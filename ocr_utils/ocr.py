@@ -11,18 +11,18 @@ import ocrmypdf
 from PIL import Image
 from deskew import determine_skew
 
-from ocr_utils.config import OCR_LANGUAGE, OCR_OVERSAMPLE_DPI
+from ocr_utils.config import OCR_LANGUAGE, OCR_UPSCALE_RATIO
 
 logger = logging.getLogger(__name__)
 
 
-def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, target_dpi: int = 600, deskew: bool = False) -> Path:
-    """Подготовить изображения для OCR: определить угол наклона, повернуть, сделать oversample.
+def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, upscale_ratio: float = 2.0, deskew: bool = False) -> Path:
+    """Подготовить изображения для OCR: определить угол наклона, повернуть, увеличить.
 
     Аргументы:
         input_pdf: путь к промежуточному PDF #1 (с исходными изображениями).
         output_pdf: путь для сохранения промежуточного PDF #2 (с подготовленными изображениями).
-        target_dpi: целевой DPI для оверсемплинга.
+        upscale_ratio: коэффициент увеличения изображений (например, 2.0 = увеличить в 2 раза).
         deskew: определять ли угол наклона и поворачивать изображения.
 
     Возвращает:
@@ -31,7 +31,7 @@ def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, target_dpi: int = 
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info(
-        "Подготовка изображений для OCR: %s → %s (target_dpi=%d, deskew=%s)", input_pdf, output_pdf, target_dpi, deskew
+        "Подготовка изображений для OCR: %s → %s (upscale_ratio=%.2f, deskew=%s)", input_pdf, output_pdf, upscale_ratio, deskew
     )
 
     src_doc = fitz.open(str(input_pdf))
@@ -55,12 +55,12 @@ def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, target_dpi: int = 
         img_width = img_dict["width"]
         img_height = img_dict["height"]
 
-        # Вычисляем текущий DPI
+        # Вычисляем текущий DPI для метаданных
         current_dpi_x = img_width / (page_rect.width / 72.0)
         current_dpi_y = img_height / (page_rect.height / 72.0)
         current_dpi = (current_dpi_x + current_dpi_y) / 2.0
 
-        logger.debug("Страница %d: текущий DPI=%.1f, целевой DPI=%d", page_num, current_dpi, target_dpi)
+        logger.debug("Страница %d: текущий DPI=%.1f, коэффициент увеличения=%.2f", page_num, current_dpi, upscale_ratio)
 
         # Открываем изображение через PIL
         import io
@@ -104,25 +104,22 @@ def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, target_dpi: int = 
                 logger.debug("Страница %d: не удалось определить угол наклона: %s", page_num, e)
                 angle = 0.0
 
-        # Вычисляем масштаб для оверсемплинга
-        scale = target_dpi / current_dpi if current_dpi > 0 else 1.0
-
         # Применяем трансформации если нужно
-        if abs(angle) > 0.1 or abs(scale - 1.0) > 0.01:
-            new_width = int(img.width * scale)
-            new_height = int(img.height * scale)
+        if abs(angle) > 0.1 or abs(upscale_ratio - 1.0) > 0.01:
+            new_width = int(img.width * upscale_ratio)
+            new_height = int(img.height * upscale_ratio)
 
             # Сначала масштабируем (bicubic)
-            if abs(scale - 1.0) > 0.01:
+            if abs(upscale_ratio - 1.0) > 0.01:
                 img = img.resize((new_width, new_height), Image.BICUBIC)
                 logger.debug(
-                    "Страница %d: масштабирование %dx%d → %dx%d (scale=%.2f)",
+                    "Страница %d: масштабирование %dx%d → %dx%d (upscale_ratio=%.2f)",
                     page_num,
                     img_width,
                     img_height,
                     new_width,
                     new_height,
-                    scale,
+                    upscale_ratio,
                 )
 
             # Затем поворачиваем
@@ -132,13 +129,15 @@ def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, target_dpi: int = 
 
         # Сохраняем изображение в PNG с правильными DPI метаданными
         img_bytes = io.BytesIO()
+        # Вычисляем новый DPI после масштабирования
+        new_dpi = int(current_dpi * upscale_ratio)
         # Устанавливаем DPI в метаданных PNG
-        img.save(img_bytes, format="PNG", dpi=(target_dpi, target_dpi))
+        img.save(img_bytes, format="PNG", dpi=(new_dpi, new_dpi))
         img_bytes.seek(0)
 
         # Создаём новую страницу с правильным размером в пунктах
-        new_page_width = img.width * 72.0 / target_dpi
-        new_page_height = img.height * 72.0 / target_dpi
+        new_page_width = img.width * 72.0 / new_dpi
+        new_page_height = img.height * 72.0 / new_dpi
         new_page = out_doc.new_page(width=new_page_width, height=new_page_height)
 
         # Вставляем изображение
@@ -157,7 +156,7 @@ def run_ocr(
     input_pdf: Path,
     output_pdf: Path,
     language: str = OCR_LANGUAGE,
-    oversample_dpi: int = OCR_OVERSAMPLE_DPI,
+    upscale_ratio: float = OCR_UPSCALE_RATIO,
     deskew: bool = False,
     clean: bool = True,
     rotate_pages: bool = True,
@@ -167,7 +166,7 @@ def run_ocr(
     """Запустить OCR с максимальным качеством распознавания, сохраняя исходные изображения.
 
     Алгоритм:
-    1. Подготовить изображения: deskew (вне ocrmypdf) + oversample → промежуточный PDF #2
+    1. Подготовить изображения: deskew (вне ocrmypdf) + upscale → промежуточный PDF #2
     2. Запустить ocrmypdf на PDF #2 с clean/rotate → промежуточный PDF #3
     3. Извлечь текстовый слой из PDF #3
     4. Наложить текстовый слой на исходные изображения из input_pdf → output_pdf
@@ -176,12 +175,12 @@ def run_ocr(
         input_pdf: путь к промежуточному PDF #1 (разбитые страницы, исходные изображения).
         output_pdf: путь для сохранения финального PDF с OCR.
         language: код(ы) языка Tesseract.
-        oversample_dpi: DPI оверсемплинга перед OCR (выше = лучше качество).
+        upscale_ratio: коэффициент увеличения изображений перед OCR (выше = лучше качество, но больше размер).
         deskew: определять ли угол наклона и поворачивать изображения (вне ocrmypdf) + делать ли deskew в самом ocrmypdf.
         clean: очищать ли шум при OCR (применяется в ocrmypdf).
         rotate_pages: автоповорот страниц при OCR (применяется в ocrmypdf).
         intermediate_pdf_path: путь для сохранения промежуточного PDF #3 (после OCR с обработкой).
-        second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+oversample).
+        second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+upscale).
 
     Возвращает:
         Path к выходному PDF.
@@ -189,11 +188,11 @@ def run_ocr(
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info(
-        "Запуск трёхэтапного OCR: %s → %s (lang=%s, dpi=%d, deskew=%s, clean=%s, rotate=%s)",
+        "Запуск трёхэтапного OCR: %s → %s (lang=%s, upscale_ratio=%.2f, deskew=%s, clean=%s, rotate=%s)",
         input_pdf,
         output_pdf,
         language,
-        oversample_dpi,
+        upscale_ratio,
         deskew,
         clean,
         rotate_pages,
@@ -222,9 +221,9 @@ def run_ocr(
         delete_tmp_ocr = True
 
     try:
-        # Этап 1: Подготовка изображений (deskew + oversample)
-        logger.info("Этап 1: Подготовка изображений (deskew + oversample) → %s", tmp_prepared_path)
-        prepare_images_for_ocr(input_pdf, tmp_prepared_path, target_dpi=oversample_dpi, deskew=deskew)
+        # Этап 1: Подготовка изображений (deskew + upscale)
+        logger.info("Этап 1: Подготовка изображений (deskew + upscale) → %s", tmp_prepared_path)
+        prepare_images_for_ocr(input_pdf, tmp_prepared_path, upscale_ratio=upscale_ratio, deskew=deskew)
 
         # Этап 2: OCR через ocrmypdf (без deskew и oversample)
         logger.info("Этап 2: OCR через ocrmypdf (clean=%s, rotate=%s) → %s", clean, rotate_pages, tmp_ocr_path)

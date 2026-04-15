@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Sequence
 
-from ocr_utils.config import OCR_LANGUAGE, OCR_OVERSAMPLE_DPI
+from ocr_utils.config import OCR_LANGUAGE, OCR_UPSCALE_RATIO
 from ocr_utils.ocr import run_ocr
 from ocr_utils.splitting import split_pdf_pages
 
@@ -22,7 +22,7 @@ def process_single_pdf(
     pages: Sequence[int] | slice | None = None,
     tmp_dir: Path | str | None = None,
     language: str = OCR_LANGUAGE,
-    oversample_dpi: int = OCR_OVERSAMPLE_DPI,
+    upscale_ratio: float = OCR_UPSCALE_RATIO,
     deskew: bool = True,
     clean: bool = True,
     rotate_pages: bool = True,
@@ -33,7 +33,7 @@ def process_single_pdf(
 
     Алгоритм:
     1. Разбить развороты на отдельные страницы → промежуточный PDF #1 (исходные изображения).
-    2. Подготовка изображений: deskew (вне ocrmypdf) + oversample → промежуточный PDF #2.
+    2. Подготовка изображений: deskew (вне ocrmypdf) + upscale → промежуточный PDF #2.
     3. OCR через ocrmypdf с clean/rotate → промежуточный PDF #3.
     4. Перенос текстового слоя из PDF #3 на изображения из PDF #1 → финальный PDF.
 
@@ -47,13 +47,13 @@ def process_single_pdf(
         tmp_dir: директория для временных файлов.
             None → создаётся временная директория, которая удаляется после работы.
         language: язык(и) Tesseract для OCR.
-        oversample_dpi: DPI для оверсемплинга перед OCR.
+        upscale_ratio: коэффициент увеличения изображений перед OCR.
         deskew: определять ли угол наклона и поворачивать изображения (вне ocrmypdf).
         clean: очищать ли шум при OCR (применяется в ocrmypdf).
         rotate_pages: автоповорот страниц при OCR (применяется в ocrmypdf).
         intermediate_pdf_path: путь для сохранения промежуточного PDF #3 (после OCR с обработкой).
             None → промежуточный PDF не сохраняется.
-        second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+oversample).
+        second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+upscale).
             None → промежуточный PDF не сохраняется.
 
     Возвращает:
@@ -89,7 +89,7 @@ def process_single_pdf(
             input_pdf=split_pdf,
             output_pdf=dst_pdf,
             language=language,
-            oversample_dpi=oversample_dpi,
+            upscale_ratio=upscale_ratio,
             deskew=deskew,
             clean=clean,
             rotate_pages=rotate_pages,
@@ -109,7 +109,7 @@ def _process_one(args: tuple) -> tuple[str, str | None]:
 
     Возвращает (относительный путь, None) при успехе или (относительный путь, текст ошибки) при ошибке.
     """
-    src_pdf_str, dst_pdf_str, language, oversample_dpi, deskew, clean, rotate_pages = args
+    src_pdf_str, dst_pdf_str, language, upscale_ratio, deskew, clean, rotate_pages = args
     src_pdf = Path(src_pdf_str)
     dst_pdf = Path(dst_pdf_str)
     rel = src_pdf.name
@@ -118,7 +118,7 @@ def _process_one(args: tuple) -> tuple[str, str | None]:
             src_pdf=src_pdf,
             dst_pdf=dst_pdf,
             language=language,
-            oversample_dpi=oversample_dpi,
+            upscale_ratio=upscale_ratio,
             deskew=deskew,
             clean=clean,
             rotate_pages=rotate_pages,
@@ -134,7 +134,7 @@ def process_directory(
     dst_dir: Path | str,
     workers: int | None = None,
     language: str = OCR_LANGUAGE,
-    oversample_dpi: int = OCR_OVERSAMPLE_DPI,
+    upscale_ratio: float = OCR_UPSCALE_RATIO,
     deskew: bool = True,
     clean: bool = True,
     rotate_pages: bool = True,
@@ -147,7 +147,7 @@ def process_directory(
         workers: количество параллельных процессов.
             None → 3/4 от доступных ядер, но не менее 1.
         language: язык(и) Tesseract для OCR.
-        oversample_dpi: DPI для оверсемплинга перед OCR.
+        upscale_ratio: коэффициент увеличения изображений перед OCR.
         deskew: выравнивать ли страницы при OCR.
         clean: очищать ли шум при OCR.
         rotate_pages: автоповорот страниц при OCR.
@@ -183,7 +183,7 @@ def process_directory(
     for pdf_path in pdf_files:
         rel_path = pdf_path.relative_to(src_dir)
         out_path = dst_dir / rel_path
-        tasks.append((str(pdf_path), str(out_path), language, oversample_dpi, deskew, clean, rotate_pages))
+        tasks.append((str(pdf_path), str(out_path), language, upscale_ratio, deskew, clean, rotate_pages))
 
     results: dict[str, str | None] = {}
 
@@ -211,9 +211,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1939/Плановое хозяйство 1-1939.pdf")
-    dst = Path("/tmp/test_ocr_result10.pdf")
-    intermediate = Path("/tmp/test_ocr_intermediate10.pdf")
-    second_intermediate = Path("/tmp/test_ocr_second_intermediate10.pdf")
+    dst = Path("/tmp/test_ocr_result12.pdf")
+    intermediate = Path("/tmp/test_ocr_intermediate12.pdf")
+    second_intermediate = Path("/tmp/test_ocr_second_intermediate12.pdf")
 
     print(f"Обработка: {src}")
     print(f"Результат: {dst}")
@@ -224,8 +224,8 @@ if __name__ == "__main__":
     result = process_single_pdf(
         src_pdf=src,
         dst_pdf=dst,
-        pages=slice(5, 10),
-        oversample_dpi=600,
+        # pages=slice(0, 5),
+        upscale_ratio=3.0,
         intermediate_pdf_path=intermediate,
         second_intermediate_pdf_path=second_intermediate,
         deskew=True,
@@ -249,8 +249,8 @@ if __name__ == "__main__":
     print(f"\nСравнение OCR-слоёв на последней странице:")
     print("=" * 60)
 
-    old_pdf = Path("/tmp/test_ocr_result10.pdf")
-    new_pdf = Path("/tmp/test_ocr_result10.pdf")
+    old_pdf = Path("/tmp/test_ocr_result11.pdf")
+    new_pdf = Path("/tmp/test_ocr_result12.pdf")
 
     if old_pdf.exists():
         old_doc = fitz.open(str(old_pdf))

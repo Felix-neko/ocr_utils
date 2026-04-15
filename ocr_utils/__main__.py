@@ -55,7 +55,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool) -> None:
 )
 @click.option("--tmp-dir", type=click.Path(path_type=Path), default=None, help="Директория для временных файлов")
 @click.option("--language", default="rus", help="Язык OCR (по умолчанию: rus)")
-@click.option("--dpi", default=900, type=int, help="DPI для оверсемплинга (по умолчанию: 900)")
+@click.option("--upscale-ratio", default=2.0, type=float, help="Коэффициент увеличения изображений (по умолчанию: 2.0)")
 @click.option("--deskew/--no-deskew", default=True, help="Выравнивание страниц при OCR (по умолчанию: включено)")
 @click.option("--clean/--no-clean", default=True, help="Очистка шума при OCR (по умолчанию: включено)")
 @click.option("--rotate/--no-rotate", default=True, help="Автоповорот страниц при OCR (по умолчанию: включено)")
@@ -65,7 +65,7 @@ def single(
     pages: str,
     tmp_dir: Path | None,
     language: str,
-    dpi: int,
+    upscale_ratio: float,
     deskew: bool,
     clean: bool,
     rotate: bool,
@@ -78,7 +78,7 @@ def single(
         pages=pages_parsed,
         tmp_dir=tmp_dir,
         language=language,
-        oversample_dpi=dpi,
+        upscale_ratio=upscale_ratio,
         deskew=deskew,
         clean=clean,
         rotate_pages=rotate,
@@ -90,7 +90,7 @@ def single(
 @click.argument("dst", type=click.Path(path_type=Path))
 @click.option("--workers", type=int, default=None, help="Количество воркеров (по умолчанию: 3/4 ядер)")
 @click.option("--language", default="rus", help="Язык OCR (по умолчанию: rus)")
-@click.option("--dpi", default=900, type=int, help="DPI для оверсемплинга (по умолчанию: 900)")
+@click.option("--upscale-ratio", default=2.0, type=float, help="Коэффициент увеличения изображений (по умолчанию: 2.0)")
 @click.option("--deskew/--no-deskew", default=True, help="Выравнивание страниц при OCR (по умолчанию: включено)")
 @click.option("--clean/--no-clean", default=True, help="Очистка шума при OCR (по умолчанию: включено)")
 @click.option("--rotate/--no-rotate", default=True, help="Автоповорот страниц при OCR (по умолчанию: включено)")
@@ -99,7 +99,7 @@ def dir(
     dst: Path,
     workers: int | None,
     language: str,
-    dpi: int,
+    upscale_ratio: float,
     deskew: bool,
     clean: bool,
     rotate: bool,
@@ -110,7 +110,7 @@ def dir(
         dst_dir=dst,
         workers=workers,
         language=language,
-        oversample_dpi=dpi,
+        upscale_ratio=upscale_ratio,
         deskew=deskew,
         clean=clean,
         rotate_pages=rotate,
