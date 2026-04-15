@@ -208,29 +208,40 @@ def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
             out_doc.insert_pdf(src_doc, from_page=box.src_page_idx, to_page=box.src_page_idx)
             logger.debug("Box %d: стр. %d скопирована как есть", box_idx, box.src_page_idx)
         else:
+            # Для разворотов: извлекаем изображение, обрезаем через jpegtran (lossless), вставляем
             new_w = box.width
             new_h = box.height
-
-            # Создаём новую страницу и копируем на неё часть исходной страницы через show_pdf_page
-            # Это сохраняет исходное изображение без перекодирования
-            new_page = out_doc.new_page(width=new_w, height=new_h)
             
-            # Вычисляем clip-область на исходной странице
-            clip_rect = fitz.Rect(box.x0, box.y0, box.x1, box.y1)
+            src_page = src_doc[box.src_page_idx]
+            page_rect = src_page.rect
             
-            # Копируем содержимое исходной страницы с обрезкой
-            # show_pdf_page копирует векторную графику и изображения без перекодирования
-            new_page.show_pdf_page(
-                new_page.rect,  # куда вставляем (вся новая страница)
-                src_doc,  # исходный документ
-                box.src_page_idx,  # номер исходной страницы
-                clip=clip_rect,  # какую область копировать
+            # Извлекаем изображение
+            images = src_page.get_images(full=True)
+            if not images:
+                logger.warning("Box %d: нет изображений на странице %d, пропускаем", box_idx, box.src_page_idx)
+                continue
+                
+            xref = images[0][0]
+            img_dict = src_doc.extract_image(xref)
+            img_data = img_dict["image"]
+            img_ext = img_dict["ext"]
+            img_w = img_dict["width"]
+            img_h = img_dict["height"]
+            
+            # Обрезаем изображение (lossless для JPEG через jpegtran)
+            cropped_data, cropped_ext = _crop_image_for_box(
+                img_data, img_ext, img_w, img_h, page_rect, box, tmp_dir
             )
             
+            # Создаём новую страницу и вставляем обрезанное изображение
+            new_page = out_doc.new_page(width=new_w, height=new_h)
+            new_page.insert_image(new_page.rect, stream=cropped_data)
+            
             logger.debug(
-                "Box %d: обрезана стр. %d через show_pdf_page, новая стр. %.0f×%.0f",
+                "Box %d: обрезана стр. %d через %s crop, новая стр. %.0f×%.0f",
                 box_idx,
                 box.src_page_idx,
+                "jpegtran" if cropped_ext == "jpg" else "pixmap",
                 new_w,
                 new_h,
             )

@@ -23,17 +23,19 @@ def process_single_pdf(
     tmp_dir: Path | str | None = None,
     language: str = OCR_LANGUAGE,
     oversample_dpi: int = OCR_OVERSAMPLE_DPI,
-    deskew: bool = False,
+    deskew: bool = True,
     clean: bool = True,
     rotate_pages: bool = True,
     intermediate_pdf_path: Path | str | None = None,
+    second_intermediate_pdf_path: Path | str | None = None,
 ) -> Path:
     """Обработать один PDF: разбить развороты на страницы, добавить OCR-слой.
 
     Алгоритм:
     1. Разбить развороты на отдельные страницы → промежуточный PDF #1 (исходные изображения).
-    2. OCR с deskew/clean/rotate для качественного распознавания → промежуточный PDF #2.
-    3. Перенос текстового слоя из PDF #2 на изображения из PDF #1 → финальный PDF.
+    2. Подготовка изображений: deskew (вне ocrmypdf) + oversample → промежуточный PDF #2.
+    3. OCR через ocrmypdf с clean/rotate → промежуточный PDF #3.
+    4. Перенос текстового слоя из PDF #3 на изображения из PDF #1 → финальный PDF.
 
     Аргументы:
         src_pdf: путь к исходному PDF.
@@ -46,10 +48,12 @@ def process_single_pdf(
             None → создаётся временная директория, которая удаляется после работы.
         language: язык(и) Tesseract для OCR.
         oversample_dpi: DPI для оверсемплинга перед OCR.
-        deskew: выравнивать ли страницы при OCR (только для промежуточного PDF #2).
-        clean: очищать ли шум при OCR (только для промежуточного PDF #2).
-        rotate_pages: автоповорот страниц при OCR (только для промежуточного PDF #2).
-        intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после OCR с обработкой).
+        deskew: определять ли угол наклона и поворачивать изображения (вне ocrmypdf).
+        clean: очищать ли шум при OCR (применяется в ocrmypdf).
+        rotate_pages: автоповорот страниц при OCR (применяется в ocrmypdf).
+        intermediate_pdf_path: путь для сохранения промежуточного PDF #3 (после OCR с обработкой).
+            None → промежуточный PDF не сохраняется.
+        second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+oversample).
             None → промежуточный PDF не сохраняется.
 
     Возвращает:
@@ -80,7 +84,7 @@ def process_single_pdf(
         split_pdf = split_pdf_pages(src_pdf, tmp_path, pages=pages)
         logger.info("Шаг 1 (разбивка) завершён: %s", split_pdf)
 
-        # Шаг 2: OCR через ocrmypdf → финальный PDF
+        # Шаг 2: OCR через трёхэтапный процесс → финальный PDF
         run_ocr(
             input_pdf=split_pdf,
             output_pdf=dst_pdf,
@@ -90,6 +94,7 @@ def process_single_pdf(
             clean=clean,
             rotate_pages=rotate_pages,
             intermediate_pdf_path=intermediate_pdf_path,
+            second_intermediate_pdf_path=second_intermediate_pdf_path,
         )
         logger.info("Шаг 2 (OCR) завершён: %s", dst_pdf)
 
@@ -206,21 +211,24 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1939/Плановое хозяйство 1-1939.pdf")
-    dst = Path("/tmp/test_ocr_result6.pdf")
-    intermediate = Path("/tmp/test_ocr_intermediate5.pdf")
+    dst = Path("/tmp/test_ocr_result9.pdf")
+    intermediate = Path("/tmp/test_ocr_intermediate9.pdf")
+    second_intermediate = Path("/tmp/test_ocr_second_intermediate9.pdf")
 
     print(f"Обработка: {src}")
     print(f"Результат: {dst}")
-    print(f"Промежуточный PDF (после OCR с обработкой): {intermediate}")
-    print("Обрабатываем первые 5 страниц с oversample_dpi=600...")
+    print(f"Промежуточный PDF #2 (после deskew+oversample): {second_intermediate}")
+    print(f"Промежуточный PDF #3 (после OCR с обработкой): {intermediate}")
+    print("Обрабатываем первые 5 страниц ...")
 
     result = process_single_pdf(
         src_pdf=src,
         dst_pdf=dst,
-        pages=slice(0, 5),
+        # pages=slice(0, 5),
         oversample_dpi=600,
         intermediate_pdf_path=intermediate,
-        deskew=False,
+        second_intermediate_pdf_path=second_intermediate,
+        deskew=True,
     )
 
     print(f"\nГотово! Результат сохранён в: {result}")
@@ -241,8 +249,8 @@ if __name__ == "__main__":
     print(f"\nСравнение OCR-слоёв на последней странице:")
     print("=" * 60)
 
-    old_pdf = Path("/tmp/test_ocr_result.pdf")
-    new_pdf = Path("/tmp/test_ocr_result6.pdf")
+    old_pdf = Path("/tmp/test_ocr_result9.pdf")
+    new_pdf = Path("/tmp/test_ocr_result9.pdf")
 
     if old_pdf.exists():
         old_doc = fitz.open(str(old_pdf))

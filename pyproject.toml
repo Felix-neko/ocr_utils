@@ -8,6 +8,8 @@ dependencies = [
     "ocrmypdf>=16",
     "pillow>=10",
     "click>=8.0",
+    "deskew>=1.5",
+    "pikepdf>=9.0",
 ]
 
 [project.scripts]
