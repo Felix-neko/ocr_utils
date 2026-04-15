@@ -152,6 +152,26 @@ def _crop_image_for_box(
     crop_w = px_x1 - px_x0
     crop_h = px_y1 - px_y0
 
+    # Проверяем минимальный размер (Tesseract требует минимум 3 пикселя по ширине)
+    # TODO: возможно, этот фрагмент удалим за ненадобностью
+    MIN_SIZE = 10
+    if crop_w < MIN_SIZE or crop_h < MIN_SIZE:
+        logger.warning(
+            "Обрезанное изображение слишком маленькое (%dx%d), создаём пустое изображение %dx%d",
+            crop_w,
+            crop_h,
+            max(crop_w, MIN_SIZE),
+            max(crop_h, MIN_SIZE),
+        )
+        # Создаём белое изображение минимального размера
+        from PIL import Image
+        import io
+
+        min_img = Image.new("RGB", (max(crop_w, MIN_SIZE), max(crop_h, MIN_SIZE)), color=(255, 255, 255))
+        buf = io.BytesIO()
+        min_img.save(buf, format="PNG")
+        return buf.getvalue(), "png"
+
     if img_ext in ("jpeg", "jpg") and shutil.which(JPEGTRAN_BIN):
         crop_spec = f"{crop_w}x{crop_h}+{px_x0}+{px_y0}"
         try:
@@ -211,32 +231,30 @@ def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
             # Для разворотов: извлекаем изображение, обрезаем через jpegtran (lossless), вставляем
             new_w = box.width
             new_h = box.height
-            
+
             src_page = src_doc[box.src_page_idx]
             page_rect = src_page.rect
-            
+
             # Извлекаем изображение
             images = src_page.get_images(full=True)
             if not images:
                 logger.warning("Box %d: нет изображений на странице %d, пропускаем", box_idx, box.src_page_idx)
                 continue
-                
+
             xref = images[0][0]
             img_dict = src_doc.extract_image(xref)
             img_data = img_dict["image"]
             img_ext = img_dict["ext"]
             img_w = img_dict["width"]
             img_h = img_dict["height"]
-            
+
             # Обрезаем изображение (lossless для JPEG через jpegtran)
-            cropped_data, cropped_ext = _crop_image_for_box(
-                img_data, img_ext, img_w, img_h, page_rect, box, tmp_dir
-            )
-            
+            cropped_data, cropped_ext = _crop_image_for_box(img_data, img_ext, img_w, img_h, page_rect, box, tmp_dir)
+
             # Создаём новую страницу и вставляем обрезанное изображение
             new_page = out_doc.new_page(width=new_w, height=new_h)
             new_page.insert_image(new_page.rect, stream=cropped_data)
-            
+
             logger.debug(
                 "Box %d: обрезана стр. %d через %s crop, новая стр. %.0f×%.0f",
                 box_idx,

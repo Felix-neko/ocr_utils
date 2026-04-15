@@ -211,9 +211,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1939/Плановое хозяйство 1-1939.pdf")
-    dst = Path("/tmp/test_ocr_result9.pdf")
-    intermediate = Path("/tmp/test_ocr_intermediate9.pdf")
-    second_intermediate = Path("/tmp/test_ocr_second_intermediate9.pdf")
+    dst = Path("/tmp/test_ocr_result10.pdf")
+    intermediate = Path("/tmp/test_ocr_intermediate10.pdf")
+    second_intermediate = Path("/tmp/test_ocr_second_intermediate10.pdf")
 
     print(f"Обработка: {src}")
     print(f"Результат: {dst}")
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     result = process_single_pdf(
         src_pdf=src,
         dst_pdf=dst,
-        # pages=slice(0, 5),
+        pages=slice(5, 10),
         oversample_dpi=600,
         intermediate_pdf_path=intermediate,
         second_intermediate_pdf_path=second_intermediate,
@@ -249,8 +249,8 @@ if __name__ == "__main__":
     print(f"\nСравнение OCR-слоёв на последней странице:")
     print("=" * 60)
 
-    old_pdf = Path("/tmp/test_ocr_result9.pdf")
-    new_pdf = Path("/tmp/test_ocr_result9.pdf")
+    old_pdf = Path("/tmp/test_ocr_result10.pdf")
+    new_pdf = Path("/tmp/test_ocr_result10.pdf")
 
     if old_pdf.exists():
         old_doc = fitz.open(str(old_pdf))
