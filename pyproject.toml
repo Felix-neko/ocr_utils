@@ -1,0 +1,25 @@
+[project]
+name = "ocr-utils"
+version = "0.1.0"
+description = "Postprocess PDF magazine scans: split spreads into pages, add high-quality OCR layer"
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf>=1.25",
+    "ocrmypdf>=16",
+    "pillow>=10",
+]
+
+[project.scripts]
+ocr-utils = "ocr_utils.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 120
+magic_trailing_comma = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
