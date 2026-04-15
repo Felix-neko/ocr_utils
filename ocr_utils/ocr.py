@@ -75,9 +75,13 @@ def prepare_images_for_ocr(input_pdf: Path, output_pdf: Path, target_dpi: int = 
         angle = 0.0
         if deskew:
             try:
+                import numpy as np
+
                 # Конвертируем в grayscale для определения угла
                 img_gray = img.convert("L")
-                detected_angle = determine_skew(img_gray)
+                # Конвертируем PIL Image в numpy array для deskew
+                img_array = np.array(img_gray)
+                detected_angle = determine_skew(img_array)
 
                 if detected_angle is not None:
                     # Ограничиваем угол разумными пределами (±40°)
