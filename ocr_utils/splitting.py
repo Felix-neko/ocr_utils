@@ -211,22 +211,26 @@ def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
             new_w = box.width
             new_h = box.height
 
-            # Пробуем извлечь единственное растровое изображение для lossless crop
-            if box.src_page_idx not in page_image_cache:
-                page_image_cache[box.src_page_idx] = _extract_page_image(src_doc, box.src_page_idx)
-
-            img_data, img_ext, img_w, img_h = page_image_cache[box.src_page_idx]
-            cropped_data, cropped_ext = _crop_image_for_box(img_data, img_ext, img_w, img_h, page_rect, box, tmp_dir)
-
-            # Создаём новую страницу с обрезанным изображением
+            # Создаём новую страницу и копируем на неё часть исходной страницы через show_pdf_page
+            # Это сохраняет исходное изображение без перекодирования
             new_page = out_doc.new_page(width=new_w, height=new_h)
-            img_rect = fitz.Rect(0, 0, new_w, new_h)
-            new_page.insert_image(img_rect, stream=cropped_data)
+            
+            # Вычисляем clip-область на исходной странице
+            clip_rect = fitz.Rect(box.x0, box.y0, box.x1, box.y1)
+            
+            # Копируем содержимое исходной страницы с обрезкой
+            # show_pdf_page копирует векторную графику и изображения без перекодирования
+            new_page.show_pdf_page(
+                new_page.rect,  # куда вставляем (вся новая страница)
+                src_doc,  # исходный документ
+                box.src_page_idx,  # номер исходной страницы
+                clip=clip_rect,  # какую область копировать
+            )
+            
             logger.debug(
-                "Box %d: обрезана стр. %d (%s), новая стр. %.0f×%.0f",
+                "Box %d: обрезана стр. %d через show_pdf_page, новая стр. %.0f×%.0f",
                 box_idx,
                 box.src_page_idx,
-                cropped_ext,
                 new_w,
                 new_h,
             )

@@ -8,7 +8,7 @@ SPREAD_ASPECT_THRESHOLD: float = 288.0 / 250.0  # ≈ 1.152
 
 # Параметры OCR
 OCR_LANGUAGE: str = "rus"
-OCR_OVERSAMPLE_DPI: int = 900
+OCR_OVERSAMPLE_DPI: int = 600
 
 # Имя бинарника jpegtran
 JPEGTRAN_BIN: str = "jpegtran"

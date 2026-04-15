@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 from pathlib import Path
+
+import click
 
 from ocr_utils.pipeline import process_directory, process_single_pdf
 
@@ -29,91 +30,103 @@ def _parse_pages(value: str) -> list[int] | slice | None:
     return [int(x.strip()) for x in value.split(",")]
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="ocr-utils", description="Обработка PDF-сканов журналов: разбивка разворотов на страницы + OCR."
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    # --- Команда: single ---
-    p_single = sub.add_parser("single", help="Обработать один PDF-файл")
-    p_single.add_argument("src", type=Path, help="Путь к исходному PDF")
-    p_single.add_argument("dst", type=Path, help="Путь к выходному PDF")
-    p_single.add_argument(
-        "--pages",
-        type=str,
-        default="all",
-        help="Какие страницы обрабатывать: 'all', '0,2,5' или '1:10' (0-based, Python slice). По умолчанию: all",
-    )
-    p_single.add_argument("--tmp-dir", type=Path, default=None, help="Директория для временных файлов")
-    p_single.add_argument("--language", type=str, default="rus", help="Язык OCR (по умолчанию: rus)")
-    p_single.add_argument("--dpi", type=int, default=900, help="DPI для оверсемплинга (по умолчанию: 900)")
-    p_single.add_argument("--no-deskew", action="store_true", help="Отключить выравнивание страниц")
-    p_single.add_argument("--no-clean", action="store_true", help="Отключить очистку шума")
-    p_single.add_argument("--no-rotate", action="store_true", help="Отключить автоповорот страниц")
-
-    # --- Команда: dir ---
-    p_dir = sub.add_parser("dir", help="Рекурсивно обработать все PDF в директории")
-    p_dir.add_argument("src", type=Path, help="Путь к исходной директории")
-    p_dir.add_argument("dst", type=Path, help="Путь к выходной директории")
-    p_dir.add_argument("--workers", type=int, default=None, help="Количество воркеров (по умолчанию: 3/4 ядер)")
-    p_dir.add_argument("--language", type=str, default="rus", help="Язык OCR (по умолчанию: rus)")
-    p_dir.add_argument("--dpi", type=int, default=900, help="DPI для оверсемплинга (по умолчанию: 900)")
-    p_dir.add_argument("--no-deskew", action="store_true", help="Отключить выравнивание страниц")
-    p_dir.add_argument("--no-clean", action="store_true", help="Отключить очистку шума")
-    p_dir.add_argument("--no-rotate", action="store_true", help="Отключить автоповорот страниц")
-
-    # --- Общие параметры ---
-    parser.add_argument("-v", "--verbose", action="store_true", help="Подробный вывод (DEBUG)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Минимальный вывод (только ошибки)")
-
-    args = parser.parse_args(argv)
-
-    # Настройка логирования
-    if args.verbose:
+@click.group()
+@click.option("-v", "--verbose", is_flag=True, help="Подробный вывод (DEBUG)")
+@click.option("-q", "--quiet", is_flag=True, help="Минимальный вывод (только ошибки)")
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool, quiet: bool) -> None:
+    """Обработка PDF-сканов журналов: разбивка разворотов на страницы + OCR."""
+    if verbose:
         level = logging.DEBUG
-    elif args.quiet:
+    elif quiet:
         level = logging.ERROR
     else:
         level = logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-    if args.command == "single":
-        pages = _parse_pages(args.pages)
-        process_single_pdf(
-            src_pdf=args.src,
-            dst_pdf=args.dst,
-            pages=pages,
-            tmp_dir=args.tmp_dir,
-            language=args.language,
-            oversample_dpi=args.dpi,
-            deskew=not args.no_deskew,
-            clean=not args.no_clean,
-            rotate_pages=not args.no_rotate,
-        )
-        return 0
 
-    if args.command == "dir":
-        results = process_directory(
-            src_dir=args.src,
-            dst_dir=args.dst,
-            workers=args.workers,
-            language=args.language,
-            oversample_dpi=args.dpi,
-            deskew=not args.no_deskew,
-            clean=not args.no_clean,
-            rotate_pages=not args.no_rotate,
-        )
-        errors = {k: v for k, v in results.items() if v is not None}
-        if errors:
-            print(f"\nОшибки ({len(errors)}):", file=sys.stderr)
-            for path, err in errors.items():
-                print(f"  {path}: {err}", file=sys.stderr)
-            return 1
-        return 0
+@cli.command()
+@click.argument("src", type=click.Path(exists=True, path_type=Path))
+@click.argument("dst", type=click.Path(path_type=Path))
+@click.option(
+    "--pages",
+    default="all",
+    help="Какие страницы обрабатывать: 'all', '0,2,5' или '1:10' (0-based, Python slice). По умолчанию: all",
+)
+@click.option("--tmp-dir", type=click.Path(path_type=Path), default=None, help="Директория для временных файлов")
+@click.option("--language", default="rus", help="Язык OCR (по умолчанию: rus)")
+@click.option("--dpi", default=900, type=int, help="DPI для оверсемплинга (по умолчанию: 900)")
+@click.option("--deskew/--no-deskew", default=True, help="Выравнивание страниц при OCR (по умолчанию: включено)")
+@click.option("--clean/--no-clean", default=True, help="Очистка шума при OCR (по умолчанию: включено)")
+@click.option("--rotate/--no-rotate", default=True, help="Автоповорот страниц при OCR (по умолчанию: включено)")
+def single(
+    src: Path,
+    dst: Path,
+    pages: str,
+    tmp_dir: Path | None,
+    language: str,
+    dpi: int,
+    deskew: bool,
+    clean: bool,
+    rotate: bool,
+) -> None:
+    """Обработать один PDF-файл."""
+    pages_parsed = _parse_pages(pages)
+    process_single_pdf(
+        src_pdf=src,
+        dst_pdf=dst,
+        pages=pages_parsed,
+        tmp_dir=tmp_dir,
+        language=language,
+        oversample_dpi=dpi,
+        deskew=deskew,
+        clean=clean,
+        rotate_pages=rotate,
+    )
 
-    return 1
+
+@cli.command()
+@click.argument("src", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("dst", type=click.Path(path_type=Path))
+@click.option("--workers", type=int, default=None, help="Количество воркеров (по умолчанию: 3/4 ядер)")
+@click.option("--language", default="rus", help="Язык OCR (по умолчанию: rus)")
+@click.option("--dpi", default=900, type=int, help="DPI для оверсемплинга (по умолчанию: 900)")
+@click.option("--deskew/--no-deskew", default=True, help="Выравнивание страниц при OCR (по умолчанию: включено)")
+@click.option("--clean/--no-clean", default=True, help="Очистка шума при OCR (по умолчанию: включено)")
+@click.option("--rotate/--no-rotate", default=True, help="Автоповорот страниц при OCR (по умолчанию: включено)")
+def dir(
+    src: Path,
+    dst: Path,
+    workers: int | None,
+    language: str,
+    dpi: int,
+    deskew: bool,
+    clean: bool,
+    rotate: bool,
+) -> None:
+    """Рекурсивно обработать все PDF в директории."""
+    results = process_directory(
+        src_dir=src,
+        dst_dir=dst,
+        workers=workers,
+        language=language,
+        oversample_dpi=dpi,
+        deskew=deskew,
+        clean=clean,
+        rotate_pages=rotate,
+    )
+    errors = {k: v for k, v in results.items() if v is not None}
+    if errors:
+        click.echo(f"\nОшибки ({len(errors)}):", err=True)
+        for path, err in errors.items():
+            click.echo(f"  {path}: {err}", err=True)
+        sys.exit(1)
+
+
+def main() -> None:
+    """Точка входа для CLI."""
+    cli()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

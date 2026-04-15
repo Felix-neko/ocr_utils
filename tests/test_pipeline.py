@@ -171,3 +171,143 @@ class TestProcessDirectory:
         cpu = multiprocessing.cpu_count()
         expected = max(1, (cpu * 3) // 4)
         assert expected >= 1
+
+
+class TestProcessSinglePdfRealOcr:
+    """Тесты process_single_pdf с реальным OCR (без моков)."""
+
+    def test_full_pipeline_with_text(self, tmp_dir: Path) -> None:
+        """Полный пайплайн с реальным OCR: текст должен распознаться."""
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((100, 100), "Тестовый текст для OCR", fontsize=24)
+        src_pdf = tmp_dir / "source.pdf"
+        dst_pdf = tmp_dir / "result.pdf"
+        doc.save(str(src_pdf))
+        doc.close()
+
+        result = process_single_pdf(src_pdf=src_pdf, dst_pdf=dst_pdf, oversample_dpi=300)
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        text = result_doc[0].get_text()
+        result_doc.close()
+
+        assert "Тестовый" in text or "текст" in text or "OCR" in text
+
+    def test_full_pipeline_with_spread(self, landscape_spread_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с разворотом: должен разбиться на 2 страницы."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(src_pdf=landscape_spread_pdf, dst_pdf=dst_pdf, oversample_dpi=300)
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        assert len(result_doc) == 2
+        result_doc.close()
+
+    def test_full_pipeline_with_mixed_pages(self, mixed_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с mixed PDF: портрет + разворот + портрет → 4 страницы."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, oversample_dpi=300)
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        assert len(result_doc) == 4
+        result_doc.close()
+
+    def test_full_pipeline_with_page_selection(self, mixed_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с выбором страниц: обработать только страницу 1 (разворот)."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, pages=[1], oversample_dpi=300)
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        assert len(result_doc) == 2
+        result_doc.close()
+
+    def test_full_pipeline_with_slice(self, mixed_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с slice: обработать страницы 0:2 (портрет + разворот)."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, pages=slice(0, 2), oversample_dpi=300)
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        assert len(result_doc) == 3
+        result_doc.close()
+
+    def test_full_pipeline_with_all_options_disabled(self, portrait_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с отключёнными deskew, clean, rotate."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(
+            src_pdf=portrait_pdf,
+            dst_pdf=dst_pdf,
+            oversample_dpi=300,
+            deskew=False,
+            clean=False,
+            rotate_pages=False,
+        )
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+
+class TestProcessDirectoryRealOcr:
+    """Тесты process_directory с реальным OCR (без моков)."""
+
+    def test_directory_with_multiple_pdfs(self, tmp_dir: Path) -> None:
+        """Обработка директории с несколькими PDF."""
+        src = tmp_dir / "src"
+        src.mkdir()
+
+        for i in range(2):
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((100, 100), f"Файл {i}", fontsize=20)
+            doc.save(str(src / f"file_{i}.pdf"))
+            doc.close()
+
+        dst = tmp_dir / "dst"
+        results = process_directory(src, dst, workers=1, oversample_dpi=300)
+
+        assert len(results) == 2
+        assert all(err is None for err in results.values())
+        assert (dst / "file_0.pdf").exists()
+        assert (dst / "file_1.pdf").exists()
+
+    def test_directory_with_nested_structure(self, tmp_dir: Path) -> None:
+        """Обработка вложенной структуры директорий."""
+        src = tmp_dir / "src"
+        (src / "sub").mkdir(parents=True)
+
+        doc1 = fitz.open()
+        doc1.new_page(width=595, height=842)
+        doc1.save(str(src / "root.pdf"))
+        doc1.close()
+
+        doc2 = fitz.open()
+        doc2.new_page(width=595, height=842)
+        doc2.save(str(src / "sub" / "nested.pdf"))
+        doc2.close()
+
+        dst = tmp_dir / "dst"
+        results = process_directory(src, dst, workers=1, oversample_dpi=300)
+
+        assert len(results) == 2
+        assert all(err is None for err in results.values())
+        assert (dst / "root.pdf").exists()
+        assert (dst / "sub" / "nested.pdf").exists()

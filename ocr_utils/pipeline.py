@@ -23,11 +23,17 @@ def process_single_pdf(
     tmp_dir: Path | str | None = None,
     language: str = OCR_LANGUAGE,
     oversample_dpi: int = OCR_OVERSAMPLE_DPI,
-    deskew: bool = True,
+    deskew: bool = False,
     clean: bool = True,
     rotate_pages: bool = True,
+    intermediate_pdf_path: Path | str | None = None,
 ) -> Path:
     """Обработать один PDF: разбить развороты на страницы, добавить OCR-слой.
+
+    Алгоритм:
+    1. Разбить развороты на отдельные страницы → промежуточный PDF #1 (исходные изображения).
+    2. OCR с deskew/clean/rotate для качественного распознавания → промежуточный PDF #2.
+    3. Перенос текстового слоя из PDF #2 на изображения из PDF #1 → финальный PDF.
 
     Аргументы:
         src_pdf: путь к исходному PDF.
@@ -40,9 +46,11 @@ def process_single_pdf(
             None → создаётся временная директория, которая удаляется после работы.
         language: язык(и) Tesseract для OCR.
         oversample_dpi: DPI для оверсемплинга перед OCR.
-        deskew: выравнивать ли страницы перед OCR.
-        clean: очищать ли шум перед OCR.
-        rotate_pages: автоповорот страниц по ориентации текста.
+        deskew: выравнивать ли страницы при OCR (только для промежуточного PDF #2).
+        clean: очищать ли шум при OCR (только для промежуточного PDF #2).
+        rotate_pages: автоповорот страниц при OCR (только для промежуточного PDF #2).
+        intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после OCR с обработкой).
+            None → промежуточный PDF не сохраняется.
 
     Возвращает:
         Path к выходному PDF.
@@ -81,6 +89,7 @@ def process_single_pdf(
             deskew=deskew,
             clean=clean,
             rotate_pages=rotate_pages,
+            intermediate_pdf_path=intermediate_pdf_path,
         )
         logger.info("Шаг 2 (OCR) завершён: %s", dst_pdf)
 
@@ -134,9 +143,9 @@ def process_directory(
             None → 3/4 от доступных ядер, но не менее 1.
         language: язык(и) Tesseract для OCR.
         oversample_dpi: DPI для оверсемплинга перед OCR.
-        deskew: выравнивать ли страницы.
-        clean: очищать ли шум.
-        rotate_pages: автоповорот страниц.
+        deskew: выравнивать ли страницы при OCR.
+        clean: очищать ли шум при OCR.
+        rotate_pages: автоповорот страниц при OCR.
 
     Возвращает:
         dict: {относительный_путь: None (успех) или строка ошибки}.
@@ -160,7 +169,7 @@ def process_directory(
     # Определяем количество воркеров
     if workers is None:
         cpu_count = multiprocessing.cpu_count()
-        workers = max(1, (cpu_count * 3) // 4)
+        workers = max(1, int(cpu_count * 3 / 4))
     workers = max(1, workers)
     logger.info("Используем %d воркеров", workers)
 
@@ -189,3 +198,67 @@ def process_directory(
     fail = sum(1 for v in results.values() if v is not None)
     logger.info("Готово: %d успешно, %d с ошибками (из %d)", ok, fail, len(results))
     return results
+
+
+if __name__ == "__main__":
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1939/Плановое хозяйство 1-1939.pdf")
+    dst = Path("/tmp/test_ocr_result6.pdf")
+    intermediate = Path("/tmp/test_ocr_intermediate5.pdf")
+
+    print(f"Обработка: {src}")
+    print(f"Результат: {dst}")
+    print(f"Промежуточный PDF (после OCR с обработкой): {intermediate}")
+    print("Обрабатываем первые 5 страниц с oversample_dpi=600...")
+
+    result = process_single_pdf(
+        src_pdf=src,
+        dst_pdf=dst,
+        pages=slice(0, 5),
+        oversample_dpi=600,
+        intermediate_pdf_path=intermediate,
+        deskew=False,
+    )
+
+    print(f"\nГотово! Результат сохранён в: {result}")
+    print("Проверяем количество страниц...")
+
+    import fitz
+
+    doc = fitz.open(str(result))
+    print(f"Количество страниц в результате: {len(doc)}")
+
+    for i in range(min(len(doc), 10)):
+        text = doc[i].get_text().strip()
+        has_text = len(text) > 50
+        print(f"  Страница {i}: текст {'найден' if has_text else 'НЕ найден'} ({len(text)} символов)")
+
+    doc.close()
+
+    print(f"\nСравнение OCR-слоёв на последней странице:")
+    print("=" * 60)
+
+    old_pdf = Path("/tmp/test_ocr_result.pdf")
+    new_pdf = Path("/tmp/test_ocr_result6.pdf")
+
+    if old_pdf.exists():
+        old_doc = fitz.open(str(old_pdf))
+        old_last_page = len(old_doc) - 1
+        old_text = old_doc[old_last_page].get_text().strip()
+        old_doc.close()
+        print(f"\nСтарый PDF ({old_pdf}):")
+        print(f"  Последняя страница ({old_last_page}): {len(old_text)} символов")
+        print(f"  Первые 200 символов: {old_text[:200]!r}")
+    else:
+        print(f"\nСтарый PDF не найден: {old_pdf}")
+
+    new_doc = fitz.open(str(new_pdf))
+    new_last_page = len(new_doc) - 1
+    new_text = new_doc[new_last_page].get_text().strip()
+    new_doc.close()
+    print(f"\nНовый PDF ({new_pdf}):")
+    print(f"  Последняя страница ({new_last_page}): {len(new_text)} символов")
+    print(f"  Первые 200 символов: {new_text[:200]!r}")
