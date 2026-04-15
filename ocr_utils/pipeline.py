@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import multiprocessing
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Sequence
 
@@ -105,7 +103,7 @@ def process_single_pdf(
 
 
 def _process_one(args: tuple) -> tuple[str, str | None]:
-    """Обёртка для process_single_pdf, пригодная для ProcessPoolExecutor.
+    """Обёртка для process_single_pdf.
 
     Возвращает (относительный путь, None) при успехе или (относительный путь, текст ошибки) при ошибке.
     """
@@ -132,7 +130,6 @@ def _process_one(args: tuple) -> tuple[str, str | None]:
 def process_directory(
     src_dir: Path | str,
     dst_dir: Path | str,
-    workers: int | None = None,
     language: str = OCR_LANGUAGE,
     upscale_ratio: float = OCR_UPSCALE_RATIO,
     deskew: bool = True,
@@ -144,8 +141,6 @@ def process_directory(
     Аргументы:
         src_dir: путь к исходной директории.
         dst_dir: путь к выходной директории (будет создана, если не существует).
-        workers: количество параллельных процессов.
-            None → 3/4 от доступных ядер, но не менее 1.
         language: язык(и) Tesseract для OCR.
         upscale_ratio: коэффициент увеличения изображений перед OCR.
         deskew: выравнивать ли страницы при OCR.
@@ -171,13 +166,6 @@ def process_directory(
 
     logger.info("Найдено %d PDF-файлов в %s", len(pdf_files), src_dir)
 
-    # Определяем количество воркеров
-    if workers is None:
-        cpu_count = multiprocessing.cpu_count()
-        workers = max(1, int(cpu_count * 3 / 4))
-    workers = max(1, workers)
-    logger.info("Используем %d воркеров", workers)
-
     # Формируем задачи: (src, dst, параметры)
     tasks = []
     for pdf_path in pdf_files:
@@ -187,17 +175,9 @@ def process_directory(
 
     results: dict[str, str | None] = {}
 
-    if workers == 1:
-        # Без пула, чтобы ошибки были нагляднее
-        for task in tasks:
-            rel, err = _process_one(task)
-            results[rel] = err
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_process_one, task): task for task in tasks}
-            for future in as_completed(futures):
-                rel, err = future.result()
-                results[rel] = err
+    for task in tasks:
+        rel, err = _process_one(task)
+        results[rel] = err
 
     ok = sum(1 for v in results.values() if v is None)
     fail = sum(1 for v in results.values() if v is not None)
@@ -210,63 +190,66 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-    src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1939/Плановое хозяйство 1-1939.pdf")
-    dst = Path("/tmp/test_ocr_result12.pdf")
-    intermediate = Path("/tmp/test_ocr_intermediate12.pdf")
-    second_intermediate = Path("/tmp/test_ocr_second_intermediate12.pdf")
+    src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1966")
+    dst = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989) [распознанное]/1966")
+    # dst = Path("/tmp/test_ocr_result13.pdf")
+    # intermediate = Path("/tmp/test_ocr_intermediate13.pdf")
+    # second_intermediate = Path("/tmp/test_ocr_second_intermediate13.pdf")
 
-    print(f"Обработка: {src}")
-    print(f"Результат: {dst}")
-    print(f"Промежуточный PDF #2 (после deskew+oversample): {second_intermediate}")
-    print(f"Промежуточный PDF #3 (после OCR с обработкой): {intermediate}")
-    print("Обрабатываем первые 5 страниц ...")
+    # print(f"Обработка: {src}")
+    # print(f"Результат: {dst}")
+    # print(f"Промежуточный PDF #2 (после deskew+oversample): {second_intermediate}")
+    # print(f"Промежуточный PDF #3 (после OCR с обработкой): {intermediate}")
+    # print("Обрабатываем первые 5 страниц ...")
 
-    result = process_single_pdf(
-        src_pdf=src,
-        dst_pdf=dst,
-        # pages=slice(0, 5),
-        upscale_ratio=3.0,
-        intermediate_pdf_path=intermediate,
-        second_intermediate_pdf_path=second_intermediate,
-        deskew=True,
-    )
+    # result = process_single_pdf(
+    #     src_pdf=src,
+    #     dst_pdf=dst,
+    #     # pages=slice(0, 5),
+    #     upscale_ratio=3.0,
+    #     intermediate_pdf_path=intermediate,
+    #     second_intermediate_pdf_path=second_intermediate,
+    #     deskew=True,
+    # )
 
-    print(f"\nГотово! Результат сохранён в: {result}")
-    print("Проверяем количество страниц...")
+    result = process_directory(src, dst, language="rus", upscale_ratio=2, deskew=True, clean=True, rotate_pages=True)
 
-    import fitz
-
-    doc = fitz.open(str(result))
-    print(f"Количество страниц в результате: {len(doc)}")
-
-    for i in range(min(len(doc), 10)):
-        text = doc[i].get_text().strip()
-        has_text = len(text) > 50
-        print(f"  Страница {i}: текст {'найден' if has_text else 'НЕ найден'} ({len(text)} символов)")
-
-    doc.close()
-
-    print(f"\nСравнение OCR-слоёв на последней странице:")
-    print("=" * 60)
-
-    old_pdf = Path("/tmp/test_ocr_result11.pdf")
-    new_pdf = Path("/tmp/test_ocr_result12.pdf")
-
-    if old_pdf.exists():
-        old_doc = fitz.open(str(old_pdf))
-        old_last_page = len(old_doc) - 1
-        old_text = old_doc[old_last_page].get_text().strip()
-        old_doc.close()
-        print(f"\nСтарый PDF ({old_pdf}):")
-        print(f"  Последняя страница ({old_last_page}): {len(old_text)} символов")
-        print(f"  Первые 200 символов: {old_text[:200]!r}")
-    else:
-        print(f"\nСтарый PDF не найден: {old_pdf}")
-
-    new_doc = fitz.open(str(new_pdf))
-    new_last_page = len(new_doc) - 1
-    new_text = new_doc[new_last_page].get_text().strip()
-    new_doc.close()
-    print(f"\nНовый PDF ({new_pdf}):")
-    print(f"  Последняя страница ({new_last_page}): {len(new_text)} символов")
-    print(f"  Первые 200 символов: {new_text[:200]!r}")
+    # print(f"\nГотово! Результат сохранён в: {result}")
+    # print("Проверяем количество страниц...")
+    #
+    # import fitz
+    #
+    # doc = fitz.open(str(result))
+    # print(f"Количество страниц в результате: {len(doc)}")
+    #
+    # for i in range(min(len(doc), 10)):
+    #     text = doc[i].get_text().strip()
+    #     has_text = len(text) > 50
+    #     print(f"  Страница {i}: текст {'найден' if has_text else 'НЕ найден'} ({len(text)} символов)")
+    #
+    # doc.close()
+    #
+    # print(f"\nСравнение OCR-слоёв на последней странице:")
+    # print("=" * 60)
+    #
+    # old_pdf = Path("/tmp/test_ocr_result12.pdf")
+    # new_pdf = Path("/tmp/test_ocr_result13.pdf")
+    #
+    # if old_pdf.exists():
+    #     old_doc = fitz.open(str(old_pdf))
+    #     old_last_page = len(old_doc) - 1
+    #     old_text = old_doc[old_last_page].get_text().strip()
+    #     old_doc.close()
+    #     print(f"\nСтарый PDF ({old_pdf}):")
+    #     print(f"  Последняя страница ({old_last_page}): {len(old_text)} символов")
+    #     print(f"  Первые 200 символов: {old_text[:200]!r}")
+    # else:
+    #     print(f"\nСтарый PDF не найден: {old_pdf}")
+    #
+    # new_doc = fitz.open(str(new_pdf))
+    # new_last_page = len(new_doc) - 1
+    # new_text = new_doc[new_last_page].get_text().strip()
+    # new_doc.close()
+    # print(f"\nНовый PDF ({new_pdf}):")
+    # print(f"  Последняя страница ({new_last_page}): {len(new_text)} символов")
+    # print(f"  Первые 200 символов: {new_text[:200]!r}")

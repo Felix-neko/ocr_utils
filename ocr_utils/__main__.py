@@ -88,7 +88,6 @@ def single(
 @cli.command()
 @click.argument("src", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.argument("dst", type=click.Path(path_type=Path))
-@click.option("--workers", type=int, default=None, help="Количество воркеров (по умолчанию: 3/4 ядер)")
 @click.option("--language", default="rus", help="Язык OCR (по умолчанию: rus)")
 @click.option("--upscale-ratio", default=2.0, type=float, help="Коэффициент увеличения изображений (по умолчанию: 2.0)")
 @click.option("--deskew/--no-deskew", default=True, help="Выравнивание страниц при OCR (по умолчанию: включено)")
@@ -97,7 +96,6 @@ def single(
 def dir(
     src: Path,
     dst: Path,
-    workers: int | None,
     language: str,
     upscale_ratio: float,
     deskew: bool,
@@ -108,7 +106,6 @@ def dir(
     results = process_directory(
         src_dir=src,
         dst_dir=dst,
-        workers=workers,
         language=language,
         upscale_ratio=upscale_ratio,
         deskew=deskew,

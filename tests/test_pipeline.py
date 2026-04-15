@@ -110,7 +110,7 @@ class TestProcessDirectory:
         dst = tmp_dir / "dst"
         with patch("ocr_utils.pipeline.process_single_pdf") as mock:
             mock.return_value = None
-            process_directory(src, dst, workers=1)
+            process_directory(src, dst)
         assert mock.call_count == 3
 
     def test_creates_output_dir(self, tmp_dir: Path) -> None:
@@ -118,7 +118,7 @@ class TestProcessDirectory:
         src = self._make_dir_with_pdfs(tmp_dir)
         dst = tmp_dir / "new_output"
         with patch("ocr_utils.pipeline.process_single_pdf"):
-            process_directory(src, dst, workers=1)
+            process_directory(src, dst)
         assert dst.exists()
 
     def test_preserves_relative_paths(self, tmp_dir: Path) -> None:
@@ -132,13 +132,13 @@ class TestProcessDirectory:
             # Вызываем напрямую, проверяя формирование задач
             from ocr_utils.pipeline import process_directory
 
-            # Вместо мока process_single_pdf — проверим через реальный вызов с workers=1
+            # Вместо мока process_single_pdf — проверим через реальный вызов
             pass
 
         # Проверим через правильный мок
         with patch("ocr_utils.pipeline.process_single_pdf") as mock:
             mock.return_value = None
-            process_directory(src, dst, workers=1)
+            process_directory(src, dst)
 
         # Собираем dst-пути из вызовов
         dst_paths = []
@@ -161,16 +161,8 @@ class TestProcessDirectory:
         """Пустая директория → пустой результат."""
         src = tmp_dir / "empty"
         src.mkdir()
-        result = process_directory(src, tmp_dir / "dst", workers=1)
+        result = process_directory(src, tmp_dir / "dst")
         assert result == {}
-
-    def test_workers_default(self) -> None:
-        """По умолчанию workers = 3/4 ядер, но не менее 1."""
-        import multiprocessing
-
-        cpu = multiprocessing.cpu_count()
-        expected = max(1, (cpu * 3) // 4)
-        assert expected >= 1
 
 
 class TestProcessSinglePdfRealOcr:
@@ -186,7 +178,7 @@ class TestProcessSinglePdfRealOcr:
         doc.save(str(src_pdf))
         doc.close()
 
-        result = process_single_pdf(src_pdf=src_pdf, dst_pdf=dst_pdf, oversample_dpi=300)
+        result = process_single_pdf(src_pdf=src_pdf, dst_pdf=dst_pdf)
 
         assert result == dst_pdf
         assert dst_pdf.exists()
@@ -201,7 +193,7 @@ class TestProcessSinglePdfRealOcr:
         """Полный пайплайн с разворотом: должен разбиться на 2 страницы."""
         dst_pdf = tmp_dir / "result.pdf"
 
-        result = process_single_pdf(src_pdf=landscape_spread_pdf, dst_pdf=dst_pdf, oversample_dpi=300)
+        result = process_single_pdf(src_pdf=landscape_spread_pdf, dst_pdf=dst_pdf)
 
         assert result == dst_pdf
         assert dst_pdf.exists()
@@ -254,12 +246,7 @@ class TestProcessSinglePdfRealOcr:
         dst_pdf = tmp_dir / "result.pdf"
 
         result = process_single_pdf(
-            src_pdf=portrait_pdf,
-            dst_pdf=dst_pdf,
-            oversample_dpi=300,
-            deskew=False,
-            clean=False,
-            rotate_pages=False,
+            src_pdf=portrait_pdf, dst_pdf=dst_pdf, oversample_dpi=300, deskew=False, clean=False, rotate_pages=False
         )
 
         assert result == dst_pdf
@@ -282,7 +269,7 @@ class TestProcessDirectoryRealOcr:
             doc.close()
 
         dst = tmp_dir / "dst"
-        results = process_directory(src, dst, workers=1, oversample_dpi=300)
+        results = process_directory(src, dst, oversample_dpi=300)
 
         assert len(results) == 2
         assert all(err is None for err in results.values())
@@ -305,7 +292,7 @@ class TestProcessDirectoryRealOcr:
         doc2.close()
 
         dst = tmp_dir / "dst"
-        results = process_directory(src, dst, workers=1, oversample_dpi=300)
+        results = process_directory(src, dst, oversample_dpi=300)
 
         assert len(results) == 2
         assert all(err is None for err in results.values())

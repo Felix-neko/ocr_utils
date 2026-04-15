@@ -160,6 +160,7 @@ def run_ocr(
     deskew: bool = False,
     clean: bool = True,
     rotate_pages: bool = True,
+    jobs: int | None = None,
     intermediate_pdf_path: Path | str | None = None,
     second_intermediate_pdf_path: Path | str | None = None,
 ) -> Path:
@@ -179,6 +180,7 @@ def run_ocr(
         deskew: определять ли угол наклона и поворачивать изображения (вне ocrmypdf) + делать ли deskew в самом ocrmypdf.
         clean: очищать ли шум при OCR (применяется в ocrmypdf).
         rotate_pages: автоповорот страниц при OCR (применяется в ocrmypdf).
+        jobs: количество параллельных воркеров для ocrmypdf (None = 3/4 ядер).
         intermediate_pdf_path: путь для сохранения промежуточного PDF #3 (после OCR с обработкой).
         second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+upscale).
 
@@ -187,8 +189,15 @@ def run_ocr(
     """
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
+    # Определяем количество воркеров для ocrmypdf
+    if jobs is None:
+        import multiprocessing
+
+        cpu_count = multiprocessing.cpu_count()
+        jobs = max(1, int(cpu_count * 3 / 4))
+
     logger.info(
-        "Запуск трёхэтапного OCR: %s → %s (lang=%s, upscale_ratio=%.2f, deskew=%s, clean=%s, rotate=%s)",
+        "Запуск трёхэтапного OCR: %s → %s (lang=%s, upscale_ratio=%.2f, deskew=%s, clean=%s, rotate=%s, jobs=%d)",
         input_pdf,
         output_pdf,
         language,
@@ -196,6 +205,7 @@ def run_ocr(
         deskew,
         clean,
         rotate_pages,
+        jobs,
     )
 
     # Подготовка промежуточного PDF #2 (deskew + oversample)
@@ -225,8 +235,8 @@ def run_ocr(
         logger.info("Этап 1: Подготовка изображений (deskew + upscale) → %s", tmp_prepared_path)
         prepare_images_for_ocr(input_pdf, tmp_prepared_path, upscale_ratio=upscale_ratio, deskew=deskew)
 
-        # Этап 2: OCR через ocrmypdf (без deskew и oversample)
-        logger.info("Этап 2: OCR через ocrmypdf (clean=%s, rotate=%s) → %s", clean, rotate_pages, tmp_ocr_path)
+        # Этап 2: OCR через ocrmypdf
+        logger.info("Этап 2: OCR через ocrmypdf (clean=%s, rotate=%s, jobs=%d) → %s", clean, rotate_pages, jobs, tmp_ocr_path)
         ocrmypdf.ocr(
             str(tmp_prepared_path),
             str(tmp_ocr_path),
@@ -237,6 +247,7 @@ def run_ocr(
             skip_text=True,
             optimize=0,
             progress_bar=False,
+            jobs=jobs,
         )
 
         # Этап 3: Перенос текстового слоя на исходные изображения
