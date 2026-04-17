@@ -26,6 +26,7 @@ def process_single_pdf(
     rotate_pages: bool = True,
     intermediate_pdf_path: Path | str | None = None,
     second_intermediate_pdf_path: Path | str | None = None,
+    intermediate_page_pics_dir: Path | None = None,
 ) -> Path:
     """Обработать один PDF: разбить развороты на страницы, добавить OCR-слой.
 
@@ -53,6 +54,11 @@ def process_single_pdf(
             None → промежуточный PDF не сохраняется.
         second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+upscale).
             None → промежуточный PDF не сохраняется.
+        intermediate_page_pics_dir: директория для сохранения промежуточных картинок страниц.
+            None → картинки не сохраняются.
+            Если задана, то сохранять промежуточные картинки (отдельные страницы, на которые мы нарезали книгу) в эту директорию.
+            Если директория не существует, создаётся новая. Если картинка по какому-то пути уже существует — переписывается.
+            Сохранение осуществляется без перекодировки, т.к. используется lossless crop.
 
     Возвращает:
         Path к выходному PDF.
@@ -79,7 +85,9 @@ def process_single_pdf(
         logger.info("Обработка: %s → %s", src_pdf, dst_pdf)
 
         # Шаг 1: разбить развороты на отдельные страницы → промежуточный PDF #1
-        split_pdf = split_pdf_pages(src_pdf, tmp_path, pages=pages)
+        split_pdf = split_pdf_pages(
+            src_pdf, tmp_path, pages=pages, intermediate_page_pics_dir=intermediate_page_pics_dir
+        )
         logger.info("Шаг 1 (разбивка) завершён: %s", split_pdf)
 
         # Шаг 2: OCR через трёхэтапный процесс → финальный PDF
@@ -107,20 +115,40 @@ def _process_one(args: tuple) -> tuple[str, str | None]:
 
     Возвращает (относительный путь, None) при успехе или (относительный путь, текст ошибки) при ошибке.
     """
-    src_pdf_str, dst_pdf_str, language, upscale_ratio, deskew, clean, rotate_pages = args
+    (
+        src_pdf_str,
+        dst_pdf_str,
+        language,
+        upscale_ratio,
+        deskew,
+        clean,
+        rotate_pages,
+        intermediate_page_pics_dir,
+        only_save_page_pics,
+    ) = args
     src_pdf = Path(src_pdf_str)
     dst_pdf = Path(dst_pdf_str)
     rel = src_pdf.name
     try:
-        process_single_pdf(
-            src_pdf=src_pdf,
-            dst_pdf=dst_pdf,
-            language=language,
-            upscale_ratio=upscale_ratio,
-            deskew=deskew,
-            clean=clean,
-            rotate_pages=rotate_pages,
-        )
+        if only_save_page_pics:
+            # Только сохраняем картинки-страницы, без OCR
+            import tempfile
+
+            with tempfile.TemporaryDirectory(prefix="ocr_utils_") as tmp_dir:
+                split_pdf_pages(
+                    src_pdf=src_pdf, tmp_dir=Path(tmp_dir), intermediate_page_pics_dir=intermediate_page_pics_dir
+                )
+        else:
+            process_single_pdf(
+                src_pdf=src_pdf,
+                dst_pdf=dst_pdf,
+                language=language,
+                upscale_ratio=upscale_ratio,
+                deskew=deskew,
+                clean=clean,
+                rotate_pages=rotate_pages,
+                intermediate_page_pics_dir=intermediate_page_pics_dir,
+            )
         return (rel, None)
     except Exception as e:
         logger.error("Ошибка при обработке %s: %s", rel, e)
@@ -135,6 +163,8 @@ def process_directory(
     deskew: bool = True,
     clean: bool = True,
     rotate_pages: bool = True,
+    save_intermediate_page_pics: bool = False,
+    only_save_page_pics: bool = False,
 ) -> dict[str, str | None]:
     """Рекурсивно обработать все PDF в директории.
 
@@ -146,6 +176,10 @@ def process_directory(
         deskew: выравнивать ли страницы при OCR.
         clean: очищать ли шум при OCR.
         rotate_pages: автоповорот страниц при OCR.
+        save_intermediate_page_pics: если включено, то рядом с каждым файлом сохраняемым выходным PDF-файлом
+            создавать папку {имя_выходного_pdf}.page_pics и сохранять туда промежуточные картинки.
+        only_save_page_pics: если включено, то только сохранить картинки-страницы от каждой PDF
+            и дальше обработку не вести.
 
     Возвращает:
         dict: {относительный_путь: None (успех) или строка ошибки}.
@@ -171,7 +205,26 @@ def process_directory(
     for pdf_path in pdf_files:
         rel_path = pdf_path.relative_to(src_dir)
         out_path = dst_dir / rel_path
-        tasks.append((str(pdf_path), str(out_path), language, upscale_ratio, deskew, clean, rotate_pages))
+
+        # Определяем директорию для промежуточных картинок
+        if save_intermediate_page_pics or only_save_page_pics:
+            page_pics_dir = out_path.parent / f"{out_path.stem}.page_pics"
+        else:
+            page_pics_dir = None
+
+        tasks.append(
+            (
+                str(pdf_path),
+                str(out_path),
+                language,
+                upscale_ratio,
+                deskew,
+                clean,
+                rotate_pages,
+                page_pics_dir,
+                only_save_page_pics,
+            )
+        )
 
     results: dict[str, str | None] = {}
 
@@ -190,8 +243,8 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-    src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)/1966")
-    dst = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989) [распознанное]/1966")
+    src = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989)")
+    dst = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989) [pics_only]")
     # dst = Path("/tmp/test_ocr_result13.pdf")
     # intermediate = Path("/tmp/test_ocr_intermediate13.pdf")
     # second_intermediate = Path("/tmp/test_ocr_second_intermediate13.pdf")
@@ -212,7 +265,9 @@ if __name__ == "__main__":
     #     deskew=True,
     # )
 
-    result = process_directory(src, dst, language="rus", upscale_ratio=2, deskew=True, clean=True, rotate_pages=True)
+    result = process_directory(
+        src, dst, language="rus", upscale_ratio=3, deskew=True, clean=True, rotate_pages=True, only_save_page_pics=True
+    )
 
     # print(f"\nГотово! Результат сохранён в: {result}")
     # print("Проверяем количество страниц...")

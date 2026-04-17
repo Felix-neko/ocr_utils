@@ -197,16 +197,30 @@ def _crop_image_for_box(
 # ---------------------------------------------------------------------------
 
 
-def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
+def build_split_pdf(
+    src_pdf: Path, boxes: list[PageBox], tmp_dir: Path, intermediate_page_pics_dir: Path | None = None
+) -> Path:
     """Собрать промежуточный PDF #1 из исходного PDF и списка PageBox.
 
     Страницы, не требующие разбивки (box покрывает всю страницу), копируются напрямую.
     Для разбитых страниц изображения обрезаются (для JPEG — lossless) и вставляются в новые страницы.
 
+    Аргументы:
+        src_pdf: путь к исходному PDF.
+        boxes: список PageBox для обработки.
+        tmp_dir: директория для временных файлов.
+        intermediate_page_pics_dir: директория для сохранения промежуточных картинок страниц.
+            None → картинки не сохраняются.
+
     Возвращает путь к промежуточному PDF.
     """
     src_doc = fitz.open(str(src_pdf))
     out_doc = fitz.open()
+
+    # Создаём директорию для промежуточных картинок, если задана
+    if intermediate_page_pics_dir is not None:
+        intermediate_page_pics_dir = Path(intermediate_page_pics_dir)
+        intermediate_page_pics_dir.mkdir(parents=True, exist_ok=True)
 
     # Кэш изображений страниц (чтобы не извлекать дважды для двух половин разворота)
     page_image_cache: dict[int, tuple[bytes, str, int, int]] = {}
@@ -227,6 +241,14 @@ def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
             # Копируем страницу как есть
             out_doc.insert_pdf(src_doc, from_page=box.src_page_idx, to_page=box.src_page_idx)
             logger.debug("Box %d: стр. %d скопирована как есть", box_idx, box.src_page_idx)
+            
+            # Сохраняем промежуточную картинку, если задана директория
+            if intermediate_page_pics_dir is not None:
+                # Извлекаем изображение страницы
+                img_data, img_ext, img_w, img_h = _extract_page_image(src_doc, box.src_page_idx)
+                page_pic_path = intermediate_page_pics_dir / f"page_{box_idx:04d}.{img_ext}"
+                page_pic_path.write_bytes(img_data)
+                logger.debug("Сохранена промежуточная картинка: %s", page_pic_path)
         else:
             # Для разворотов: извлекаем изображение, обрезаем через jpegtran (lossless), вставляем
             new_w = box.width
@@ -250,6 +272,12 @@ def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
 
             # Обрезаем изображение (lossless для JPEG через jpegtran)
             cropped_data, cropped_ext = _crop_image_for_box(img_data, img_ext, img_w, img_h, page_rect, box, tmp_dir)
+
+            # Сохраняем промежуточную картинку, если задана директория
+            if intermediate_page_pics_dir is not None:
+                page_pic_path = intermediate_page_pics_dir / f"page_{box_idx:04d}.{cropped_ext}"
+                page_pic_path.write_bytes(cropped_data)
+                logger.debug("Сохранена промежуточная картинка: %s", page_pic_path)
 
             # Создаём новую страницу и вставляем обрезанное изображение
             new_page = out_doc.new_page(width=new_w, height=new_h)
@@ -277,7 +305,12 @@ def build_split_pdf(src_pdf: Path, boxes: list[PageBox], tmp_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def split_pdf_pages(src_pdf: Path, tmp_dir: Path, pages: Sequence[int] | slice | None = None) -> Path:
+def split_pdf_pages(
+    src_pdf: Path,
+    tmp_dir: Path,
+    pages: Sequence[int] | slice | None = None,
+    intermediate_page_pics_dir: Path | None = None,
+) -> Path:
     """Разбить развороты в PDF на отдельные страницы, записать промежуточный PDF #1 в tmp_dir.
 
     Аргументы:
@@ -287,6 +320,8 @@ def split_pdf_pages(src_pdf: Path, tmp_dir: Path, pages: Sequence[int] | slice |
             None → все страницы.
             list[int] → конкретные 0-based индексы.
             slice → Python-слайс страниц.
+        intermediate_page_pics_dir: директория для сохранения промежуточных картинок страниц.
+            None → картинки не сохраняются.
 
     Возвращает:
         Path к промежуточному PDF с разбитыми страницами.
@@ -317,9 +352,9 @@ def split_pdf_pages(src_pdf: Path, tmp_dir: Path, pages: Sequence[int] | slice |
         sub_path = tmp_dir / "selected_pages.pdf"
         sub_doc.save(str(sub_path), garbage=4, deflate=True)
         sub_doc.close()
-        result = build_split_pdf(sub_path, boxes, tmp_dir)
+        result = build_split_pdf(sub_path, boxes, tmp_dir, intermediate_page_pics_dir)
     else:
         doc.close()
-        result = build_split_pdf(src_pdf, boxes, tmp_dir)
+        result = build_split_pdf(src_pdf, boxes, tmp_dir, intermediate_page_pics_dir)
 
     return result
