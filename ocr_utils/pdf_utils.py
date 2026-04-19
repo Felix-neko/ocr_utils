@@ -80,29 +80,19 @@ def dir_to_pdf(
 
 if __name__ == "__main__":
     root_dir = Path("/mnt/dump3/DOWN/Плановое хозяйство (1931-1989) [pics_only]")
-    
-    for year_dir in sorted(root_dir.iterdir()):
-        if not year_dir.is_dir():
+
+    for issue_dir in sorted(root_dir.iterdir()):
+        if not issue_dir.is_dir():
             continue
-        
-        print(f"Обрабатываю год: {year_dir.name}")
-        
-        for journal_dir in sorted(year_dir.iterdir()):
-            if not journal_dir.is_dir():
-                continue
-            
-            if not journal_dir.name.endswith('.page_pics'):
-                continue
-            
-            pdf_name = journal_dir.name.replace('.page_pics', '.pdf')
-            pdf_path = year_dir / pdf_name
-            
-            try:
-                dir_to_pdf(journal_dir, pdf_path)
-                print(f"  ✓ Создан: {pdf_name}")
-            except ValueError as e:
-                print(f"  ✗ Пропущен {journal_dir.name}: {e}")
-            except Exception as e:
-                print(f"  ✗ Ошибка при обработке {journal_dir.name}: {e}")
-    
+
+        pdf_path = issue_dir.parent / (issue_dir.name + ".pdf")
+
+        try:
+            dir_to_pdf(issue_dir, pdf_path)
+            print(f"✓ {pdf_path.name}")
+        except ValueError as e:
+            print(f"✗ Пропущен {issue_dir.name}: {e}")
+        except Exception as e:
+            print(f"✗ Ошибка при обработке {issue_dir.name}: {e}")
+
     print("Готово!")
