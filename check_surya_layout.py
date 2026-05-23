@@ -16,7 +16,10 @@ import torch
 def find_useful_area_bbox(layout_result):
     """
     Находит общий bounding box полезной области страницы.
-    Объединяет все найденные блоки текста/изображений в один bbox.
+    Объединяет все найденные блоки (текст, изображения, линии, виньетки) в один bbox.
+
+    Args:
+        layout_result: результат layout detection от surya
 
     Returns:
         tuple: (x1, y1, x2, y2) или None если блоки не найдены
@@ -69,6 +72,14 @@ def process_images(input_dir: Path, output_dir: Path):
         layout_result = layout_results[0]
 
         print(f"  Найдено блоков: {len(layout_result.bboxes)}")
+        
+        block_types = {}
+        for block_bbox in layout_result.bboxes:
+            label = block_bbox.label
+            block_types[label] = block_types.get(label, 0) + 1
+        
+        if block_types:
+            print(f"  Типы блоков: {dict(block_types)}")
 
         bbox = find_useful_area_bbox(layout_result)
 
@@ -80,9 +91,23 @@ def process_images(input_dir: Path, output_dir: Path):
             draw = ImageDraw.Draw(img)
             draw.rectangle([x1, y1, x2, y2], outline="red", width=5)
 
+            color_map = {
+                "Text": "blue",
+                "Title": "green",
+                "Figure": "purple",
+                "Table": "orange",
+                "Caption": "cyan",
+                "Footnote": "magenta",
+                "Page-header": "yellow",
+                "Page-footer": "pink",
+                "Section-header": "lime",
+            }
+
             for block_bbox in layout_result.bboxes:
                 bx1, by1, bx2, by2 = block_bbox.bbox
-                draw.rectangle([bx1, by1, bx2, by2], outline="blue", width=2)
+                label = block_bbox.label
+                color = color_map.get(label, "blue")
+                draw.rectangle([bx1, by1, bx2, by2], outline=color, width=2)
         else:
             print(f"  ⚠ Полезная область не найдена")
 
