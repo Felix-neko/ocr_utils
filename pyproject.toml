@@ -48,7 +48,7 @@ testpaths = ["tests"]
 
 [tool.black]
 line-length = 120
-magic_trailing_comma = false
+magic-trailing-comma = false
 
 [dependency-groups]
 dev = [
