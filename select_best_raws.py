@@ -337,9 +337,9 @@ def build_groups(all_names: list[str], duplicates: dict[str, list[str]]) -> list
 
 @click.command()
 @click.argument(
-    "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-25 ЭГ 1965 IV-VI"
+    "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-28/983_FUJI"
 )
-@click.argument("output_dir", default="/mnt/system/raw/1965_4_6_1_out")
+@click.argument("output_dir", default="/mnt/system/raw/1966_1_3_out")
 @click.option("--n-search", default=5, show_default=True, help="Макс. расстояние в позициях между кадрами одной группы")
 @click.option(
     "--method",
@@ -482,6 +482,7 @@ def main(
     click.echo(f"\nГрупп дубликатов: {len(dup_groups)}, одиночных файлов: {len(groups) - len(dup_groups)}")
 
     # Шаг 5: копируем лучший файл из каждой группы
+    dup_counter = 0
     for group in groups:
         best_jpeg = max(group, key=lambda j: sharpness[j])
         src = raf_by_jpeg[best_jpeg]
@@ -489,9 +490,10 @@ def main(
         if len(group) == 1:
             click.echo(f"  {src.name}: резкость={sharpness[best_jpeg]:.1f}")
         else:
+            dup_counter += 1
             names = [raf_by_jpeg[j].name for j in group]
             sharp_map = {raf_by_jpeg[j].name: f"{sharpness[j]:.1f}" for j in group}
-            click.echo(f"  Дубликаты {names}")
+            click.echo(f"  Дубликаты {names} ({dup_counter} / {len(dup_groups)})")
             click.echo(f"    резкость: {sharp_map}")
             click.echo(f"    -> выбран: {src.name}")
 

@@ -27,6 +27,13 @@ dependencies = [
     "imagehash>=4.3.2",
     "rawpy>=0.27.0",
     "imagededup>=0.3.3.post2",
+    "spandrel>=0.4.0",
+    "opencv-python-headless>=4.0",
+    "diffusers>=0.30.0",
+    "accelerate>=0.34.0",
+    "scipy>=1.11.0",
+    "matplotlib>=3.7.0",
+    "scikit-image>=0.22.0",
 ]
 
 [tool.uv]
