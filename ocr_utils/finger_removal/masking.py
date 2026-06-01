@@ -22,8 +22,20 @@ from typing import Optional
 
 import cv2
 import numpy as np
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+class FingerDetectionsBySide(BaseModel):
+    """Детекции пальцев, сгруппированные по сторонам изображения."""
+    top: list[np.ndarray] = []
+    bottom: list[np.ndarray] = []
+    left: list[np.ndarray] = []
+    right: list[np.ndarray] = []
+    
+    class Config:
+        arbitrary_types_allowed = True
 
 # Папка для весов нейромоделей (корень проекта, по аналогии с dewarp_models/)
 MODELS_DIR = Path(__file__).resolve().parents[2] / "finger_models"
@@ -230,6 +242,61 @@ def neural_hand_mask(
     return mask
 
 
+def get_box_edge_overlap(box: np.ndarray, img_shape: tuple[int, int], edge_frac: float = 0.12) -> dict[str, float]:
+    """Вычисляет длину пересечения бокса с каждым краем изображения.
+    
+    Args:
+        box: [x1, y1, x2, y2]
+        img_shape: (height, width)
+        edge_frac: ширина краевой зоны (доля от размера изображения)
+    
+    Returns:
+        dict с ключами 'top', 'bottom', 'left', 'right' и длинами пересечений
+    """
+    h, w = img_shape
+    x1, y1, x2, y2 = box
+    
+    edge_h = int(edge_frac * h)
+    edge_w = int(edge_frac * w)
+    
+    overlaps = {
+        'top': 0.0,
+        'bottom': 0.0,
+        'left': 0.0,
+        'right': 0.0,
+    }
+    
+    if y1 < edge_h:
+        overlaps['top'] = x2 - x1
+    if y2 > h - edge_h:
+        overlaps['bottom'] = x2 - x1
+    if x1 < edge_w:
+        overlaps['left'] = y2 - y1
+    if x2 > w - edge_w:
+        overlaps['right'] = y2 - y1
+    
+    return overlaps
+
+
+def get_dominant_side(box: np.ndarray, img_shape: tuple[int, int], edge_frac: float = 0.12) -> Optional[str]:
+    """Определяет, к какой стороне изображения бокс прилегает сильнее всего.
+    
+    Returns:
+        'top', 'bottom', 'left', 'right' или None, если не прилегает ни к одной стороне
+    """
+    overlaps = get_box_edge_overlap(box, img_shape, edge_frac)
+    max_overlap = max(overlaps.values())
+    
+    if max_overlap == 0:
+        return None
+    
+    for side, overlap in overlaps.items():
+        if overlap == max_overlap:
+            return side
+    
+    return None
+
+
 def neural_hand_mask_batch(
     rgb_list: list[np.ndarray],
     device: str = "cuda",
@@ -281,6 +348,121 @@ def neural_hand_mask_batch(
         masks.append(mask)
     
     return masks
+
+
+def neural_hand_mask_batch_double_pass(
+    rgb_list: list[np.ndarray],
+    device: str = "cuda",
+    conf_high: float = 0.15,
+    conf_low: float = 0.03,
+    edge_frac: float = 0.12,
+    dilate_px: int = 10,
+    yolo_model: str = DEFAULT_YOLO_WORLD,
+    sam_model: str = DEFAULT_SAM,
+    max_box_frac: float = 0.30,
+    max_area_frac: float = MAX_FINGER_AREA_FRAC,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[FingerDetectionsBySide]]:
+    """Двухпроходная батчевая детекция с высоким и низким порогами confidence.
+    
+    Returns:
+        (masks_high, masks_low, detections_by_side) - маски с высоким conf (красные),
+        маски с низким conf (синие), детекции по сторонам для каждого изображения
+    """
+    if not rgb_list:
+        return [], [], []
+    
+    bgr_list = [cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) for rgb in rgb_list]
+    yolo = _load_yolo_world(yolo_model, device)
+    sam = _load_sam(sam_model)
+    
+    det_high = yolo.predict(bgr_list, conf=conf_high, device=device, verbose=False)
+    det_low = yolo.predict(bgr_list, conf=conf_low, device=device, verbose=False)
+    
+    masks_high = []
+    masks_low = []
+    detections_by_side_list = []
+    
+    for rgb, bgr, dh, dl in zip(rgb_list, bgr_list, det_high, det_low):
+        h, w = rgb.shape[:2]
+        img_area = h * w
+        
+        detections_by_side = FingerDetectionsBySide()
+        
+        boxes_high = dh.boxes.xyxy.cpu().numpy() if dh.boxes is not None else np.empty((0, 4))
+        boxes_low = dl.boxes.xyxy.cpu().numpy() if dl.boxes is not None else np.empty((0, 4))
+        
+        if len(boxes_high) > 0:
+            bw = boxes_high[:, 2] - boxes_high[:, 0]
+            bh = boxes_high[:, 3] - boxes_high[:, 1]
+            keep = (bw * bh) <= (max_box_frac * img_area)
+            boxes_high = boxes_high[keep]
+        
+        if len(boxes_low) > 0:
+            bw = boxes_low[:, 2] - boxes_low[:, 0]
+            bh = boxes_low[:, 3] - boxes_low[:, 1]
+            keep = (bw * bh) <= (max_box_frac * img_area)
+            boxes_low = boxes_low[keep]
+        
+        occupied_sides = set()
+        
+        for box in boxes_high:
+            side = get_dominant_side(box, (h, w), edge_frac)
+            if side:
+                getattr(detections_by_side, side).append(box)
+                occupied_sides.add(side)
+        
+        for box in boxes_low:
+            side = get_dominant_side(box, (h, w), edge_frac)
+            if side and side not in occupied_sides:
+                getattr(detections_by_side, side).append(box)
+        
+        mask_high_raw = np.zeros((h, w), dtype=np.uint8)
+        if len(boxes_high) > 0:
+            seg = sam.predict(bgr, bboxes=boxes_high, device=device, verbose=False)
+            if seg and seg[0].masks is not None:
+                data = seg[0].masks.data.cpu().numpy()
+                for m in data:
+                    m_bin = m > 0.5
+                    if m_bin.shape != (h, w):
+                        m_bin = cv2.resize(m_bin.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
+                    if m_bin.sum() > max_area_frac * img_area:
+                        continue
+                    mask_high_raw[m_bin] = 255
+        
+        boxes_low_filtered = []
+        for box in boxes_low:
+            side = get_dominant_side(box, (h, w), edge_frac)
+            if side and side not in occupied_sides:
+                boxes_low_filtered.append(box)
+        
+        mask_low_raw = np.zeros((h, w), dtype=np.uint8)
+        if len(boxes_low_filtered) > 0:
+            seg = sam.predict(bgr, bboxes=np.array(boxes_low_filtered), device=device, verbose=False)
+            if seg and seg[0].masks is not None:
+                data = seg[0].masks.data.cpu().numpy()
+                for m in data:
+                    m_bin = m > 0.5
+                    if m_bin.shape != (h, w):
+                        m_bin = cv2.resize(m_bin.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
+                    if m_bin.sum() > max_area_frac * img_area:
+                        continue
+                    mask_low_raw[m_bin] = 255
+        
+        mask_high = mask_high_raw
+        mask_low = mask_low_raw
+        
+        if dilate_px > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
+            if int(np.count_nonzero(mask_high)) > 0:
+                mask_high = cv2.dilate(mask_high, kernel, iterations=1)
+            if int(np.count_nonzero(mask_low)) > 0:
+                mask_low = cv2.dilate(mask_low, kernel, iterations=1)
+        
+        masks_high.append(mask_high)
+        masks_low.append(mask_low)
+        detections_by_side_list.append(detections_by_side)
+    
+    return masks_high, masks_low, detections_by_side_list
 
 
 # ============================================================
@@ -412,7 +594,31 @@ def overlay_mask(rgb: np.ndarray, mask: np.ndarray, alpha: float = 0.5) -> np.nd
     red[:, :, 0] = 255
     m = mask > 0
     out[m] = (alpha * red[m] + (1.0 - alpha) * rgb[m]).astype(np.uint8)
-    # Контур маски для наглядности
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(out, contours, -1, (0, 255, 0), 3)
+    return out
+
+
+def overlay_mask_double(
+    rgb: np.ndarray, mask_high: np.ndarray, mask_low: np.ndarray, alpha: float = 0.5
+) -> np.ndarray:
+    """Возвращает RGB с красной заливкой для mask_high и синей для mask_low."""
+    out = rgb.copy()
+    
+    red = np.zeros_like(rgb)
+    red[:, :, 0] = 255
+    m_high = mask_high > 0
+    out[m_high] = (alpha * red[m_high] + (1.0 - alpha) * rgb[m_high]).astype(np.uint8)
+    
+    blue = np.zeros_like(rgb)
+    blue[:, :, 2] = 255
+    m_low = mask_low > 0
+    out[m_low] = (alpha * blue[m_low] + (1.0 - alpha) * rgb[m_low]).astype(np.uint8)
+    
+    contours_high, _ = cv2.findContours(mask_high, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out, contours_high, -1, (0, 255, 0), 3)
+    
+    contours_low, _ = cv2.findContours(mask_low, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out, contours_low, -1, (255, 255, 0), 3)
+    
     return out

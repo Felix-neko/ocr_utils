@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .masking import MODELS_DIR
+from ocr_utils.finger_removal.masking import MODELS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -232,27 +232,27 @@ def dominant_fill_axis(mask: np.ndarray) -> str:
 
 
 def _fill_along_columns(roi_rgb: np.ndarray, fill_mask: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
-    """Продолжает каждую КОЛОНКУ: заполняет ``fill_mask`` интерполяцией по ``valid_mask``.
+    """Продолжает каждую КОЛОНКУ: заполняет ``fill_mask`` вертикальной интерполяцией.
 
-    Раздельные fill/valid важны при нескольких пальцах: заполняем пиксели ОДНОГО
-    пальца, но опорными берём только реально валидные пиксели (не накрытые НИКАКОЙ
-    маской), чтобы не интерполировать по коже другого пальца.
-
-    Для каждого столбца берём валидные пиксели этого столбца как опорные и линейно
-    интерполируем значения заполняемых. np.interp на краях зажимает к крайнему
-    опорному значению (копия края).
+    Для каждого столбца берём валидные пиксели и интерполируем по ним.
+    np.interp на краях зажимает к крайнему опорному значению (копия края).
     """
     h, w = fill_mask.shape[:2]
     out = roi_rgb.astype(np.float32).copy()
     ys = np.arange(h)
-    for x in np.where(fill_mask.any(axis=0))[0]:  # только столбцы, где есть что заполнять
+    
+    for x in np.where(fill_mask.any(axis=0))[0]:
         fcol = fill_mask[:, x]
         vcol = valid_mask[:, x]
-        if vcol.sum() < 2:  # нечем интерполировать — пропускаем
+        if vcol.sum() < 2:
             continue
+        
+        yf = ys[fcol]
         yv = ys[vcol]
+        
         for c in range(3):
-            out[fcol, x, c] = np.interp(ys[fcol], yv, roi_rgb[vcol, x, c])
+            out[yf, x, c] = np.interp(yf, yv, roi_rgb[vcol, x, c])
+    
     return out
 
 
@@ -275,12 +275,11 @@ def edge_inpaint(rgb: np.ndarray, mask: np.ndarray, padding: int, force_axis: st
     """
     h, w = mask.shape[:2]
     out = rgb.astype(np.float32).copy()
-    invalid_full = mask > 0  # ни один из этих пикселей не годится в опору
+    invalid_full = mask > 0
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     for i in range(1, num):
         comp_full = labels == i
         axis = force_axis or dominant_fill_axis(comp_full.astype(np.uint8))
-        # ROI вокруг компоненты + контекст
         cx, cy = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
         cw, ch = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
         x1, y1 = max(0, cx - padding), max(0, cy - padding)

@@ -22,8 +22,14 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from .inpainting import DEFAULT_SD_NEGATIVE, DEFAULT_SD_PROMPT, inpaint_image
-from .masking import build_finger_mask, build_finger_mask_batch, overlay_mask
+from ocr_utils.finger_removal.inpainting import DEFAULT_SD_NEGATIVE, DEFAULT_SD_PROMPT, inpaint_image
+from ocr_utils.finger_removal.masking import (
+    build_finger_mask,
+    build_finger_mask_batch,
+    neural_hand_mask_batch_double_pass,
+    overlay_mask,
+    overlay_mask_double,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -106,8 +112,11 @@ def load_manual_mask(mask_dir: Path | None, stem: str, shape: tuple[int, int]) -
     help="HF-id модели SD inpainting",
 )
 @click.option("--device", default=None, help="cuda / cpu (по умолчанию авто)")
-@click.option("--batch-size", default=8, show_default=True, help="Размер батча для обработки")
+@click.option("--batch-size", default=32, show_default=True, help="Размер батча для обработки")
 @click.option("--conf", default=0.03, show_default=True, help="Порог уверенности YOLO (ниже = больше детекций)")
+@click.option("--double-pass", is_flag=True, default=False, help="Использовать двухпроходную детекцию (conf_high=0.15, conf_low=0.03)")
+@click.option("--conf-high", default=0.15, show_default=True, help="Высокий порог уверенности для двухпроходной детекции")
+@click.option("--conf-low", default=0.03, show_default=True, help="Низкий порог уверенности для двухпроходной детекции")
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -128,6 +137,9 @@ def main(
     device: str | None,
     batch_size: int,
     conf: float,
+    double_pass: bool,
+    conf_high: float,
+    conf_low: float,
 ) -> None:
     """Убирает пальцы со сканов из INPUT_DIR и сохраняет PNG в OUTPUT_DIR."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,12 +190,28 @@ def main(
             auto_indices = [i for i, m in enumerate(manuals) if m is None]
             auto_rgbs = [rgbs[i] for i in auto_indices]
             
-            if auto_rgbs:
+            if double_pass and auto_rgbs and mask_method in ("neural", "auto"):
+                masks_high, masks_low, detections_by_side = neural_hand_mask_batch_double_pass(
+                    auto_rgbs, device=device, conf_high=conf_high, conf_low=conf_low, edge_frac=edge_frac, dilate_px=10
+                )
+                
+                auto_results = []
+                for mh, ml in zip(masks_high, masks_low):
+                    combined = cv2.bitwise_or(mh, ml)
+                    auto_results.append((combined, f"double({conf_high}/{conf_low})"))
+                
+                auto_masks_high = masks_high
+                auto_masks_low = masks_low
+            elif auto_rgbs:
                 auto_results = build_finger_mask_batch(
                     auto_rgbs, method=mask_method, edge_frac=edge_frac, dilate_px=dilate_px, device=device, conf=conf
                 )
+                auto_masks_high = None
+                auto_masks_low = None
             else:
                 auto_results = []
+                auto_masks_high = None
+                auto_masks_low = None
             
             masks_and_infos = []
             auto_idx = 0
@@ -194,12 +222,19 @@ def main(
                     masks_and_infos.append(auto_results[auto_idx])
                     auto_idx += 1
             
-            for path, rgb, (mask, info), orig_ext in zip(paths, rgbs, masks_and_infos, orig_exts):
+            for idx, (path, rgb, (mask, info), orig_ext) in enumerate(zip(paths, rgbs, masks_and_infos, orig_exts)):
                 try:
                     mask_px = int(np.count_nonzero(mask))
                     
                     if debug_dir is not None:
-                        Image.fromarray(overlay_mask(rgb, mask)).save(debug_dir / f"{path.stem}_overlay.png")
+                        if double_pass and auto_masks_high is not None and manuals[idx] is None:
+                            auto_idx_for_debug = auto_indices.index(idx)
+                            overlay = overlay_mask_double(rgb, auto_masks_high[auto_idx_for_debug], auto_masks_low[auto_idx_for_debug])
+                            Image.fromarray(overlay).save(debug_dir / f"{path.stem}_overlay.png")
+                            Image.fromarray(auto_masks_high[auto_idx_for_debug]).save(debug_dir / f"{path.stem}_mask_high.png")
+                            Image.fromarray(auto_masks_low[auto_idx_for_debug]).save(debug_dir / f"{path.stem}_mask_low.png")
+                        else:
+                            Image.fromarray(overlay_mask(rgb, mask)).save(debug_dir / f"{path.stem}_overlay.png")
                         Image.fromarray(mask).save(debug_dir / f"{path.stem}_mask.png")
                     
                     if mask_only:
