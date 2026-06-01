@@ -451,12 +451,16 @@ def neural_hand_mask_batch_double_pass(
         mask_high = mask_high_raw
         mask_low = mask_low_raw
         
-        if dilate_px > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
-            if int(np.count_nonzero(mask_high)) > 0:
-                mask_high = cv2.dilate(mask_high, kernel, iterations=1)
-            if int(np.count_nonzero(mask_low)) > 0:
-                mask_low = cv2.dilate(mask_low, kernel, iterations=1)
+        dilate_high = dilate_px + 5
+        dilate_low = max(0, dilate_px - 5)
+        
+        if dilate_high > 0 and int(np.count_nonzero(mask_high)) > 0:
+            kernel_high = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_high + 1, 2 * dilate_high + 1))
+            mask_high = cv2.dilate(mask_high, kernel_high, iterations=1)
+        
+        if dilate_low > 0 and int(np.count_nonzero(mask_low)) > 0:
+            kernel_low = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_low + 1, 2 * dilate_low + 1))
+            mask_low = cv2.dilate(mask_low, kernel_low, iterations=1)
         
         masks_high.append(mask_high)
         masks_low.append(mask_low)

@@ -232,10 +232,11 @@ def dominant_fill_axis(mask: np.ndarray) -> str:
 
 
 def _fill_along_columns(roi_rgb: np.ndarray, fill_mask: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
-    """Продолжает каждую КОЛОНКУ: заполняет ``fill_mask`` вертикальной интерполяцией.
+    """Продолжает каждую КОЛОНКУ: заполняет ``fill_mask`` градиентом между краями.
 
-    Для каждого столбца берём валидные пиксели и интерполируем по ним.
-    np.interp на краях зажимает к крайнему опорному значению (копия края).
+    Для каждого столбца находим валидные пиксели выше и ниже заполняемой области.
+    Если есть оба края - делаем локальный градиент для этого столбца.
+    Если только один - копируем его.
     """
     h, w = fill_mask.shape[:2]
     out = roi_rgb.astype(np.float32).copy()
@@ -244,14 +245,35 @@ def _fill_along_columns(roi_rgb: np.ndarray, fill_mask: np.ndarray, valid_mask: 
     for x in np.where(fill_mask.any(axis=0))[0]:
         fcol = fill_mask[:, x]
         vcol = valid_mask[:, x]
-        if vcol.sum() < 2:
+        if vcol.sum() < 1:
             continue
         
         yf = ys[fcol]
         yv = ys[vcol]
         
-        for c in range(3):
-            out[yf, x, c] = np.interp(yf, yv, roi_rgb[vcol, x, c])
+        fill_min = yf.min()
+        fill_max = yf.max()
+        valid_above = yv[yv < fill_min]
+        valid_below = yv[yv > fill_max]
+        
+        if len(valid_above) >= 1 and len(valid_below) >= 1:
+            y_top = int(valid_above.max())
+            y_bottom = int(valid_below.min())
+            
+            for c in range(3):
+                val_top = float(roi_rgb[y_top, x, c])
+                val_bottom = float(roi_rgb[y_bottom, x, c])
+                
+                alpha = (yf - fill_min) / max(1.0, fill_max - fill_min)
+                out[yf, x, c] = val_top * (1.0 - alpha) + val_bottom * alpha
+        elif len(valid_above) >= 1:
+            y_top = int(valid_above.max())
+            for c in range(3):
+                out[yf, x, c] = roi_rgb[y_top, x, c]
+        elif len(valid_below) >= 1:
+            y_bottom = int(valid_below.min())
+            for c in range(3):
+                out[yf, x, c] = roi_rgb[y_bottom, x, c]
     
     return out
 
