@@ -10,9 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import cv2
 import fitz  # PyMuPDF
+import numpy as np
 
 from ocr_utils.config import JPEGTRAN_BIN, SPREAD_ASPECT_THRESHOLD
+from ocr_utils.page_split_detector import detect_page_split
 
 logger = logging.getLogger(__name__)
 
@@ -37,21 +40,74 @@ class PageBox:
 
 
 def compute_page_boxes(doc: fitz.Document) -> list[PageBox]:
-    """Проанализировать каждую страницу: портретные — оставить, альбомные развороты — разрезать пополам."""
+    """Проанализировать каждую страницу: портретные — оставить, альбомные развороты — попытаться разрезать.
+    
+    Для альбомных страниц (aspect >= SPREAD_ASPECT_THRESHOLD):
+    1. Извлекаем изображение страницы
+    2. Ищем вертикальную границу между страницами
+    3. Если граница найдена — разрезаем по ней
+    4. Если не найдена — оставляем страницу как есть
+    """
     boxes: list[PageBox] = []
     for idx in range(len(doc)):
         page = doc[idx]
         rect = page.rect  # fitz.Rect(x0, y0, x1, y1)
         w, h = rect.width, rect.height
         aspect = w / h if h > 0 else 0.0
-        if aspect >= SPREAD_ASPECT_THRESHOLD:
-            mid_x = rect.x0 + w / 2.0
-            boxes.append(PageBox(idx, rect.x0, rect.y0, mid_x, rect.y1))
-            boxes.append(PageBox(idx, mid_x, rect.y0, rect.x1, rect.y1))
-            logger.debug("Стр. %d (%.0f×%.0f, aspect=%.3f) → разбита на 2 половины", idx, w, h, aspect)
-        else:
+        
+        # Портретная ориентация — оставляем как есть
+        if aspect < SPREAD_ASPECT_THRESHOLD:
             boxes.append(PageBox(idx, rect.x0, rect.y0, rect.x1, rect.y1))
-            logger.debug("Стр. %d (%.0f×%.0f, aspect=%.3f) → оставлена как есть", idx, w, h, aspect)
+            logger.debug("Стр. %d (%.0f×%.0f, aspect=%.3f) → портретная, оставлена как есть", idx, w, h, aspect)
+            continue
+        
+        # Альбомная ориентация — пытаемся найти границу разворота
+        try:
+            # Извлекаем изображение страницы
+            images = page.get_images(full=True)
+            if not images:
+                # Нет изображений — рендерим страницу
+                pix = page.get_pixmap(dpi=150)  # 150 DPI достаточно для детекции
+                img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                if pix.n == 4:  # RGBA
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+                elif pix.n == 1:  # Grayscale
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+            else:
+                # Извлекаем первое изображение
+                xref = images[0][0]
+                img_dict = doc.extract_image(xref)
+                img_bytes = img_dict["image"]
+                img_array = cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+            
+            # Детектируем границу разворота
+            split_x_px = detect_page_split(img_array, min_confidence=0.15, jpeg_block_size=16)
+            
+            if split_x_px is not None:
+                # Пересчитываем из пикселей в PDF-координаты
+                img_h, img_w = img_array.shape[:2]
+                scale_x = w / img_w
+                split_x_pdf = rect.x0 + split_x_px * scale_x
+                
+                # Разбиваем на две страницы
+                boxes.append(PageBox(idx, rect.x0, rect.y0, split_x_pdf, rect.y1))
+                boxes.append(PageBox(idx, split_x_pdf, rect.y0, rect.x1, rect.y1))
+                logger.info(
+                    "Стр. %d (%.0f×%.0f, aspect=%.3f) → найдена граница на x=%d px (%.1f PDF), разбита на 2 страницы",
+                    idx, w, h, aspect, split_x_px, split_x_pdf
+                )
+            else:
+                # Граница не найдена — оставляем как есть
+                boxes.append(PageBox(idx, rect.x0, rect.y0, rect.x1, rect.y1))
+                logger.info(
+                    "Стр. %d (%.0f×%.0f, aspect=%.3f) → граница не найдена, оставлена как есть",
+                    idx, w, h, aspect
+                )
+        except Exception as exc:
+            # При ошибке детекции — оставляем страницу как есть
+            logger.warning("Стр. %d: ошибка детекции границы (%s), оставлена как есть", idx, exc)
+            boxes.append(PageBox(idx, rect.x0, rect.y0, rect.x1, rect.y1))
+    
     return boxes
 
 

@@ -93,15 +93,7 @@ def single(
 @click.option("--deskew/--no-deskew", default=True, help="Выравнивание страниц при OCR (по умолчанию: включено)")
 @click.option("--clean/--no-clean", default=True, help="Очистка шума при OCR (по умолчанию: включено)")
 @click.option("--rotate/--no-rotate", default=True, help="Автоповорот страниц при OCR (по умолчанию: включено)")
-def dir(
-    src: Path,
-    dst: Path,
-    language: str,
-    upscale_ratio: float,
-    deskew: bool,
-    clean: bool,
-    rotate: bool,
-) -> None:
+def dir(src: Path, dst: Path, language: str, upscale_ratio: float, deskew: bool, clean: bool, rotate: bool) -> None:
     """Рекурсивно обработать все PDF в директории."""
     results = process_directory(
         src_dir=src,

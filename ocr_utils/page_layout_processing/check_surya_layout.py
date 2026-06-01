@@ -37,20 +37,20 @@ def find_useful_area_bbox(layout_result):
 
 def process_images(input_dir: Path, output_dir: Path):
     """
-    Обрабатывает все TIF-файлы из input_dir, находит границы полезной области
+    Обрабатывает все TIF и JPG файлы из input_dir (нерекурсивно), находит границы полезной области
     и сохраняет результаты с нарисованными bounding boxes в output_dir.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tif_files = sorted(input_dir.glob("*.tif"))
+    image_files = sorted([f for f in input_dir.iterdir() if f.is_file() and f.suffix.lower() in (".tif", ".jpg", ".jpeg")])
 
-    if not tif_files:
-        print(f"Не найдено TIF-файлов в {input_dir}")
+    if not image_files:
+        print(f"Не найдено TIF/JPG файлов в {input_dir}")
         return
 
-    print(f"Найдено {len(tif_files)} TIF-файлов")
+    print(f"Найдено {len(image_files)} изображений")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Используется устройство: {device}")
@@ -58,10 +58,10 @@ def process_images(input_dir: Path, output_dir: Path):
 
     layout_predictor = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
 
-    for idx, tif_path in enumerate(tif_files, 1):
-        print(f"\n[{idx}/{len(tif_files)}] Обработка: {tif_path.name}")
+    for idx, img_path in enumerate(image_files, 1):
+        print(f"\n[{idx}/{len(image_files)}] Обработка: {img_path.name}")
 
-        img = Image.open(tif_path)
+        img = Image.open(img_path)
         if img.mode != "RGB":
             img = img.convert("RGB")
 
@@ -72,12 +72,12 @@ def process_images(input_dir: Path, output_dir: Path):
         layout_result = layout_results[0]
 
         print(f"  Найдено блоков: {len(layout_result.bboxes)}")
-        
+
         block_types = {}
         for block_bbox in layout_result.bboxes:
             label = block_bbox.label
             block_types[label] = block_types.get(label, 0) + 1
-        
+
         if block_types:
             print(f"  Типы блоков: {dict(block_types)}")
 
@@ -111,14 +111,14 @@ def process_images(input_dir: Path, output_dir: Path):
         else:
             print(f"  ⚠ Полезная область не найдена")
 
-        output_path = output_dir / tif_path.name
+        output_path = output_dir / img_path.name
         img.save(output_path, compression="tiff_deflate")
         print(f"  ✓ Сохранено: {output_path}")
 
 
 if __name__ == "__main__":
-    input_directory = Path("/mnt/dump3/DOWN/1975-12/out")
-    output_directory = Path("/mnt/dump3/DOWN/1975-12/out3")
+    input_directory = Path("/mnt/dump3/DOWN/1975-12")
+    output_directory = Path("/mnt/dump3/DOWN/1975-12_surya")
 
     print("=" * 80)
     print("Тестирование surya-ocr для определения границ полезной области")

@@ -15,105 +15,107 @@ import cv2
 def detect_regions_opencv(img_array):
     """
     Детектирует регионы на изображении используя OpenCV контуры.
-    
+
     Returns:
         list: список словарей с информацией о регионах
     """
     img_height, img_width = img_array.shape[:2]
-    
+
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    
+
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
+
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 10))
     dilated = cv2.dilate(binary, kernel, iterations=2)
-    
+
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+
     regions = []
     min_area = 1000
-    
+
     for idx, contour in enumerate(contours):
         area = cv2.contourArea(contour)
         if area < min_area:
             continue
-        
+
         x, y, w, h = cv2.boundingRect(contour)
-        
+
         coverage_x = w / img_width
         coverage_y = h / img_height
-        
+
         if coverage_x > 0.95 and coverage_y > 0.95:
             continue
-        
-        roi = binary[y:y+h, x:x+w]
+
+        roi = binary[y : y + h, x : x + w]
         pixel_density = np.sum(roi > 0) / (w * h)
-        
+
         aspect_ratio = w / float(h) if h > 0 else 0
-        
+
         if aspect_ratio > 10:
-            region_type = 'separator'
+            region_type = "separator"
             min_density = 0.01
         elif aspect_ratio < 0.5:
-            region_type = 'image'
+            region_type = "image"
             min_density = 0.05
         else:
-            region_type = 'text'
+            region_type = "text"
             min_density = 0.1
-        
+
         if pixel_density < min_density:
             continue
-        
-        regions.append({
-            'id': f'region_{idx:04d}',
-            'type': region_type,
-            'bbox': [x, y, x + w, y + h],
-            'polygon': [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
-            'confidence': float(pixel_density)
-        })
-    
+
+        regions.append(
+            {
+                "id": f"region_{idx:04d}",
+                "type": region_type,
+                "bbox": [x, y, x + w, y + h],
+                "polygon": [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+                "confidence": float(pixel_density),
+            }
+        )
+
     return regions
 
 
 def find_useful_area_bbox(regions):
     """
     Находит общий bounding box полезной области страницы из регионов.
-    
+
     Returns:
         tuple: (x1, y1, x2, y2) и список регионов, или (None, []) если регионы не найдены
     """
     if not regions:
         return None, []
-    
-    x1 = min(r['bbox'][0] for r in regions)
-    y1 = min(r['bbox'][1] for r in regions)
-    x2 = max(r['bbox'][2] for r in regions)
-    y2 = max(r['bbox'][3] for r in regions)
-    
+
+    x1 = min(r["bbox"][0] for r in regions)
+    y1 = min(r["bbox"][1] for r in regions)
+    x2 = max(r["bbox"][2] for r in regions)
+    y2 = max(r["bbox"][3] for r in regions)
+
     return (x1, y1, x2, y2), regions
 
 
 def process_images(input_dir: Path, output_dir: Path):
     """
-    Обрабатывает все TIF-файлы из input_dir, находит границы полезной области
+    Обрабатывает все TIF и JPG файлы из input_dir (нерекурсивно), находит границы полезной области
     и сохраняет результаты с нарисованными bounding boxes в output_dir.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tif_files = sorted(input_dir.glob("*.tif"))
+    image_files = sorted([f for f in input_dir.iterdir() if f.is_file() and f.suffix.lower() in (".tif", ".jpg", ".jpeg")])
 
-    if not tif_files:
-        print(f"Не найдено TIF-файлов в {input_dir}")
+    if not image_files:
+        print(f"Не найдено TIF/JPG файлов в {input_dir}")
         return
 
-    print(f"Найдено {len(tif_files)} TIF-файлов")
+    print(f"Найдено {len(image_files)} изображений")
 
-    for idx, tif_path in enumerate(tif_files, 1):
-        print(f"\n[{idx}/{len(tif_files)}] Обработка: {tif_path.name}")
+    for idx, img_path in enumerate(image_files, 1):
+        print(f"\n[{idx}/{len(image_files)}] Обработка: {img_path.name}")
 
-        img = Image.open(tif_path)
+        img = Image.open(img_path)
         if img.mode != "RGB":
             img = img.convert("RGB")
 
@@ -134,7 +136,7 @@ def process_images(input_dir: Path, output_dir: Path):
                 region_types[rtype] = region_types.get(rtype, 0) + 1
                 if rtype not in avg_confidence:
                     avg_confidence[rtype] = []
-                avg_confidence[rtype].append(r.get('confidence', 0))
+                avg_confidence[rtype].append(r.get("confidence", 0))
 
             if region_types:
                 print(f"  Типы регионов: {dict(region_types)}")
@@ -143,7 +145,7 @@ def process_images(input_dir: Path, output_dir: Path):
 
         if bbox:
             x1, y1, x2, y2 = bbox
-            
+
             print(f"  Границы полезной области: ({x1}, {y1}) -> ({x2}, {y2})")
             print(f"  Размер области: {x2-x1} x {y2-y1}")
 
@@ -168,14 +170,14 @@ def process_images(input_dir: Path, output_dir: Path):
         else:
             print(f"  ⚠ Полезная область не найдена")
 
-        output_path = output_dir / tif_path.name
+        output_path = output_dir / img_path.name
         img.save(output_path, compression="tiff_deflate")
         print(f"  ✓ Сохранено: {output_path}")
 
 
 if __name__ == "__main__":
-    input_directory = Path("/mnt/dump3/DOWN/1975-12/out")
-    output_directory = Path("/mnt/dump3/DOWN/1975-12/out_ocrd_segment")
+    input_directory = Path("/mnt/dump3/DOWN/1975-12")
+    output_directory = Path("/mnt/dump3/DOWN/1975-12_opencv")
 
     print("=" * 80)
     print("Тестирование ocrd-segment для определения границ полезной области")

@@ -337,9 +337,9 @@ def build_groups(all_names: list[str], duplicates: dict[str, list[str]]) -> list
 
 @click.command()
 @click.argument(
-    "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-28/983_FUJI"
+    "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-30/992_FUJI"
 )
-@click.argument("output_dir", default="/mnt/system/raw/1966_1_3_out")
+@click.argument("output_dir", default="/mnt/system/raw/1967_10_12")
 @click.option("--n-search", default=5, show_default=True, help="Макс. расстояние в позициях между кадрами одной группы")
 @click.option(
     "--method",
