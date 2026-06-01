@@ -51,6 +51,10 @@ HAND_CLASSES = ["hand", "finger", "thumb", "fingertip", "human hand"]
 # Палец никогда не занимает больше этой доли кадра — отсекаем гигантские ложные маски
 MAX_FINGER_AREA_FRAC = 0.12
 
+# Дилатация масок в двухпроходной детекции (относительно базового dilate_px)
+DILATE_HIGH_OFFSET = 10  # Дополнительная дилатация для высокого порога (уверенные детекции)
+DILATE_LOW_OFFSET = -5   # Уменьшение дилатации для низкого порога (неуверенные детекции)
+
 # Кэш загруженных моделей (чтобы не грузить заново на каждом кадре)
 _MODEL_CACHE: dict = {}
 
@@ -451,8 +455,8 @@ def neural_hand_mask_batch_double_pass(
         mask_high = mask_high_raw
         mask_low = mask_low_raw
         
-        dilate_high = dilate_px + 5
-        dilate_low = max(0, dilate_px - 5)
+        dilate_high = dilate_px + DILATE_HIGH_OFFSET
+        dilate_low = max(0, dilate_px + DILATE_LOW_OFFSET)
         
         if dilate_high > 0 and int(np.count_nonzero(mask_high)) > 0:
             kernel_high = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_high + 1, 2 * dilate_high + 1))
