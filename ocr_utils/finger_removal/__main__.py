@@ -23,7 +23,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from .inpainting import DEFAULT_SD_NEGATIVE, DEFAULT_SD_PROMPT, inpaint_image
-from .masking import build_finger_mask, overlay_mask
+from .masking import build_finger_mask, build_finger_mask_batch, overlay_mask
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -106,6 +106,8 @@ def load_manual_mask(mask_dir: Path | None, stem: str, shape: tuple[int, int]) -
     help="HF-id модели SD inpainting",
 )
 @click.option("--device", default=None, help="cuda / cpu (по умолчанию авто)")
+@click.option("--batch-size", default=8, show_default=True, help="Размер батча для обработки")
+@click.option("--conf", default=0.03, show_default=True, help="Порог уверенности YOLO (ниже = больше детекций)")
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -124,6 +126,8 @@ def main(
     sd_smooth: float,
     sd_model: str,
     device: str | None,
+    batch_size: int,
+    conf: float,
 ) -> None:
     """Убирает пальцы со сканов из INPUT_DIR и сохраняет PNG в OUTPUT_DIR."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -133,68 +137,109 @@ def main(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    files = sorted(p for p in input_dir.glob("*.png") if p.is_file())
+    extensions = ["*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]
+    files = []
+    for ext in extensions:
+        files.extend(p for p in input_dir.glob(ext) if p.is_file())
+    files = sorted(files)
     if not files:
-        logger.warning("PNG-файлы не найдены в %s", input_dir)
+        logger.warning("Изображения (PNG/JPG/JPEG) не найдены в %s", input_dir)
         return
 
     logger.info(
-        "Файлов: %d | маска: %s | инпейнт: %s | устройство: %s%s",
+        "Файлов: %d | маска: %s | инпейнт: %s | устройство: %s | батч: %d%s",
         len(files),
         mask_method,
         inpaint_method,
         device,
+        batch_size,
         " | mask-only" if mask_only else "",
     )
 
-    for path in tqdm(files, desc="Обрабатываем"):
+    for batch_start in tqdm(range(0, len(files), batch_size), desc="Батчи", unit="batch"):
+        batch_files = files[batch_start : batch_start + batch_size]
+        
         try:
-            rgb = load_rgb(path)
-
-            manual = load_manual_mask(mask_dir, path.stem, rgb.shape[:2])
-            if manual is not None:
-                mask, info = manual, "manual"
-            else:
-                mask, info = build_finger_mask(
-                    rgb, method=mask_method, edge_frac=edge_frac, dilate_px=dilate_px, device=device
-                )
-
-            mask_px = int(np.count_nonzero(mask))
-
-            if debug_dir is not None:
-                Image.fromarray(overlay_mask(rgb, mask)).save(debug_dir / f"{path.stem}_overlay.png")
-                Image.fromarray(mask).save(debug_dir / f"{path.stem}_mask.png")
-
-            if mask_only:
-                tqdm.write(f"  {path.name} | маска={info} | пикселей={mask_px}")
+            batch_data = []
+            for path in batch_files:
+                try:
+                    rgb = load_rgb(path)
+                    manual = load_manual_mask(mask_dir, path.stem, rgb.shape[:2])
+                    orig_ext = path.suffix.lower()
+                    batch_data.append((path, rgb, manual, orig_ext))
+                except Exception as e:
+                    tqdm.write(f"  Ошибка загрузки {path.name}: {e}")
+            
+            if not batch_data:
                 continue
-
-            if mask_px == 0:
-                # Пальцев не нашли — копируем как есть
-                result = rgb
-            else:
-                result = inpaint_image(
-                    rgb,
-                    mask,
-                    method=inpaint_method,
-                    device=device,
-                    padding=padding,
-                    sd_prompt=sd_prompt,
-                    sd_negative=sd_negative,
-                    sd_steps=sd_steps,
-                    sd_guidance=sd_guidance,
-                    sd_smooth=sd_smooth,
-                    sd_model_id=sd_model,
+            
+            paths, rgbs, manuals, orig_exts = zip(*batch_data)
+            
+            auto_indices = [i for i, m in enumerate(manuals) if m is None]
+            auto_rgbs = [rgbs[i] for i in auto_indices]
+            
+            if auto_rgbs:
+                auto_results = build_finger_mask_batch(
+                    auto_rgbs, method=mask_method, edge_frac=edge_frac, dilate_px=dilate_px, device=device, conf=conf
                 )
-
-            out_file = output_dir / f"{path.stem}.png"
-            Image.fromarray(result).save(out_file)
-            tqdm.write(f"  {path.name} → {out_file.name} | маска={info} | пикселей={mask_px}")
-
+            else:
+                auto_results = []
+            
+            masks_and_infos = []
+            auto_idx = 0
+            for manual in manuals:
+                if manual is not None:
+                    masks_and_infos.append((manual, "manual"))
+                else:
+                    masks_and_infos.append(auto_results[auto_idx])
+                    auto_idx += 1
+            
+            for path, rgb, (mask, info), orig_ext in zip(paths, rgbs, masks_and_infos, orig_exts):
+                try:
+                    mask_px = int(np.count_nonzero(mask))
+                    
+                    if debug_dir is not None:
+                        Image.fromarray(overlay_mask(rgb, mask)).save(debug_dir / f"{path.stem}_overlay.png")
+                        Image.fromarray(mask).save(debug_dir / f"{path.stem}_mask.png")
+                    
+                    if mask_only:
+                        tqdm.write(f"  {path.name} | маска={info} | пикселей={mask_px}")
+                        continue
+                    
+                    if mask_px == 0:
+                        result = rgb
+                    else:
+                        result = inpaint_image(
+                            rgb,
+                            mask,
+                            method=inpaint_method,
+                            device=device,
+                            padding=padding,
+                            sd_prompt=sd_prompt,
+                            sd_negative=sd_negative,
+                            sd_steps=sd_steps,
+                            sd_guidance=sd_guidance,
+                            sd_smooth=sd_smooth,
+                            sd_model_id=sd_model,
+                        )
+                    
+                    if orig_ext in (".jpg", ".jpeg"):
+                        out_file = output_dir / f"{path.stem}{orig_ext}"
+                        Image.fromarray(result).save(out_file, quality=95)
+                    else:
+                        out_file = output_dir / f"{path.stem}.png"
+                        Image.fromarray(result).save(out_file)
+                    
+                    tqdm.write(f"  {path.name} → {out_file.name} | маска={info} | пикселей={mask_px}")
+                
+                except Exception as e:
+                    tqdm.write(f"  Ошибка обработки {path.name}: {e}")
+                    import traceback
+                    tqdm.write(traceback.format_exc())
+        
         except Exception as e:
-            tqdm.write(f"  Ошибка {path.name}: {e}")
+            tqdm.write(f"  Ошибка батча: {e}")
             import traceback
-
             tqdm.write(traceback.format_exc())
 
     logger.info("Готово. Результаты в %s", output_dir)

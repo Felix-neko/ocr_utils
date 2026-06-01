@@ -186,7 +186,7 @@ def _load_sam(model_name: str):
 def neural_hand_mask(
     rgb: np.ndarray,
     device: str = "cuda",
-    conf: float = 0.15,
+    conf: float = 0.05,
     yolo_model: str = DEFAULT_YOLO_WORLD,
     sam_model: str = DEFAULT_SAM,
     max_box_frac: float = 0.30,
@@ -230,6 +230,59 @@ def neural_hand_mask(
     return mask
 
 
+def neural_hand_mask_batch(
+    rgb_list: list[np.ndarray],
+    device: str = "cuda",
+    conf: float = 0.05,
+    yolo_model: str = DEFAULT_YOLO_WORLD,
+    sam_model: str = DEFAULT_SAM,
+    max_box_frac: float = 0.30,
+    max_area_frac: float = MAX_FINGER_AREA_FRAC,
+) -> list[np.ndarray]:
+    """Батчевая версия neural_hand_mask. Возвращает список масок uint8 0/255."""
+    if not rgb_list:
+        return []
+
+    bgr_list = [cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) for rgb in rgb_list]
+    
+    yolo = _load_yolo_world(yolo_model, device)
+    det_results = yolo.predict(bgr_list, conf=conf, device=device, verbose=False)
+    
+    sam = _load_sam(sam_model)
+    masks = []
+    
+    for idx, (rgb, bgr, det) in enumerate(zip(rgb_list, bgr_list, det_results)):
+        h, w = rgb.shape[:2]
+        img_area = h * w
+        
+        boxes = det.boxes.xyxy.cpu().numpy() if det.boxes is not None else np.empty((0, 4))
+        
+        if len(boxes) > 0:
+            bw = boxes[:, 2] - boxes[:, 0]
+            bh = boxes[:, 3] - boxes[:, 1]
+            keep = (bw * bh) <= (max_box_frac * img_area)
+            boxes = boxes[keep]
+        
+        if len(boxes) == 0:
+            masks.append(np.zeros((h, w), dtype=np.uint8))
+            continue
+        
+        seg = sam.predict(bgr, bboxes=boxes, device=device, verbose=False)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        if seg and seg[0].masks is not None:
+            data = seg[0].masks.data.cpu().numpy()
+            for m in data:
+                m_bin = m > 0.5
+                if m_bin.shape != (h, w):
+                    m_bin = cv2.resize(m_bin.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
+                if m_bin.sum() > max_area_frac * img_area:
+                    continue
+                mask[m_bin] = 255
+        masks.append(mask)
+    
+    return masks
+
+
 # ============================================================
 # Итоговая сборка маски
 # ============================================================
@@ -242,7 +295,7 @@ def build_finger_mask(
     dilate_px: int = 12,
     min_area_frac: float = 0.0015,
     device: str = "cuda",
-    conf: float = 0.15,
+    conf: float = 0.05,
 ) -> tuple[np.ndarray, str]:
     """Строит итоговую маску пальца. Возвращает (mask uint8 0/255, краткое описание).
 
@@ -291,6 +344,57 @@ def build_finger_mask(
             mask = cv2.dilate(mask, kernel, iterations=1)
 
     return mask, info
+
+
+def build_finger_mask_batch(
+    rgb_list: list[np.ndarray],
+    method: str = "auto",
+    edge_frac: float = 0.12,
+    dilate_px: int = 12,
+    min_area_frac: float = 0.0015,
+    device: str = "cuda",
+    conf: float = 0.05,
+) -> list[tuple[np.ndarray, str]]:
+    """Батчевая версия build_finger_mask. Возвращает список (mask, info)."""
+    if not rgb_list:
+        return []
+    
+    results = []
+    
+    if method == "skin":
+        for rgb in rgb_list:
+            mask = skin_edge_mask(rgb, edge_frac=edge_frac, min_area_frac=min_area_frac)
+            results.append((mask, method))
+    elif method in ("neural", "auto"):
+        neural_masks = neural_hand_mask_batch(rgb_list, device=device, conf=conf)
+        
+        for rgb, nm in zip(rgb_list, neural_masks):
+            h, w = rgb.shape[:2]
+            
+            if method == "neural":
+                mask = keep_border_components(nm, edge_frac=edge_frac, min_area_frac=min_area_frac)
+                info = method
+            else:
+                if int(np.count_nonzero(nm)) == 0:
+                    mask = np.zeros((h, w), dtype=np.uint8)
+                    info = "auto(пусто)"
+                else:
+                    sm = morph_cleanup(skin_color_mask(rgb), ksize=max(3, int(0.006 * min(h, w))))
+                    sm_near = keep_seeded_components(sm, seed_mask=nm, min_area_frac=min_area_frac)
+                    mask = cv2.bitwise_or(nm, sm_near)
+                    info = "auto(neural+skin)"
+            
+            if int(np.count_nonzero(mask)) > 0:
+                mask = fill_holes(mask)
+                if dilate_px > 0:
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
+                    mask = cv2.dilate(mask, kernel, iterations=1)
+            
+            results.append((mask, info))
+    else:
+        raise ValueError(f"Неизвестный метод маскирования: {method}")
+    
+    return results
 
 
 def fill_holes(mask: np.ndarray) -> np.ndarray:
