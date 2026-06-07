@@ -34,7 +34,7 @@ DEFAULT_SAM = "sam_b.pt"
 
 # Классы open-vocabulary детектора, описывающие пальцы/руку.
 # Без "person" — он матчит всю страницу/фото и приводит к огромным ложным маскам.
-HAND_CLASSES = ["hand", "finger", "thumb", "fingertip", "human hand"]
+HAND_CLASSES = ["hand", "finger", "thumb", "fingertip", "human hand", "fingernail", "nail"]
 
 # Палец никогда не занимает больше этой доли кадра — отсекаем гигантские ложные маски
 MAX_FINGER_AREA_FRAC = 0.12
