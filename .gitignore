@@ -8,3 +8,5 @@ build/
 .idea/
 /uv.lock
 /finger_models/
+/third_party/
+/dewarp_models/
