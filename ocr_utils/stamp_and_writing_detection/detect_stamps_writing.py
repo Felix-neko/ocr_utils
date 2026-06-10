@@ -7,11 +7,12 @@
 зелёная — рукописные надписи) и подпись с классом и уверенностью.
 
 Методы (--method):
-  * classic        — классический CV: сегментация чернил по цвету + морфология.
-  * yolo-stamp      — YOLOv8 детектор штампов (PiDinoSauR/Stamp_Detection_10_12_2024).
-  * yolo-signature  — YOLOv8 детектор рукописных подписей
-                      (tech4humans/yolov8s-signature-detector).
-  * all             — прогнать все методы по очереди.
+  * classic              — классический CV: сегментация чернил по цвету + морфология.
+  * yolo-stamp           — YOLOv8 детектор штампов (PiDinoSauR/Stamp_Detection_10_12_2024).
+  * yolo-stamp-finetuned — TorchScript-детектор штампов (stamps-labs/yolov8-finetuned).
+  * yolo-signature       — YOLOv8 детектор рукописных подписей
+                           (tech4humans/yolov8s-signature-detector).
+  * all                  — прогнать все методы по очереди.
 
 Выходная директория по умолчанию берётся рядом со входной, внутри неё
 создаётся поддиректория по имени метода/модели.
@@ -229,6 +230,123 @@ def detect_yolo(image_bgr: np.ndarray, method: str, conf: float = 0.25) -> list[
 
 
 # --------------------------------------------------------------------------- #
+#  Метод 4. TorchScript-детектор штампов stamps-labs/yolov8-finetuned         #
+# --------------------------------------------------------------------------- #
+# Это не обычный ultralytics-чекпойнт, а экспортированная в TorchScript обёртка
+# WrapperModel2: на вход — тензор [1,3,640,640] (RGB, /255) и порог conf, на
+# выходе — Optional[(x2, boxes, scores)] с кандидатами ДО NMS (или None, если
+# детекций нет). Реальные xyxy-координаты лежат в x2[:, :4] (в системе входа
+# 640), conf — x2[:, 4]. NMS применяем сами через torchvision.
+
+FINETUNED_STAMP = {"repo_id": "stamps-labs/yolov8-finetuned", "filename": "weights.pt", "label": "stamp"}
+FINETUNED_IMGSZ = 640
+
+
+def _load_finetuned_stamp():
+    """Скачивает и загружает TorchScript-модель штампов на GPU (с кешем)."""
+    if "yolo-stamp-finetuned" in _yolo_cache:
+        return _yolo_cache["yolo-stamp-finetuned"]
+
+    import torch
+    from huggingface_hub import hf_hub_download
+
+    weights = hf_hub_download(repo_id=FINETUNED_STAMP["repo_id"], filename=FINETUNED_STAMP["filename"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = torch.jit.load(weights, map_location=device).eval()
+    _yolo_cache["yolo-stamp-finetuned"] = (model, device)
+    return model, device
+
+
+def _letterbox(image_bgr: np.ndarray, new: int = FINETUNED_IMGSZ, color: int = 114):
+    """Масштабирует с сохранением пропорций и дополняет до квадрата new×new.
+
+    Возвращает (canvas, ratio, pad_x, pad_y) для обратного пересчёта координат.
+    """
+    h, w = image_bgr.shape[:2]
+    ratio = min(new / h, new / w)
+    nw, nh = int(round(w * ratio)), int(round(h * ratio))
+    resized = cv2.resize(image_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((new, new, 3), color, dtype=np.uint8)
+    pad_x, pad_y = (new - nw) // 2, (new - nh) // 2
+    canvas[pad_y : pad_y + nh, pad_x : pad_x + nw] = resized
+    return canvas, ratio, pad_x, pad_y
+
+
+def _finetuned_run_on_crop(crop_bgr: np.ndarray, conf: float, iou: float) -> np.ndarray:
+    """Прогоняет TorchScript-модель на одном кропе. Возвращает [N, 5]: xyxy+conf
+    в координатах кропа (или пустой массив)."""
+    import torch
+    import torchvision
+
+    model, device = _load_finetuned_stamp()
+    canvas, ratio, pad_x, pad_y = _letterbox(crop_bgr)
+    rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+    x = torch.from_numpy(rgb).permute(2, 0, 1).float().div(255).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        out = model(x, conf)
+    if out is None:
+        return np.zeros((0, 5), dtype=np.float32)
+
+    x2, boxes, scores = out
+    keep = torchvision.ops.nms(boxes, scores, iou)
+    dets = x2[keep].cpu().numpy()
+    res = dets[:, :5].astype(np.float32).copy()
+    # Возврат из letterbox-системы 640 в координаты кропа.
+    res[:, [0, 2]] = (res[:, [0, 2]] - pad_x) / ratio
+    res[:, [1, 3]] = (res[:, [1, 3]] - pad_y) / ratio
+    return res
+
+
+def detect_yolo_finetuned(
+    image_bgr: np.ndarray, conf: float = 0.25, iou: float = 0.45, tile: int = 1100, overlap: float = 0.25
+) -> list[Detection]:
+    """Детектор штампов stamps-labs/yolov8-finetuned (TorchScript) с тайлингом.
+
+    Модель трассирована жёстко под вход 640×640, поэтому крупные сканы режутся
+    на перекрывающиеся плитки tile×tile (+полнокадровый проход для больших
+    штампов); детекции собираются в общие координаты и объединяются глобальным
+    NMS. Боксы уточняются до криволинейного контура чернил, как в detect_yolo.
+    """
+    import torch
+    import torchvision
+
+    h, w = image_bgr.shape[:2]
+    step = max(1, int(tile * (1 - overlap)))
+
+    parts = [_finetuned_run_on_crop(image_bgr, conf, iou)]  # полнокадровый проход
+    ys = sorted({*range(0, max(1, h - tile + 1), step), max(0, h - tile)})
+    xs = sorted({*range(0, max(1, w - tile + 1), step), max(0, w - tile)})
+    for y in ys:
+        for x in xs:
+            d = _finetuned_run_on_crop(image_bgr[y : y + tile, x : x + tile], conf, iou)
+            if len(d):
+                d[:, [0, 2]] += x
+                d[:, [1, 3]] += y
+                parts.append(d)
+
+    all_dets = np.vstack(parts)
+    if len(all_dets) == 0:
+        return []
+
+    # Глобальный NMS, чтобы убрать дубли из перекрытий плиток.
+    keep = torchvision.ops.nms(torch.tensor(all_dets[:, :4]), torch.tensor(all_dets[:, 4]), 0.3)
+    all_dets = all_dets[keep.numpy()]
+
+    min_ink_fraction = 0.01
+    detections: list[Detection] = []
+    for bx1, by1, bx2, by2, score in all_dets:
+        x1, y1, x2i, y2i = int(round(bx1)), int(round(by1)), int(round(bx2)), int(round(by2))
+        poly, ink = _refine_box_to_ink_contour(image_bgr, x1, y1, x2i, y2i)
+        if ink < min_ink_fraction:
+            continue
+        if poly is None:
+            poly = np.array([[x1, y1], [x2i, y1], [x2i, y2i], [x1, y2i]], dtype=np.int32)
+        detections.append(Detection(label="stamp", polygon=poly, score=float(score)))
+    return detections
+
+
+# --------------------------------------------------------------------------- #
 #  Отрисовка оверлеев                                                          #
 # --------------------------------------------------------------------------- #
 def draw_overlays(image_bgr: np.ndarray, detections: list[Detection]) -> np.ndarray:
@@ -298,6 +416,8 @@ def run_method(input_dir: Path, output_root: Path, method: str, conf: float) -> 
         t0 = time.time()
         if method == "classic":
             dets = detect_classic(image)
+        elif method == "yolo-stamp-finetuned":
+            dets = detect_yolo_finetuned(image, conf=conf)
         else:
             dets = detect_yolo(image, method, conf=conf)
         dt = time.time() - t0
@@ -348,7 +468,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--method",
         default="all",
-        choices=["classic", "yolo-stamp", "yolo-signature", "all"],
+        choices=["classic", "yolo-stamp", "yolo-stamp-finetuned", "yolo-signature", "all"],
         help="Метод детектирования.",
     )
     parser.add_argument("--conf", type=float, default=0.25, help="Порог уверенности для YOLO.")
@@ -366,7 +486,10 @@ def main(argv: list[str]) -> int:
     output_root: Path = args.output_dir or input_dir.parent / f"{input_dir.name}_detected"
     output_root.mkdir(parents=True, exist_ok=True)
 
-    methods = ["classic", "yolo-stamp", "yolo-signature"] if args.method == "all" else [args.method]
+    if args.method == "all":
+        methods = ["classic", "yolo-stamp", "yolo-stamp-finetuned", "yolo-signature"]
+    else:
+        methods = [args.method]
 
     all_stats: dict[str, MethodStats] = {}
     for method in methods:

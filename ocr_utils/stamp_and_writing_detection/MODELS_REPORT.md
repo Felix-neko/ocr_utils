@@ -34,7 +34,7 @@
 | Модель | Тип | Веса | Статус | Комментарий |
 |---|---|---|---|---|
 | **PiDinoSauR/Stamp_Detection_10_12_2024** | YOLOv8 detect | `weights/best.pt` | ✅ работает | Чистая ultralytics-модель, 1 класс `stamp`. **Выбрана как `yolo-stamp`.** Ловит штампы, но на наших сканах даёт ложные срабатывания на пальцах и красных печатных иллюстрациях (доменный сдвиг). |
-| stamps-labs/yolov8-finetuned | YOLOv8 (torchscript) | `weights.pt`, ~45 MB | ❌ непригодна | Экспорт в TorchScript **сломан**: `forward` возвращает `None`. Не загружается через `YOLO()`. |
+| **stamps-labs/yolov8-finetuned** | YOLOv8 (TorchScript) | `weights.pt`, ~45 MB | ✅ работает (с нюансами) | **Выбрана как `yolo-stamp-finetuned`.** Это не обычный чекпойнт, а TorchScript-обёртка `WrapperModel2(input, conf)` → `Optional[(x2, boxes, scores)]` (кандидаты до NMS, `None` если детекций нет). Грузится через `torch.jit.load`, NMS делаем сами (`torchvision.ops.nms`). Трассирована **жёстко под вход 640×640**, поэтому на больших сканах применяем **тайлинг** (перекрывающиеся плитки + полнокадровый проход + глобальный NMS). Лучше PiDinoSauR ловит мелкие/бледные штампы (напр. синий `П-69-372` на 002.jpg). |
 | stamps-labs/yolo-stamp | кастомный YOLOStamp | `weights.pt`, 0.5 MB | ⚠️ неудобно | Требует их пакет `detection_models` (кастомный класс + `SymReLU`). |
 | Ooredoo-Group/ooredoo-stamp-detection | RT-DETR (safetensors) | `model.safetensors` | ⚠️ альтернатива | transformers-детектор, 30.7M параметров. Не пробовали — кандидат на замену. |
 | bilal01/segformer-b0-...-stamp-verification | SegFormer-b0 | safetensors | ⚠️ для масок | Сегментация штампов. Нужна, если требуются попиксельные маски (для закраски). |
@@ -62,8 +62,10 @@
 пишет в свою поддиректорию по имени модели:
 
 1. **`classic`** — OpenCV, цвет+морфология. Офлайн baseline.
-2. **`yolo-stamp`** — `stamps-labs/yolov8-finetuned` (детектор штампов).
-3. **`yolo-signature`** — `tech4humans/yolov8s-signature-detector`
+2. **`yolo-stamp`** — `PiDinoSauR/Stamp_Detection_10_12_2024` (детектор штампов).
+3. **`yolo-stamp-finetuned`** — `stamps-labs/yolov8-finetuned` (TorchScript +
+   тайлинг; лучше ловит мелкие штампы).
+4. **`yolo-signature`** — `tech4humans/yolov8s-signature-detector`
    (детектор рукописных подписей/пометок).
 
 Веса YOLO скачиваются с HuggingFace при первом запуске и кешируются.
