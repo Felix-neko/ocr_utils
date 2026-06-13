@@ -57,12 +57,14 @@ def _md_link(path: Path) -> str:
 @click.option("--factor", type=float, default=3.0, show_default=True, help="Коэффициент уменьшения для метода moire.")
 @click.option(
     "--normalize",
-    type=click.Choice(["none", "structure", "gradient"]),
+    type=click.Choice(["none", "structure", "gradient", "global_contrast"]),
     default="structure",
     show_default=True,
     help="Нормировка муара на кол-во резких переходов в тайле (убирает зависимость "
     "от доли текста): none — сырой муар; structure (A1) — делить на std AREA-тайла; "
-    "gradient (A2) — делить на RMS полноразмерного градиента.",
+    "gradient (A2) — делить на RMS полноразмерного градиента; "
+    "global_contrast (A1+, экспериментальная) — structure + нормировка на центральный "
+    "std изображения (пытается убрать зависимость от общего динамического диапазона).",
 )
 @click.option("--grid-x", type=int, default=16, show_default=True, help="Число тайлов по горизонтали.")
 @click.option("--grid-y", type=int, default=11, show_default=True, help="Число тайлов по вертикали.")

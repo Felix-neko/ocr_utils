@@ -21,6 +21,25 @@ from scipy import ndimage
 from ocr_utils.defocus_detection.grid import tile_bounds
 
 
+def center_std(gray: np.ndarray) -> float:
+    """Вычисляет std центрального кропа (50%) изображения.
+    
+    Используется для нормировки метрик на общий динамический диапазон изображения:
+    сканы с разной экспозицией/контрастом имеют разный базовый уровень муара даже
+    при одинаковом фокусе.
+    
+    Args:
+        gray: Полутоновое изображение.
+    
+    Returns:
+        Std центрального кропа (50% от размера по каждой оси).
+    """
+    h, w = gray.shape
+    crop_h, crop_w = h // 4, w // 4
+    center_crop = gray[crop_h : 3 * crop_h, crop_w : 3 * crop_w]
+    return float(center_crop.std())
+
+
 def moire_tile_maps(gray: np.ndarray, factor: float, grid_x: int, grid_y: int) -> tuple[np.ndarray, np.ndarray]:
     """Считает по сетке карту энергии муара и карту контраста (наличия краски).
 

@@ -18,7 +18,7 @@ from ocr_utils.defocus_detection.fft_hf import (
     detect_array as fft_detect_array,
 )
 from ocr_utils.defocus_detection.laplacian import laplacian_tile_maps
-from ocr_utils.defocus_detection.moire import find_defocus_zone, gradient_tile_map, moire_tile_maps, raster_edge_density
+from ocr_utils.defocus_detection.moire import center_std, find_defocus_zone, gradient_tile_map, moire_tile_maps, raster_edge_density
 
 # Уровни уверенности при кросс-проверке (этап E): чем меньше число — тем выше в списке.
 VERDICTS = {
@@ -75,7 +75,10 @@ def analyze(
             в тайле (убирает зависимость от количества краски/текста):
             "none" — сырая энергия муара (прежнее поведение);
             "structure" (A1) — делить на std AREA-уменьшения тайла;
-            "gradient" (A2) — делить на RMS полноразмерного градиента тайла.
+            "gradient" (A2) — делить на RMS полноразмерного градиента тайла;
+            "global_contrast" (A1+) — structure + дополнительная нормировка на
+                центральный std изображения (убирает зависимость от общего
+                динамического диапазона/экспозиции).
             Для метода laplacian игнорируется.
         zone_params: Параметры поиска 2D-зоны расфокуса (этап C): ключи margin,
             k_abs, k_rel, g_rel, min_rows, min_cols. Если None или метод не moire
@@ -107,8 +110,18 @@ def analyze(
     grad = None
     if method == "moire" and normalize != "none":
         grad = gradient_tile_map(gray, grid_x, grid_y)
-        denom = structure if normalize == "structure" else grad
+        denom = structure if normalize in ("structure", "global_contrast") else grad
         sharp_map = sharp_map / np.maximum(denom, 1e-6)
+        
+        # A1+: дополнительная нормировка на общий динамический диапазон изображения.
+        # Убирает зависимость от экспозиции/контраста: сканы с высоким контрастом
+        # дают высокий муар даже при хорошем фокусе, и наоборот.
+        if normalize == "global_contrast":
+            cstd = center_std(gray)
+            # Умножаем на обратный коэффициент: изображения с низким контрастом
+            # (часто расфокусные) получают понижающий коэффициент, с высоким — повышающий.
+            # Делитель 35.0 подобран эмпирически как типичное значение центрального std.
+            sharp_map = sharp_map * (35.0 / np.maximum(cstd, 10.0))
 
     # B: гейт наличия растра (плотность краёв) — отсев обложек/пустых листов.
     edge_density = raster_edge_density(gray)
