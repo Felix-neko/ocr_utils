@@ -37,6 +37,7 @@ dependencies = [
     "page-dewarp>=0.3.4",
     "gdown>=6.0",
     "ultralytics>=8.3",
+    "tqdm>=4.66.0",
 ]
 
 [tool.uv]
