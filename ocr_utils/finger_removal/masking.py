@@ -36,6 +36,11 @@ DEFAULT_SAM = "sam_b.pt"
 # Без "person" — он матчит всю страницу/фото и приводит к огромным ложным маскам.
 HAND_CLASSES = ["hand", "finger", "thumb", "fingertip", "human hand", "fingernail", "nail"]
 
+# Классы open-vocabulary детектора для зажимов/биндеров, которыми прижимают край
+# страницы. Это мелкие объекты — детектору нужно повышенное разрешение и низкий
+# порог уверенности (см. detect_fingers.py: DEFAULT_CLAMP_WORK_SIDE/CONF).
+CLAMP_CLASSES = ["binder clip", "colored clip", "office clip", "clip", "clamp", "bulldog clip"]
+
 # Палец никогда не занимает больше этой доли кадра — отсекаем гигантские ложные маски
 MAX_FINGER_AREA_FRAC = 0.12
 

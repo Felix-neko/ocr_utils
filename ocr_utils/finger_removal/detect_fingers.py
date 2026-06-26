@@ -48,6 +48,7 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "finger_models"
 # Цвета в BGR (OpenCV)
 COLOR_FINGER = (0, 0, 255)  # красный — граница маски пальца
 COLOR_ROI = (0, 255, 255)  # жёлтый — ROI, скармливаемый инпейнтеру
+COLOR_CLAMP = (255, 0, 0)  # синий — граница маски зажима/биндера для бумаги
 
 # Дефолтные спецификации моделей. По умолчанию — open-vocabulary YOLO-World
 # (классы из HAND_CLASSES, включая «ноготь»).
@@ -56,6 +57,22 @@ DEFAULT_SAM_MODEL = "sam_b.pt"  # локальный вес в finger_models/
 
 # Дилатация объединённой маски пальцев по умолчанию, пикс. (полное разрешение)
 DEFAULT_DILATE_PX = 24
+
+# --- Детекция зажимов (биндеров/скрепок) для бумаги -----------------------
+# Зажим ищется тем же стеком, что и пальцы: open-vocabulary YOLO-World (классы
+# CLAMP_CLASSES из masking.py) находит бокс, SAM строит силуэт. Зажим — мелкий
+# объект, поэтому детекции нужно повышенное разрешение (DEFAULT_CLAMP_WORK_SIDE)
+# и низкий порог уверенности (DEFAULT_CLAMP_CONF), иначе он теряется на скане.
+DEFAULT_CLAMP_MODEL = "world:yolov8x-worldv2.pt"  # YOLO-World с классами CLAMP_CLASSES
+DEFAULT_CLAMP_CONF = 0.05  # порог уверенности YOLO-World для зажима (мелкий объект — низкий)
+DEFAULT_CLAMP_WORK_SIDE = 2400  # сторона уменьшенной копии для детекции зажима, пикс.
+MAX_CLAMP_BOX_FRAC = 0.20  # зажим не занимает больше этой доли кадра — отсекаем ложные боксы
+DEFAULT_CLAMP_DILATE_PX = 36  # дилатация маски зажима, пикс. (захватить металлические усики)
+# Усики зажима откинуты на внешнюю сторону — торчат ОТ центра листа к краю
+# кадра (поверх тёмного фона), SAM их не обводит. Достраиваем маску
+# прямоугольником от внешней грани тела к ближайшему краю кадра на эту долю
+# ширины/высоты тела (0 — не достраивать).
+DEFAULT_CLAMP_HANDLE_EXTEND = 1.0
 
 # Палец/рука не занимает больше этой доли кадра — отсекаем ложные гигантские боксы
 MAX_FINGER_BOX_FRAC = 0.35
@@ -108,20 +125,24 @@ def load_yolo(spec: str):
     return _MODEL_CACHE[key]
 
 
-def load_yolo_world(spec: str):
+def load_yolo_world(spec: str, classes: Optional[list[str]] = None, cache_tag: str = "hand"):
     """Ленивая загрузка open-vocabulary YOLO-World с кэшем.
 
-    Классы берутся из ``HAND_CLASSES`` (masking.py) — рука/палец/ноготь и т.п.,
-    поэтому модель ищет именно пальцы, а не произвольные объекты.
+    Классы задаются ``classes``; по умолчанию берутся ``HAND_CLASSES`` (masking.py)
+    — рука/палец/ноготь и т.п. ``cache_tag`` разделяет кэш для разных наборов
+    классов (один и тот же вес можно настроить и на пальцы, и на зажимы).
     """
-    key = f"world:{spec}"
+    key = f"world:{cache_tag}:{spec}"
     if key not in _MODEL_CACHE:
         from ultralytics import YOLOWorld
 
-        from ocr_utils.finger_removal.masking import HAND_CLASSES
+        if classes is None:
+            from ocr_utils.finger_removal.masking import HAND_CLASSES
+
+            classes = HAND_CLASSES
 
         model = YOLOWorld(resolve_model_path(spec))
-        model.set_classes(HAND_CLASSES)
+        model.set_classes(classes)
         _MODEL_CACHE[key] = model
     return _MODEL_CACHE[key]
 
@@ -141,25 +162,27 @@ def load_sam(spec: str):
 # ============================================================
 
 
-def detect_finger_masks(
+def _yolo_sam_masks(
     bgr: np.ndarray,
-    finger_model: str,
+    yolo,
     sam_model: Optional[str],
     device: str,
     conf: float,
-    world: bool = False,
+    max_box_frac: float,
+    drop_negative_names: bool = False,
+    imgsz: Optional[int] = None,
 ) -> list[np.ndarray]:
-    """Возвращает список бинарных масок (uint8 0/255) пальцев/рук.
+    """Общий конвейер «YOLO-бокс → SAM-силуэт». Возвращает список масок uint8 0/255.
 
-    Сначала YOLO-детектор находит боксы руки, затем (если задан) SAM строит по ним
-    криволинейный силуэт. Без SAM маской служит прямоугольник бокса. При ``world``
-    используется open-vocabulary YOLO-World с классами ``HAND_CLASSES``.
+    YOLO-детектор ``yolo`` находит боксы, слишком крупные (> ``max_box_frac`` кадра)
+    отбрасываются; при ``drop_negative_names`` выкидываются классы вроде
+    ``not_hand``/``background``. По оставшимся боксам SAM строит криволинейный
+    силуэт; без SAM (``sam_model is None``) маской служит прямоугольник бокса.
     """
     h, w = bgr.shape[:2]
     img_area = h * w
 
-    yolo = load_yolo_world(finger_model) if world else load_yolo(finger_model)
-    det = yolo.predict(bgr, conf=conf, device=device, verbose=False)
+    det = yolo.predict(bgr, conf=conf, device=device, verbose=False, imgsz=imgsz or max(h, w))
     if not det or det[0].boxes is None or len(det[0].boxes) == 0:
         return []
 
@@ -167,15 +190,15 @@ def detect_finger_masks(
     cls = det[0].boxes.cls.cpu().numpy().astype(int)
     names = det[0].names
 
-    # Оставляем только «руку/палец», выбрасываем классы вроде not_hand/background
     keep = []
     for i in range(len(boxes)):
-        name = str(names.get(cls[i], "")).lower()
-        if "not" in name or "background" in name:
-            continue
+        if drop_negative_names:
+            name = str(names.get(cls[i], "")).lower()
+            if "not" in name or "background" in name:
+                continue
         bw = boxes[i, 2] - boxes[i, 0]
         bh = boxes[i, 3] - boxes[i, 1]
-        if bw * bh > MAX_FINGER_BOX_FRAC * img_area:
+        if bw * bh > max_box_frac * img_area:
             continue
         keep.append(i)
     boxes = boxes[keep]
@@ -201,6 +224,78 @@ def detect_finger_masks(
                 m_bin = cv2.resize(m_bin, (w, h), interpolation=cv2.INTER_NEAREST)
             masks.append(m_bin * 255)
     return masks
+
+
+def detect_finger_masks(
+    bgr: np.ndarray, finger_model: str, sam_model: Optional[str], device: str, conf: float, world: bool = False
+) -> list[np.ndarray]:
+    """Возвращает список бинарных масок (uint8 0/255) пальцев/рук.
+
+    Сначала YOLO-детектор находит боксы руки, затем (если задан) SAM строит по ним
+    криволинейный силуэт. Без SAM маской служит прямоугольник бокса. При ``world``
+    используется open-vocabulary YOLO-World с классами ``HAND_CLASSES``.
+    """
+    yolo = load_yolo_world(finger_model) if world else load_yolo(finger_model)
+    return _yolo_sam_masks(bgr, yolo, sam_model, device, conf, MAX_FINGER_BOX_FRAC, drop_negative_names=True)
+
+
+# ============================================================
+# Детекция зажимов (биндеров) для бумаги: YOLO-World → SAM
+# ============================================================
+
+
+def detect_clamp_masks(
+    bgr: np.ndarray, clamp_model: str, sam_model: Optional[str], device: str, conf: float
+) -> list[np.ndarray]:
+    """Возвращает список бинарных масок (uint8 0/255) зажимов/биндеров для бумаги.
+
+    Тот же стек, что и для пальцев, но YOLO-World настроена на классы
+    ``CLAMP_CLASSES`` (биндер/зажим/скрепка). Зажим — мелкий объект, поэтому
+    вызывать стоит на копии повышенного разрешения (``DEFAULT_CLAMP_WORK_SIDE``)
+    и с низким ``conf`` (``DEFAULT_CLAMP_CONF``), иначе детектор его не видит.
+    """
+    from ocr_utils.finger_removal.masking import CLAMP_CLASSES
+
+    spec = clamp_model
+    if spec.lower().startswith("world:"):
+        spec = spec[len("world:") :]
+    yolo = load_yolo_world(spec, classes=CLAMP_CLASSES, cache_tag="clamp")
+    return _yolo_sam_masks(bgr, yolo, sam_model, device, conf, MAX_CLAMP_BOX_FRAC, drop_negative_names=False)
+
+
+def extend_clamp_handles(mask: np.ndarray, extend_frac: float) -> np.ndarray:
+    """Достраивает маску зажима наружу, к краю кадра — захватывает усики.
+
+    Зажим телом прижимает край страницы, а его металлические усики откинуты на
+    обратную (внешнюю) сторону — торчат ОТ центра листа к краю кадра, поверх
+    тёмного фона. SAM обводит только цветное тело; чтобы покрыть и усики, к
+    каждой компоненте маски достраивается прямоугольник от её внешней грани к
+    ближайшему краю кадра (за него и держится зажим). Длина прямоугольника —
+    ``extend_frac`` × ширины/высоты тела по соответствующей оси. Заодно это
+    безопасно: за краем страницы тёмный фон, лишний текст не затирается.
+    """
+    if extend_frac <= 0:
+        return mask
+    h, w = mask.shape[:2]
+    out = mask.copy()
+    num, _, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    for i in range(1, num):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        # Ближайший край кадра держит зажим; усики смотрят НАРУЖУ — к этому краю
+        dist = {"left": x, "right": w - (x + bw), "top": y, "bottom": h - (y + bh)}
+        side = min(dist, key=dist.get)
+        if side == "left":
+            out[y : y + bh, max(0, x - int(round(extend_frac * bw))) : x] = 255
+        elif side == "right":
+            out[y : y + bh, x + bw : min(w, x + bw + int(round(extend_frac * bw)))] = 255
+        elif side == "top":
+            out[max(0, y - int(round(extend_frac * bh))) : y, x : x + bw] = 255
+        else:  # bottom
+            out[y + bh : min(h, y + bh + int(round(extend_frac * bh))), x : x + bw] = 255
+    return out
 
 
 # ============================================================
@@ -237,14 +332,24 @@ def annotate_image(
     work_side: int,
     dilate_px: int = DEFAULT_DILATE_PX,
     finger_world: bool = False,
-) -> tuple[np.ndarray, np.ndarray, int]:
-    """Возвращает (BGR с красной обводкой, объединённая маска uint8 0/255, число областей).
+    detect_clamps: bool = True,
+    clamp_model: str = DEFAULT_CLAMP_MODEL,
+    clamp_conf: float = DEFAULT_CLAMP_CONF,
+    clamp_work_side: int = DEFAULT_CLAMP_WORK_SIDE,
+    clamp_dilate_px: int = DEFAULT_CLAMP_DILATE_PX,
+    clamp_handle_extend: float = DEFAULT_CLAMP_HANDLE_EXTEND,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Возвращает (BGR с обводкой, маска пальцев, маска зажимов, n_пальцев, n_зажимов).
 
-    Детекция идёт на уменьшенной копии (сторона ``work_side``). Все найденные
-    маски сливаются в одну, поднимаются в полное разрешение и расширяются
-    дилатацией на ``dilate_px`` пикселей — близкие/касающиеся области сливаются в
-    одну связную (объединение связных областей). Контуры берутся уже с полной
-    маски, поэтому рисуются в исходном разрешении; маска пригодна для инпейнтинга.
+    Детекция пальцев идёт на уменьшенной копии (сторона ``work_side``). Маски
+    сливаются в одну, поднимаются в полное разрешение и расширяются дилатацией
+    (``dilate_px``); их контуры рисуются КРАСНЫМ. Параллельно тем же стеком
+    YOLO-World→SAM ищутся зажимы для бумаги (``detect_clamp_masks`` с классами
+    ``CLAMP_CLASSES``) — на ОТДЕЛЬНОЙ копии повышенного разрешения
+    (``clamp_work_side``), т.к. зажим мелкий. У них СВОЯ маска: силуэт тела
+    достраивается наружу, к краю кадра (``clamp_handle_extend``, чтобы захватить
+    откинутые усики), расширяется дилатацией (``clamp_dilate_px``) и обводится СИНИМ.
+    Обе маски — uint8 0/255 в полном разрешении, пригодны для инпейнтинга.
     """
     h, w = bgr.shape[:2]
     scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
@@ -256,27 +361,55 @@ def annotate_image(
     out = bgr.copy()
     thickness = max(2, int(round(max(h, w) / 600)))
 
+    # --- Пальцы/руки: YOLO(+SAM) → красный контур ---
+    finger_mask = np.zeros((h, w), dtype=np.uint8)
+    n_fingers = 0
     masks = detect_finger_masks(work, finger_model, sam_model, device, conf, world=finger_world)
-    if not masks:
-        return out, np.zeros((h, w), dtype=np.uint8), 0
+    if masks:
+        combined = np.zeros(work.shape[:2], dtype=np.uint8)
+        for m in masks:
+            combined = cv2.bitwise_or(combined, m)
+        if scale != 1.0:
+            combined = cv2.resize(combined, (w, h), interpolation=cv2.INTER_NEAREST)
+        # Дилатация склеивает близкие компоненты в одну связную область
+        if dilate_px > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
+            combined = cv2.dilate(combined, kernel, iterations=1)
+        finger_mask = combined
+        cnts, _ = cv2.findContours(finger_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        draw_contours(out, list(cnts), COLOR_FINGER, thickness)
+        n_fingers = len(cnts)
 
-    # Объединяем все маски в одну (логическое ИЛИ), поднимаем в полное разрешение
-    combined = np.zeros(work.shape[:2], dtype=np.uint8)
-    for m in masks:
-        combined = cv2.bitwise_or(combined, m)
-    if scale != 1.0:
-        combined = cv2.resize(combined, (w, h), interpolation=cv2.INTER_NEAREST)
+    # --- Зажимы/биндеры: YOLO-World(CLAMP_CLASSES)→SAM → синий контур ---
+    # Отдельная копия повышенного разрешения: зажим мелкий, на work_side пальцев
+    # (обычно меньше) детектор его теряет.
+    clamp_mask = np.zeros((h, w), dtype=np.uint8)
+    n_clamps = 0
+    if detect_clamps:
+        cscale = clamp_work_side / max(h, w) if max(h, w) > clamp_work_side else 1.0
+        cwork = (
+            cv2.resize(bgr, (int(w * cscale), int(h * cscale)), interpolation=cv2.INTER_AREA) if cscale < 1.0 else bgr
+        )
+        cmasks = detect_clamp_masks(cwork, clamp_model, sam_model, device, clamp_conf)
+        if cmasks:
+            cm = np.zeros(cwork.shape[:2], dtype=np.uint8)
+            for m in cmasks:
+                cm = cv2.bitwise_or(cm, m)
+            # Достраиваем маску к центру кадра — захватываем металлические усики
+            cm = extend_clamp_handles(cm, clamp_handle_extend)
+            if cscale != 1.0:
+                cm = cv2.resize(cm, (w, h), interpolation=cv2.INTER_NEAREST)
+            if clamp_dilate_px > 0:
+                kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * clamp_dilate_px + 1, 2 * clamp_dilate_px + 1)
+                )
+                cm = cv2.dilate(cm, kernel, iterations=1)
+            clamp_mask = cm
+            c_cnts, _ = cv2.findContours(clamp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            draw_contours(out, list(c_cnts), COLOR_CLAMP, thickness)
+            n_clamps = len(c_cnts)
 
-    # Дилатация склеивает близкие компоненты в одну связную область
-    if dilate_px > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
-        combined = cv2.dilate(combined, kernel, iterations=1)
-
-    # Контуры объединённой маски — каждый соответствует одной связной области
-    cnts, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    draw_contours(out, list(cnts), COLOR_FINGER, thickness)
-
-    return out, combined, len(cnts)
+    return out, finger_mask, clamp_mask, n_fingers, n_clamps
 
 
 # ============================================================
@@ -329,6 +462,44 @@ def annotate_image(
     help="Дилатация объединённой маски, пикс. (склеивает близкие области; 0 — выкл.)",
 )
 @click.option(
+    "--detect-clamps/--no-detect-clamps",
+    default=True,
+    show_default=True,
+    help="Искать зажимы/биндеры для бумаги (YOLO-World с классами CLAMP_CLASSES → SAM)",
+)
+@click.option(
+    "--clamp-model",
+    default=DEFAULT_CLAMP_MODEL,
+    show_default=True,
+    help="YOLO-World для зажимов (классы CLAMP_CLASSES): 'world:file' или путь к .pt",
+)
+@click.option(
+    "--clamp-conf",
+    default=DEFAULT_CLAMP_CONF,
+    show_default=True,
+    help="Порог уверенности YOLO-World для зажима (мелкий объект — держите низким)",
+)
+@click.option(
+    "--clamp-work-side",
+    default=DEFAULT_CLAMP_WORK_SIDE,
+    show_default=True,
+    help="Сторона копии для детекции зажима, пикс. (выше, чем у пальцев — зажим мелкий)",
+)
+@click.option(
+    "--clamp-dilate",
+    "clamp_dilate_px",
+    default=DEFAULT_CLAMP_DILATE_PX,
+    show_default=True,
+    help="Дилатация маски зажима, пикс. (0 — выкл.)",
+)
+@click.option(
+    "--clamp-handle-extend",
+    default=DEFAULT_CLAMP_HANDLE_EXTEND,
+    show_default=True,
+    help="Достроить маску зажима наружу, к краю кадра, на эту долю его ширины/высоты "
+    "(захват откинутых металлических усиков; 0 — только тело)",
+)
+@click.option(
     "--inpaint",
     type=click.Choice(["none", "lama", "sd"]),
     default="lama",
@@ -353,6 +524,12 @@ def main(
     conf: float,
     work_side: int,
     dilate_px: int,
+    detect_clamps: bool,
+    clamp_model: str,
+    clamp_conf: float,
+    clamp_work_side: int,
+    clamp_dilate_px: int,
+    clamp_handle_extend: float,
     inpaint: str,
     padding: int,
     feather: int,
@@ -363,10 +540,13 @@ def main(
     sd_negative: str,
     limit: int,
 ) -> None:
-    """Убирает пальцы со сканов из INPUT_DIR (инпейнтинг) и пишет результат в OUTPUT_DIR.
+    """Убирает пальцы и зажимы со сканов из INPUT_DIR (инпейнтинг) → OUTPUT_DIR.
 
-    В ``--output-dir`` — финальные изображения без подсветки границ. Если задана
-    ``--debug-dir`` — туда кладутся отладочные JPG с красным оверлеем маски пальцев.
+    Пальцы/руки и зажимы для бумаги ищутся одним стеком YOLO-World→SAM (зажимы —
+    отдельным набором классов и на повышенном разрешении). В ``--output-dir`` —
+    финальные изображения без подсветки границ. Если задана ``--debug-dir`` —
+    туда кладутся отладочные JPG: КРАСНАЯ граница пальцев, СИНЯЯ граница зажимов,
+    жёлтый ROI инпейнтинга.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     if debug_dir is not None:
@@ -394,13 +574,14 @@ def main(
         return
 
     logger.info(
-        "Файлов: %d | устройство: %s | пальцы: %s%s | sam: %s | dilate: %d px | inpaint: %s",
+        "Файлов: %d | устройство: %s | пальцы: %s%s | sam: %s | dilate: %d px | зажимы: %s | inpaint: %s",
         len(files),
         device,
         finger,
         " (YOLO-World)" if finger_world else "",
         sam,
         dilate_px,
+        f"{clamp_model} @conf={clamp_conf}, ws={clamp_work_side}" if detect_clamps else "выкл",
         inpaint,
     )
 
@@ -410,11 +591,29 @@ def main(
             if bgr is None:
                 tqdm.write(f"  Не удалось загрузить: {path.name}")
                 continue
-            out, mask, n = annotate_image(
-                bgr, finger, sam, device, conf, work_side, dilate_px=dilate_px, finger_world=finger_world
+            out, finger_mask, clamp_mask, n_fingers, n_clamps = annotate_image(
+                bgr,
+                finger,
+                sam,
+                device,
+                conf,
+                work_side,
+                dilate_px=dilate_px,
+                finger_world=finger_world,
+                detect_clamps=detect_clamps,
+                clamp_model=clamp_model,
+                clamp_conf=clamp_conf,
+                clamp_work_side=clamp_work_side,
+                clamp_dilate_px=clamp_dilate_px,
+                clamp_handle_extend=clamp_handle_extend,
             )
 
-            # Отладочный оверлей: красная граница маски + жёлтый ROI каждой компоненты
+            # Маска для инпейнтинга — объединение пальцев и зажимов (оба убираем)
+            mask = cv2.bitwise_or(finger_mask, clamp_mask)
+            n = n_fingers + n_clamps
+
+            # Отладочный оверлей: красная граница пальцев + синяя граница зажимов
+            # (нарисованы в annotate_image) + жёлтый ROI каждой компоненты
             if debug_dir is not None:
                 if inpaint != "none" and n > 0:
                     thickness = max(2, int(round(max(bgr.shape[:2]) / 600)))
@@ -445,7 +644,9 @@ def main(
 
             out_file = output_dir / f"{path.stem}.jpg"
             cv2.imwrite(str(out_file), result_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            tqdm.write(f"  {path.name} → {out_file.name} | пальцев={n} | inpaint={inpaint}")
+            tqdm.write(
+                f"  {path.name} → {out_file.name} | пальцев={n_fingers} | зажимов={n_clamps} | inpaint={inpaint}"
+            )
         except Exception as e:
             tqdm.write(f"  Ошибка {path.name}: {e}")
             import traceback
