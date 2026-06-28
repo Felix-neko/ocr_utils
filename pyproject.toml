@@ -38,6 +38,7 @@ dependencies = [
     "gdown>=6.0",
     "ultralytics>=8.3",
     "tqdm>=4.66.0",
+    "pillow-heif>=0.16.0",
 ]
 
 [tool.uv]

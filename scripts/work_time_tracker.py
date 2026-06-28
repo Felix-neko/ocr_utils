@@ -13,7 +13,32 @@ from pathlib import Path
 from typing import List, Tuple
 
 import rawpy
+from PIL import Image
+from PIL.ExifTags import TAGS
+from pillow_heif import register_heif_opener
 from tqdm import tqdm
+
+register_heif_opener()
+
+
+def extract_datetime_from_image(file_path: Path) -> datetime | None:
+    """
+    Извлекает дату и время съёмки из файла изображения (RAF, HEIC, JPG/JPEG).
+
+    Args:
+        file_path: Путь к файлу изображения
+
+    Returns:
+        datetime объект или None, если не удалось извлечь
+    """
+    file_ext = file_path.suffix.lower()
+
+    if file_ext in [".raf"]:
+        return extract_datetime_from_raf(file_path)
+    elif file_ext in [".jpg", ".jpeg", ".heic"]:
+        return extract_datetime_from_exif(file_path)
+    else:
+        return None
 
 
 def extract_datetime_from_raf(file_path: Path) -> datetime | None:
@@ -38,44 +63,76 @@ def extract_datetime_from_raf(file_path: Path) -> datetime | None:
     return None
 
 
-def find_raf_files(directory: Path) -> List[Path]:
+def extract_datetime_from_exif(file_path: Path) -> datetime | None:
     """
-    Рекурсивно находит все RAF-файлы в директории.
+    Извлекает дату и время съёмки из EXIF-данных (JPG/JPEG/HEIC).
+
+    Args:
+        file_path: Путь к файлу изображения
+
+    Returns:
+        datetime объект или None, если не удалось извлечь
+    """
+    try:
+        with Image.open(file_path) as img:
+            exif_data = img.getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    if tag == "DateTimeOriginal" or tag == "DateTime":
+                        try:
+                            return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+                        except ValueError:
+                            pass
+
+    except Exception as e:
+        print(f"⚠ Ошибка при чтении {file_path}: {e}", file=sys.stderr)
+
+    return None
+
+
+def find_image_files(directory: Path) -> List[Path]:
+    """
+    Рекурсивно находит все поддерживаемые файлы изображений в директории.
 
     Args:
         directory: Директория для поиска
 
     Returns:
-        Список путей к RAF-файлам
+        Список путей к файлам изображений
     """
-    return sorted(directory.rglob("*.RAF")) + sorted(directory.rglob("*.raf"))
+    extensions = ["*.RAF", "*.raf", "*.JPG", "*.jpg", "*.JPEG", "*.jpeg", "*.HEIC", "*.heic"]
+    files = []
+    for ext in extensions:
+        files.extend(directory.rglob(ext))
+    return sorted(files)
 
 
 def analyze_work_time(directory: Path, min_break_minutes: int = 15) -> None:
     """
-    Анализирует рабочее время на основе RAF-файлов в директории.
+    Анализирует рабочее время на основе файлов изображений в директории.
 
     Args:
-        directory: Директория с RAF-файлами
+        directory: Директория с файлами изображений
         min_break_minutes: Минимальная длительность перерыва в минутах (по умолчанию 15)
     """
-    print(f"🔍 Поиск RAF-файлов в: {directory}")
-    raf_files = find_raf_files(directory)
+    print(f"🔍 Поиск файлов изображений в: {directory}")
+    image_files = find_image_files(directory)
 
-    if not raf_files:
-        print("❌ RAF-файлы не найдены")
+    if not image_files:
+        print("❌ Файлы изображений не найдены")
         return
 
-    print(f"✓ Найдено RAF-файлов: {len(raf_files)}")
+    print(f"✓ Найдено файлов изображений: {len(image_files)}")
     print()
 
     print("📸 Извлечение времени съёмки...")
     timestamps: List[Tuple[datetime, Path]] = []
 
-    for raf_file in tqdm(raf_files, desc="Обработка файлов", unit="файл"):
-        dt = extract_datetime_from_raf(raf_file)
+    for image_file in tqdm(image_files, desc="Обработка файлов", unit="файл"):
+        dt = extract_datetime_from_image(image_file)
         if dt:
-            timestamps.append((dt, raf_file))
+            timestamps.append((dt, image_file))
 
     if not timestamps:
         print("❌ Не удалось извлечь время съёмки ни из одного файла")
@@ -83,7 +140,7 @@ def analyze_work_time(directory: Path, min_break_minutes: int = 15) -> None:
 
     timestamps.sort(key=lambda x: x[0])
 
-    print(f"✓ Успешно обработано файлов: {len(timestamps)} из {len(raf_files)}")
+    print(f"✓ Успешно обработано файлов: {len(timestamps)} из {len(image_files)}")
     print()
 
     start_time = timestamps[0][0]
@@ -189,7 +246,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument("directory", type=str, help="Входная директория с RAF-файлами")
+    parser.add_argument("directory", type=str, help="Входная директория с файлами изображений (RAF, JPG/JPEG, HEIC)")
 
     parser.add_argument(
         "--min-break",
