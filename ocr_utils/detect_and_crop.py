@@ -24,7 +24,8 @@ min-area bbox, фиолетовая crop-зона, красная граница
     каналам отдельно) по перцентилям внутри маски страницы, эрозированной на
     ``--erosion-px`` (по умолчанию 20).
   - ``--upscale`` — увеличивает выходной холст перед поворотом/кропом (по
-    умолчанию 1.0, без апскейла); сэмплирование всегда из исходного кадра.
+    умолчанию не задан — апскейл вообще не считается); сэмплирование всегда
+    из исходного кадра.
   - ``--remove-fingers/--no-remove-fingers`` (включено по умолчанию) — перед
     детекцией разворота и кропом детектирует и закрашивает через LaMa палец,
     придерживающий страницу (``ocr_utils.finger_removal``), чтобы он не искажал
@@ -107,7 +108,7 @@ BG_FILL_EROSION_PX = 100
 FINGER_CONF = 0.01
 # Дилатация маски пальца (build_finger_mask default=12) — тонкая мягкая тень по
 # краю силуэта (полутона на стыке кожа/бумага) иначе не докрашивается.
-FINGER_DILATE_PX = 64
+FINGER_DILATE_PX = 40
 FINGER_EDGE_FRAC = 0.12  # доля кадра для проверки контакта с рамкой (реальный палец всегда входит с края)
 FINGER_PADDING = 64  # контекст вокруг маски пальца для LaMa, пикс. (как в finger_inpaint.py)
 # ROI для LaMa увеличивается в FINGER_ROI_SCALE раз от центра (после padding) —
@@ -411,7 +412,7 @@ def fill_outside_mask(bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FI
 
 
 def crop_rotated(
-    bgr: np.ndarray, cx: float, cy: float, angle: float, ext: tuple, mx: int, my: int, upscale: float = 1.0
+    bgr: np.ndarray, cx: float, cy: float, angle: float, ext: tuple, mx: int, my: int, upscale: Optional[float] = None
 ) -> np.ndarray:
     """Поворот вокруг центра тяжести + вырез crop-зоны → выпрямленный прямоугольник.
 
@@ -420,15 +421,21 @@ def crop_rotated(
     на найденный угол с одновременным вырезом области). ``upscale`` увеличивает
     только выходной холст (источник сэмплирования — всегда исходный полноразмерный
     кадр), поэтому апскейл получается за один интерполяционный проход, без потерь
-    от промежуточного ресайза целого кадра.
+    от промежуточного ресайза целого кадра. ``None`` — апскейл вообще не считается
+    (экономит время: без умножения размеров и без INTER_CUBIC).
     """
     minx, miny, maxx, maxy = _ext_with_margins(ext, mx, my)
-    out_w = max(1, int(round((maxx - minx) * upscale)))
-    out_h = max(1, int(round((maxy - miny) * upscale)))
+    if upscale is None:
+        out_w = max(1, int(round(maxx - minx)))
+        out_h = max(1, int(round(maxy - miny)))
+        flags = cv2.INTER_LINEAR
+    else:
+        out_w = max(1, int(round((maxx - minx) * upscale)))
+        out_h = max(1, int(round((maxy - miny) * upscale)))
+        flags = cv2.INTER_CUBIC
     src = _bbox_corners(cx, cy, angle, (minx, miny, maxx, maxy))
     dst = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
     m = cv2.getPerspectiveTransform(src, dst)
-    flags = cv2.INTER_CUBIC if upscale != 1.0 else cv2.INTER_LINEAR
     return cv2.warpPerspective(bgr, m, (out_w, out_h), flags=flags)
 
 
@@ -579,7 +586,13 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     show_default=True,
     help="Эрозия маски страницы (пикс.) перед расчётом уровней (--compensate-levels)",
 )
-@click.option("--upscale", default=1.0, show_default=True, help="Апскейл выходного изображения перед поворотом/кропом")
+@click.option(
+    "--upscale",
+    default=None,
+    type=float,
+    show_default=True,
+    help="Апскейл выходного изображения перед поворотом/кропом (по умолчанию — без апскейла)",
+)
 @click.option(
     "--remove-fingers/--no-remove-fingers",
     "do_remove_fingers",
@@ -597,7 +610,7 @@ def main(
     output_format: Optional[str],
     do_compensate_levels: bool,
     erosion_px: int,
-    upscale: float,
+    upscale: Optional[float],
     do_remove_fingers: bool,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
@@ -622,7 +635,7 @@ def main(
         output_format or "как у входа",
         do_compensate_levels,
         erosion_px,
-        upscale,
+        upscale if upscale is not None else "без апскейла",
         do_remove_fingers,
     )
 

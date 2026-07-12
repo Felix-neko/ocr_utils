@@ -37,6 +37,15 @@ DEFAULT_SAM = "sam_b.pt"
 # Без "person" — он матчит всю страницу/фото и приводит к огромным ложным маскам.
 HAND_CLASSES = ["hand", "finger", "thumb", "fingertip", "human hand", "fingernail", "nail"]
 
+# Классы-«детали» (часть пальца, не весь палец/рука) — см. _suppress_nested_boxes:
+# такой бокс часто увереннее (нейросети легче узнать сам ноготь), но он МЕНЬШЕ
+# настоящего пальца, поэтому не должен «побеждать» целые hand/finger-боксы.
+HAND_PART_CLASSES = {"fingertip", "fingernail", "nail"}
+
+# Во сколько раз площадь принятого "целого" бокса может расти относительно самого
+# уверенного из них — отсекает боксы, раздутые за счёт смазанного/тёмного края.
+FINGER_BOX_GROWTH_FACTOR = 1.5
+
 # Классы open-vocabulary детектора для зажимов/биндеров, которыми прижимают край
 # страницы. Это мелкие объекты — детектору нужно повышенное разрешение и низкий
 # порог уверенности (см. detect_fingers.py: DEFAULT_CLAMP_WORK_SIDE/CONF).
@@ -165,37 +174,85 @@ def _load_sam(model_name: str):
     return _MODEL_CACHE[key]
 
 
-def _suppress_nested_boxes(boxes: np.ndarray, confs: np.ndarray, containment_thresh: float = 0.8) -> np.ndarray:
-    """Индексы боксов, оставленных после подавления по вложенности (не по IoU).
+def _suppress_nested_boxes(
+    boxes: np.ndarray,
+    confs: np.ndarray,
+    containment_thresh: float = 0.8,
+    growth_factor: float = FINGER_BOX_GROWTH_FACTOR,
+) -> np.ndarray:
+    """Индексы боксов, оставленных после подавления избыточных/раздутых боксов.
 
-    YOLO-World с синонимичными классами (``hand``/``human hand``/``fingernail``/
-    ``fingertip``) часто выдаёт на одно и то же место НЕСКОЛЬКО боксов разного
-    масштаба — компактный вокруг настоящего пальца и более крупные, менее
-    уверенные, расползающиеся вдоль края кадра. У таких вложенных боксов IoU
-    низкий (разный масштаб), поэтому обычный NMS их не объединяет. Жадно берём
-    боксы по убыванию confidence и отбрасываем те, что почти целиком (≥
-    ``containment_thresh`` своей площади) лежат внутри уже принятого бокса.
+    YOLO-World часто выдаёт на одно и то же место НЕСКОЛЬКО боксов разного
+    масштаба (варьирующих по классу/уверенности) — от компактного вокруг
+    настоящего пальца до расползающихся вдоль края кадра. У таких вложенных
+    боксов IoU низкий (разный масштаб), поэтому обычный NMS их не объединяет.
+
+    Жадно берём боксы по убыванию confidence:
+      - отбрасываем кандидата, если бОльшая часть (≥ ``containment_thresh``)
+        ЕГО СОБСТВЕННОЙ площади уже покрыта ранее принятыми боксами —
+        асимметрично (в отличие от простого IoU/вложенности), чтобы не
+        отбрасывать легитимно БОЛЬШИЙ бокс только из-за того, что внутри него
+        оказался уже принятый, но более мелкий (например, самый уверенный бокс
+        — это плотный кончик ногтя, а настоящий палец крупнее и должен войти
+        в маску целиком, см. IMG_0049/IMG_0052);
+      - ограничиваем разрастание: кандидат отбрасывается, если его площадь
+        превышает площадь самого уверенного принятого бокса более чем в
+        ``growth_factor`` раз — иначе цепочка всё более крупных
+        низкоуверенных боксов раздувает маску вплоть до почти всего кадра.
     """
     order = np.argsort(-confs)
     keep: list[int] = []
+    anchor_area: Optional[float] = None
     for i in order:
         bi = boxes[i]
         area_i = max(1.0, float((bi[2] - bi[0]) * (bi[3] - bi[1])))
-        nested = False
+        if anchor_area is None:
+            anchor_area = area_i
+        elif area_i > growth_factor * anchor_area:
+            continue
+        redundant = False
         for j in keep:
             bj = boxes[j]
-            area_j = max(1.0, float((bj[2] - bj[0]) * (bj[3] - bj[1])))
             ix1, iy1 = max(bi[0], bj[0]), max(bi[1], bj[1])
             ix2, iy2 = min(bi[2], bj[2]), min(bi[3], bj[3])
             inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-            # min(area_i, area_j): либо кандидат внутри принятого, либо принятый
-            # внутри кандидата (кандидат крупнее) — оба варианта считаем вложенностью.
-            if inter / min(area_i, area_j) >= containment_thresh:
-                nested = True
+            if inter / area_i >= containment_thresh:
+                redundant = True
                 break
-        if not nested:
+        if not redundant:
             keep.append(i)
     return np.array(keep, dtype=int)
+
+
+def _select_finger_boxes(
+    boxes: np.ndarray,
+    confs: np.ndarray,
+    cls: np.ndarray,
+    containment_thresh: float = 0.8,
+    growth_factor: float = FINGER_BOX_GROWTH_FACTOR,
+) -> np.ndarray:
+    """Отбирает финальные боксы: подавление избыточных — только среди «целых»
+    классов (hand/finger/thumb/human hand), боксы-«детали» (``HAND_PART_CLASSES``
+    — fingernail/fingertip/nail) включаются безусловно.
+
+    Деталь пальца детектор часто узнаёт увереннее, чем весь палец целиком (ноготь
+    — куда более характерный паттерн), но она заведомо МЕНЬШЕ настоящего пальца.
+    Если пускать боксы-детали в общую конкуренцию по confidence в
+    ``_suppress_nested_boxes``, самый уверенный (но мелкий) ноготь «побеждает» и
+    отбрасывает более крупный (но менее уверенный) целый бокс руки — итоговая
+    маска получается по размеру ногтя, а не пальца (см. IMG_0049/IMG_0052).
+    """
+    if len(boxes) == 0:
+        return boxes
+    is_part = np.array([HAND_CLASSES[k] in HAND_PART_CLASSES for k in cls])
+    whole_idx = np.where(~is_part)[0]
+    part_idx = np.where(is_part)[0]
+    if len(whole_idx) > 0:
+        kept_whole = whole_idx[_suppress_nested_boxes(boxes[whole_idx], confs[whole_idx], containment_thresh, growth_factor)]
+    else:
+        kept_whole = np.empty((0,), dtype=int)
+    keep_idx = np.concatenate([kept_whole, part_idx]).astype(int)
+    return boxes[keep_idx]
 
 
 def neural_hand_mask(
@@ -225,16 +282,16 @@ def neural_hand_mask(
     det = yolo.predict(bgr, conf=conf, device=device, verbose=False)
     boxes = det[0].boxes.xyxy.cpu().numpy() if det and det[0].boxes is not None else np.empty((0, 4))
     confs = det[0].boxes.conf.cpu().numpy() if det and det[0].boxes is not None else np.empty((0,))
+    cls = det[0].boxes.cls.cpu().numpy().astype(int) if det and det[0].boxes is not None else np.empty((0,), dtype=int)
 
     # Отбрасываем слишком большие боксы (вся страница/обложка)
     if len(boxes) > 0:
         bw = boxes[:, 2] - boxes[:, 0]
         bh = boxes[:, 3] - boxes[:, 1]
         keep = (bw * bh) <= (max_box_frac * img_area)
-        boxes, confs = boxes[keep], confs[keep]
+        boxes, confs, cls = boxes[keep], confs[keep], cls[keep]
     if len(boxes) > 0:
-        keep_idx = _suppress_nested_boxes(boxes, confs, containment_thresh)
-        boxes = boxes[keep_idx]
+        boxes = _select_finger_boxes(boxes, confs, cls, containment_thresh)
     if len(boxes) == 0:
         return np.zeros((h, w), dtype=np.uint8)
 
@@ -282,15 +339,15 @@ def neural_hand_mask_batch(
 
         boxes = det.boxes.xyxy.cpu().numpy() if det.boxes is not None else np.empty((0, 4))
         confs = det.boxes.conf.cpu().numpy() if det.boxes is not None else np.empty((0,))
+        cls = det.boxes.cls.cpu().numpy().astype(int) if det.boxes is not None else np.empty((0,), dtype=int)
 
         if len(boxes) > 0:
             bw = boxes[:, 2] - boxes[:, 0]
             bh = boxes[:, 3] - boxes[:, 1]
             keep = (bw * bh) <= (max_box_frac * img_area)
-            boxes, confs = boxes[keep], confs[keep]
+            boxes, confs, cls = boxes[keep], confs[keep], cls[keep]
         if len(boxes) > 0:
-            keep_idx = _suppress_nested_boxes(boxes, confs, containment_thresh)
-            boxes = boxes[keep_idx]
+            boxes = _select_finger_boxes(boxes, confs, cls, containment_thresh)
 
         if len(boxes) == 0:
             masks.append(np.zeros((h, w), dtype=np.uint8))

@@ -8,7 +8,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/1972"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/1972 готово"
 OUTPUT_DIR="/mnt/system/raw/mts/cropped/1972"
 DEBUG_DIR="/mnt/system/raw/mts/debug/1972"
 
@@ -26,5 +26,4 @@ uv run python -m ocr_utils.detect_and_crop \
     --y-margins -140 \
     --output-format png \
     --compensate-levels \
-    --upscale 2.0 \
     --remove-fingers
