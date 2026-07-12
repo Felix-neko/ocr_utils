@@ -2,13 +2,14 @@
 
 Стратегия (по умолчанию режим ``auto``):
   1. Нейросетевой детектор (``neural_hand_mask``): open-vocabulary YOLO-World
-     находит боксы руки/пальца, затем SAM по этим боксам строит точный силуэт.
-     Нейромаска — семантический «затвор»: если рука не найдена, маска пустая.
-  2. Скин-прайор (``skin_color_mask``): детектор кожи в YCrCb+HSV.
-  3. Добор кожей ТОЛЬКО там, где она пересекает нейромаску
-     (``keep_seeded_components``) — подхватывает мягкие края/ноготь, недобранные
-     детектором. Скин-компоненты, лишь касающиеся края кадра, но не связанные с
-     рукой (цветная кромка бумаги, текст), НЕ берём — иначе ложные маски.
+     находит боксы руки/пальца (боксы, почти целиком вложенные в более уверенный
+     бокс того же места — синонимичные классы hand/human hand/fingernail —
+     отбрасываются, см. ``_suppress_nested_boxes``), затем SAM по этим боксам
+     строит точный силуэт. Нейромаска — семантический «затвор»: если рука не
+     найдена, маска пустая.
+  2. Маска берётся как есть (без скин-цветного добора — раньше он подхватывал
+     кожу, пересекающую нейромаску, но целым связным компонентом, который иногда
+     оказывался огромным, если скин-тон совпадал с обложкой книги у края кадра).
 
 Режим ``skin`` (без нейросети) использует краевое ограничение
 (``keep_border_components``): оставляет компоненты у рамки кадра нужной площади.
@@ -127,30 +128,6 @@ def keep_border_components(
     return out
 
 
-def keep_seeded_components(
-    mask: np.ndarray, seed_mask: np.ndarray, min_area_frac: float = 0.0015, max_area_frac: float = MAX_FINGER_AREA_FRAC
-) -> np.ndarray:
-    """Оставляет компоненты маски, пересекающиеся с ``seed_mask`` (без условия края).
-
-    В отличие от ``keep_border_components``, НЕ пропускает компоненты только из-за
-    касания рамки кадра — нужно именно пересечение с seed (нейромаской).
-    """
-    h, w = mask.shape[:2]
-    min_area = int(min_area_frac * h * w)
-    max_area = int(max_area_frac * h * w)
-    seed = seed_mask > 0
-    num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
-    out = np.zeros((h, w), dtype=np.uint8)
-    for i in range(1, num):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < min_area or area > max_area:
-            continue
-        comp = labels == i
-        if bool(np.any(comp & seed)):
-            out[comp] = 255
-    return out
-
-
 def skin_edge_mask(rgb: np.ndarray, edge_frac: float = 0.12, min_area_frac: float = 0.0015) -> np.ndarray:
     """Полный скин-прайор: цвет кожи → морфология → краевые компоненты."""
     mask = skin_color_mask(rgb)
@@ -188,6 +165,39 @@ def _load_sam(model_name: str):
     return _MODEL_CACHE[key]
 
 
+def _suppress_nested_boxes(boxes: np.ndarray, confs: np.ndarray, containment_thresh: float = 0.8) -> np.ndarray:
+    """Индексы боксов, оставленных после подавления по вложенности (не по IoU).
+
+    YOLO-World с синонимичными классами (``hand``/``human hand``/``fingernail``/
+    ``fingertip``) часто выдаёт на одно и то же место НЕСКОЛЬКО боксов разного
+    масштаба — компактный вокруг настоящего пальца и более крупные, менее
+    уверенные, расползающиеся вдоль края кадра. У таких вложенных боксов IoU
+    низкий (разный масштаб), поэтому обычный NMS их не объединяет. Жадно берём
+    боксы по убыванию confidence и отбрасываем те, что почти целиком (≥
+    ``containment_thresh`` своей площади) лежат внутри уже принятого бокса.
+    """
+    order = np.argsort(-confs)
+    keep: list[int] = []
+    for i in order:
+        bi = boxes[i]
+        area_i = max(1.0, float((bi[2] - bi[0]) * (bi[3] - bi[1])))
+        nested = False
+        for j in keep:
+            bj = boxes[j]
+            area_j = max(1.0, float((bj[2] - bj[0]) * (bj[3] - bj[1])))
+            ix1, iy1 = max(bi[0], bj[0]), max(bi[1], bj[1])
+            ix2, iy2 = min(bi[2], bj[2]), min(bi[3], bj[3])
+            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+            # min(area_i, area_j): либо кандидат внутри принятого, либо принятый
+            # внутри кандидата (кандидат крупнее) — оба варианта считаем вложенностью.
+            if inter / min(area_i, area_j) >= containment_thresh:
+                nested = True
+                break
+        if not nested:
+            keep.append(i)
+    return np.array(keep, dtype=int)
+
+
 def neural_hand_mask(
     rgb: np.ndarray,
     device: str = "cuda",
@@ -196,11 +206,16 @@ def neural_hand_mask(
     sam_model: str = DEFAULT_SAM,
     max_box_frac: float = 0.30,
     max_area_frac: float = MAX_FINGER_AREA_FRAC,
+    containment_thresh: float = 0.8,
 ) -> np.ndarray:
     """Маска пальца через YOLO-World→SAM. Возвращает uint8 0/255 (может быть пустой).
 
     Боксы крупнее ``max_box_frac`` кадра и SAM-маски крупнее ``max_area_frac``
     отбраковываются — палец не занимает половину снимка, такие срабатывания ложные.
+    Боксы, почти целиком вложенные в уже принятый более уверенный бокс, тоже
+    отбрасываются (см. ``_suppress_nested_boxes``) — иначе синонимичные классы
+    (hand/human hand/fingernail) дают один и тот же палец боксами разного
+    масштаба, и самый большой из них раздувает итоговую маску.
     """
     h, w = rgb.shape[:2]
     img_area = h * w
@@ -209,13 +224,17 @@ def neural_hand_mask(
     yolo = _load_yolo_world(yolo_model, device)
     det = yolo.predict(bgr, conf=conf, device=device, verbose=False)
     boxes = det[0].boxes.xyxy.cpu().numpy() if det and det[0].boxes is not None else np.empty((0, 4))
+    confs = det[0].boxes.conf.cpu().numpy() if det and det[0].boxes is not None else np.empty((0,))
 
     # Отбрасываем слишком большие боксы (вся страница/обложка)
     if len(boxes) > 0:
         bw = boxes[:, 2] - boxes[:, 0]
         bh = boxes[:, 3] - boxes[:, 1]
         keep = (bw * bh) <= (max_box_frac * img_area)
-        boxes = boxes[keep]
+        boxes, confs = boxes[keep], confs[keep]
+    if len(boxes) > 0:
+        keep_idx = _suppress_nested_boxes(boxes, confs, containment_thresh)
+        boxes = boxes[keep_idx]
     if len(boxes) == 0:
         return np.zeros((h, w), dtype=np.uint8)
 
@@ -243,6 +262,7 @@ def neural_hand_mask_batch(
     sam_model: str = DEFAULT_SAM,
     max_box_frac: float = 0.30,
     max_area_frac: float = MAX_FINGER_AREA_FRAC,
+    containment_thresh: float = 0.8,
 ) -> list[np.ndarray]:
     """Батчевая версия neural_hand_mask. Возвращает список масок uint8 0/255."""
     if not rgb_list:
@@ -261,12 +281,16 @@ def neural_hand_mask_batch(
         img_area = h * w
 
         boxes = det.boxes.xyxy.cpu().numpy() if det.boxes is not None else np.empty((0, 4))
+        confs = det.boxes.conf.cpu().numpy() if det.boxes is not None else np.empty((0,))
 
         if len(boxes) > 0:
             bw = boxes[:, 2] - boxes[:, 0]
             bh = boxes[:, 3] - boxes[:, 1]
             keep = (bw * bh) <= (max_box_frac * img_area)
-            boxes = boxes[keep]
+            boxes, confs = boxes[keep], confs[keep]
+        if len(boxes) > 0:
+            keep_idx = _suppress_nested_boxes(boxes, confs, containment_thresh)
+            boxes = boxes[keep_idx]
 
         if len(boxes) == 0:
             masks.append(np.zeros((h, w), dtype=np.uint8))
@@ -310,9 +334,15 @@ def build_finger_mask(
     method:
       - ``neural`` — только нейросеть (YOLO-World→SAM);
       - ``skin``   — только скин-прайор (склонен к ложным срабатываниям на бумаге);
-      - ``auto``   — нейросеть как семантический «затвор»: берём нейромаску и
-                     расширяем её скин-компонентами, которые её касаются. Если
-                     нейросеть руку не нашла — маска пустая (палец считаем отсутствующим).
+      - ``auto``   — нейросеть как семантический «затвор»: если нейросеть руку не
+                     нашла — маска пустая (палец считаем отсутствующим), иначе
+                     берём нейромаску как есть. Раньше здесь добавлялся ещё
+                     скин-цветной добор (``keep_seeded_components``), но он давал
+                     пренебрежимо малый выигрыш там, где нейромаска и так хороша
+                     (+0.4% площади на проверенном кадре), и катастрофически
+                     раздувал маску там, где скин-тона совпадали с обложкой книги
+                     у края кадра — связный компонент скин-маски вбирал в себя
+                     всё, что касалось нейромаски, целиком. Убран.
     """
     h, w = rgb.shape[:2]
     info = method
@@ -328,14 +358,8 @@ def build_finger_mask(
             mask = np.zeros((h, w), dtype=np.uint8)
             info = "auto(пусто)"
         else:
-            # Расширяем нейромаску ТОЛЬКО скин-компонентами, которые её пересекают
-            # (мягкие края/части пальца, недобранные детектором). Скин-полосы у
-            # края, не связанные с рукой (цветная кромка бумаги, текст), не берём —
-            # иначе появляются ложные маски там, где пальца нет.
-            sm = morph_cleanup(skin_color_mask(rgb), ksize=max(3, int(0.006 * min(h, w))))
-            sm_near = keep_seeded_components(sm, seed_mask=nm, min_area_frac=min_area_frac)
-            mask = cv2.bitwise_or(nm, sm_near)
-            info = "auto(neural+skin)"
+            mask = nm
+            info = "auto(neural)"
     else:
         raise ValueError(f"Неизвестный метод маскирования: {method}")
 
@@ -384,10 +408,8 @@ def build_finger_mask_batch(
                     mask = np.zeros((h, w), dtype=np.uint8)
                     info = "auto(пусто)"
                 else:
-                    sm = morph_cleanup(skin_color_mask(rgb), ksize=max(3, int(0.006 * min(h, w))))
-                    sm_near = keep_seeded_components(sm, seed_mask=nm, min_area_frac=min_area_frac)
-                    mask = cv2.bitwise_or(nm, sm_near)
-                    info = "auto(neural+skin)"
+                    mask = nm
+                    info = "auto(neural)"
 
             if int(np.count_nonzero(mask)) > 0:
                 mask = fill_holes(mask)
