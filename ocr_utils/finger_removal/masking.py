@@ -196,31 +196,43 @@ def _suppress_nested_boxes(
         — это плотный кончик ногтя, а настоящий палец крупнее и должен войти
         в маску целиком, см. IMG_0049/IMG_0052);
       - ограничиваем разрастание: кандидат отбрасывается, если его площадь
-        превышает площадь самого уверенного принятого бокса более чем в
-        ``growth_factor`` раз — иначе цепочка всё более крупных
-        низкоуверенных боксов раздувает маску вплоть до почти всего кадра.
+        превышает площадь самого уверенного УЖЕ ПРИНЯТОГО бокса, С КОТОРЫМ ОН
+        ПЕРЕСЕКАЕТСЯ, более чем в ``growth_factor`` раз. Якорь берётся ЛОКАЛЬНО
+        (по первому пересекающемуся уже принятому боксу — он же самый уверенный
+        в этом месте, т.к. боксы перебираются по убыванию confidence), А НЕ
+        глобально по всему кадру — иначе один палец на одном краю кадра (с
+        случайно более уверенным, но некрупным боксом) становится «якорем» для
+        совершенно другого, пространственно не связанного пальца на другом
+        краю, и все его боксы отбрасываются целиком (см. IMG_0153.jpg: боксы
+        правого пальца росли от 0.1036 до 0.056/0.0527 conf, но отбрасывались
+        из-за анкера от постороннего левого пальца — итоговая маска правого
+        пальца схлопывалась до размера одного ногтя).
     """
     order = np.argsort(-confs)
     keep: list[int] = []
-    anchor_area: Optional[float] = None
     for i in order:
         bi = boxes[i]
         area_i = max(1.0, float((bi[2] - bi[0]) * (bi[3] - bi[1])))
-        if anchor_area is None:
-            anchor_area = area_i
-        elif area_i > growth_factor * anchor_area:
-            continue
         redundant = False
+        local_anchor_area: Optional[float] = None
         for j in keep:
             bj = boxes[j]
             ix1, iy1 = max(bi[0], bj[0]), max(bi[1], bj[1])
             ix2, iy2 = min(bi[2], bj[2]), min(bi[3], bj[3])
             inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+            if inter <= 0:
+                continue
+            if local_anchor_area is None:
+                # Первый пересекающийся уже принятый бокс — самый уверенный в этом месте
+                local_anchor_area = max(1.0, float((bj[2] - bj[0]) * (bj[3] - bj[1])))
             if inter / area_i >= containment_thresh:
                 redundant = True
                 break
-        if not redundant:
-            keep.append(i)
+        if redundant:
+            continue
+        if local_anchor_area is not None and area_i > growth_factor * local_anchor_area:
+            continue
+        keep.append(i)
     return np.array(keep, dtype=int)
 
 

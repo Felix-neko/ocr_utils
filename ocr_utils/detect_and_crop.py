@@ -78,13 +78,24 @@ PAGE_CLASSES = ["page", "book page", "open book", "sheet of paper", "paper", "do
 
 # Классы фона/подложки — конкурируют с PAGE_CLASSES за боксы, чтобы боксы,
 # распознанные как ткань/подложка, не попадали в маску страницы (см. detect_page_mask).
+# CLIP путает светлую однотонную бумагу (форзац без текста) с тканью по текстуре
+# волокна, независимо от того, что написано в промпте про цвет/яркость — поэтому
+# «тёмное/светлое» разделяем не промптом, а напрямую по пикселям (см. ниже).
 FABRIC_CLASSES = ["fabric", "cloth", "fabric backdrop", "tablecloth"]
+
+# Настоящая тканевая подложка в этой съёмке — тёмная (чёрный/тёмно-синий стол).
+# Если бокс распознан как «ткань», но внутри него в среднем светлее этого порога
+# (0-255) — это не подложка, а светлая страница/обложка; возвращаем его в кандидаты.
+FABRIC_MAX_MEAN_BRIGHTNESS = 100
 
 # Поддерживаемые форматы входных изображений (без учёта регистра расширения)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 # Параметры детекции
-CONF = 0.05  # порог уверенности YOLO-World (выше — не хватает всю картинку как «страницу»)
+# Низкий порог нужен для пустых/малоинформативных страниц (форзац без текста
+# конкурирует по уверенности с FABRIC_CLASSES и проигрывает даже при CONF=0.05,
+# см. IMG_0154.jpg) — дальше отсеиваем контейнментом/размером/яркостью, а не conf.
+CONF = 0.01
 WORK_SIDE = 2048  # сторона уменьшенной копии для детекции (выше = точнее контур SAM)
 MIN_PAGE_FRAC = 0.05  # бокс/маска меньше этой доли кадра — это не страница
 MAX_PAGE_FRAC = 1.0  # верхний предел не ставим: страница может занимать весь кадр
@@ -115,6 +126,16 @@ FINGER_PADDING = 64  # контекст вокруг маски пальца д�
 # без этого LaMa не видит достаточно кромки/фона и заливает дыру доминирующим
 # цветом (см. finger_inpaint.py, коммит "Сделали хороший закрас с помощью lama").
 FINGER_ROI_SCALE = 1.5
+# LaMa заливает область пальца заметно ТЕМНЕЕ окружающей бумаги (проверено на
+# нескольких кадрах: разница ~25-35 отн. ед. яркости у самой маски). Поэтому
+# перед закраской осветляем зону пальца — плавно, чтобы не было резкой границы:
+# полный инкремент внутри самой маски (она уже включает дилатацию на
+# FINGER_DILATE_PX), спад до нуля к границе маски + ещё 2×FINGER_DILATE_PX наружу
+# (эта кайма — как раз тот контекст, по которому LaMa восстанавливает цвет дыры).
+# Значение 20 подобрано по серии кадров из /mnt/system/raw/mts/cropped/1972 —
+# заметно снижает остаточное потемнение, не давая цветового ухода в оранжевый
+# (при 25-30 на тонированной («состаренной») бумаге появляется через чур тёплый оттенок).
+FINGER_ZONE_LIGHT_INCREMENT = 20
 
 _MODEL_CACHE: dict = {}
 
@@ -142,6 +163,27 @@ def finger_yolo_boxes(rgb: np.ndarray, device: str, conf: float, max_box_frac: f
     return boxes
 
 
+def brighten_finger_zone(rgb: np.ndarray, mask: np.ndarray, increment: float, falloff_px: int) -> np.ndarray:
+    """Осветляет зону пальца перед закраской (см. ``FINGER_ZONE_LIGHT_INCREMENT``).
+
+    Внутри ``mask`` — полный ``increment``; далее вес плавно (линейно по
+    расстоянию) спадает до 0 на удалении ``falloff_px`` от границы маски.
+    Прибавляется поровну ко всем каналам — контраст-нейтрально (не искажает
+    цветовой баланс сам по себе), итоговый цвет заливки всё равно определяет LaMa.
+    """
+    if increment <= 0 or int(np.count_nonzero(mask)) == 0:
+        return rgb
+    inside = mask > 0
+    if falloff_px > 0:
+        dist = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 5)
+        weight = np.clip(1.0 - dist / falloff_px, 0.0, 1.0)
+        weight[inside] = 1.0
+    else:
+        weight = inside.astype(np.float32)
+    out = rgb.astype(np.float32) + (weight[..., None] * increment)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def remove_fingers(
     bgr: np.ndarray, device: str, conf: float = FINGER_CONF, want_boxes: bool = False
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str]:
@@ -160,7 +202,9 @@ def remove_fingers(
     людей/рук на самой странице (в глубине кадра, не с края) иногда ложно
     принимаются за палец. Настоящий палец всегда входит С КРАЯ кадра, поэтому
     дополнительно отсекаем компоненты, не касающиеся рамки, через
-    ``keep_border_components``. Если палец не найден — кадр возвращается без
+    ``keep_border_components``. Перед самой закраской зона пальца осветляется
+    (``brighten_finger_zone``) — LaMa иначе заливает дыру заметно темнее
+    окружающей бумаги. Если палец не найден — кадр возвращается без
     изменений.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -174,7 +218,8 @@ def remove_fingers(
         return bgr, mask, None, yolo_boxes, info
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
-    rgb_clean = lama_inpaint(rgb, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
+    rgb_bright = brighten_finger_zone(rgb, mask, FINGER_ZONE_LIGHT_INCREMENT, 2 * FINGER_DILATE_PX)
+    rgb_clean = lama_inpaint(rgb_bright, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
     return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info
 
 
@@ -217,15 +262,23 @@ def load_sam(name: str):
 
 
 def refine_page_mask(mask: np.ndarray) -> np.ndarray:
-    """Крупнейшая связная область + заливка дыр + сглаживание границы."""
+    """Смыкание разрывов + крупнейшая связная область + заливка дыр.
+
+    Левая и правая страницы разворота часто детектируются ДВУМЯ отдельными
+    боксами (левая половина / правая половина или обложка), и у SAM-силуэтов
+    между ними остаётся зазор в пару пикселей у корешка — тогда они оказываются
+    РАЗНЫМИ связными компонентами. Поэтому смыкание (``MORPH_CLOSE``) нужно
+    делать ДО выбора «самого большого» компонента, а не после — иначе одна из
+    половин разворота (например, обложка) отбрасывается целиком как «шум».
+    """
     if int(np.count_nonzero(mask)) == 0:
         return mask
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     if num > 1:
         biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         mask = np.where(labels == biggest, 255, 0).astype(np.uint8)
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(mask)
     cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
@@ -253,9 +306,21 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     confs = det[0].boxes.conf.cpu().numpy()
     cls = det[0].boxes.cls.cpu().numpy().astype(int)
 
-    # Отбрасываем боксы, распознанные как ткань/подложка (классы после PAGE_CLASSES)
-    is_page_cls = cls < len(PAGE_CLASSES)
-    boxes, confs = boxes[is_page_cls], confs[is_page_cls]
+    # Боксы класса из FABRIC_CLASSES отбрасываем, ЕСЛИ они действительно тёмные
+    # (настоящая подложка в кадре — чёрный/тёмно-синий стол). Светлый бокс,
+    # который CLIP всё равно назвал «тканью» из-за текстуры волокна бумаги —
+    # возвращаем в кандидаты, иначе однотонные страницы без текста (форзац)
+    # остаются вообще без детекции.
+    is_fabric = cls >= len(PAGE_CLASSES)
+    if np.any(is_fabric):
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        for i in np.where(is_fabric)[0]:
+            x1, y1, x2, y2 = boxes[i].astype(int)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 > x1 and y2 > y1 and gray[y1:y2, x1:x2].mean() > FABRIC_MAX_MEAN_BRIGHTNESS:
+                is_fabric[i] = False
+    boxes, confs = boxes[~is_fabric], confs[~is_fabric]
     if len(boxes) == 0:
         return np.zeros((h, w), dtype=np.uint8)
 
