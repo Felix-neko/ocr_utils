@@ -30,6 +30,8 @@ min-area bbox, фиолетовая crop-зона, красная граница
     детекцией разворота и кропом детектирует и закрашивает через LaMa палец,
     придерживающий страницу (``ocr_utils.finger_removal``), чтобы он не искажал
     силуэт/bbox страницы и не попадал в финальный кроп.
+  - ``--finger-dilate-px`` — дилатация маски пальца перед закраской, пикс.
+    (по умолчанию ``FINGER_DILATE_PX``).
 
     uv run python -m ocr_utils.detect_and_crop \\
         --input-dir IN --output-dir OUT --debug-dir DBG --x-margins -150 --y-margins -150
@@ -48,8 +50,6 @@ from tqdm import tqdm
 
 from ocr_utils.finger_removal.finger_inpaint import lama_inpaint, roi_bounds_list
 from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_components
-from ocr_utils.finger_removal.masking import DEFAULT_YOLO_WORLD as FINGER_YOLO_WORLD
-from ocr_utils.finger_removal.masking import _load_yolo_world as _load_finger_yolo_world
 from ocr_utils.finger_removal.masking import _suppress_nested_boxes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -99,6 +99,10 @@ CONF = 0.01
 WORK_SIDE = 2048  # сторона уменьшенной копии для детекции (выше = точнее контур SAM)
 MIN_PAGE_FRAC = 0.05  # бокс/маска меньше этой доли кадра — это не страница
 MAX_PAGE_FRAC = 1.0  # верхний предел не ставим: страница может занимать весь кадр
+# В refine_page_mask: связная компонента меньше этой доли площади самой крупной
+# компоненты считается шумом и отбрасывается; крупнее — это вторая страница
+# разворота (см. IMG_0058.jpg), а не шум, и должна остаться в маске.
+SECOND_PAGE_MIN_AREA_FRAC = 0.2
 
 # Компенсация уровней: перцентили по общей интенсивности внутри маски (минус эрозия)
 N_EROSION_PX = 20
@@ -145,56 +149,65 @@ _MODEL_CACHE: dict = {}
 # ============================================================
 
 
-def finger_yolo_boxes(rgb: np.ndarray, device: str, conf: float, max_box_frac: float = 0.30) -> np.ndarray:
-    """Боксы YOLO-World для пальцев ДО SAM (только для debug-оверлея).
-
-    Повторяет фильтр по площади из ``neural_hand_mask`` (``masking.py``), чтобы
-    показывать именно те боксы, что реально ушли в SAM.
-    """
-    h, w = rgb.shape[:2]
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    yolo = _load_finger_yolo_world(FINGER_YOLO_WORLD, device)
-    det = yolo.predict(bgr, conf=conf, device=device, verbose=False)
-    boxes = det[0].boxes.xyxy.cpu().numpy() if det and det[0].boxes is not None else np.empty((0, 4))
-    if len(boxes) > 0:
-        bw = boxes[:, 2] - boxes[:, 0]
-        bh = boxes[:, 3] - boxes[:, 1]
-        boxes = boxes[(bw * bh) <= (max_box_frac * h * w)]
-    return boxes
-
-
-def brighten_finger_zone(rgb: np.ndarray, mask: np.ndarray, increment: float, falloff_px: int) -> np.ndarray:
+def brighten_finger_zone(
+    rgb: np.ndarray, mask: np.ndarray, increment: "float | tuple[float, float]", falloff_px: int
+) -> np.ndarray:
     """Осветляет зону пальца перед закраской (см. ``FINGER_ZONE_LIGHT_INCREMENT``).
 
     Внутри ``mask`` — полный ``increment``; далее вес плавно (линейно по
     расстоянию) спадает до 0 на удалении ``falloff_px`` от границы маски.
     Прибавляется поровну ко всем каналам — контраст-нейтрально (не искажает
     цветовой баланс сам по себе), итоговый цвет заливки всё равно определяет LaMa.
+
+    ``increment`` — одно число (одинаково для всего кадра) либо пара
+    ``(слева, справа)``: свет в кадре может падать не симметрично, и тогда
+    правая и левая половины разворота требуют разной компенсации (см.
+    ``--finger-zone-light-increment``). Компонента маски относится к той
+    половине, где лежит центр её масс.
     """
-    if increment <= 0 or int(np.count_nonzero(mask)) == 0:
+    if int(np.count_nonzero(mask)) == 0:
         return rgb
-    inside = mask > 0
-    if falloff_px > 0:
-        dist = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 5)
-        weight = np.clip(1.0 - dist / falloff_px, 0.0, 1.0)
-        weight[inside] = 1.0
-    else:
-        weight = inside.astype(np.float32)
-    out = rgb.astype(np.float32) + (weight[..., None] * increment)
+    left_inc, right_inc = increment if isinstance(increment, tuple) else (increment, increment)
+    if left_inc <= 0 and right_inc <= 0:
+        return rgb
+    h, w = mask.shape[:2]
+    num, labels = cv2.connectedComponents((mask > 0).astype(np.uint8), connectivity=8)
+    out = rgb.astype(np.float32)
+    for i in range(1, num):
+        inside = labels == i
+        _, xs = np.where(inside)
+        inc = left_inc if xs.mean() < w / 2 else right_inc
+        if inc <= 0:
+            continue
+        if falloff_px > 0:
+            dist = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 5)
+            weight = np.clip(1.0 - dist / falloff_px, 0.0, 1.0)
+            weight[inside] = 1.0
+        else:
+            weight = inside.astype(np.float32)
+        out += weight[..., None] * inc
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def remove_fingers(
-    bgr: np.ndarray, device: str, conf: float = FINGER_CONF, want_boxes: bool = False
+    bgr: np.ndarray,
+    device: str,
+    conf: float = FINGER_CONF,
+    want_boxes: bool = False,
+    dilate_px: int = FINGER_DILATE_PX,
+    light_increment: "float | tuple[float, float]" = FINGER_ZONE_LIGHT_INCREMENT,
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str]:
     """Детектирует и закрашивает пальцы (finger_removal.masking/finger_inpaint) в BGR-кадре.
 
     Возвращает (bgr, finger_mask, lama_roi_bboxes, yolo_boxes, info) — маска,
     список ROI-боксов LaMa (по одному на компоненту маски) и боксы YOLO-World
     нужны только для debug-оверлея, на итоговый bgr не влияют. ``yolo_boxes``
-    считается лишним проходом YOLO-World и запрашивается только при
-    ``want_boxes=True`` (т.е. когда включён ``--debug-dir``), чтобы не удваивать
-    инференс на обычных прогонах без debug.
+    берётся из ``build_finger_mask(..., return_boxes=True)`` — та же самая
+    детекция, что уже нужна для маски, без повторного прогона YOLO-World
+    (раньше эти боксы для debug-оверлея считались отдельным, дублирующим
+    вызовом ``finger_yolo_boxes``). Возвращается только при ``want_boxes=True``
+    (т.е. когда включён ``--debug-dir``), а не всегда, просто чтобы не тащить
+    в debug-неактуальные боксы через весь пайплайн.
 
     Палец может исказить детекцию разворота и итоговый кроп, поэтому закраска
     выполняется до ``page_mask``/``crop_rotated``. ``build_finger_mask("auto", ...)``
@@ -208,8 +221,8 @@ def remove_fingers(
     изменений.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    yolo_boxes = finger_yolo_boxes(rgb, device, conf) if want_boxes else None
-    mask, info = build_finger_mask(rgb, method="auto", device=device, conf=conf, dilate_px=FINGER_DILATE_PX)
+    mask, info, raw_boxes = build_finger_mask(rgb, method="auto", device=device, conf=conf, dilate_px=dilate_px, return_boxes=True)
+    yolo_boxes = raw_boxes if want_boxes else None
     if int(np.count_nonzero(mask)) > 0:
         mask = keep_border_components(mask, edge_frac=FINGER_EDGE_FRAC)
         if int(np.count_nonzero(mask)) == 0:
@@ -218,7 +231,7 @@ def remove_fingers(
         return bgr, mask, None, yolo_boxes, info
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
-    rgb_bright = brighten_finger_zone(rgb, mask, FINGER_ZONE_LIGHT_INCREMENT, 2 * FINGER_DILATE_PX)
+    rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
     rgb_clean = lama_inpaint(rgb_bright, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
     return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info
 
@@ -262,14 +275,24 @@ def load_sam(name: str):
 
 
 def refine_page_mask(mask: np.ndarray) -> np.ndarray:
-    """Смыкание разрывов + крупнейшая связная область + заливка дыр.
+    """Смыкание разрывов + крупные связные области + заливка дыр.
 
     Левая и правая страницы разворота часто детектируются ДВУМЯ отдельными
     боксами (левая половина / правая половина или обложка), и у SAM-силуэтов
     между ними остаётся зазор в пару пикселей у корешка — тогда они оказываются
     РАЗНЫМИ связными компонентами. Поэтому смыкание (``MORPH_CLOSE``) нужно
-    делать ДО выбора «самого большого» компонента, а не после — иначе одна из
-    половин разворота (например, обложка) отбрасывается целиком как «шум».
+    делать ДО выбора «крупных» компонентов, а не после — иначе одна из половин
+    разворота (например, обложка) отбрасывается целиком как «шум».
+
+    Если детектор вместо двух отдельных боксов на страницы выдал ОДИН бокс на
+    весь разворот (см. ``_suppress_nested_boxes``), у SAM-силуэта в этом боксе
+    зазор у корешка получается намного шире 15px — смыкание его не устраняет, и
+    страницы остаются раздельными компонентами. Раньше здесь оставляли только
+    САМУЮ БОЛЬШУЮ компоненту — тогда вторая страница (сопоставимая по площади с
+    первой) отбрасывалась целиком (см. IMG_0058.jpg: осталась только левая
+    страница). Поэтому теперь оставляем ВСЕ компоненты не меньше
+    ``SECOND_PAGE_MIN_AREA_FRAC`` от площади самой крупной — мелкий мусор
+    (обрывки текста, шум SAM) настолько мельче страницы, что не проходит порог.
     """
     if int(np.count_nonzero(mask)) == 0:
         return mask
@@ -277,8 +300,9 @@ def refine_page_mask(mask: np.ndarray) -> np.ndarray:
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     if num > 1:
-        biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        mask = np.where(labels == biggest, 255, 0).astype(np.uint8)
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        keep_labels = 1 + np.where(areas >= SECOND_PAGE_MIN_AREA_FRAC * areas.max())[0]
+        mask = np.isin(labels, keep_labels).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(mask)
     cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
@@ -350,14 +374,23 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
 
 
 def page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
-    """Полная маска разворота в разрешении кадра (детекция на уменьшенной копии)."""
+    """Полная маска разворота в разрешении кадра (детекция на уменьшенной копии).
+
+    Результат уже включает ``bridge_component_gaps`` — то есть промежуток между
+    отдельными фрагментами (например, корешок между левой и правой страницей)
+    заполнен, а не только «крупнейшие компоненты + залитые дыры». Это
+    КАНОНИЧЕСКАЯ маска разворота — используется одинаково во всех потребителях
+    (debug-оверлей, ``min_area_rotated_bbox``, ``compensate_levels``,
+    ``fill_outside_mask``), а не только для одного из них.
+    """
     h, w = bgr.shape[:2]
     scale = WORK_SIDE / max(h, w) if max(h, w) > WORK_SIDE else 1.0
     work = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
     mask = detect_page_mask(work, device)
     if scale != 1.0:
         mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    return refine_page_mask(mask)
+    mask = refine_page_mask(mask)
+    return bridge_component_gaps(mask)
 
 
 # ============================================================
@@ -371,6 +404,7 @@ def compensate_levels(
     erosion_px: int,
     low_pct: float = LEVELS_LOW_PCT,
     high_pct: float = LEVELS_HIGH_PCT,
+    work_side: int = WORK_SIDE,
 ) -> np.ndarray:
     """Растягивает уровни по общей интенсивности (одинаково для всех каналов).
 
@@ -378,20 +412,37 @@ def compensate_levels(
     ``erosion_px`` (чтобы не захватывать край страницы/фон). Диапазон общий для
     B/G/R — это не независимая цветокоррекция по каналам, а контраст-стретч,
     сохраняющий цветовой баланс.
+
+    Эрозия и ``np.percentile`` считаются на копии, уменьшенной до ``work_side``
+    (как и в ``page_mask``) — это лишь ОЦЕНКА перцентилей, полное разрешение ей
+    не нужно, а на кадрах 30-48 Мп percentile по маске занимал секунды (см.
+    профилирование ``detect_and_crop`` на медленных прогонах). Сам контраст-стретч
+    (``rescale_intensity``) применяется к исходному кадру полного разрешения —
+    только на нём и формируется итоговый результат.
     """
-    eroded = mask
-    if erosion_px > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_px * 2 + 1, erosion_px * 2 + 1))
-        eroded = cv2.erode(mask, k)
+    h, w = mask.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    if scale < 1.0:
+        small_mask = cv2.resize(mask, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST)
+        small_bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        small_erosion_px = max(1, int(round(erosion_px * scale)))
+    else:
+        small_mask, small_bgr, small_erosion_px = mask, bgr, erosion_px
+
+    eroded = small_mask
+    if small_erosion_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (small_erosion_px * 2 + 1, small_erosion_px * 2 + 1))
+        eroded = cv2.erode(small_mask, k)
     sel = eroded > 0
     if not np.any(sel):
         return bgr
 
-    bgr_f = bgr.astype(np.float32) / 255.0
-    lo, hi = np.percentile(bgr_f[sel], (low_pct, high_pct))
+    small_bgr_f = small_bgr.astype(np.float32) / 255.0
+    lo, hi = np.percentile(small_bgr_f[sel], (low_pct, high_pct))
     if hi <= lo:
         return bgr
 
+    bgr_f = bgr.astype(np.float32) / 255.0
     out = rescale_intensity(bgr_f, in_range=(lo, hi), out_range=(0.0, 1.0))
     return np.clip(out * 255.0, 0, 255).astype(np.uint8)
 
@@ -451,7 +502,57 @@ def _bbox_corners(cx: float, cy: float, angle: float, ext: tuple) -> np.ndarray:
     return (corners @ _rotation_matrix(angle) + np.array([cx, cy])).astype(np.float32)
 
 
-def fill_outside_mask(bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FILL_EROSION_PX) -> np.ndarray:
+def bridge_component_gaps(mask: np.ndarray, work_side: int = WORK_SIDE) -> np.ndarray:
+    """По строкам заполняет промежуток МЕЖДУ первым и последним отрезком маски —
+    часть канонической маски разворота (см. ``page_mask``), используется во всех
+    потребителях (debug-оверлей, поиск поворота, компенсация уровней, заливка фона).
+
+    SAM иногда рвёт силуэт разворота вдоль корешка (широкий, неравномерный по
+    высоте зазор между левой и правой страницей — от десятков до сотен пикселей,
+    ``MORPH_CLOSE`` в ``refine_page_mask`` не бриджит его целиком) либо
+    фрагментирует силуэт по малоинформативным/пустым участкам страницы (см.
+    IMG_0033/0034/0030.jpg) — тогда эта область выпадает из региона интереса:
+    не только закрашивается фоном при кропе, но и не учитывается при поиске угла
+    поворота, что мешает последующей разбивке разворота на страницы.
+
+    ВАЖНО: строка с ОДНИМ непрерывным отрезком маски не трогается — там разрыв
+    может быть только на ВНЕШНЕЙ границе страницы (рваный край, срезанный угол),
+    и её закраска фоном в ``fill_outside_mask`` должна остаться как была (полная
+    выпуклая оболочка вместо этого «дошивала» бы и такие внешние прорехи тоже —
+    затащила бы в регион интереса реальный фон/край стола). Заполняется только
+    промежуток МЕЖДУ разными фрагментами в одной строке (например, между
+    страницами) — сигнал ≥2 отрезков в строке отличает разрыв «между двумя
+    объектами» от вогнутости на краю одного объекта.
+    """
+    if int(np.count_nonzero(mask)) == 0:
+        return mask
+    h, w = mask.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    small = cv2.resize(mask, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST) if scale < 1.0 else mask
+    sh, sw = small.shape[:2]
+    out = small.copy()
+    m = small > 0
+    for y in range(sh):
+        row = m[y]
+        if not row.any():
+            continue
+        diff = np.diff(row.astype(np.int8))
+        starts = np.where(diff == 1)[0] + 1
+        ends = np.where(diff == -1)[0] + 1
+        if row[0]:
+            starts = np.concatenate(([0], starts))
+        if row[-1]:
+            ends = np.concatenate((ends, [sw]))
+        if len(starts) >= 2:
+            out[y, ends[0] : starts[-1]] = 255
+    if scale < 1.0:
+        out = cv2.resize(out, (w, h), interpolation=cv2.INTER_NEAREST)
+    return out
+
+
+def fill_outside_mask(
+    bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FILL_EROSION_PX, work_side: int = WORK_SIDE
+) -> np.ndarray:
     """Закрашивает всё вне ``mask`` усреднённым цветом внутри неё.
 
     Криволинейная маска страницы не идеально совпадает с осевым min-area bbox
@@ -460,17 +561,33 @@ def fill_outside_mask(bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FI
     ровный угол вместо чёрного пятна, даже если crop-зона чуть шире силуэта.
     Цвет считается по маске, эрозированной на ``erosion_px`` — чтобы не задеть
     шумную/смазанную границу силуэта (там же соседствует фон).
+
+    Эрозия и усреднение цвета считаются на копии, уменьшенной до ``work_side`` —
+    нужен только один средний цвет, а ``cv2.erode`` с эллиптическим ядром
+    ``erosion_px=100`` (диаметр 201px) на кадре 30-48 Мп не раскладывается на
+    быстрые сепарабельные проходы и заметно (секунды) тормозит пайплайн (см.
+    профилирование). Полное разрешение используется только для самой заливки.
     """
     sel = mask > 0
     if not np.any(sel):
         return bgr
-    sample_sel = sel
-    if erosion_px > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_px * 2 + 1, erosion_px * 2 + 1))
-        eroded = cv2.erode(mask, k)
+
+    h, w = mask.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    if scale < 1.0:
+        small_mask = cv2.resize(mask, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST)
+        small_bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        small_erosion_px = max(1, int(round(erosion_px * scale)))
+    else:
+        small_mask, small_bgr, small_erosion_px = mask, bgr, erosion_px
+
+    sample_sel = small_mask > 0
+    if small_erosion_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (small_erosion_px * 2 + 1, small_erosion_px * 2 + 1))
+        eroded = cv2.erode(small_mask, k)
         if np.any(eroded > 0):
             sample_sel = eroded > 0
-    avg_color = bgr[sample_sel].mean(axis=0)
+    avg_color = small_bgr[sample_sel].mean(axis=0)
     out = bgr.copy()
     out[~sel] = avg_color.astype(np.uint8)
     return out
@@ -598,6 +715,20 @@ def _imwrite_params(suffix: str) -> list[int]:
     return []
 
 
+def _parse_light_increment(ctx, param, value: str) -> "tuple[float, float]":
+    """Парсит ``--finger-zone-light-increment``: 'N' → (N, N), 'L,R' → (L, R)."""
+    parts = [p.strip() for p in str(value).split(",")]
+    try:
+        if len(parts) == 1:
+            v = float(parts[0])
+            return (v, v)
+        if len(parts) == 2:
+            return (float(parts[0]), float(parts[1]))
+    except ValueError:
+        pass
+    raise click.BadParameter("ожидается число ('20') или пара 'слева,справа' ('15,30')")
+
+
 def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> str:
     """Суффикс выходного файла: как у входа, если ``output_format`` не задан."""
     if output_format is None:
@@ -665,6 +796,21 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     show_default=True,
     help="Детектировать и закрашивать пальцы (finger_removal) перед детекцией книги/кропом",
 )
+@click.option(
+    "--finger-dilate-px",
+    default=FINGER_DILATE_PX,
+    show_default=True,
+    help="Дилатация маски пальца, пикс. (шире — надёжнее докрашивает полутона на краю силуэта)",
+)
+@click.option(
+    "--finger-zone-light-increment",
+    "finger_zone_light_increment",
+    default=str(FINGER_ZONE_LIGHT_INCREMENT),
+    show_default=True,
+    callback=_parse_light_increment,
+    help="Осветление зоны пальца перед закраской: одно число (на весь кадр) "
+    "либо 'слева,справа' (напр. 15,30) — если свет в кадре падает не симметрично",
+)
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -677,6 +823,8 @@ def main(
     erosion_px: int,
     upscale: Optional[float],
     do_remove_fingers: bool,
+    finger_dilate_px: int,
+    finger_zone_light_increment: "tuple[float, float]",
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -691,7 +839,8 @@ def main(
 
     logger.info(
         "Файлов: %d | устройство: %s | margins: x=%d y=%d | recursive: %s | "
-        "output-format: %s | compensate-levels: %s (erosion-px=%d) | upscale: %s | remove-fingers: %s",
+        "output-format: %s | compensate-levels: %s (erosion-px=%d) | upscale: %s | "
+        "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g)",
         len(files),
         device,
         x_margins,
@@ -702,6 +851,9 @@ def main(
         erosion_px,
         upscale if upscale is not None else "без апскейла",
         do_remove_fingers,
+        finger_dilate_px,
+        finger_zone_light_increment[0],
+        finger_zone_light_increment[1],
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
@@ -717,7 +869,11 @@ def main(
             finger_boxes: Optional[np.ndarray] = None
             if do_remove_fingers:
                 bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info = remove_fingers(
-                    bgr, device, want_boxes=debug_dir is not None
+                    bgr,
+                    device,
+                    want_boxes=debug_dir is not None,
+                    dilate_px=finger_dilate_px,
+                    light_increment=finger_zone_light_increment,
                 )
                 if int(np.count_nonzero(finger_mask)) > 0:
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")

@@ -276,7 +276,8 @@ def neural_hand_mask(
     max_box_frac: float = 0.30,
     max_area_frac: float = MAX_FINGER_AREA_FRAC,
     containment_thresh: float = 0.8,
-) -> np.ndarray:
+    return_boxes: bool = False,
+) -> "np.ndarray | tuple[np.ndarray, np.ndarray]":
     """Маска пальца через YOLO-World→SAM. Возвращает uint8 0/255 (может быть пустой).
 
     Боксы крупнее ``max_box_frac`` кадра и SAM-маски крупнее ``max_area_frac``
@@ -285,6 +286,12 @@ def neural_hand_mask(
     отбрасываются (см. ``_suppress_nested_boxes``) — иначе синонимичные классы
     (hand/human hand/fingernail) дают один и тот же палец боксами разного
     масштаба, и самый большой из них раздувает итоговую маску.
+
+    ``return_boxes=True`` дополнительно возвращает «сырые» боксы YOLO-World —
+    после фильтра ``max_box_frac``, но ДО ``_select_finger_boxes`` (т.е. все
+    кандидаты, включая позже отсеянные вложенные/раздутые) — специально для
+    debug-оверлея в ``detect_and_crop.py``, чтобы не гонять YOLO-World ещё раз
+    только ради визуализации (раньше это был отдельный повторный проход).
     """
     h, w = rgb.shape[:2]
     img_area = h * w
@@ -302,10 +309,14 @@ def neural_hand_mask(
         bh = boxes[:, 3] - boxes[:, 1]
         keep = (bw * bh) <= (max_box_frac * img_area)
         boxes, confs, cls = boxes[keep], confs[keep], cls[keep]
+
+    debug_boxes = boxes
+
     if len(boxes) > 0:
         boxes = _select_finger_boxes(boxes, confs, cls, containment_thresh)
     if len(boxes) == 0:
-        return np.zeros((h, w), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        return (mask, debug_boxes) if return_boxes else mask
 
     sam = _load_sam(sam_model)
     seg = sam.predict(bgr, bboxes=boxes, device=device, verbose=False)
@@ -320,7 +331,7 @@ def neural_hand_mask(
             if m_bin.sum() > max_area_frac * img_area:
                 continue
             mask[m_bin] = 255
-    return mask
+    return (mask, debug_boxes) if return_boxes else mask
 
 
 def neural_hand_mask_batch(
@@ -394,7 +405,8 @@ def build_finger_mask(
     min_area_frac: float = 0.0015,
     device: str = "cuda",
     conf: float = 0.05,
-) -> tuple[np.ndarray, str]:
+    return_boxes: bool = False,
+) -> "tuple[np.ndarray, str] | tuple[np.ndarray, str, np.ndarray]":
     """Строит итоговую маску пальца. Возвращает (mask uint8 0/255, краткое описание).
 
     На кадрах без пальцев должна возвращаться пустая маска — поэтому ``auto``
@@ -412,17 +424,23 @@ def build_finger_mask(
                      раздувал маску там, где скин-тона совпадали с обложкой книги
                      у края кадра — связный компонент скин-маски вбирал в себя
                      всё, что касалось нейромаски, целиком. Убран.
+
+    ``return_boxes=True`` дополнительно возвращает «сырые» боксы YOLO-World (см.
+    ``neural_hand_mask``, только для ``method`` != ``skin``, иначе — пустой массив):
+    debug-оверлей в ``detect_and_crop.py`` берёт их отсюда вместо повторного
+    прогона YOLO-World специально ради визуализации.
     """
     h, w = rgb.shape[:2]
     info = method
+    debug_boxes = np.empty((0, 4), dtype=np.float32)
 
     if method == "skin":
         mask = skin_edge_mask(rgb, edge_frac=edge_frac, min_area_frac=min_area_frac)
     elif method == "neural":
-        mask = neural_hand_mask(rgb, device=device, conf=conf)
+        mask, debug_boxes = neural_hand_mask(rgb, device=device, conf=conf, return_boxes=True)
         mask = keep_border_components(mask, edge_frac=edge_frac, min_area_frac=min_area_frac)
     elif method == "auto":
-        nm = neural_hand_mask(rgb, device=device, conf=conf)
+        nm, debug_boxes = neural_hand_mask(rgb, device=device, conf=conf, return_boxes=True)
         if int(np.count_nonzero(nm)) == 0:
             mask = np.zeros((h, w), dtype=np.uint8)
             info = "auto(пусто)"
@@ -441,7 +459,7 @@ def build_finger_mask(
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
             mask = cv2.dilate(mask, kernel, iterations=1)
 
-    return mask, info
+    return (mask, info, debug_boxes) if return_boxes else (mask, info)
 
 
 def build_finger_mask_batch(
