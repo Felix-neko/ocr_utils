@@ -6,8 +6,9 @@
   2. ``min_area_rotated_bbox`` ищет «правильный поворот»: вокруг центра тяжести маски
      перебираются углы ±``ROT_RANGE_DEG`` с шагом ``ROT_STEP_DEG``, выбирается угол с
      минимальной площадью осевого bounding box.
-  3. К bbox применяются припуски ``--x-margins`` / ``--y-margins`` (пиксели; >0 —
-     расширить, <0 — сжать) → финальная crop-зона.
+  3. К bbox применяются припуски по каждой стороне отдельно ``--left-margin`` /
+     ``--top-margin`` / ``--right-margin`` / ``--bottom-margin`` (пиксели; >0 —
+     расширить наружу, <0 — сжать внутрь) → финальная crop-зона.
   4. Исходный кадр поворачивается на найденный угол вокруг центра тяжести, из него
      вырезается crop-зона (выпрямленный прямоугольник) и кладётся в ``--output-dir``
      под тем же именем файла.
@@ -34,7 +35,8 @@ min-area bbox, фиолетовая crop-зона, красная граница
     (по умолчанию ``FINGER_DILATE_PX``).
 
     uv run python -m ocr_utils.detect_and_crop \\
-        --input-dir IN --output-dir OUT --debug-dir DBG --x-margins -150 --y-margins -150
+        --input-dir IN --output-dir OUT --debug-dir DBG \\
+        --left-margin -150 --top-margin -150 --right-margin -150 --bottom-margin -150
 """
 
 import logging
@@ -124,7 +126,15 @@ FINGER_CONF = 0.01
 # Дилатация маски пальца (build_finger_mask default=12) — тонкая мягкая тень по
 # краю силуэта (полутона на стыке кожа/бумага) иначе не докрашивается.
 FINGER_DILATE_PX = 40
-FINGER_EDGE_FRAC = 0.12  # доля кадра для проверки контакта с рамкой (реальный палец всегда входит с края)
+# Доля кадра для проверки контакта с рамкой в keep_border_components. Настоящий
+# палец физически ОБРЕЗАН рамкой кадра (рука уходит за границу снимка), поэтому
+# его маска доходит почти до самого края (~0 px). Узкая полоса надёжнее широкой:
+# при 0.12 на 36-Мп сканах полоса ~430 px, и в неё попадают внутренние тёмные
+# иллюстрации/фото у верхнего/бокового поля, ошибочно принятые YOLO-World за руку
+# (см. IMG_0109.jpg: карта СССР в эмблеме «50 ЛЕТ СОЮЗА ССР» — 408 px от верха,
+# 11.4 % высоты — пролезала впритык под 12 %). Настоящий палец здесь на 0 %,
+# так что зазор огромный, 4 % чисто разделяет случаи.
+FINGER_EDGE_FRAC = 0.04
 FINGER_PADDING = 64  # контекст вокруг маски пальца для LaMa, пикс. (как в finger_inpaint.py)
 # ROI для LaMa увеличивается в FINGER_ROI_SCALE раз от центра (после padding) —
 # без этого LaMa не видит достаточно кромки/фона и заливает дыру доминирующим
@@ -488,10 +498,15 @@ def min_area_rotated_bbox(mask: np.ndarray) -> Optional[tuple]:
     return cx, cy, angle, ext
 
 
-def _ext_with_margins(ext: tuple, mx: int, my: int) -> tuple:
-    """Применяет припуски к ext (minx, miny, maxx, maxy): >0 расширяет, <0 сжимает."""
+def _ext_with_margins(ext: tuple, margins: "tuple[int, int, int, int]") -> tuple:
+    """Применяет припуски к ext (minx, miny, maxx, maxy): >0 расширяет наружу, <0 сжимает внутрь.
+
+    ``margins`` = (left, top, right, bottom) — своя величина на каждую сторону
+    crop-зоны (левая двигает minx, верхняя — miny, правая — maxx, нижняя — maxy).
+    """
     minx, miny, maxx, maxy = ext
-    return (minx - mx, miny - my, maxx + mx, maxy + my)
+    left, top, right, bottom = margins
+    return (minx - left, miny - top, maxx + right, maxy + bottom)
 
 
 def _bbox_corners(cx: float, cy: float, angle: float, ext: tuple) -> np.ndarray:
@@ -594,7 +609,13 @@ def fill_outside_mask(
 
 
 def crop_rotated(
-    bgr: np.ndarray, cx: float, cy: float, angle: float, ext: tuple, mx: int, my: int, upscale: Optional[float] = None
+    bgr: np.ndarray,
+    cx: float,
+    cy: float,
+    angle: float,
+    ext: tuple,
+    margins: "tuple[int, int, int, int]",
+    upscale: Optional[float] = None,
 ) -> np.ndarray:
     """Поворот вокруг центра тяжести + вырез crop-зоны → выпрямленный прямоугольник.
 
@@ -606,7 +627,7 @@ def crop_rotated(
     от промежуточного ресайза целого кадра. ``None`` — апскейл вообще не считается
     (экономит время: без умножения размеров и без INTER_CUBIC).
     """
-    minx, miny, maxx, maxy = _ext_with_margins(ext, mx, my)
+    minx, miny, maxx, maxy = _ext_with_margins(ext, margins)
     if upscale is None:
         out_w = max(1, int(round(maxx - minx)))
         out_h = max(1, int(round(maxy - miny)))
@@ -653,8 +674,7 @@ def draw_overlay(
     bgr: np.ndarray,
     mask: np.ndarray,
     geom: Optional[tuple],
-    mx: int,
-    my: int,
+    margins: "tuple[int, int, int, int]",
     finger_mask: Optional[np.ndarray] = None,
     lama_roi_bboxes: Optional[list] = None,
     finger_boxes: Optional[np.ndarray] = None,
@@ -676,7 +696,7 @@ def draw_overlay(
         cx, cy, angle, ext = geom
         bbox = _bbox_corners(cx, cy, angle, ext).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(out, [bbox], True, COLOR_ROT_BBOX, thickness, cv2.LINE_AA)
-        crop = _bbox_corners(cx, cy, angle, _ext_with_margins(ext, mx, my)).astype(np.int32).reshape(-1, 1, 2)
+        crop = _bbox_corners(cx, cy, angle, _ext_with_margins(ext, margins)).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(out, [crop], True, COLOR_CROP, thickness, cv2.LINE_AA)
     if lama_roi_bboxes is not None:
         for x1, y1, x2, y2 in lama_roi_bboxes:
@@ -760,8 +780,12 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     default=None,
     help="Если задана — сюда кадр с оверлеями (граница/min-bbox/crop-зона)",
 )
-@click.option("--x-margins", default=0, show_default=True, help="Припуск crop-зоны по X, пикс. (>0 шире, <0 уже)")
-@click.option("--y-margins", default=0, show_default=True, help="Припуск crop-зоны по Y, пикс. (>0 шире, <0 уже)")
+@click.option("--left-margin", default=0, show_default=True, help="Припуск crop-зоны слева, пикс. (>0 шире, <0 уже)")
+@click.option("--top-margin", default=0, show_default=True, help="Припуск crop-зоны сверху, пикс. (>0 шире, <0 уже)")
+@click.option("--right-margin", default=0, show_default=True, help="Припуск crop-зоны справа, пикс. (>0 шире, <0 уже)")
+@click.option(
+    "--bottom-margin", default=0, show_default=True, help="Припуск crop-зоны снизу, пикс. (>0 шире, <0 уже)"
+)
 @click.option("--recursive", is_flag=True, default=False, help="Рекурсивно обходить подкаталоги в поисках картинок")
 @click.option(
     "--output-format",
@@ -815,8 +839,10 @@ def main(
     input_dir: Path,
     output_dir: Path,
     debug_dir: Optional[Path],
-    x_margins: int,
-    y_margins: int,
+    left_margin: int,
+    top_margin: int,
+    right_margin: int,
+    bottom_margin: int,
     recursive: bool,
     output_format: Optional[str],
     do_compensate_levels: bool,
@@ -832,19 +858,24 @@ def main(
         debug_dir.mkdir(parents=True, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Припуски crop-зоны: (left, top, right, bottom) — по одному на сторону
+    margins = (left_margin, top_margin, right_margin, bottom_margin)
+
     files = collect_images(input_dir, recursive)
     if not files:
         logger.warning("Изображения не найдены в %s", input_dir)
         return
 
     logger.info(
-        "Файлов: %d | устройство: %s | margins: x=%d y=%d | recursive: %s | "
+        "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | upscale: %s | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g)",
         len(files),
         device,
-        x_margins,
-        y_margins,
+        left_margin,
+        top_margin,
+        right_margin,
+        bottom_margin,
         recursive,
         output_format or "как у входа",
         do_compensate_levels,
@@ -896,14 +927,14 @@ def main(
             else:
                 cx, cy, angle, ext = geom
                 bgr_for_crop = fill_outside_mask(bgr_leveled, mask)
-                crop = crop_rotated(bgr_for_crop, cx, cy, angle, ext, x_margins, y_margins, upscale)
+                crop = crop_rotated(bgr_for_crop, cx, cy, angle, ext, margins, upscale)
                 cv2.imwrite(str(out_path), crop, params)
 
             if debug_dir is not None:
                 dbg_path = (debug_dir / rel).with_suffix(".jpg")
                 dbg_path.parent.mkdir(parents=True, exist_ok=True)
                 overlay = draw_overlay(
-                    bgr_orig, mask, geom, x_margins, y_margins, finger_mask, lama_roi_bboxes, finger_boxes
+                    bgr_orig, mask, geom, margins, finger_mask, lama_roi_bboxes, finger_boxes
                 )
                 cv2.imwrite(str(dbg_path), overlay, _imwrite_params(".jpg"))
 
