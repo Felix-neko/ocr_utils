@@ -14,9 +14,10 @@
      под тем же именем файла.
 
 Если задана ``--debug-dir`` — туда пишется кадр с оверлеями (всегда JPEG, ДО
-удаления пальцев и компенсации уровней): зелёная граница разворота, синий
-min-area bbox, фиолетовая crop-зона, красная граница обнаруженного пальца,
-жёлтая ROI-рамка контекста, переданного в LaMa.
+удаления пальцев и компенсации уровней): зелёная граница разворота (E1),
+оранжевая граница области копирования (E2, после доп. эрозии), синий min-area
+bbox, фиолетовая crop-зона, красная граница обнаруженного пальца, жёлтая
+ROI-рамка контекста, переданного в LaMa.
 
 Дополнительные опции:
   - ``--output-format`` (png/tiff) — формат файлов в ``--output-dir``; по умолчанию
@@ -33,6 +34,9 @@ min-area bbox, фиолетовая crop-зона, красная граница
     силуэт/bbox страницы и не попадал в финальный кроп.
   - ``--finger-dilate-px`` — дилатация маски пальца перед закраской, пикс.
     (по умолчанию ``FINGER_DILATE_PX``).
+  - ``--extra-erosion-px`` — доп. обрезка краёв силуэта книги перед копированием,
+    пикс. (E2 = диляция на extra + эрозия на 2*extra от E1); срезает тёмные куски
+    обложки в углах crop-зоны (по умолчанию ``EXTRA_EROSION_PX``; 0 — выкл.).
 
     uv run python -m ocr_utils.detect_and_crop \\
         --input-dir IN --output-dir OUT --debug-dir DBG \\
@@ -66,6 +70,7 @@ COLOR_ROT_BBOX = (255, 0, 0)  # ярко-синий — min-area повёрну�
 COLOR_CROP = (211, 0, 148)  # фиолетовый — финальная crop-зона с припусками
 COLOR_FINGER = (0, 0, 255)  # красный — обнаруженная область пальца
 COLOR_LAMA_ROI = (0, 255, 255)  # жёлтый — контекстная ROI-рамка, переданная в LaMa
+COLOR_COPY_MASK = (0, 165, 255)  # оранжевый — область копирования E2 (маска после доп. эрозии)
 
 # Поиск правильного поворота разворота: перебор углов ± предела с шагом (градусы)
 ROT_RANGE_DEG = 35
@@ -123,6 +128,16 @@ LEVELS_HIGH_PCT = 98.0
 # книги перед расчётом усреднённого цвета заливки, пикс. — чтобы не захватывать
 # шумную/смазанную границу силуэта.
 BG_FILL_EROSION_PX = 100
+
+# Доп. «обрезка» краёв силуэта книги перед копированием, пикс. Маска страницы на
+# тёмном фоне захватывает не только светлые страницы, но и куски сравнительно
+# тёмной обложки подшивки у краёв/углов. Просто взять min-area bbox и отступить
+# внутрь мало: книга не прямая, и в углах B2 всё равно остаются тёмные фрагменты
+# обложки. Поэтому область КОПИРОВАНИЯ (E2) получаем из маски (E1) морфологией
+# «диляция на extra + эрозия на 2*extra» — это закрытие мелких вырезов + чистый
+# сдвиг края внутрь на extra: периферийные слои обложки срезаются, а то, что в B2
+# вне E2, заливается усреднённым светлым цветом страницы. 0 — выключить.
+EXTRA_EROSION_PX = 80
 
 # Удаление пальцев (finger_removal) перед детекцией книги/кропом
 # Низкий порог нужен для recall (слабые боксы на смазанных/неярких пальцах, см.
@@ -573,6 +588,38 @@ def bridge_component_gaps(mask: np.ndarray, work_side: int = WORK_SIDE) -> np.nd
     return out
 
 
+def trim_cover_fragments(mask: np.ndarray, extra_erosion_px: int = EXTRA_EROSION_PX, work_side: int = WORK_SIDE) -> np.ndarray:
+    """E2 из E1: срезает периферийные фрагменты обложки, оставшиеся в маске страницы.
+
+    К маске страницы (``mask`` = E1) применяется диляция на ``extra_erosion_px`` и
+    затем эрозия на ``2 * extra_erosion_px``. Это закрытие мелких вырезов/зазубрин
+    (диляция+эрозия на ту же величину) плюс чистый сдвиг края внутрь на
+    ``extra_erosion_px`` (остаток эрозии): криволинейный край книги отступает
+    внутрь, и тонкие слои тёмной обложки у краёв/углов (которые детектор включил в
+    маску) отсекаются. Возвращает уменьшенную маску E2 (uint8 0/255) в разрешении
+    исходной ``mask``.
+
+    Морфология считается на копии, уменьшенной до ``work_side``: ядро радиусом
+    ``2*extra_erosion_px`` (диаметр ~321px при 80) на кадре 30-48 Мп заметно
+    тормозит (см. fill_outside_mask/compensate_levels), а для «обрезки» краёв
+    точность полного разрешения не нужна — граница потом всё равно у бумажных
+    полей, не у текста.
+    """
+    if extra_erosion_px <= 0:
+        return mask
+    h, w = mask.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    small = cv2.resize(mask, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST) if scale < 1.0 else mask
+    d = max(1, int(round(extra_erosion_px * scale)))
+    k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * d + 1, 2 * d + 1))
+    k_ero = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * (2 * d) + 1, 2 * (2 * d) + 1))
+    out = cv2.dilate(small, k_dil, iterations=1)
+    out = cv2.erode(out, k_ero, iterations=1)
+    if scale < 1.0:
+        out = cv2.resize(out, (w, h), interpolation=cv2.INTER_NEAREST)
+    return out
+
+
 def fill_outside_mask(
     bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FILL_EROSION_PX, work_side: int = WORK_SIDE
 ) -> np.ndarray:
@@ -686,8 +733,10 @@ def draw_overlay(
     finger_mask: Optional[np.ndarray] = None,
     lama_roi_bboxes: Optional[list] = None,
     finger_boxes: Optional[np.ndarray] = None,
+    copy_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Кадр с оверлеями: зелёная граница разворота, синий min-bbox, фиолетовая crop-зона,
+    """Кадр с оверлеями: зелёная граница разворота (E1), оранжевая граница области
+    копирования (E2, после доп. эрозии), синий min-bbox, фиолетовая crop-зона,
     красная граница обнаруженного пальца (после SAM), красный пунктирный bbox от
     YOLO-World (до SAM), жёлтая ROI-рамка контекста для LaMa.
 
@@ -700,6 +749,9 @@ def draw_overlay(
     if int(np.count_nonzero(mask)) > 0:
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(out, contours, -1, COLOR_PAGE, thickness, lineType=cv2.LINE_AA)
+    if copy_mask is not None and int(np.count_nonzero(copy_mask)) > 0:
+        contours, _ = cv2.findContours(copy_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, contours, -1, COLOR_COPY_MASK, thickness, lineType=cv2.LINE_AA)
     if geom is not None:
         cx, cy, angle, ext = geom
         bbox = _bbox_corners(cx, cy, angle, ext).astype(np.int32).reshape(-1, 1, 2)
@@ -815,6 +867,13 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     help="Эрозия маски страницы (пикс.) перед расчётом уровней (--compensate-levels)",
 )
 @click.option(
+    "--extra-erosion-px",
+    default=EXTRA_EROSION_PX,
+    show_default=True,
+    help="Доп. обрезка краёв силуэта книги перед копированием, пикс. (диляция на extra + "
+    "эрозия на 2*extra → срезает тёмные фрагменты обложки в углах; 0 — выкл.)",
+)
+@click.option(
     "--upscale",
     default=None,
     type=float,
@@ -855,6 +914,7 @@ def main(
     output_format: Optional[str],
     do_compensate_levels: bool,
     erosion_px: int,
+    extra_erosion_px: int,
     upscale: Optional[float],
     do_remove_fingers: bool,
     finger_dilate_px: int,
@@ -876,7 +936,7 @@ def main(
 
     logger.info(
         "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
-        "output-format: %s | compensate-levels: %s (erosion-px=%d) | upscale: %s | "
+        "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g)",
         len(files),
         device,
@@ -888,6 +948,7 @@ def main(
         output_format or "как у входа",
         do_compensate_levels,
         erosion_px,
+        extra_erosion_px,
         upscale if upscale is not None else "без апскейла",
         do_remove_fingers,
         finger_dilate_px,
@@ -917,8 +978,10 @@ def main(
                 if int(np.count_nonzero(finger_mask)) > 0:
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
 
-            mask = page_mask(bgr, device)
-            geom = min_area_rotated_bbox(mask)
+            mask = page_mask(bgr, device)  # E1 — силуэт разворота (со светлыми страницами и кусками обложки)
+            geom = min_area_rotated_bbox(mask)  # B1/B2 строим по E1
+            # E2 — область копирования: E1 с обрезанными периферийными фрагментами обложки
+            copy_mask = trim_cover_fragments(mask, extra_erosion_px)
             bgr_leveled = compensate_levels(bgr, mask, erosion_px) if do_compensate_levels else bgr
 
             # При recursive — зеркалим подкаталоги; формат — из --output-format либо как у входа
@@ -934,7 +997,8 @@ def main(
                 cv2.imwrite(str(out_path), bgr_leveled, params)
             else:
                 cx, cy, angle, ext = geom
-                bgr_for_crop = fill_outside_mask(bgr_leveled, mask)
+                # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем усреднённым цветом страницы
+                bgr_for_crop = fill_outside_mask(bgr_leveled, copy_mask)
                 crop = crop_rotated(bgr_for_crop, cx, cy, angle, ext, margins, upscale)
                 cv2.imwrite(str(out_path), crop, params)
 
@@ -942,7 +1006,7 @@ def main(
                 dbg_path = (debug_dir / rel).with_suffix(".jpg")
                 dbg_path.parent.mkdir(parents=True, exist_ok=True)
                 overlay = draw_overlay(
-                    bgr_orig, mask, geom, margins, finger_mask, lama_roi_bboxes, finger_boxes
+                    bgr_orig, mask, geom, margins, finger_mask, lama_roi_bboxes, finger_boxes, copy_mask=copy_mask
                 )
                 cv2.imwrite(str(dbg_path), overlay, _imwrite_params(".jpg"))
 
