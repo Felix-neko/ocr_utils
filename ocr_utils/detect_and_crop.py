@@ -51,6 +51,7 @@ import click
 import cv2
 import numpy as np
 import torch
+from PIL import Image as PILImage
 from skimage.exposure import rescale_intensity
 from tqdm import tqdm
 
@@ -254,7 +255,9 @@ def remove_fingers(
     изменений.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    mask, info, raw_boxes = build_finger_mask(rgb, method="auto", device=device, conf=conf, dilate_px=dilate_px, return_boxes=True)
+    mask, info, raw_boxes = build_finger_mask(
+        rgb, method="auto", device=device, conf=conf, dilate_px=dilate_px, return_boxes=True
+    )
     yolo_boxes = raw_boxes if want_boxes else None
     if int(np.count_nonzero(mask)) > 0:
         mask = keep_border_components(mask, edge_frac=FINGER_EDGE_FRAC)
@@ -588,7 +591,9 @@ def bridge_component_gaps(mask: np.ndarray, work_side: int = WORK_SIDE) -> np.nd
     return out
 
 
-def trim_cover_fragments(mask: np.ndarray, extra_erosion_px: int = EXTRA_EROSION_PX, work_side: int = WORK_SIDE) -> np.ndarray:
+def trim_cover_fragments(
+    mask: np.ndarray, extra_erosion_px: int = EXTRA_EROSION_PX, work_side: int = WORK_SIDE
+) -> np.ndarray:
     """E2 из E1: срезает периферийные фрагменты обложки, оставшиеся в маске страницы.
 
     К маске страницы (``mask`` = E1) применяется диляция на ``extra_erosion_px`` и
@@ -795,6 +800,18 @@ def _imwrite_params(suffix: str) -> list[int]:
     return []
 
 
+def _write_image(out_path: Path, img: np.ndarray, params: list[int], force_dpi: Optional[int]) -> None:
+    """Сохраняет изображение через cv2; если задан ``force_dpi`` — дописывает DPI-метаданные через PIL.
+
+    cv2.imwrite не умеет прописывать разрешение (DPI), поэтому при заданном ``force_dpi`` файл
+    перечитывается PIL и пересохраняется с тегом dpi (pHYs для PNG, X/YResolution для TIFF).
+    """
+    cv2.imwrite(str(out_path), img, params)
+    if force_dpi is not None:
+        with PILImage.open(out_path) as im:
+            im.save(out_path, dpi=(force_dpi, force_dpi))
+
+
 def _parse_light_increment(ctx, param, value: str) -> "tuple[float, float]":
     """Парсит ``--finger-zone-light-increment``: 'N' → (N, N), 'L,R' → (L, R)."""
     parts = [p.strip() for p in str(value).split(",")]
@@ -843,9 +860,7 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
 @click.option("--left-margin", default=0, show_default=True, help="Припуск crop-зоны слева, пикс. (>0 шире, <0 уже)")
 @click.option("--top-margin", default=0, show_default=True, help="Припуск crop-зоны сверху, пикс. (>0 шире, <0 уже)")
 @click.option("--right-margin", default=0, show_default=True, help="Припуск crop-зоны справа, пикс. (>0 шире, <0 уже)")
-@click.option(
-    "--bottom-margin", default=0, show_default=True, help="Припуск crop-зоны снизу, пикс. (>0 шире, <0 уже)"
-)
+@click.option("--bottom-margin", default=0, show_default=True, help="Припуск crop-зоны снизу, пикс. (>0 шире, <0 уже)")
 @click.option("--recursive", is_flag=True, default=False, help="Рекурсивно обходить подкаталоги в поисках картинок")
 @click.option(
     "--output-format",
@@ -902,6 +917,13 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     help="Осветление зоны пальца перед закраской: одно число (на весь кадр) "
     "либо 'слева,справа' (напр. 15,30) — если свет в кадре падает не симметрично",
 )
+@click.option(
+    "--force-dpi",
+    default=None,
+    type=int,
+    show_default=True,
+    help="Принудительно прописать выходным изображениям указанный DPI (по умолчанию — не трогать)",
+)
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -919,6 +941,7 @@ def main(
     do_remove_fingers: bool,
     finger_dilate_px: int,
     finger_zone_light_increment: "tuple[float, float]",
+    force_dpi: Optional[int],
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -937,7 +960,7 @@ def main(
     logger.info(
         "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
-        "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g)",
+        "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s",
         len(files),
         device,
         left_margin,
@@ -954,6 +977,7 @@ def main(
         finger_dilate_px,
         finger_zone_light_increment[0],
         finger_zone_light_increment[1],
+        force_dpi if force_dpi is not None else "не трогать",
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
@@ -994,13 +1018,13 @@ def main(
             if geom is None:
                 # Разворот не найден — кладём оригинал, чтобы не терять файл в пайплайне
                 tqdm.write(f"  Разворот не найден, сохраняю оригинал: {rel}")
-                cv2.imwrite(str(out_path), bgr_leveled, params)
+                _write_image(out_path, bgr_leveled, params, force_dpi)
             else:
                 cx, cy, angle, ext = geom
                 # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем усреднённым цветом страницы
                 bgr_for_crop = fill_outside_mask(bgr_leveled, copy_mask)
                 crop = crop_rotated(bgr_for_crop, cx, cy, angle, ext, margins, upscale)
-                cv2.imwrite(str(out_path), crop, params)
+                _write_image(out_path, crop, params, force_dpi)
 
             if debug_dir is not None:
                 dbg_path = (debug_dir / rel).with_suffix(".jpg")

@@ -10,8 +10,8 @@ cd "$(dirname "$0")"
 
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
 #INPUT_DIR="/mnt/system/raw/плохие сканы  ВЭ/06"
-OUTPUT_DIR="/mnt/system/raw/mts/out_4"
-DEBUG_DIR="/mnt/system/raw/mts/debug_4"
+OUTPUT_DIR="/mnt/system/raw/mts/out_5"
+DEBUG_DIR="/mnt/system/raw/mts/debug_5"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -28,6 +28,7 @@ uv run python -m ocr_utils.detect_and_crop \
     --left-margin -140 \
     --right-margin -180 \
     --output-format png \
+    --force-dpi=300 \
     --compensate-levels \
     --finger-dilate-px=60 \
     --finger-zone-light-increment=20 \
