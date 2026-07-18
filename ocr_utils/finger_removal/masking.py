@@ -174,11 +174,38 @@ def _load_sam(model_name: str):
     return _MODEL_CACHE[key]
 
 
+def _box_uncovered_fraction(cand: np.ndarray, others: list[np.ndarray], grid: int = 256) -> float:
+    """Доля площади бокса ``cand``, НЕ покрытая объединением боксов ``others``.
+
+    Считается на грубом растре внутри ``cand`` (бОльшая сторона до ``grid`` ячеек):
+    точная площадь объединения прямоугольников не нужна, боксов единицы. Возвращает
+    1.0, если ``cand`` не пересекается ни с одним из ``others`` (вся площадь новая),
+    и 0.0, если полностью ими покрыт.
+    """
+    x1, y1, x2, y2 = cand[0], cand[1], cand[2], cand[3]
+    cw, ch = x2 - x1, y2 - y1
+    if cw <= 0 or ch <= 0:
+        return 0.0
+    scale = grid / max(cw, ch)
+    gw, gh = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
+    cov = np.zeros((gh, gw), dtype=bool)
+    for bj in others:
+        ix1, iy1 = max(x1, bj[0]), max(y1, bj[1])
+        ix2, iy2 = min(x2, bj[2]), min(y2, bj[3])
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        gx1, gx2 = int((ix1 - x1) * scale), int(round((ix2 - x1) * scale))
+        gy1, gy2 = int((iy1 - y1) * scale), int(round((iy2 - y1) * scale))
+        cov[gy1:gy2, gx1:gx2] = True
+    return 1.0 - float(cov.mean())
+
+
 def _suppress_nested_boxes(
     boxes: np.ndarray,
     confs: np.ndarray,
     containment_thresh: float = 0.8,
     growth_factor: float = FINGER_BOX_GROWTH_FACTOR,
+    keep_new_area_frac: Optional[float] = None,
 ) -> np.ndarray:
     """Индексы боксов, оставленных после подавления избыточных/раздутых боксов.
 
@@ -207,6 +234,18 @@ def _suppress_nested_boxes(
         правого пальца росли от 0.1036 до 0.056/0.0527 conf, но отбрасывались
         из-за анкера от постороннего левого пальца — итоговая маска правого
         пальца схлопывалась до размера одного ногтя).
+
+    ``keep_new_area_frac`` (по умолчанию None — выключено, поведение для пальцев
+    не меняется): исключение из ограничителя разрастания для ДЕТЕКЦИИ СТРАНИЦ.
+    Бокс, переросший локальный якорь сверх ``growth_factor``, всё же оставляется,
+    если он добавляет ≥ этой доли площади, ЕЩЁ НЕ покрытой принятыми боксами
+    (``_box_uncovered_fraction``). Для пальца «раздутый» бокс — это тот же палец,
+    расползшийся вдоль края (новой площади добавляет мало полезного, его надо
+    резать), а для разворота YOLO-World нередко НЕ даёт отдельного бокса на
+    страницу, целиком занятую фото/иллюстрацией, и покрывает её только «широким»
+    боксом на весь разворот; такой бокс переростает якорь-соседа (одну страницу),
+    но добавляет цельную вторую страницу как новую площадь — его нужно сохранить
+    (см. detect_and_crop.detect_page_mask, IMG_0004.jpg 1972/04).
     """
     order = np.argsort(-confs)
     keep: list[int] = []
@@ -231,7 +270,12 @@ def _suppress_nested_boxes(
         if redundant:
             continue
         if local_anchor_area is not None and area_i > growth_factor * local_anchor_area:
-            continue
+            # Перерос локального якоря. По умолчанию режем (защита от раздувания
+            # маски пальца). Для страниц (keep_new_area_frac задан) оставляем, если
+            # бокс добавляет достаточно НЕ покрытой принятыми боксами площади —
+            # это не раздутый дубль, а отдельная крупная область (вторая страница).
+            if keep_new_area_frac is None or _box_uncovered_fraction(bi, [boxes[j] for j in keep]) < keep_new_area_frac:
+                continue
         keep.append(i)
     return np.array(keep, dtype=int)
 

@@ -105,6 +105,14 @@ MAX_PAGE_FRAC = 1.0  # верхний предел не ставим: стран
 # компоненты считается шумом и отбрасывается; крупнее — это вторая страница
 # разворота (см. IMG_0058.jpg), а не шум, и должна остаться в маске.
 SECOND_PAGE_MIN_AREA_FRAC = 0.2
+# Порог для _suppress_nested_boxes (keep_new_area_frac): бокс, переросший
+# локальный якорь сверх growth_factor, всё же оставляем, если он добавляет ≥ этой
+# доли НЕ покрытой принятыми боксами площади. YOLO-World иногда не даёт отдельного
+# бокса на страницу, целиком занятую фото/иллюстрацией, и покрывает её только
+# «широким» боксом на весь разворот; он перерастает бокс соседней (одной) страницы,
+# но вносит цельную вторую страницу как новую площадь и должен уцелеть (см.
+# IMG_0004.jpg 1972/04, где левая страница-фото иначе теряется).
+PAGE_KEEP_NEW_AREA_FRAC = 0.35
 
 # Компенсация уровней: перцентили по общей интенсивности внутри маски (минус эрозия)
 N_EROSION_PX = 20
@@ -366,7 +374,7 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     if len(boxes) == 0:
         return np.zeros((h, w), dtype=np.uint8)
 
-    boxes = boxes[_suppress_nested_boxes(boxes, confs)]
+    boxes = boxes[_suppress_nested_boxes(boxes, confs, keep_new_area_frac=PAGE_KEEP_NEW_AREA_FRAC)]
     if len(boxes) == 0:
         return np.zeros((h, w), dtype=np.uint8)
 

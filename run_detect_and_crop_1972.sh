@@ -8,10 +8,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/1972 готово"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
 #INPUT_DIR="/mnt/system/raw/плохие сканы  ВЭ/06"
-OUTPUT_DIR="/mnt/system/raw/mts/out_2/1972 готово"
-DEBUG_DIR="/mnt/system/raw/mts/debug_2/1972 готово"
+OUTPUT_DIR="/mnt/system/raw/mts/out_3"
+DEBUG_DIR="/mnt/system/raw/mts/debug_3"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -30,6 +30,6 @@ uv run python -m ocr_utils.detect_and_crop \
     --output-format png \
     --compensate-levels \
     --finger-dilate-px=60 \
-    --finger-zone-light-increment=25 \
+    --finger-zone-light-increment=20 \
     --remove-fingers
 
