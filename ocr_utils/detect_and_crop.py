@@ -107,6 +107,15 @@ CONF = 0.01
 WORK_SIDE = 2048  # сторона уменьшенной копии для детекции (выше = точнее контур SAM)
 MIN_PAGE_FRAC = 0.05  # бокс/маска меньше этой доли кадра — это не страница
 MAX_PAGE_FRAC = 1.0  # верхний предел не ставим: страница может занимать весь кадр
+# Отсев «мусорных» боксов почти на весь кадр: YOLO-World иногда выдаёт бокс класса
+# страницы на 95+% кадра с низкой уверенностью — его SAM-силуэт захватывает фон и
+# придерживающую книгу руку по краям, раздувая маску до всего кадра (см. IMG_0012.jpg
+# 1975/10 и IMG_0014.jpg 1976/04). Чем крупнее бокс, тем выше должна быть уверенность:
+# градуированные ярусы (доля кадра, мин. conf) — бокс площадью ≥ доли отбрасывается,
+# если его conf ниже соответствующего порога. По выборке (50 кадров) легитимные крупные
+# боксы имеют conf ≥ 0.22 и не превышают ~90% кадра, а мусорные near-full-frame боксы
+# встречались при conf 0.013–0.066 — ярусы ложатся в зазор между ними.
+LARGE_BOX_CONF_TIERS = ((0.91, 0.05), (0.94, 0.10))
 # В refine_page_mask: связная компонента меньше этой доли площади самой крупной
 # компоненты считается шумом и отбрасывается; крупнее — это вторая страница
 # разворота (см. IMG_0058.jpg), а не шум, и должна остаться в маске.
@@ -119,6 +128,13 @@ SECOND_PAGE_MIN_AREA_FRAC = 0.2
 # но вносит цельную вторую страницу как новую площадь и должен уцелеть (см.
 # IMG_0004.jpg 1972/04, где левая страница-фото иначе теряется).
 PAGE_KEEP_NEW_AREA_FRAC = 0.35
+
+# Отбор вложенных per-page под-боксов, дополнительно скармливаемых SAM (см.
+# _contained_subboxes / detect_page_mask): под-бокс должен лежать в одном из принятых
+# боксов не менее чем на PAGE_SUBBOX_CONTAIN и быть не крупнее PAGE_SUBBOX_MAX_AREA_FRAC
+# его площади (иначе это дубль всего разворота, а не под-бокс отдельной страницы).
+PAGE_SUBBOX_CONTAIN = 0.85
+PAGE_SUBBOX_MAX_AREA_FRAC = 0.9
 
 # Компенсация уровней: перцентили по общей интенсивности внутри маски (минус эрозия)
 N_EROSION_PX = 20
@@ -345,6 +361,41 @@ def refine_page_mask(mask: np.ndarray) -> np.ndarray:
     return filled
 
 
+def _contained_subboxes(boxes: np.ndarray, keep: np.ndarray, kept: np.ndarray) -> np.ndarray:
+    """Вложенные per-page под-боксы, которые дополнительно скармливаем SAM.
+
+    YOLO-World нередко выдаёт и бокс на весь разворот, и отдельные боксы на левую/
+    правую страницу; ``_suppress_nested_boxes`` оставляет только самый уверенный
+    (обычно широкий бокс разворота), а SAM по ОДНОМУ широкому боксу строит рыхлый
+    силуэт — не дотягивается до верха страниц и проваливается у придержанного
+    пальцем края. Поэтому вложенные per-page боксы (заведомо ВНУТРИ уже принятой
+    области книги, поэтому фон внести не могут) тоже прогоняем через SAM, а их
+    силуэты объединяются с основным (``bitwise_or`` в ``detect_page_mask``) —
+    страница восстанавливается целиком.
+
+    Берём под-боксы, покрытые одним из принятых (``kept``) не менее чем на
+    ``PAGE_SUBBOX_CONTAIN`` и не крупнее ``PAGE_SUBBOX_MAX_AREA_FRAC`` его площади
+    (иначе это дубль всего разворота, а не под-бокс отдельной страницы). ``keep`` —
+    индексы принятых в ``boxes`` (их самих не дублируем).
+    """
+    keep_set = set(int(i) for i in keep)
+    kept_areas = (kept[:, 2] - kept[:, 0]) * (kept[:, 3] - kept[:, 1])
+    extra: list[np.ndarray] = []
+    for i in range(len(boxes)):
+        if i in keep_set:
+            continue
+        bi = boxes[i]
+        area_i = max(1.0, float((bi[2] - bi[0]) * (bi[3] - bi[1])))
+        for kb, akb in zip(kept, kept_areas):
+            ix1, iy1 = max(bi[0], kb[0]), max(bi[1], kb[1])
+            ix2, iy2 = min(bi[2], kb[2]), min(bi[3], kb[3])
+            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+            if inter / area_i >= PAGE_SUBBOX_CONTAIN and area_i <= PAGE_SUBBOX_MAX_AREA_FRAC * akb:
+                extra.append(bi)
+                break
+    return np.array(extra, dtype=boxes.dtype).reshape(-1, 4)
+
+
 def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     """Бинарная маска (uint8 0/255) области страниц: YOLO-World боксы → SAM силуэт.
 
@@ -352,7 +403,9 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     Оставшиеся боксы дополнительно прогоняются через ``_suppress_nested_boxes``
     (та же логика, что и для пальцев в ``masking.py``) — низкоуверенный бокс,
     почти целиком содержащий в себе более уверенный (например, «вся подложка +
-    книга» вместо «только книга»), отбрасывается в пользу более точного.
+    книга» вместо «только книга»), отбрасывается в пользу более точного. Помимо
+    принятых боксов SAM получает вложенные per-page под-боксы (``_contained_subboxes``):
+    по одному широкому боксу разворота силуэт SAM рыхлый и недобирает края страниц.
     """
     h, w = bgr.shape[:2]
     img_area = h * w
@@ -388,16 +441,26 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     bh = boxes[:, 3] - boxes[:, 1]
     area = bw * bh
     size_ok = (area >= MIN_PAGE_FRAC * img_area) & (area <= MAX_PAGE_FRAC * img_area)
-    boxes, confs = boxes[size_ok], confs[size_ok]
+    # Плюс: near-full-frame боксы с недостаточной уверенностью — это шум YOLO-World, чей
+    # SAM-силуэт сгребает фон и руку по краям (см. LARGE_BOX_CONF_TIERS / IMG_0012, IMG_0014).
+    junk_fullframe = np.zeros(len(boxes), dtype=bool)
+    for frac_thr, conf_thr in LARGE_BOX_CONF_TIERS:
+        junk_fullframe |= (area >= frac_thr * img_area) & (confs < conf_thr)
+    keep_size = size_ok & ~junk_fullframe
+    boxes, confs = boxes[keep_size], confs[keep_size]
     if len(boxes) == 0:
         return np.zeros((h, w), dtype=np.uint8)
 
-    boxes = boxes[_suppress_nested_boxes(boxes, confs, keep_new_area_frac=PAGE_KEEP_NEW_AREA_FRAC)]
-    if len(boxes) == 0:
+    keep = _suppress_nested_boxes(boxes, confs, keep_new_area_frac=PAGE_KEEP_NEW_AREA_FRAC)
+    if len(keep) == 0:
         return np.zeros((h, w), dtype=np.uint8)
+    kept = boxes[keep]
+    # Помимо принятых боксов SAM получает вложенные per-page под-боксы: по одному
+    # широкому боксу разворота силуэт SAM рыхлый и недобирает края (см. _contained_subboxes).
+    sam_boxes = np.vstack([kept, _contained_subboxes(boxes, keep, kept)])
 
     sam = load_sam(DEFAULT_SAM)
-    seg = sam.predict(bgr, bboxes=boxes, device=device, verbose=False)
+    seg = sam.predict(bgr, bboxes=sam_boxes, device=device, verbose=False)
     mask = np.zeros((h, w), dtype=np.uint8)
     if seg and seg[0].masks is not None:
         for m in seg[0].masks.data.cpu().numpy():
