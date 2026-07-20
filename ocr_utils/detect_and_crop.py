@@ -854,12 +854,16 @@ def collect_images(input_dir: Path, recursive: bool) -> list[Path]:
 
 
 def _imwrite_params(suffix: str) -> list[int]:
-    """Параметры cv2.imwrite под формат (качество JPEG / сжатие PNG)."""
+    """Параметры cv2.imwrite под формат (качество JPEG / сжатие PNG / сжатие TIFF)."""
     s = suffix.lower()
     if s in (".jpg", ".jpeg"):
         return [cv2.IMWRITE_JPEG_QUALITY, 95]
     if s == ".png":
         return [cv2.IMWRITE_PNG_COMPRESSION, 3]
+    if s in (".tif", ".tiff"):
+        # LZW — сжатие БЕЗ потерь (в отличие от JPEG-in-TIFF); задаём явно, чтобы
+        # не зависеть от дефолта cv2. Код 5 = COMPRESSION_LZW (libtiff).
+        return [cv2.IMWRITE_TIFF_COMPRESSION, 5]
     return []
 
 
@@ -868,11 +872,15 @@ def _write_image(out_path: Path, img: np.ndarray, params: list[int], force_dpi: 
 
     cv2.imwrite не умеет прописывать разрешение (DPI), поэтому при заданном ``force_dpi`` файл
     перечитывается PIL и пересохраняется с тегом dpi (pHYs для PNG, X/YResolution для TIFF).
+    Для TIFF при переспасении явно сохраняем LZW (без потерь), чтобы PIL не сменил сжатие.
     """
     cv2.imwrite(str(out_path), img, params)
     if force_dpi is not None:
+        save_kwargs: dict = {"dpi": (force_dpi, force_dpi)}
+        if out_path.suffix.lower() in (".tif", ".tiff"):
+            save_kwargs["compression"] = "tiff_lzw"
         with PILImage.open(out_path) as im:
-            im.save(out_path, dpi=(force_dpi, force_dpi))
+            im.save(out_path, **save_kwargs)
 
 
 def _parse_light_increment(ctx, param, value: str) -> "tuple[float, float]":
