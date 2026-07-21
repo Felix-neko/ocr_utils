@@ -58,6 +58,7 @@ from tqdm import tqdm
 from ocr_utils.finger_removal.finger_inpaint import lama_inpaint, roi_bounds_list
 from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_components
 from ocr_utils.finger_removal.masking import _suppress_nested_boxes
+from ocr_utils.finger_removal.finger_shadow import SHADOW_METHODS, correct_finger_shadow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -995,6 +996,14 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     show_default=True,
     help="Принудительно прописать выходным изображениям указанный DPI (по умолчанию — не трогать)",
 )
+@click.option(
+    "--shadow-method",
+    type=click.Choice(SHADOW_METHODS, case_sensitive=False),
+    default="none",
+    show_default=True,
+    help="Коррекция теневой зоны вокруг пальца после зарисовки: none | classic | retinex | "
+    "docshadow-sd7k | docshadow-kligler | docshadow-jung (нейросеть DocShadow)",
+)
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -1013,6 +1022,7 @@ def main(
     finger_dilate_px: int,
     finger_zone_light_increment: "tuple[float, float]",
     force_dpi: Optional[int],
+    shadow_method: str,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1074,6 +1084,10 @@ def main(
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
 
             mask = page_mask(bgr, device)  # E1 — силуэт разворота (со светлыми страницами и кусками обложки)
+            # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
+            if shadow_method != "none" and finger_mask is not None:
+                bgr = correct_finger_shadow(bgr, finger_mask, mask, shadow_method, device=device)
+
             geom = min_area_rotated_bbox(mask)  # B1/B2 строим по E1
             # E2 — область копирования: E1 с обрезанными периферийными фрагментами обложки
             copy_mask = trim_cover_fragments(mask, extra_erosion_px)
