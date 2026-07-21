@@ -59,6 +59,7 @@ from ocr_utils.finger_removal.finger_inpaint import lama_inpaint, roi_bounds_lis
 from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_components
 from ocr_utils.finger_removal.masking import _suppress_nested_boxes
 from ocr_utils.finger_removal.finger_shadow import SHADOW_METHODS, correct_finger_shadow
+from ocr_utils.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -247,6 +248,7 @@ def remove_fingers(
     want_boxes: bool = False,
     dilate_px: int = FINGER_DILATE_PX,
     light_increment: "float | tuple[float, float]" = FINGER_ZONE_LIGHT_INCREMENT,
+    asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking/finger_inpaint) в BGR-кадре.
 
@@ -273,7 +275,14 @@ def remove_fingers(
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     mask, info, raw_boxes, mask_predilate = build_finger_mask(
-        rgb, method="auto", device=device, conf=conf, dilate_px=dilate_px, return_boxes=True, return_predilate=True
+        rgb,
+        method="auto",
+        device=device,
+        conf=conf,
+        dilate_px=dilate_px,
+        return_boxes=True,
+        return_predilate=True,
+        asymmetric_dilation_ratio=asymmetric_dilation_ratio,
     )
     yolo_boxes = raw_boxes if want_boxes else None
     predilate = mask_predilate if want_boxes else None
@@ -1041,6 +1050,16 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     help="Принудительно прописать выходным изображениям указанный DPI (по умолчанию — не трогать)",
 )
 @click.option(
+    "--max-asymmetric-dilation-ratio",
+    "asymmetric_dilation_ratio",
+    default=DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
+    type=float,
+    show_default=True,
+    help="Максимальная ДОБАВКА к коэффициенту дилатации маски пальца по «выгодной» оси: "
+    "боковой палец растёт по Y в (1 + ratio) раз, верхний/нижний — по X, угловой — в "
+    "(1 + ratio/2) по обеим. 0 — прежняя круговая дилатация",
+)
+@click.option(
     "--shadow-method",
     type=click.Choice(SHADOW_METHODS, case_sensitive=False),
     default="none",
@@ -1066,6 +1085,7 @@ def main(
     finger_dilate_px: int,
     finger_zone_light_increment: "tuple[float, float]",
     force_dpi: Optional[int],
+    asymmetric_dilation_ratio: float,
     shadow_method: str,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
@@ -1085,7 +1105,8 @@ def main(
     logger.info(
         "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
-        "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s",
+        "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
+        "max-asymmetric-dilation-ratio: %g",
         len(files),
         device,
         left_margin,
@@ -1103,6 +1124,7 @@ def main(
         finger_zone_light_increment[0],
         finger_zone_light_increment[1],
         force_dpi if force_dpi is not None else "не трогать",
+        asymmetric_dilation_ratio,
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
@@ -1124,6 +1146,7 @@ def main(
                     want_boxes=debug_dir is not None,
                     dilate_px=finger_dilate_px,
                     light_increment=finger_zone_light_increment,
+                    asymmetric_dilation_ratio=asymmetric_dilation_ratio,
                 )
                 if int(np.count_nonzero(finger_mask)) > 0:
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")

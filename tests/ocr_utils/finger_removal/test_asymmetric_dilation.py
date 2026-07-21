@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from ocr_utils.finger_removal.asymmetric_dilation import (
-    MAX_ASYMMETRIC_DILATION_RATIO,
+    DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
     FingerZoneDilation,
     dilate_finger_zones,
 )
@@ -54,7 +54,7 @@ def test_side_finger_grows_along_y(helper, bbox):
     """Боковой палец: x_ratio → 1, y_ratio → 1 + MAX."""
     x_ratio, y_ratio = helper.ratios(bbox)
     assert x_ratio == pytest.approx(1.0, abs=0.2)
-    assert y_ratio == pytest.approx(1.0 + MAX_ASYMMETRIC_DILATION_RATIO, abs=0.2)
+    assert y_ratio == pytest.approx(1.0 + DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO, abs=0.2)
     assert y_ratio > x_ratio
 
 
@@ -62,7 +62,7 @@ def test_side_finger_grows_along_y(helper, bbox):
 def test_top_bottom_finger_grows_along_x(helper, bbox):
     """Верхний/нижний палец: x_ratio → 1 + MAX, y_ratio → 1."""
     x_ratio, y_ratio = helper.ratios(bbox)
-    assert x_ratio == pytest.approx(1.0 + MAX_ASYMMETRIC_DILATION_RATIO, abs=0.2)
+    assert x_ratio == pytest.approx(1.0 + DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO, abs=0.2)
     assert y_ratio == pytest.approx(1.0, abs=0.2)
     assert x_ratio > y_ratio
 
@@ -71,7 +71,7 @@ def test_top_bottom_finger_grows_along_x(helper, bbox):
 def test_corner_finger_grows_evenly(helper, bbox):
     """Угловой палец: оба коэффициента → 1 + MAX/2 и равны между собой."""
     x_ratio, y_ratio = helper.ratios(bbox)
-    expected = 1.0 + MAX_ASYMMETRIC_DILATION_RATIO / 2.0
+    expected = 1.0 + DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO / 2.0
     assert x_ratio == pytest.approx(expected, abs=0.2)
     assert y_ratio == pytest.approx(expected, abs=0.2)
     assert x_ratio == pytest.approx(y_ratio, abs=1e-6)
@@ -88,7 +88,33 @@ def test_ratios_within_bounds(helper):
     """Коэффициенты всегда в [1, 1 + MAX] — дилатация не может уменьшать зону."""
     for bbox in (BBOX_LEFT, BBOX_RIGHT, BBOX_TOP, BBOX_BOTTOM, BBOX_CORNER_TL, (400, 400, 600, 600)):
         for r in helper.ratios(bbox):
-            assert 1.0 <= r <= 1.0 + MAX_ASYMMETRIC_DILATION_RATIO + 1e-9
+            assert 1.0 <= r <= 1.0 + DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO + 1e-9
+
+
+def test_max_ratio_zero_is_symmetric():
+    """max_ratio=0 (из CLI --max-asymmetric-dilation-ratio=0) — прежняя круговая дилатация."""
+    zero = FingerZoneDilation((H, W), max_ratio=0.0)
+    for bbox in (BBOX_LEFT, BBOX_TOP, BBOX_CORNER_TL):
+        assert zero.ratios(bbox) == pytest.approx((1.0, 1.0))
+
+
+@pytest.mark.parametrize("ratio", [1.0, 2.0, 4.0])
+def test_larger_max_ratio_grows_more(ratio):
+    """Чем больше max_ratio, тем сильнее перекос: y_ratio бокового пальца ≈ 1 + ratio."""
+    helper = FingerZoneDilation((H, W), max_ratio=ratio)
+    x_ratio, y_ratio = helper.ratios(BBOX_LEFT)
+    assert y_ratio == pytest.approx(1.0 + ratio, abs=0.1 * ratio + 0.05)
+    assert 1.0 <= x_ratio <= 1.0 + ratio
+
+
+def test_max_ratio_propagates_to_dilation():
+    """max_ratio доходит до реальной дилатации: больший ratio даёт больший прирост по Y."""
+    mask = _mask_with(BBOX_LEFT)
+    small = dilate_finger_zones(mask, dilate_px=20, max_ratio=0.0)
+    large = dilate_finger_zones(mask, dilate_px=20, max_ratio=4.0)
+    ys_s = np.where(small > 0)[0]
+    ys_l = np.where(large > 0)[0]
+    assert (ys_l.max() - ys_l.min()) > (ys_s.max() - ys_s.min())
 
 
 def test_disabled_gives_symmetric_ratios():

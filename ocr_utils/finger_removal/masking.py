@@ -24,7 +24,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from ocr_utils.finger_removal.asymmetric_dilation import dilate_finger_zones
+from ocr_utils.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO, dilate_finger_zones
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +455,7 @@ def build_finger_mask(
     conf: float = 0.05,
     return_boxes: bool = False,
     return_predilate: bool = False,
+    asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
 ) -> "tuple[np.ndarray, str] | tuple[np.ndarray, str, np.ndarray]":
     """Строит итоговую маску пальца. Возвращает (mask uint8 0/255, краткое описание).
 
@@ -512,7 +513,7 @@ def build_finger_mask(
         if dilate_px > 0:
             # Асимметричная дилатация: каждую зону пальца растим сильнее вдоль той
             # стороны кадра, к которой она прилегает (там и лежит её тень).
-            mask = dilate_finger_zones(mask, dilate_px)
+            mask = dilate_finger_zones(mask, dilate_px, max_ratio=asymmetric_dilation_ratio)
     else:
         mask_predilate = mask.copy()
 

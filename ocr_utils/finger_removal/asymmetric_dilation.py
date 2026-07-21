@@ -44,10 +44,12 @@
   - палец в углу: d_lr≈0, d_tb≈0
     → eps спасает от деления 0/0 и даёт ровно w_lr = w_tb = 0.5.
 
-Наконец, коэффициенты дилатации (боковому пальцу растим Y, верхнему/нижнему — X):
+Наконец, коэффициенты дилатации (боковому пальцу растим Y, верхнему/нижнему — X),
+где MAX — ``max_ratio`` (по умолчанию ``DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO``,
+задаётся из CLI через ``--max-asymmetric-dilation-ratio``):
 
-    x_ratio = 1 + MAX_ASYMMETRIC_DILATION_RATIO * w_tb
-    y_ratio = 1 + MAX_ASYMMETRIC_DILATION_RATIO * w_lr
+    x_ratio = 1 + MAX * w_tb
+    y_ratio = 1 + MAX * w_lr
 
 что даёт ровно требуемое поведение:
 
@@ -66,8 +68,8 @@ import cv2
 import numpy as np
 
 # Максимальная ДОБАВКА к коэффициенту дилатации по «выгодной» оси.
-# Итоговый коэффициент по этой оси = 1 + MAX_ASYMMETRIC_DILATION_RATIO.
-MAX_ASYMMETRIC_DILATION_RATIO = 2.0
+# Итоговый коэффициент по этой оси = 1 + DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO.
+DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO = 2.0
 
 # Глобальный выключатель асимметрии. Если False — дилатация круговая (как раньше),
 # т.е. x_ratio = y_ratio = 1 для всех зон.
@@ -93,7 +95,7 @@ class FingerZoneDilation:
     def __init__(
         self,
         image_shape,
-        max_ratio: float = MAX_ASYMMETRIC_DILATION_RATIO,
+        max_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
         enabled: bool = ASYMMETRIC_DILATION_ENABLED,
         corner_softness: float = DEFAULT_CORNER_SOFTNESS,
     ) -> None:
@@ -178,7 +180,7 @@ def dilate_finger_zones(
     mask: np.ndarray,
     dilate_px: int,
     enabled: bool = ASYMMETRIC_DILATION_ENABLED,
-    max_ratio: float = MAX_ASYMMETRIC_DILATION_RATIO,
+    max_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
     corner_softness: float = DEFAULT_CORNER_SOFTNESS,
 ) -> np.ndarray:
     """Дилатирует КАЖДУЮ зону пальца (связную компоненту) со своими коэффициентами.
