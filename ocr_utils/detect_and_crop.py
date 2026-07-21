@@ -247,10 +247,10 @@ def remove_fingers(
     want_boxes: bool = False,
     dilate_px: int = FINGER_DILATE_PX,
     light_increment: "float | tuple[float, float]" = FINGER_ZONE_LIGHT_INCREMENT,
-) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str]:
+) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking/finger_inpaint) в BGR-кадре.
 
-    Возвращает (bgr, finger_mask, lama_roi_bboxes, yolo_boxes, info) — маска,
+    Возвращает (bgr, finger_mask, lama_roi_bboxes, yolo_boxes, info, finger_mask_predilate) — маска,
     список ROI-боксов LaMa (по одному на компоненту маски) и боксы YOLO-World
     нужны только для debug-оверлея, на итоговый bgr не влияют. ``yolo_boxes``
     берётся из ``build_finger_mask(..., return_boxes=True)`` — та же самая
@@ -272,21 +272,22 @@ def remove_fingers(
     изменений.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    mask, info, raw_boxes = build_finger_mask(
-        rgb, method="auto", device=device, conf=conf, dilate_px=dilate_px, return_boxes=True
+    mask, info, raw_boxes, mask_predilate = build_finger_mask(
+        rgb, method="auto", device=device, conf=conf, dilate_px=dilate_px, return_boxes=True, return_predilate=True
     )
     yolo_boxes = raw_boxes if want_boxes else None
+    predilate = mask_predilate if want_boxes else None
     if int(np.count_nonzero(mask)) > 0:
         mask = keep_border_components(mask, edge_frac=FINGER_EDGE_FRAC)
         if int(np.count_nonzero(mask)) == 0:
             info = "auto(отсеяно: не у края)"
     if int(np.count_nonzero(mask)) == 0:
-        return bgr, mask, None, yolo_boxes, info
+        return bgr, mask, None, yolo_boxes, info, predilate
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
     rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
     rgb_clean = lama_inpaint(rgb_bright, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
-    return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info
+    return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info, predilate
 
 
 # ============================================================
@@ -794,6 +795,41 @@ def _draw_dashed_rect(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, color
         _draw_dashed_line(img, p1, p2, color, thickness)
 
 
+def _draw_dashed_contours(
+    img: np.ndarray, mask: np.ndarray, color: tuple, thickness: int, dash_len: int = 24, gap_len: int = 18
+) -> None:
+    """Пунктирный контур маски — чтобы отличать первичную зону пальца от раздутой.
+
+    Фаза пунктира копится ВДОЛЬ всего контура: точки контура идут почти впритык
+    (``CHAIN_APPROX_NONE``), и если сбрасывать фазу на каждом сегменте, каждый
+    короткий сегмент рисуется сплошным штрихом — контур выглядит сплошным.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    period = float(dash_len + gap_len)
+    for cnt in contours:
+        pts = cnt.reshape(-1, 2).astype(np.float64)
+        if len(pts) < 2:
+            continue
+        travelled = 0.0
+        for i in range(len(pts)):
+            p1, p2 = pts[i], pts[(i + 1) % len(pts)]
+            seg = float(np.hypot(*(p2 - p1)))
+            if seg < 1e-6:
+                continue
+            t = 0.0
+            while t < seg:
+                phase = (travelled + t) % period
+                if phase < dash_len:  # штрих
+                    run = min(dash_len - phase, seg - t)
+                    a = p1 + (p2 - p1) * (t / seg)
+                    b = p1 + (p2 - p1) * ((t + run) / seg)
+                    cv2.line(img, tuple(a.astype(int)), tuple(b.astype(int)), color, thickness, cv2.LINE_AA)
+                else:  # пропуск
+                    run = min(period - phase, seg - t)
+                t += run
+            travelled += seg
+
+
 def draw_overlay(
     bgr: np.ndarray,
     mask: np.ndarray,
@@ -803,11 +839,14 @@ def draw_overlay(
     lama_roi_bboxes: Optional[list] = None,
     finger_boxes: Optional[np.ndarray] = None,
     copy_mask: Optional[np.ndarray] = None,
+    finger_mask_predilate: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Кадр с оверлеями: зелёная граница разворота (E1), оранжевая граница области
     копирования (E2, после доп. эрозии), синий min-bbox, фиолетовая crop-зона,
-    красная граница обнаруженного пальца (после SAM), красный пунктирный bbox от
-    YOLO-World (до SAM), жёлтая ROI-рамка контекста для LaMa.
+    красная СПЛОШНАЯ граница зоны пальца ПОСЛЕ (асимметричной) дилатации — именно
+    её закрашивает LaMa, красный ПУНКТИРНЫЙ тонкий контур первичной зоны пальца
+    (после SAM, до дилатации), красный пунктирный bbox от YOLO-World (до SAM),
+    жёлтая ROI-рамка контекста для LaMa.
 
     Рисуется поверх ``bgr`` ДО удаления пальцев и компенсации уровней — оверлей
     должен показывать, что было найдено, а не результат обработки.
@@ -834,6 +873,11 @@ def draw_overlay(
         for bx in finger_boxes:
             x1, y1, x2, y2 = (int(round(v)) for v in bx)
             _draw_dashed_rect(out, x1, y1, x2, y2, COLOR_FINGER, thickness)
+    # Первичная зона пальца (после SAM, ДО дилатации) — тонким пунктиром,
+    # чтобы было видно, насколько её раздула асимметричная дилатация.
+    if finger_mask_predilate is not None and int(np.count_nonzero(finger_mask_predilate)) > 0:
+        _draw_dashed_contours(out, finger_mask_predilate, COLOR_FINGER, max(1, thickness // 2))
+    # Итоговая (раздутая) зона — сплошной линией: именно она уходит в LaMa.
     if finger_mask is not None and int(np.count_nonzero(finger_mask)) > 0:
         contours, _ = cv2.findContours(finger_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(out, contours, -1, COLOR_FINGER, thickness, lineType=cv2.LINE_AA)
@@ -1072,8 +1116,9 @@ def main(
             finger_mask: Optional[np.ndarray] = None
             lama_roi_bboxes: Optional[list] = None
             finger_boxes: Optional[np.ndarray] = None
+            finger_mask_predilate: Optional[np.ndarray] = None
             if do_remove_fingers:
-                bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info = remove_fingers(
+                bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info, finger_mask_predilate = remove_fingers(
                     bgr,
                     device,
                     want_boxes=debug_dir is not None,
@@ -1084,6 +1129,7 @@ def main(
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
 
             mask = page_mask(bgr, device)  # E1 — силуэт разворота (со светлыми страницами и кусками обложки)
+
             # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
             if shadow_method != "none" and finger_mask is not None:
                 bgr = correct_finger_shadow(bgr, finger_mask, mask, shadow_method, device=device)
@@ -1115,7 +1161,15 @@ def main(
                 dbg_path = (debug_dir / rel).with_suffix(".jpg")
                 dbg_path.parent.mkdir(parents=True, exist_ok=True)
                 overlay = draw_overlay(
-                    bgr_orig, mask, geom, margins, finger_mask, lama_roi_bboxes, finger_boxes, copy_mask=copy_mask
+                    bgr_orig,
+                    mask,
+                    geom,
+                    margins,
+                    finger_mask,
+                    lama_roi_bboxes,
+                    finger_boxes,
+                    copy_mask=copy_mask,
+                    finger_mask_predilate=finger_mask_predilate,
                 )
                 cv2.imwrite(str(dbg_path), overlay, _imwrite_params(".jpg"))
 

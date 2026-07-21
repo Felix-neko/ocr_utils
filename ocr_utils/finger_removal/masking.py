@@ -24,6 +24,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from ocr_utils.finger_removal.asymmetric_dilation import dilate_finger_zones
+
 logger = logging.getLogger(__name__)
 
 # Папка для весов нейромоделей (корень проекта, по аналогии с dewarp_models/)
@@ -304,7 +306,9 @@ def _select_finger_boxes(
     whole_idx = np.where(~is_part)[0]
     part_idx = np.where(is_part)[0]
     if len(whole_idx) > 0:
-        kept_whole = whole_idx[_suppress_nested_boxes(boxes[whole_idx], confs[whole_idx], containment_thresh, growth_factor)]
+        kept_whole = whole_idx[
+            _suppress_nested_boxes(boxes[whole_idx], confs[whole_idx], containment_thresh, growth_factor)
+        ]
     else:
         kept_whole = np.empty((0,), dtype=int)
     keep_idx = np.concatenate([kept_whole, part_idx]).astype(int)
@@ -450,6 +454,7 @@ def build_finger_mask(
     device: str = "cuda",
     conf: float = 0.05,
     return_boxes: bool = False,
+    return_predilate: bool = False,
 ) -> "tuple[np.ndarray, str] | tuple[np.ndarray, str, np.ndarray]":
     """Строит итоговую маску пальца. Возвращает (mask uint8 0/255, краткое описание).
 
@@ -473,6 +478,10 @@ def build_finger_mask(
     ``neural_hand_mask``, только для ``method`` != ``skin``, иначе — пустой массив):
     debug-оверлей в ``detect_and_crop.py`` берёт их отсюда вместо повторного
     прогона YOLO-World специально ради визуализации.
+
+    ``return_predilate=True`` дополнительно возвращает (последним элементом) маску
+    ДО дилатации — первичную зону пальца после SAM и заливки дыр. Нужна debug-оверлею,
+    чтобы показать первичную и раздутую зоны разным стилем линий.
     """
     h, w = rgb.shape[:2]
     info = method
@@ -499,11 +508,16 @@ def build_finger_mask(
         # сплошным), НО не используем выпуклую оболочку — она раздувает маску в
         # треугольник, и инпейнтер заливает большую дыру доминирующим фоном.
         mask = fill_holes(mask)
+        mask_predilate = mask.copy()  # первичная зона (после SAM + заливки дыр) — для debug-оверлея
         if dilate_px > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
-            mask = cv2.dilate(mask, kernel, iterations=1)
+            # Асимметричная дилатация: каждую зону пальца растим сильнее вдоль той
+            # стороны кадра, к которой она прилегает (там и лежит её тень).
+            mask = dilate_finger_zones(mask, dilate_px)
+    else:
+        mask_predilate = mask.copy()
 
-    return (mask, info, debug_boxes) if return_boxes else (mask, info)
+    result = (mask, info, debug_boxes) if return_boxes else (mask, info)
+    return (*result, mask_predilate) if return_predilate else result
 
 
 def build_finger_mask_batch(
