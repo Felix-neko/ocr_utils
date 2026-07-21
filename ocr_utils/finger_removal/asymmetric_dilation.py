@@ -191,6 +191,7 @@ def dilate_finger_zones(
         return mask
     helper = FingerZoneDilation(mask.shape, max_ratio=max_ratio, enabled=enabled, corner_softness=corner_softness)
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    height, width = mask.shape[:2]
     out = np.zeros_like(mask)
     for i in range(1, num):
         x, y, w, h = (
@@ -201,6 +202,13 @@ def dilate_finger_zones(
         )
         kx, ky = helper.kernel_radii((x, y, x + w, y + h), dilate_px)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * kx + 1, 2 * ky + 1))
-        comp = (labels == i).astype(np.uint8) * 255
-        out = cv2.bitwise_or(out, cv2.dilate(comp, kernel, iterations=1))
+        # Дилатация локальна: растёт максимум на радиус ядра. Поэтому работаем в bbox
+        # компоненты с запасом (kx, ky), а не на полном кадре — результат тот же, но
+        # объём работы меньше во столько раз, во сколько ROI меньше кадра (иначе
+        # cv2.dilate неразделимым эллипсом по всему кадру съедает секунды на компоненту).
+        x0, y0 = max(0, x - kx), max(0, y - ky)
+        x1, y1 = min(width, x + w + kx), min(height, y + h + ky)
+        comp_roi = (labels[y0:y1, x0:x1] == i).astype(np.uint8) * 255
+        dilated_roi = cv2.dilate(comp_roi, kernel, iterations=1)
+        out[y0:y1, x0:x1] = cv2.bitwise_or(out[y0:y1, x0:x1], dilated_roi)
     return out
