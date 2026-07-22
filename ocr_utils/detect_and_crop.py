@@ -60,6 +60,16 @@ from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_comp
 from ocr_utils.finger_removal.masking import _suppress_nested_boxes
 from ocr_utils.finger_removal.finger_shadow import SHADOW_METHODS, correct_finger_shadow
 from ocr_utils.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
+from ocr_utils.finger_removal.text_protection import (
+    DEFAULT_LAYOUT_PAD_PX,
+    PROTECT_COPY_BACK,
+    PROTECT_LIMIT_LAMA,
+    PROTECT_MODES,
+    copy_back_layout,
+    layout_polygons,
+    limit_paint_zone,
+    polygons_to_mask,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,6 +84,7 @@ COLOR_CROP = (211, 0, 148)  # фиолетовый — финальная crop-�
 COLOR_FINGER = (0, 0, 255)  # красный — обнаруженная область пальца
 COLOR_LAMA_ROI = (0, 255, 255)  # жёлтый — контекстная ROI-рамка, переданная в LaMa
 COLOR_COPY_MASK = (0, 165, 255)  # оранжевый — область копирования E2 (маска после доп. эрозии)
+COLOR_LAYOUT_BLOCK = (255, 255, 0)  # голубой — блок Surya layout (защищён от закраски)
 
 # Поиск правильного поворота разворота: перебор углов ± предела с шагом (градусы)
 ROT_RANGE_DEG = 35
@@ -249,10 +260,14 @@ def remove_fingers(
     dilate_px: int = FINGER_DILATE_PX,
     light_increment: "float | tuple[float, float]" = FINGER_ZONE_LIGHT_INCREMENT,
     asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
-) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray]]:
+    protect_text: bool = False,
+    protect_mode: str = PROTECT_LIMIT_LAMA,
+    layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
+) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray], Optional[list]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking/finger_inpaint) в BGR-кадре.
 
-    Возвращает (bgr, finger_mask, lama_roi_bboxes, yolo_boxes, info, finger_mask_predilate) — маска,
+    Возвращает (bgr, finger_mask, lama_roi_bboxes, yolo_boxes, info, finger_mask_predilate,
+    layout_polys) — маска,
     список ROI-боксов LaMa (по одному на компоненту маски) и боксы YOLO-World
     нужны только для debug-оверлея, на итоговый bgr не влияют. ``yolo_boxes``
     берётся из ``build_finger_mask(..., return_boxes=True)`` — та же самая
@@ -261,6 +276,13 @@ def remove_fingers(
     вызовом ``finger_yolo_boxes``). Возвращается только при ``want_boxes=True``
     (т.е. когда включён ``--debug-dir``), а не всегда, просто чтобы не тащить
     в debug-неактуальные боксы через весь пайплайн.
+
+    При ``protect_text=True`` кадр (ДО закраски) прогоняется через Surya layout, и
+    найденные блоки защищаются от закраски способом ``protect_mode``: урезанием
+    зоны закраски (``limit-lama-zone``) либо копированием блоков обратно с
+    оригинала уже ПОСЛЕ закраски (``copy-back-layout-zones``) — см.
+    ``finger_removal.text_protection``. Возвращаемые ``layout_polys`` нужны только
+    для debug-оверлея.
 
     Палец может исказить детекцию разворота и итоговый кроп, поэтому закраска
     выполняется до ``page_mask``/``crop_rotated``. ``build_finger_mask("auto", ...)``
@@ -291,12 +313,32 @@ def remove_fingers(
         if int(np.count_nonzero(mask)) == 0:
             info = "auto(отсеяно: не у края)"
     if int(np.count_nonzero(mask)) == 0:
-        return bgr, mask, None, yolo_boxes, info, predilate
+        return bgr, mask, None, yolo_boxes, info, predilate, None
+
+    layout_polys: Optional[list] = None
+    if protect_text:
+        layout_polys = layout_polygons(rgb)
+        info = f"{info}, layout: блоков={len(layout_polys)}"
+        if protect_mode == PROTECT_LIMIT_LAMA:
+            before = int(np.count_nonzero(mask))
+            layout_mask = polygons_to_mask(mask.shape, layout_polys, layout_pad_px)
+            mask = limit_paint_zone(mask, mask_predilate, layout_mask)
+            after = int(np.count_nonzero(mask))
+            info = f"{info}, зона закраски {before}→{after} px"
+            if after == 0:
+                return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
     rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
     rgb_clean = lama_inpaint(rgb_bright, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
-    return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info, predilate
+
+    # Копирование блоков обратно — строго ПОСЛЕ закраски и с ИСХОДНОГО (неосветлённого)
+    # кадра: rgb_bright уже подкрашен под LaMa и вернул бы контент со сдвигом яркости.
+    if protect_text and protect_mode == PROTECT_COPY_BACK and layout_polys:
+        rgb_clean, restored = copy_back_layout(rgb, rgb_clean, layout_polys, mask, mask_predilate, layout_pad_px)
+        info = f"{info}, восстановлено блоков={restored}"
+
+    return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info, predilate, layout_polys
 
 
 # ============================================================
@@ -617,6 +659,55 @@ def _bbox_corners(cx: float, cy: float, angle: float, ext: tuple) -> np.ndarray:
     return (corners @ _rotation_matrix(angle) + np.array([cx, cy])).astype(np.float32)
 
 
+def _ext_to_mask(shape: "tuple[int, int]", cx: float, cy: float, angle: float, ext: tuple) -> np.ndarray:
+    """Бинарная маска (uint8 0/255) залитого повёрнутого bbox ``ext`` в координатах кадра."""
+    m = np.zeros(shape[:2], dtype=np.uint8)
+    corners = _bbox_corners(cx, cy, angle, ext).astype(np.int32).reshape(-1, 1, 2)
+    cv2.fillPoly(m, [corners], 255)
+    return m
+
+
+def _layout_ext_bounds(
+    cx: float, cy: float, angle: float, layout_mask: Optional[np.ndarray]
+) -> Optional["tuple[float, float, float, float]"]:
+    """Габариты блоков layout в осях crop-зоны (та же повёрнутая система, что и ``ext``).
+
+    ``layout_mask`` — бинарная маска блоков УЖЕ с padding'ом (см. ``polygons_to_mask``).
+    Контурные точки маски переводятся в повёрнутую вокруг ``(cx, cy)`` систему
+    координат (как в ``min_area_rotated_bbox``) и по ним берётся осевой bbox.
+    Возвращает (minx, miny, maxx, maxy) относительно центра либо None, если маска пуста.
+    """
+    if layout_mask is None:
+        return None
+    contours, _ = cv2.findContours(layout_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    pts = np.vstack([c.reshape(-1, 2) for c in contours]).astype(np.float64)
+    rot = (pts - np.array([cx, cy])) @ _rotation_matrix(angle).T
+    mn = rot.min(axis=0)
+    mx = rot.max(axis=0)
+    return (float(mn[0]), float(mn[1]), float(mx[0]), float(mx[1]))
+
+
+def crop_ext_with_layout(
+    ext: tuple, margins: "tuple[int, int, int, int]", layout_bounds: Optional["tuple[float, float, float, float]"]
+) -> tuple:
+    """Финальный ext crop-зоны: ext с припусками, дополнительно расширенный под layout.
+
+    Сначала применяются ``margins`` (могут быть и отрицательными — отступ внутрь),
+    затем зона расширяется НАРУЖУ ровно настолько, чтобы целиком вместить габариты
+    блоков layout (``layout_bounds`` в тех же осях). Если блоки и так внутри —
+    ничего не меняется. Так отрицательные припуски не срезают часть обложки/текста,
+    которую Surya распознала как контент (см. IMG_0003 с завышенными припусками).
+    """
+    minx, miny, maxx, maxy = _ext_with_margins(ext, margins)
+    if layout_bounds is not None:
+        lminx, lminy, lmaxx, lmaxy = layout_bounds
+        minx, miny = min(minx, lminx), min(miny, lminy)
+        maxx, maxy = max(maxx, lmaxx), max(maxy, lmaxy)
+    return (minx, miny, maxx, maxy)
+
+
 def bridge_component_gaps(mask: np.ndarray, work_side: int = WORK_SIDE) -> np.ndarray:
     """По строкам заполняет промежуток МЕЖДУ первым и последним отрезком маски —
     часть канонической маски разворота (см. ``page_mask``), используется во всех
@@ -743,25 +834,21 @@ def fill_outside_mask(
 
 
 def crop_rotated(
-    bgr: np.ndarray,
-    cx: float,
-    cy: float,
-    angle: float,
-    ext: tuple,
-    margins: "tuple[int, int, int, int]",
-    upscale: Optional[float] = None,
+    bgr: np.ndarray, cx: float, cy: float, angle: float, crop_ext: tuple, upscale: Optional[float] = None
 ) -> np.ndarray:
     """Поворот вокруг центра тяжести + вырез crop-зоны → выпрямленный прямоугольник.
 
-    Берём 4 угла crop-зоны в исходном кадре и перспективным преобразованием
-    отображаем их в осевой прямоугольник нужного размера (это и есть поворот кадра
-    на найденный угол с одновременным вырезом области). ``upscale`` увеличивает
-    только выходной холст (источник сэмплирования — всегда исходный полноразмерный
-    кадр), поэтому апскейл получается за один интерполяционный проход, без потерь
-    от промежуточного ресайза целого кадра. ``None`` — апскейл вообще не считается
-    (экономит время: без умножения размеров и без INTER_CUBIC).
+    ``crop_ext`` — финальный ext crop-зоны (уже с припусками и расширением под
+    layout, см. ``crop_ext_with_layout``). Берём 4 угла crop-зоны в исходном кадре
+    и перспективным преобразованием отображаем их в осевой прямоугольник нужного
+    размера (это и есть поворот кадра на найденный угол с одновременным вырезом
+    области). ``upscale`` увеличивает только выходной холст (источник сэмплирования —
+    всегда исходный полноразмерный кадр), поэтому апскейл получается за один
+    интерполяционный проход, без потерь от промежуточного ресайза целого кадра.
+    ``None`` — апскейл вообще не считается (экономит время: без умножения размеров и
+    без INTER_CUBIC).
     """
-    minx, miny, maxx, maxy = _ext_with_margins(ext, margins)
+    minx, miny, maxx, maxy = crop_ext
     if upscale is None:
         out_w = max(1, int(round(maxx - minx)))
         out_h = max(1, int(round(maxy - miny)))
@@ -849,13 +936,23 @@ def draw_overlay(
     finger_boxes: Optional[np.ndarray] = None,
     copy_mask: Optional[np.ndarray] = None,
     finger_mask_predilate: Optional[np.ndarray] = None,
+    layout_polygons: Optional[list] = None,
+    layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
+    crop_ext: Optional[tuple] = None,
 ) -> np.ndarray:
     """Кадр с оверлеями: зелёная граница разворота (E1), оранжевая граница области
     копирования (E2, после доп. эрозии), синий min-bbox, фиолетовая crop-зона,
     красная СПЛОШНАЯ граница зоны пальца ПОСЛЕ (асимметричной) дилатации — именно
     её закрашивает LaMa, красный ПУНКТИРНЫЙ тонкий контур первичной зоны пальца
     (после SAM, до дилатации), красный пунктирный bbox от YOLO-World (до SAM),
-    жёлтая ROI-рамка контекста для LaMa.
+    жёлтая ROI-рамка контекста для LaMa, голубые тонкие контуры блоков Surya layout
+    (``--protect-text-layout``) — они защищены от закраски. Контуры блоков рисуются
+    УЖЕ с запасом ``layout_pad_px`` (как в маске защиты), т.е. показывают фактически
+    защищённую зону, а не «впритык» очерченный Surya полигон.
+
+    ``crop_ext`` — финальный ext вырезаемой зоны (с припусками и расширением под
+    layout); если не задан, crop-зона рисуется по ``ext`` с ``margins`` (без учёта
+    layout). Так фиолетовая рамка на оверлее совпадает с тем, что реально вырежется.
 
     Рисуется поверх ``bgr`` ДО удаления пальцев и компенсации уровней — оверлей
     должен показывать, что было найдено, а не результат обработки.
@@ -873,8 +970,16 @@ def draw_overlay(
         cx, cy, angle, ext = geom
         bbox = _bbox_corners(cx, cy, angle, ext).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(out, [bbox], True, COLOR_ROT_BBOX, thickness, cv2.LINE_AA)
-        crop = _bbox_corners(cx, cy, angle, _ext_with_margins(ext, margins)).astype(np.int32).reshape(-1, 1, 2)
+        crop_zone = crop_ext if crop_ext is not None else _ext_with_margins(ext, margins)
+        crop = _bbox_corners(cx, cy, angle, crop_zone).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(out, [crop], True, COLOR_CROP, thickness, cv2.LINE_AA)
+    # Блоки layout — тонкой линией: их много, толстая рамка забила бы кадр.
+    # Рисуем контуры маски С padding'ом, чтобы оверлей совпадал с реально
+    # защищённой от закраски зоной (Surya обводит блок впритык).
+    if layout_polygons:
+        layout_mask = polygons_to_mask(out.shape, layout_polygons, layout_pad_px)
+        contours, _ = cv2.findContours(layout_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, contours, -1, COLOR_LAYOUT_BLOCK, max(1, thickness // 2), lineType=cv2.LINE_AA)
     if lama_roi_bboxes is not None:
         for x1, y1, x2, y2 in lama_roi_bboxes:
             cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_LAMA_ROI, thickness, cv2.LINE_AA)
@@ -949,6 +1054,20 @@ def _parse_light_increment(ctx, param, value: str) -> "tuple[float, float]":
     except ValueError:
         pass
     raise click.BadParameter("ожидается число ('20') или пара 'слева,справа' ('15,30')")
+
+
+def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
+    """Парсит ``--layout-pad-px``: 'N' → (N, N), 'X,Y' → (X, Y) (запас по X и по Y)."""
+    parts = [p.strip() for p in str(value).split(",")]
+    try:
+        if len(parts) == 1:
+            v = int(parts[0])
+            return (v, v)
+        if len(parts) == 2:
+            return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        pass
+    raise click.BadParameter("ожидается число ('12') или пара 'по_x,по_y' ('12,24')")
 
 
 def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> str:
@@ -1060,6 +1179,34 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     "(1 + ratio/2) по обеим. 0 — прежняя круговая дилатация",
 )
 @click.option(
+    "--protect-text-layout/--no-protect-text-layout",
+    "protect_text_layout",
+    default=False,
+    show_default=True,
+    help="Прогонять кадр через Surya layout ДО закраски и защищать найденные блоки (текст, "
+    "заголовки, картинки, таблицы) от закраски пальца — позволяет ставить щедрую дилатацию "
+    "под тень, не портя контент. Способ защиты — см. --text-protect-mode",
+)
+@click.option(
+    "--text-protect-mode",
+    type=click.Choice(PROTECT_MODES, case_sensitive=False),
+    default=PROTECT_LIMIT_LAMA,
+    show_default=True,
+    help="Способ защиты блоков layout (--protect-text-layout): limit-lama-zone — вычесть блоки из "
+    "зоны закраски; copy-back-layout-zones — закрасить всё, а потом скопировать пересекающиеся "
+    "с зоной закраски блоки обратно с оригинала (лучше вычищает тень между блоками)",
+)
+@click.option(
+    "--layout-pad-px",
+    default=str(DEFAULT_LAYOUT_PAD_PX),
+    show_default=True,
+    callback=_parse_layout_pad,
+    help="Запас вокруг блока layout, пикс. (--protect-text-layout): Surya обводит блок впритык, "
+    "и без запаса закраска подъедает край строки. Число ('12') — одинаково по обеим осям, пара "
+    "'по_x,по_y' ('12,24') — раздельно. Больше запас — целее контент, но хуже вычищается тень у "
+    "самого блока; 0 — строго по границе блока",
+)
+@click.option(
     "--shadow-method",
     type=click.Choice(SHADOW_METHODS, case_sensitive=False),
     default="none",
@@ -1086,6 +1233,9 @@ def main(
     finger_zone_light_increment: "tuple[float, float]",
     force_dpi: Optional[int],
     asymmetric_dilation_ratio: float,
+    protect_text_layout: bool,
+    text_protect_mode: str,
+    layout_pad_px: "tuple[int, int]",
     shadow_method: str,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
@@ -1106,7 +1256,8 @@ def main(
         "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
-        "max-asymmetric-dilation-ratio: %g",
+        "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
+        "shadow-method: %s",
         len(files),
         device,
         left_margin,
@@ -1125,6 +1276,11 @@ def main(
         finger_zone_light_increment[1],
         force_dpi if force_dpi is not None else "не трогать",
         asymmetric_dilation_ratio,
+        protect_text_layout,
+        text_protect_mode,
+        layout_pad_px[0],
+        layout_pad_px[1],
+        shadow_method,
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
@@ -1139,14 +1295,20 @@ def main(
             lama_roi_bboxes: Optional[list] = None
             finger_boxes: Optional[np.ndarray] = None
             finger_mask_predilate: Optional[np.ndarray] = None
+            layout_polys: Optional[list] = None
             if do_remove_fingers:
-                bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info, finger_mask_predilate = remove_fingers(
-                    bgr,
-                    device,
-                    want_boxes=debug_dir is not None,
-                    dilate_px=finger_dilate_px,
-                    light_increment=finger_zone_light_increment,
-                    asymmetric_dilation_ratio=asymmetric_dilation_ratio,
+                (bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info, finger_mask_predilate, layout_polys) = (
+                    remove_fingers(
+                        bgr,
+                        device,
+                        want_boxes=debug_dir is not None,
+                        dilate_px=finger_dilate_px,
+                        light_increment=finger_zone_light_increment,
+                        asymmetric_dilation_ratio=asymmetric_dilation_ratio,
+                        protect_text=protect_text_layout,
+                        protect_mode=text_protect_mode,
+                        layout_pad_px=layout_pad_px,
+                    )
                 )
                 if int(np.count_nonzero(finger_mask)) > 0:
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
@@ -1169,15 +1331,37 @@ def main(
             out_path = (output_dir / rel).with_suffix(out_suffix)
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Блоки layout нужны и для расширения crop-зоны, и для debug-оверлея.
+            # При удалении пальцев с защитой текста они уже посчитаны в remove_fingers;
+            # иначе, при включённой --protect-text-layout, считаем здесь.
+            if layout_polys is None and protect_text_layout:
+                layout_polys = layout_polygons(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            layout_mask = polygons_to_mask(mask.shape, layout_polys, layout_pad_px) if layout_polys else None
+
+            crop_ext: Optional[tuple] = None
             if geom is None:
                 # Разворот не найден — кладём оригинал, чтобы не терять файл в пайплайне
                 tqdm.write(f"  Разворот не найден, сохраняю оригинал: {rel}")
                 _write_image(out_path, bgr_leveled, params, force_dpi)
             else:
                 cx, cy, angle, ext = geom
+                # Финальная crop-зона: ext с припусками, расширенный так, чтобы целиком
+                # вместить блоки layout (иначе отриц. припуски срезают часть обложки).
+                margined = _ext_with_margins(ext, margins)
+                crop_ext = crop_ext_with_layout(ext, margins, _layout_ext_bounds(cx, cy, angle, layout_mask))
+                # Область копирования (E2) расширяем до расширенного crop-bbox: в кольце
+                # между bbox с припусками и расширенным под layout bbox копируем контент
+                # страницы (E1), иначе fill_outside_mask замажет там обложку фоном — ту
+                # самую, ради которой crop и расширяли.
+                if crop_ext != margined:
+                    ring = cv2.bitwise_and(
+                        _ext_to_mask(mask.shape, cx, cy, angle, crop_ext),
+                        cv2.bitwise_not(_ext_to_mask(mask.shape, cx, cy, angle, margined)),
+                    )
+                    copy_mask = cv2.bitwise_or(copy_mask, cv2.bitwise_and(mask, ring))
                 # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем усреднённым цветом страницы
                 bgr_for_crop = fill_outside_mask(bgr_leveled, copy_mask)
-                crop = crop_rotated(bgr_for_crop, cx, cy, angle, ext, margins, upscale)
+                crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, upscale)
                 _write_image(out_path, crop, params, force_dpi)
 
             if debug_dir is not None:
@@ -1193,6 +1377,9 @@ def main(
                     finger_boxes,
                     copy_mask=copy_mask,
                     finger_mask_predilate=finger_mask_predilate,
+                    layout_polygons=layout_polys,
+                    layout_pad_px=layout_pad_px,
+                    crop_ext=crop_ext,
                 )
                 cv2.imwrite(str(dbg_path), overlay, _imwrite_params(".jpg"))
 
