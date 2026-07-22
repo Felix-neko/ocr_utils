@@ -43,5 +43,7 @@ uv run python -m ocr_utils.detect_and_crop \
     --protect-text-layout \
     --text-protect-mode=copy-back-layout-zones \
     --layout-pad-px=12,48 \
+    --bg-fill-method=nearest \
+    --bg-fill-blur-px=16 \
     --remove-fingers
 

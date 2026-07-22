@@ -44,6 +44,7 @@ ROI-рамка контекста, переданного в LaMa.
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -155,9 +156,18 @@ LEVELS_LOW_PCT = 1.0
 LEVELS_HIGH_PCT = 98.0
 
 # Заливка фона за пределами силуэта книги (перед rotated-crop): эрозия маски
-# книги перед расчётом усреднённого цвета заливки, пикс. — чтобы не захватывать
-# шумную/смазанную границу силуэта.
+# книги перед расчётом цвета заливки, пикс. — чтобы источник цвета не захватывал
+# шумную/смазанную границу силуэта (там же соседствует фон).
 BG_FILL_EROSION_PX = 100
+
+# Способы заливки внешней зоны (значения --bg-fill-method). Все, кроме average,
+# берут цвет из приграничной полосы страницы и локально продлевают его наружу —
+# так воспроизводится и неравномерный свет, и цветная обложка (см.
+# background_fill_extrapolation_report.md). Считаем, что на краю страницы текста
+# нет, поэтому источник цвета чистый и подавление чернил не нужно.
+BG_FILL_AVERAGE = "average"  # один усреднённый цвет по всей странице (старый способ)
+BG_FILL_NEAREST = "nearest"  # цвет ближайшего пикселя границы E2 (Вороной, distance transform)
+BG_FILL_METHODS = (BG_FILL_AVERAGE, BG_FILL_NEAREST)
 
 # Доп. «обрезка» краёв силуэта книги перед копированием, пикс. Маска страницы на
 # тёмном фоне захватывает не только светлые страницы, но и куски сравнительно
@@ -790,23 +800,74 @@ def trim_cover_fragments(
     return out
 
 
+def _nearest_edge_fill(small_bgr: np.ndarray, e2_mask: np.ndarray) -> np.ndarray:
+    """Заливка «по Вороному»: каждому пикселю — цвет ближайшего пикселя границы E2.
+
+    Ближайший пиксель E2 для точки снаружи всегда лежит на границе E2, поэтому это и
+    есть «цвет ближайшей точки границы зоны копирования». ``distance_transform_edt``
+    с ``return_indices`` даёт индексы ближайшего известного (нулевого) пикселя — O(N),
+    без перебора границы. ``e2_mask`` — маска E2 (0 вне). Возвращает BGR uint8.
+    Минус метода — ступеньки на медиальной оси (где ближайшая точка границы
+    переключается); лечится размытием заливки (см. ``_distance_weighted_blur``).
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    iy, ix = distance_transform_edt(e2_mask == 0, return_indices=True, return_distances=False)
+    return small_bgr[iy, ix]
+
+
+def _distance_weighted_blur(img: np.ndarray, e2_mask: np.ndarray, max_sigma: float) -> np.ndarray:
+    """Размывает ``img`` тем сильнее, чем дальше пиксель от зоны копирования ``e2_mask``.
+
+    У самой границы E2 размытия нет (вес 0) — так шов остаётся непрерывным, а ядро
+    приграничного пикселя почти не залезает в E2 (нет ореола от контента у края).
+    Вдали вес растёт до 1 (полное размытие ``max_sigma``) за ``~4·max_sigma`` пикселей
+    от границы. Заливка — гладкий цвет без структуры, поэтому линейного бленда
+    «резкая ⊕ сильно размытая» достаточно (двоения не даёт), собран на встроенных
+    ``cv2.distanceTransform`` + ``cv2.blendLinear``. ``img`` BGR uint8, ``e2_mask`` —
+    маска E2 (0 вне). Пиксели E2 вызывающий НЕ переписывает, поэтому E2 нетронута.
+    """
+    if max_sigma < 0.5:
+        return img
+    # Расстояние до ближайшего пикселя E2 (0 внутри E2, растёт наружу) → вес размытия.
+    d = cv2.distanceTransform((e2_mask == 0).astype(np.uint8), cv2.DIST_L2, 3)
+    alpha = np.clip(d / (4.0 * max_sigma), 0.0, 1.0).astype(np.float32)
+    blurred = cv2.GaussianBlur(img, (0, 0), float(max_sigma))
+    # blendLinear: (w1·s1 + w2·s2)/(w1+w2); w1+w2=1 → попиксельный лерп по alpha.
+    return cv2.blendLinear(img, blurred, 1.0 - alpha, alpha)
+
+
 def fill_outside_mask(
-    bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FILL_EROSION_PX, work_side: int = WORK_SIDE
+    bgr: np.ndarray,
+    mask: np.ndarray,
+    erosion_px: int = BG_FILL_EROSION_PX,
+    work_side: int = WORK_SIDE,
+    method: str = BG_FILL_AVERAGE,
+    blur_px: float = 0.0,
 ) -> np.ndarray:
-    """Закрашивает всё вне ``mask`` усреднённым цветом внутри неё.
+    """Закрашивает всё вне ``mask`` цветом бумаги/обложки внутри неё.
 
     Криволинейная маска страницы не идеально совпадает с осевым min-area bbox
     (неровные/загнутые края) — в углы повёрнутого кропа может попасть кусок
-    чёрного фона. Заранее закрасив фон усреднённым цветом книги, получаем
-    ровный угол вместо чёрного пятна, даже если crop-зона чуть шире силуэта.
-    Цвет считается по маске, эрозированной на ``erosion_px`` — чтобы не задеть
-    шумную/смазанную границу силуэта (там же соседствует фон).
+    чёрного фона. Заранее закрасив фон, получаем ровный угол вместо чёрного пятна,
+    даже если crop-зона чуть шире силуэта.
 
-    Эрозия и усреднение цвета считаются на копии, уменьшенной до ``work_side`` —
-    нужен только один средний цвет, а ``cv2.erode`` с эллиптическим ядром
-    ``erosion_px=100`` (диаметр 201px) на кадре 30-48 Мп не раскладывается на
-    быстрые сепарабельные проходы и заметно (секунды) тормозит пайплайн (см.
-    профилирование). Полное разрешение используется только для самой заливки.
+    ``method`` — способ заливки (см. ``BG_FILL_METHODS``):
+
+    - ``average`` — один усреднённый цвет по всей странице (старый способ): дёшево,
+      но не учитывает ни неравномерный свет, ни цветную обложку. Цвет усредняется по
+      маске, эрозированной на ``erosion_px`` — чтобы шумный край не сдвигал среднее.
+    - ``nearest`` — цвет ближайшей точки границы E2 (см. ``_nearest_edge_fill``): без
+      эрозии (цвет нужен у самой границы), учитывает неравномерный свет и цветную
+      обложку. Опционально сглаживается размытием (``blur_px``).
+
+    ``blur_px`` (>0, только для локальных методов) — переменное размытие заливки: у
+    границы E2 нуль, вдали до σ=``blur_px`` (см. ``_distance_weighted_blur``). Зона
+    копирования при этом остаётся нетронутой (переписываем только пиксели вне E2).
+
+    Всё считается на копии, уменьшенной до ``work_side`` (эрозия и экстраполяция на
+    кадрах 30-48 Мп заметно тормозят), к полному разрешению применяется только
+    подстановка заполненного цвета во внешнюю зону.
     """
     sel = mask > 0
     if not np.any(sel):
@@ -817,19 +878,33 @@ def fill_outside_mask(
     if scale < 1.0:
         small_mask = cv2.resize(mask, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST)
         small_bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-        small_erosion_px = max(1, int(round(erosion_px * scale)))
     else:
-        small_mask, small_bgr, small_erosion_px = mask, bgr, erosion_px
+        small_mask, small_bgr = mask, bgr
 
-    sample_sel = small_mask > 0
-    if small_erosion_px > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (small_erosion_px * 2 + 1, small_erosion_px * 2 + 1))
-        eroded = cv2.erode(small_mask, k)
-        if np.any(eroded > 0):
-            sample_sel = eroded > 0
-    avg_color = small_bgr[sample_sel].mean(axis=0)
+    if method == BG_FILL_AVERAGE:
+        # Источник среднего цвета — маска, эрозированная на erosion_px (без шумного
+        # края/подтёкшего фона). Локальным методам эрозия не нужна: они берут цвет у
+        # самой границы E2 (уже обрезанной trim_cover_fragments).
+        small_erosion_px = max(1, int(round(erosion_px * scale))) if scale < 1.0 else erosion_px
+        sample_sel = small_mask
+        if small_erosion_px > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (small_erosion_px * 2 + 1, small_erosion_px * 2 + 1))
+            eroded = cv2.erode(small_mask, k)
+            if np.any(eroded > 0):
+                sample_sel = eroded
+        avg_color = small_bgr[sample_sel > 0].mean(axis=0)
+        out = bgr.copy()
+        out[~sel] = avg_color.astype(np.uint8)
+        return out
+
+    filled_small = _nearest_edge_fill(small_bgr, small_mask)
+    if blur_px > 0:
+        # Размытие тем сильнее, чем дальше от границы E2 (на downscale).
+        filled_small = _distance_weighted_blur(filled_small, small_mask, blur_px * scale)
+    # Карта заливки гладкая (без деталей) — обычного билинейного апскейла достаточно.
+    filled = cv2.resize(filled_small, (w, h), interpolation=cv2.INTER_LINEAR) if scale < 1.0 else filled_small
     out = bgr.copy()
-    out[~sel] = avg_color.astype(np.uint8)
+    out[~sel] = filled[~sel]
     return out
 
 
@@ -1214,6 +1289,25 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     help="Коррекция теневой зоны вокруг пальца после зарисовки: none | classic | retinex | "
     "docshadow-sd7k | docshadow-kligler | docshadow-jung (нейросеть DocShadow)",
 )
+@click.option(
+    "--bg-fill-method",
+    type=click.Choice(BG_FILL_METHODS, case_sensitive=False),
+    default=BG_FILL_AVERAGE,
+    show_default=True,
+    help="Способ заливки внешней зоны (в углы повёрнутого кропа за краем страницы): "
+    "average — один усреднённый цвет по всей странице (старый); nearest — цвет ближайшей "
+    "точки границы зоны копирования (Вороной): учитывает неравномерный свет и цветную "
+    "обложку, можно сгладить через --bg-fill-blur-px",
+)
+@click.option(
+    "--bg-fill-blur-px",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Размытие зоны заливки (только для локальных методов заливки): 0 — выкл; иначе σ "
+    "растёт от 0 у границы зоны копирования до этого значения вдали. Зона копирования не "
+    "затрагивается",
+)
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -1237,6 +1331,8 @@ def main(
     text_protect_mode: str,
     layout_pad_px: "tuple[int, int]",
     shadow_method: str,
+    bg_fill_method: str,
+    bg_fill_blur_px: float,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1257,7 +1353,7 @@ def main(
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
         "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
-        "shadow-method: %s",
+        "shadow-method: %s | bg-fill-method: %s (blur-px=%g)",
         len(files),
         device,
         left_margin,
@@ -1281,6 +1377,8 @@ def main(
         layout_pad_px[0],
         layout_pad_px[1],
         shadow_method,
+        bg_fill_method,
+        bg_fill_blur_px,
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
@@ -1359,8 +1457,10 @@ def main(
                         cv2.bitwise_not(_ext_to_mask(mask.shape, cx, cy, angle, margined)),
                     )
                     copy_mask = cv2.bitwise_or(copy_mask, cv2.bitwise_and(mask, ring))
-                # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем усреднённым цветом страницы
-                bgr_for_crop = fill_outside_mask(bgr_leveled, copy_mask)
+                # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем цветом края (--bg-fill-method)
+                _t_fill = time.perf_counter()
+                bgr_for_crop = fill_outside_mask(bgr_leveled, copy_mask, method=bg_fill_method, blur_px=bg_fill_blur_px)
+                tqdm.write(f"  Заливка ({bg_fill_method}): {(time.perf_counter() - _t_fill) * 1000:.0f} мс ({rel})")
                 crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, upscale)
                 _write_image(out_path, crop, params, force_dpi)
 
