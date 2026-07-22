@@ -1102,19 +1102,26 @@ def _imwrite_params(suffix: str) -> list[int]:
 
 
 def _write_image(out_path: Path, img: np.ndarray, params: list[int], force_dpi: Optional[int]) -> None:
-    """Сохраняет изображение через cv2; если задан ``force_dpi`` — дописывает DPI-метаданные через PIL.
+    """Сохраняет изображение. Без ``force_dpi`` — быстрый ``cv2.imwrite``.
 
-    cv2.imwrite не умеет прописывать разрешение (DPI), поэтому при заданном ``force_dpi`` файл
-    перечитывается PIL и пересохраняется с тегом dpi (pHYs для PNG, X/YResolution для TIFF).
-    Для TIFF при переспасении явно сохраняем LZW (без потерь), чтобы PIL не сменил сжатие.
+    cv2.imwrite не умеет прописывать разрешение (DPI). Раньше при ``force_dpi`` файл
+    после cv2 перечитывался PIL и пересохранялся с тегом dpi — это ВТОРОЙ проход
+    кодека (для TIFF-LZW на 30-48 Мп — несколько секунд впустую, всё в один поток).
+    Теперь TIFF с DPI пишется ОДНИМ проходом через PIL (LZW без потерь + тег
+    разрешения). PNG-ветка (DPI нужен редко) оставлена прежней двухпроходной.
     """
+    if force_dpi is None:
+        cv2.imwrite(str(out_path), img, params)
+        return
+
+    if out_path.suffix.lower() in (".tif", ".tiff"):
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim == 3 else img
+        PILImage.fromarray(rgb).save(str(out_path), format="TIFF", compression="tiff_lzw", dpi=(force_dpi, force_dpi))
+        return
+
     cv2.imwrite(str(out_path), img, params)
-    if force_dpi is not None:
-        save_kwargs: dict = {"dpi": (force_dpi, force_dpi)}
-        if out_path.suffix.lower() in (".tif", ".tiff"):
-            save_kwargs["compression"] = "tiff_lzw"
-        with PILImage.open(out_path) as im:
-            im.save(out_path, **save_kwargs)
+    with PILImage.open(out_path) as im:
+        im.save(out_path, dpi=(force_dpi, force_dpi))
 
 
 def _parse_light_increment(ctx, param, value: str) -> "tuple[float, float]":
