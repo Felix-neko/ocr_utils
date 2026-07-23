@@ -544,7 +544,7 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     return mask
 
 
-def page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
+def page_mask(bgr: np.ndarray, device: str, pad_tb_px: int = 0) -> np.ndarray:
     """Полная маска разворота в разрешении кадра (детекция на уменьшенной копии).
 
     Результат уже включает ``bridge_component_gaps`` — то есть промежуток между
@@ -553,8 +553,19 @@ def page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     КАНОНИЧЕСКАЯ маска разворота — используется одинаково во всех потребителях
     (debug-оверлей, ``min_area_rotated_bbox``, ``compensate_levels``,
     ``fill_outside_mask``), а не только для одного из них.
+
+    ``pad_tb_px`` > 0 — перед детекцией добавить чёрную рамку сверху и снизу на
+    указанное число пикселей, а маску вернуть уже без неё (в координатах исходного
+    кадра). Приём для снимков, где книга занимает кадр целиком по вертикали и
+    детектится «вся область как разворот»: чёрная рамка даёт SAM явную тёмную
+    границу и отодвигает YOLO-боксы от краёв, а рост площади кадра выводит
+    near-full-frame боксы из-под порогов LARGE_BOX_CONF_TIERS.
     """
     h, w = bgr.shape[:2]
+    if pad_tb_px > 0:
+        padded = cv2.copyMakeBorder(bgr, pad_tb_px, pad_tb_px, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        mask = page_mask(padded, device)
+        return mask[pad_tb_px : pad_tb_px + h, :]
     scale = WORK_SIDE / max(h, w) if max(h, w) > WORK_SIDE else 1.0
     work = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
     mask = detect_page_mask(work, device)
@@ -1325,6 +1336,16 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     "затрагивается",
 )
 @click.option(
+    "--detect-pad-tb-px",
+    type=int,
+    default=250,
+    show_default=True,
+    help="Перед детекцией разворота добавить чёрную рамку сверху и снизу на N пикселей (маска "
+    "возвращается в координатах кадра, рамка срезается обратно). Помогает на снимках, где книга "
+    "занимает кадр целиком по вертикали и детектится «вся область как разворот»: чёрная рамка "
+    "даёт SAM тёмную границу и отодвигает боксы от краёв. 0 — выкл",
+)
+@click.option(
     "--log-level",
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=False),
     default="WARNING",
@@ -1356,6 +1377,7 @@ def main(
     shadow_method: str,
     bg_fill_method: str,
     bg_fill_blur_px: float,
+    detect_pad_tb_px: int,
     log_level: str,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
@@ -1378,7 +1400,7 @@ def main(
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
         "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
-        "shadow-method: %s | bg-fill-method: %s (blur-px=%g)",
+        "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d",
         len(files),
         device,
         left_margin,
@@ -1404,6 +1426,7 @@ def main(
         shadow_method,
         bg_fill_method,
         bg_fill_blur_px,
+        detect_pad_tb_px,
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
@@ -1447,7 +1470,7 @@ def main(
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
 
             with log_timing("page_mask", path.name):
-                mask = page_mask(bgr, device)  # E1 — силуэт разворота (светлые страницы + куски обложки)
+                mask = page_mask(bgr, device, pad_tb_px=detect_pad_tb_px)  # E1 — силуэт разворота (светлые страницы + куски обложки)
 
             # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
             if shadow_method != "none" and finger_mask is not None:

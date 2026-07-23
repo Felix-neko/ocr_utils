@@ -15,9 +15,9 @@ cd "$(dirname "$0")"
 #OUTPUT_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/out"
 #DEBUG_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/debug"
 
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-07-20 досканы разное/VE/1964/02"
-OUTPUT_DIR="/mnt/system/raw/ve_test/out/1964/02"
-DEBUG_DIR="/mnt/system/raw/ve_test/debug/1964/02"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-13-07-ВЭ/1962/"
+OUTPUT_DIR="/mnt/system/raw/ve_test/out/1962"
+DEBUG_DIR="/mnt/system/raw/ve_test/debug/1962"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
