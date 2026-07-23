@@ -44,7 +44,7 @@ ROI-рамка контекста, переданного в LaMa.
 """
 
 import logging
-import time
+import timeit
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +61,7 @@ from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_comp
 from ocr_utils.finger_removal.masking import _suppress_nested_boxes
 from ocr_utils.finger_removal.finger_shadow import SHADOW_METHODS, correct_finger_shadow
 from ocr_utils.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
+from ocr_utils.timing import log_timing
 from ocr_utils.finger_removal.text_protection import (
     DEFAULT_LAYOUT_PAD_PX,
     PROTECT_COPY_BACK,
@@ -72,8 +73,9 @@ from ocr_utils.finger_removal.text_protection import (
     polygons_to_mask,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
 
 # Папка для весов нейромоделей (корень проекта, рядом с finger_models)
 MODELS_DIR = Path(__file__).resolve().parents[1] / "finger_models"
@@ -273,6 +275,7 @@ def remove_fingers(
     protect_text: bool = False,
     protect_mode: str = PROTECT_LIMIT_LAMA,
     layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
+    log_name: str = "",
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray], Optional[list]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking/finger_inpaint) в BGR-кадре.
 
@@ -306,16 +309,18 @@ def remove_fingers(
     изменений.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    mask, info, raw_boxes, mask_predilate = build_finger_mask(
-        rgb,
-        method="auto",
-        device=device,
-        conf=conf,
-        dilate_px=dilate_px,
-        return_boxes=True,
-        return_predilate=True,
-        asymmetric_dilation_ratio=asymmetric_dilation_ratio,
-    )
+    with log_timing("build_finger_mask", log_name):
+        mask, info, raw_boxes, mask_predilate = build_finger_mask(
+            rgb,
+            method="auto",
+            device=device,
+            conf=conf,
+            dilate_px=dilate_px,
+            return_boxes=True,
+            return_predilate=True,
+            asymmetric_dilation_ratio=asymmetric_dilation_ratio,
+            log_name=log_name,
+        )
     yolo_boxes = raw_boxes if want_boxes else None
     predilate = mask_predilate if want_boxes else None
     if int(np.count_nonzero(mask)) > 0:
@@ -327,7 +332,8 @@ def remove_fingers(
 
     layout_polys: Optional[list] = None
     if protect_text:
-        layout_polys = layout_polygons(rgb)
+        with log_timing("layout_polygons", log_name):
+            layout_polys = layout_polygons(rgb)
         info = f"{info}, layout: блоков={len(layout_polys)}"
         if protect_mode == PROTECT_LIMIT_LAMA:
             before = int(np.count_nonzero(mask))
@@ -339,13 +345,16 @@ def remove_fingers(
                 return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
-    rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
-    rgb_clean = lama_inpaint(rgb_bright, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
+    with log_timing("brighten_finger_zone", log_name):
+        rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
+    with log_timing("lama_inpaint", log_name):
+        rgb_clean = lama_inpaint(rgb_bright, mask, device=device, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
 
     # Копирование блоков обратно — строго ПОСЛЕ закраски и с ИСХОДНОГО (неосветлённого)
     # кадра: rgb_bright уже подкрашен под LaMa и вернул бы контент со сдвигом яркости.
     if protect_text and protect_mode == PROTECT_COPY_BACK and layout_polys:
-        rgb_clean, restored = copy_back_layout(rgb, rgb_clean, layout_polys, mask, mask_predilate, layout_pad_px)
+        with log_timing("copy_back_layout", log_name):
+            rgb_clean, restored = copy_back_layout(rgb, rgb_clean, layout_polys, mask, mask_predilate, layout_pad_px)
         info = f"{info}, восстановлено блоков={restored}"
 
     return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info, predilate, layout_polys
@@ -1315,6 +1324,13 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     "растёт от 0 у границы зоны копирования до этого значения вдали. Зона копирования не "
     "затрагивается",
 )
+@click.option(
+    "--log-level",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=False),
+    default="WARNING",
+    show_default=True,
+    help="Уровень логирования. INFO — печатать тайминги ключевых операций (timeit) по каждому кадру",
+)
 def main(
     input_dir: Path,
     output_dir: Path,
@@ -1340,8 +1356,10 @@ def main(
     shadow_method: str,
     bg_fill_method: str,
     bg_fill_blur_px: float,
+    log_level: str,
 ) -> None:
     """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
+    logging.getLogger().setLevel(log_level.upper())
     output_dir.mkdir(parents=True, exist_ok=True)
     if debug_dir is not None:
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -1389,8 +1407,10 @@ def main(
     )
 
     for path in tqdm(files, desc="Crop", unit="img"):
+        _t_frame = timeit.default_timer()
         try:
-            bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            with log_timing("imread", path.name):
+                bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if bgr is None:
                 tqdm.write(f"  Не удалось загрузить: {path.name}")
                 continue
@@ -1402,8 +1422,16 @@ def main(
             finger_mask_predilate: Optional[np.ndarray] = None
             layout_polys: Optional[list] = None
             if do_remove_fingers:
-                (bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info, finger_mask_predilate, layout_polys) = (
-                    remove_fingers(
+                with log_timing("remove_fingers", path.name):
+                    (
+                        bgr,
+                        finger_mask,
+                        lama_roi_bboxes,
+                        finger_boxes,
+                        finger_info,
+                        finger_mask_predilate,
+                        layout_polys,
+                    ) = remove_fingers(
                         bgr,
                         device,
                         want_boxes=debug_dir is not None,
@@ -1413,21 +1441,29 @@ def main(
                         protect_text=protect_text_layout,
                         protect_mode=text_protect_mode,
                         layout_pad_px=layout_pad_px,
+                        log_name=path.name,
                     )
-                )
                 if int(np.count_nonzero(finger_mask)) > 0:
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
 
-            mask = page_mask(bgr, device)  # E1 — силуэт разворота (со светлыми страницами и кусками обложки)
+            with log_timing("page_mask", path.name):
+                mask = page_mask(bgr, device)  # E1 — силуэт разворота (светлые страницы + куски обложки)
 
             # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
             if shadow_method != "none" and finger_mask is not None:
-                bgr = correct_finger_shadow(bgr, finger_mask, mask, shadow_method, device=device)
+                with log_timing("correct_finger_shadow", path.name):
+                    bgr = correct_finger_shadow(bgr, finger_mask, mask, shadow_method, device=device)
 
-            geom = min_area_rotated_bbox(mask)  # B1/B2 строим по E1
+            with log_timing("min_area_rotated_bbox", path.name):
+                geom = min_area_rotated_bbox(mask)  # B1/B2 строим по E1
             # E2 — область копирования: E1 с обрезанными периферийными фрагментами обложки
-            copy_mask = trim_cover_fragments(mask, extra_erosion_px)
-            bgr_leveled = compensate_levels(bgr, mask, erosion_px) if do_compensate_levels else bgr
+            with log_timing("trim_cover_fragments", path.name):
+                copy_mask = trim_cover_fragments(mask, extra_erosion_px)
+            if do_compensate_levels:
+                with log_timing("compensate_levels", path.name):
+                    bgr_leveled = compensate_levels(bgr, mask, erosion_px)
+            else:
+                bgr_leveled = bgr
 
             # При recursive — зеркалим подкаталоги; формат — из --output-format либо как у входа
             rel = path.relative_to(input_dir)
@@ -1440,55 +1476,66 @@ def main(
             # При удалении пальцев с защитой текста они уже посчитаны в remove_fingers;
             # иначе, при включённой --protect-text-layout, считаем здесь.
             if layout_polys is None and protect_text_layout:
-                layout_polys = layout_polygons(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-            layout_mask = polygons_to_mask(mask.shape, layout_polys, layout_pad_px) if layout_polys else None
+                with log_timing("layout_polygons", path.name):
+                    layout_polys = layout_polygons(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            with log_timing("polygons_to_mask", path.name):
+                layout_mask = polygons_to_mask(mask.shape, layout_polys, layout_pad_px) if layout_polys else None
 
             crop_ext: Optional[tuple] = None
             if geom is None:
                 # Разворот не найден — кладём оригинал, чтобы не терять файл в пайплайне
                 tqdm.write(f"  Разворот не найден, сохраняю оригинал: {rel}")
-                _write_image(out_path, bgr_leveled, params, force_dpi)
+                with log_timing("write_image", path.name):
+                    _write_image(out_path, bgr_leveled, params, force_dpi)
             else:
-                cx, cy, angle, ext = geom
-                # Финальная crop-зона: ext с припусками, расширенный так, чтобы целиком
-                # вместить блоки layout (иначе отриц. припуски срезают часть обложки).
-                margined = _ext_with_margins(ext, margins)
-                crop_ext = crop_ext_with_layout(ext, margins, _layout_ext_bounds(cx, cy, angle, layout_mask))
-                # Область копирования (E2) расширяем до расширенного crop-bbox: в кольце
-                # между bbox с припусками и расширенным под layout bbox копируем контент
-                # страницы (E1), иначе fill_outside_mask замажет там обложку фоном — ту
-                # самую, ради которой crop и расширяли.
-                if crop_ext != margined:
-                    ring = cv2.bitwise_and(
-                        _ext_to_mask(mask.shape, cx, cy, angle, crop_ext),
-                        cv2.bitwise_not(_ext_to_mask(mask.shape, cx, cy, angle, margined)),
-                    )
-                    copy_mask = cv2.bitwise_or(copy_mask, cv2.bitwise_and(mask, ring))
+                with log_timing("crop_geometry", path.name):
+                    cx, cy, angle, ext = geom
+                    # Финальная crop-зона: ext с припусками, расширенный так, чтобы целиком
+                    # вместить блоки layout (иначе отриц. припуски срезают часть обложки).
+                    margined = _ext_with_margins(ext, margins)
+                    crop_ext = crop_ext_with_layout(ext, margins, _layout_ext_bounds(cx, cy, angle, layout_mask))
+                    # Область копирования (E2) расширяем до расширенного crop-bbox: в кольце
+                    # между bbox с припусками и расширенным под layout bbox копируем контент
+                    # страницы (E1), иначе fill_outside_mask замажет там обложку фоном — ту
+                    # самую, ради которой crop и расширяли.
+                    if crop_ext != margined:
+                        ring = cv2.bitwise_and(
+                            _ext_to_mask(mask.shape, cx, cy, angle, crop_ext),
+                            cv2.bitwise_not(_ext_to_mask(mask.shape, cx, cy, angle, margined)),
+                        )
+                        copy_mask = cv2.bitwise_or(copy_mask, cv2.bitwise_and(mask, ring))
                 # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем цветом края (--bg-fill-method)
-                _t_fill = time.perf_counter()
-                bgr_for_crop = fill_outside_mask(bgr_leveled, copy_mask, method=bg_fill_method, blur_px=bg_fill_blur_px)
-                tqdm.write(f"  Заливка ({bg_fill_method}): {(time.perf_counter() - _t_fill) * 1000:.0f} мс ({rel})")
-                crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, upscale)
-                _write_image(out_path, crop, params, force_dpi)
+                with log_timing(f"fill_outside_mask[{bg_fill_method}]", path.name):
+                    bgr_for_crop = fill_outside_mask(
+                        bgr_leveled, copy_mask, method=bg_fill_method, blur_px=bg_fill_blur_px
+                    )
+                with log_timing("crop_rotated", path.name):
+                    crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, upscale)
+                with log_timing("write_image", path.name):
+                    _write_image(out_path, crop, params, force_dpi)
 
             if debug_dir is not None:
                 dbg_path = (debug_dir / rel).with_suffix(".jpg")
                 dbg_path.parent.mkdir(parents=True, exist_ok=True)
-                overlay = draw_overlay(
-                    bgr_orig,
-                    mask,
-                    geom,
-                    margins,
-                    finger_mask,
-                    lama_roi_bboxes,
-                    finger_boxes,
-                    copy_mask=copy_mask,
-                    finger_mask_predilate=finger_mask_predilate,
-                    layout_polygons=layout_polys,
-                    layout_pad_px=layout_pad_px,
-                    crop_ext=crop_ext,
-                )
-                cv2.imwrite(str(dbg_path), overlay, _imwrite_params(".jpg"))
+                with log_timing("draw_overlay", path.name):
+                    overlay = draw_overlay(
+                        bgr_orig,
+                        mask,
+                        geom,
+                        margins,
+                        finger_mask,
+                        lama_roi_bboxes,
+                        finger_boxes,
+                        copy_mask=copy_mask,
+                        finger_mask_predilate=finger_mask_predilate,
+                        layout_polygons=layout_polys,
+                        layout_pad_px=layout_pad_px,
+                        crop_ext=crop_ext,
+                    )
+                with log_timing("write_debug_overlay", path.name):
+                    cv2.imwrite(str(dbg_path), overlay, _imwrite_params(".jpg"))
+
+            logger.info("%7.0f мс: ИТОГО кадр (%s)", (timeit.default_timer() - _t_frame) * 1000.0, path.name)
 
         except Exception as e:
             tqdm.write(f"  Ошибка {path.name}: {e}")

@@ -15,9 +15,9 @@ cd "$(dirname "$0")"
 #OUTPUT_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/out"
 #DEBUG_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/debug"
 
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/Экономист/пак-2 (450 dpi)/1991/01"
-OUTPUT_DIR="/mnt/system/raw/economist/pak2/iter_1/out/1991/01"
-DEBUG_DIR="/mnt/system/raw/economist/pak2/iter_1/debug/1991/01"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-07-20 досканы разное/VE/1964/02"
+OUTPUT_DIR="/mnt/system/raw/ve_test/out/1964/02"
+DEBUG_DIR="/mnt/system/raw/ve_test/debug/1964/02"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -29,7 +29,7 @@ uv run python -m ocr_utils.detect_and_crop \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir "$DEBUG_DIR" \
     --recursive \
-    --top-margin -180 \
+    --top-margin -100 \
     --bottom-margin -270 \
     --left-margin -310 \
     --right-margin -310 \
@@ -39,11 +39,12 @@ uv run python -m ocr_utils.detect_and_crop \
     --finger-dilate-px=120 \
     --max-asymmetric-dilation-ratio=1.6 \
     --finger-zone-light-increment=20,40 \
-    --extra-erosion-px=165 \
+    --extra-erosion-px=80 \
     --protect-text-layout \
     --text-protect-mode=copy-back-layout-zones \
     --layout-pad-px=18,72 \
     --bg-fill-method=nearest \
     --bg-fill-blur-px=16 \
+    --log-level=INFO \
     --remove-fingers
 

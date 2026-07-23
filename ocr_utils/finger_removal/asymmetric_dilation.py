@@ -62,10 +62,11 @@
 режимами. При eps=0 переход был бы разрывным вблизи угла (0/0).
 """
 
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
+from scipy import ndimage as ndi
 
 # Максимальная ДОБАВКА к коэффициенту дилатации по «выгодной» оси.
 # Итоговый коэффициент по этой оси = 1 + DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO.
@@ -176,22 +177,36 @@ class FingerZoneDilation:
         return kx, ky
 
 
-def dilate_finger_zones(
-    mask: np.ndarray,
-    dilate_px: int,
-    enabled: bool = ASYMMETRIC_DILATION_ENABLED,
-    max_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
-    corner_softness: float = DEFAULT_CORNER_SOFTNESS,
+def dilate_zones_elliptical(
+    mask: np.ndarray, kernel_radii: "Callable[[tuple[int, int, int, int]], tuple[int, int]]"
 ) -> np.ndarray:
-    """Дилатирует КАЖДУЮ зону пальца (связную компоненту) со своими коэффициентами.
+    """Дилатирует КАЖДУЮ связную компоненту маски своим эллипсом (полуоси kx, ky).
 
-    Компоненты обрабатываются раздельно, потому что пальцы на одном кадре бывают
-    с разных сторон (слева и справа), и каждому нужен свой перекос дилатации.
-    Результат — объединение раздутых компонент.
+    ``kernel_radii`` — функция bbox=(x_min, y_min, x_max, y_max) → (kx, ky):
+    полуоси эллипса в пикселях для данной компоненты. Так одна и та же процедура
+    обслуживает и равномерную дилатацию (одинаковые (kx, ky) на все компоненты,
+    напр. запас вокруг блоков layout), и асимметричную (свои коэффициенты на
+    каждую зону пальца — см. ``FingerZoneDilation``). Результат — объединение
+    раздутых компонент, uint8 0/255.
+
+    КАК СЧИТАЕТСЯ (и почему быстро). Дилатация эллипсом с полуосями (kx, ky) —
+    это «все пиксели не дальше 1 от компоненты в метрике с шагом по осям
+    (1/ky, 1/kx)». Берём анизотропный distance transform (``distance_transform_edt``
+    с ``sampling``) и порог ≤ 1. Два ключевых момента:
+
+      1. Работаем в ROI компоненты (её bbox + запас (kx, ky)), а не на полном
+         кадре — дилатация растёт максимум на радиус ядра, дальше результат нулевой.
+      2. EDT стоит O(пикселей ROI) и НЕ зависит от радиуса ядра, тогда как
+         ``cv2.dilate`` неразделимым эллипсом стоит O(пиксели × площадь_ядра) и на
+         больших ядрах (сотни пикселей) съедает секунды на компоненту.
+
+    По измерениям per-ROI EDT быстрее ``cv2.dilate`` во всех режимах (мелкое ядро
+    на большом кадре, крупное анизотропное ядро), поэтому единый метод без ветвлений.
+    Форма — истинный (не растровый) эллипс, инвариант «дилатация не сжимает»
+    выполняется автоматически (у самой компоненты расстояние 0 ≤ 1).
     """
-    if dilate_px <= 0 or int(np.count_nonzero(mask)) == 0:
+    if int(np.count_nonzero(mask)) == 0:
         return mask
-    helper = FingerZoneDilation(mask.shape, max_ratio=max_ratio, enabled=enabled, corner_softness=corner_softness)
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     height, width = mask.shape[:2]
     out = np.zeros_like(mask)
@@ -202,15 +217,32 @@ def dilate_finger_zones(
             stats[i, cv2.CC_STAT_WIDTH],
             stats[i, cv2.CC_STAT_HEIGHT],
         )
-        kx, ky = helper.kernel_radii((x, y, x + w, y + h), dilate_px)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * kx + 1, 2 * ky + 1))
-        # Дилатация локальна: растёт максимум на радиус ядра. Поэтому работаем в bbox
-        # компоненты с запасом (kx, ky), а не на полном кадре — результат тот же, но
-        # объём работы меньше во столько раз, во сколько ROI меньше кадра (иначе
-        # cv2.dilate неразделимым эллипсом по всему кадру съедает секунды на компоненту).
+        kx, ky = kernel_radii((x, y, x + w, y + h))
+        kx, ky = max(1, int(kx)), max(1, int(ky))
         x0, y0 = max(0, x - kx), max(0, y - ky)
         x1, y1 = min(width, x + w + kx), min(height, y + h + ky)
-        comp_roi = (labels[y0:y1, x0:x1] == i).astype(np.uint8) * 255
-        dilated_roi = cv2.dilate(comp_roi, kernel, iterations=1)
+        comp_roi = labels[y0:y1, x0:x1] == i
+        edt = ndi.distance_transform_edt(~comp_roi, sampling=(1.0 / ky, 1.0 / kx))
+        dilated_roi = (edt <= 1.0).astype(np.uint8) * 255
         out[y0:y1, x0:x1] = cv2.bitwise_or(out[y0:y1, x0:x1], dilated_roi)
     return out
+
+
+def dilate_finger_zones(
+    mask: np.ndarray,
+    dilate_px: int,
+    enabled: bool = ASYMMETRIC_DILATION_ENABLED,
+    max_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
+    corner_softness: float = DEFAULT_CORNER_SOFTNESS,
+) -> np.ndarray:
+    """Дилатирует КАЖДУЮ зону пальца (связную компоненту) со своими коэффициентами.
+
+    Компоненты обрабатываются раздельно, потому что пальцы на одном кадре бывают
+    с разных сторон (слева и справа), и каждому нужен свой перекос дилатации
+    (см. ``FingerZoneDilation``). Сама дилатация — через общий
+    ``dilate_zones_elliptical``.
+    """
+    if dilate_px <= 0 or int(np.count_nonzero(mask)) == 0:
+        return mask
+    helper = FingerZoneDilation(mask.shape, max_ratio=max_ratio, enabled=enabled, corner_softness=corner_softness)
+    return dilate_zones_elliptical(mask, lambda bbox: helper.kernel_radii(bbox, dilate_px))

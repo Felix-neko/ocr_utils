@@ -34,6 +34,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from ocr_utils.finger_removal.asymmetric_dilation import dilate_zones_elliptical
+
 # Режимы защиты (значения --text-protect-mode)
 PROTECT_LIMIT_LAMA = "limit-lama-zone"
 PROTECT_COPY_BACK = "copy-back-layout-zones"
@@ -46,6 +48,7 @@ PROTECT_MODES = (PROTECT_LIMIT_LAMA, PROTECT_COPY_BACK)
 # против вычистки тени: в limit-lama-zone кайма блока не закрашивается вовсе, в
 # copy-back-layout-zones — копируется обратно вместе с блоком (т.е. с тенью).
 DEFAULT_LAYOUT_PAD_PX = 12
+
 
 def _pad_xy(pad_px: "int | tuple[int, int]") -> "tuple[int, int]":
     """Нормализует запас к паре (по X, по Y): скаляр → (N, N).
@@ -118,13 +121,18 @@ def polygons_to_mask(
 
 
 def _dilated(mask: np.ndarray, pad_px: "int | tuple[int, int]") -> np.ndarray:
-    """Маска, расширенная на ``pad_px`` (скаляр или пара по X/Y; без изменений при <=0)."""
+    """Маска, расширенная на ``pad_px`` (скаляр или пара по X/Y; без изменений при <=0).
+
+    Равномерная (одинаковые полуоси на все блоки) дилатация через общий
+    ``dilate_zones_elliptical``: он считает эллиптическую дилатацию в ROI каждой
+    компоненты анизотропным distance transform — на порядок дешевле, чем
+    ``cv2.dilate`` эллипсом по всему 30-Мп кадру (см. его docstring).
+    """
     px, py = _pad_xy(pad_px)
     if px <= 0 and py <= 0:
         return mask
-    px, py = max(px, 0), max(py, 0)
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * py + 1))
-    return cv2.dilate(mask, k)
+    px, py = max(px, 1), max(py, 1)
+    return dilate_zones_elliptical(mask, lambda bbox: (px, py))
 
 
 def intersecting_polygons(

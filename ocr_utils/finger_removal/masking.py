@@ -25,6 +25,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO, dilate_finger_zones
+from ocr_utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +326,7 @@ def neural_hand_mask(
     max_area_frac: float = MAX_FINGER_AREA_FRAC,
     containment_thresh: float = 0.8,
     return_boxes: bool = False,
+    log_name: str = "",
 ) -> "np.ndarray | tuple[np.ndarray, np.ndarray]":
     """Маска пальца через YOLO-World→SAM. Возвращает uint8 0/255 (может быть пустой).
 
@@ -345,8 +347,10 @@ def neural_hand_mask(
     img_area = h * w
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-    yolo = _load_yolo_world(yolo_model, device)
-    det = yolo.predict(bgr, conf=conf, device=device, verbose=False)
+    with log_timing("yolo_load", log_name, log=logger):
+        yolo = _load_yolo_world(yolo_model, device)
+    with log_timing("yolo_predict", log_name, log=logger):
+        det = yolo.predict(bgr, conf=conf, device=device, verbose=False)
     boxes = det[0].boxes.xyxy.cpu().numpy() if det and det[0].boxes is not None else np.empty((0, 4))
     confs = det[0].boxes.conf.cpu().numpy() if det and det[0].boxes is not None else np.empty((0,))
     cls = det[0].boxes.cls.cpu().numpy().astype(int) if det and det[0].boxes is not None else np.empty((0,), dtype=int)
@@ -366,8 +370,10 @@ def neural_hand_mask(
         mask = np.zeros((h, w), dtype=np.uint8)
         return (mask, debug_boxes) if return_boxes else mask
 
-    sam = _load_sam(sam_model)
-    seg = sam.predict(bgr, bboxes=boxes, device=device, verbose=False)
+    with log_timing("sam_load", log_name, log=logger):
+        sam = _load_sam(sam_model)
+    with log_timing("sam_predict", log_name, log=logger):
+        seg = sam.predict(bgr, bboxes=boxes, device=device, verbose=False)
     mask = np.zeros((h, w), dtype=np.uint8)
     if seg and seg[0].masks is not None:
         data = seg[0].masks.data.cpu().numpy()  # (N, H, W), float/bool
@@ -456,6 +462,7 @@ def build_finger_mask(
     return_boxes: bool = False,
     return_predilate: bool = False,
     asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
+    log_name: str = "",
 ) -> "tuple[np.ndarray, str] | tuple[np.ndarray, str, np.ndarray]":
     """Строит итоговую маску пальца. Возвращает (mask uint8 0/255, краткое описание).
 
@@ -491,10 +498,12 @@ def build_finger_mask(
     if method == "skin":
         mask = skin_edge_mask(rgb, edge_frac=edge_frac, min_area_frac=min_area_frac)
     elif method == "neural":
-        mask, debug_boxes = neural_hand_mask(rgb, device=device, conf=conf, return_boxes=True)
+        with log_timing("neural_hand_mask", log_name, log=logger):
+            mask, debug_boxes = neural_hand_mask(rgb, device=device, conf=conf, return_boxes=True, log_name=log_name)
         mask = keep_border_components(mask, edge_frac=edge_frac, min_area_frac=min_area_frac)
     elif method == "auto":
-        nm, debug_boxes = neural_hand_mask(rgb, device=device, conf=conf, return_boxes=True)
+        with log_timing("neural_hand_mask", log_name, log=logger):
+            nm, debug_boxes = neural_hand_mask(rgb, device=device, conf=conf, return_boxes=True, log_name=log_name)
         if int(np.count_nonzero(nm)) == 0:
             mask = np.zeros((h, w), dtype=np.uint8)
             info = "auto(пусто)"
@@ -508,12 +517,14 @@ def build_finger_mask(
         # Заполняем только внутренние дыры компонент (силуэт пальца должен быть
         # сплошным), НО не используем выпуклую оболочку — она раздувает маску в
         # треугольник, и инпейнтер заливает большую дыру доминирующим фоном.
-        mask = fill_holes(mask)
+        with log_timing("fill_holes", log_name, log=logger):
+            mask = fill_holes(mask)
         mask_predilate = mask.copy()  # первичная зона (после SAM + заливки дыр) — для debug-оверлея
         if dilate_px > 0:
             # Асимметричная дилатация: каждую зону пальца растим сильнее вдоль той
             # стороны кадра, к которой она прилегает (там и лежит её тень).
-            mask = dilate_finger_zones(mask, dilate_px, max_ratio=asymmetric_dilation_ratio)
+            with log_timing("dilate_finger_zones", log_name, log=logger):
+                mask = dilate_finger_zones(mask, dilate_px, max_ratio=asymmetric_dilation_ratio)
     else:
         mask_predilate = mask.copy()
 
