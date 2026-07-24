@@ -1223,6 +1223,15 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
 @click.option("--bottom-margin", default=0, show_default=True, help="Припуск crop-зоны снизу, пикс. (>0 шире, <0 уже)")
 @click.option("--recursive", is_flag=True, default=False, help="Рекурсивно обходить подкаталоги в поисках картинок")
 @click.option(
+    "--skip-if-exists/--no-skip-if-exists",
+    "skip_if_exists",
+    default=True,
+    show_default=True,
+    help="Пропускать файл, если соответствующий результат уже есть в OUTPUT_DIR (докачка "
+    "прерванного прогона). Проверяется только output-файл; debug-оверлей при обработке файла "
+    "перезаписывается всегда. При --no-skip-if-exists всё пересчитывается заново.",
+)
+@click.option(
     "--output-format",
     type=click.Choice(["png", "tiff"], case_sensitive=False),
     default=None,
@@ -1375,6 +1384,7 @@ def main(
     right_margin: int,
     bottom_margin: int,
     recursive: bool,
+    skip_if_exists: bool,
     output_format: Optional[str],
     do_compensate_levels: bool,
     erosion_px: int,
@@ -1411,6 +1421,7 @@ def main(
 
     logger.info(
         "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
+        "skip-if-exists: %s | "
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
         "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
@@ -1422,6 +1433,7 @@ def main(
         right_margin,
         bottom_margin,
         recursive,
+        skip_if_exists,
         output_format or "как у входа",
         do_compensate_levels,
         erosion_px,
@@ -1446,6 +1458,22 @@ def main(
     for path in tqdm(files, desc="Crop", unit="img"):
         _t_frame = timeit.default_timer()
         try:
+            # Путь результата (при recursive зеркалим подкаталоги; формат — из
+            # --output-format либо как у входа). Считаем его ДО загрузки картинки,
+            # чтобы --skip-if-exists мог пропустить файл, не тратя время на imread
+            # и модели.
+            rel = path.relative_to(input_dir)
+            out_suffix = _resolve_output_suffix(path.suffix, output_format)
+            out_path = (output_dir / rel).with_suffix(out_suffix)
+            # Докачка прерванного прогона: пропускаем файл, только если готов
+            # OUTPUT-файл. debug-оверлей при фактической обработке переписывается
+            # всегда (его наличие на решение о пропуске не влияет).
+            if skip_if_exists and out_path.exists():
+                logger.info("Пропуск (результат уже есть): %s", rel)
+                continue
+            params = _imwrite_params(out_suffix)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+
             with log_timing("imread", path.name):
                 bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if bgr is None:
@@ -1503,13 +1531,6 @@ def main(
                     bgr_leveled = compensate_levels(bgr, mask, erosion_px)
             else:
                 bgr_leveled = bgr
-
-            # При recursive — зеркалим подкаталоги; формат — из --output-format либо как у входа
-            rel = path.relative_to(input_dir)
-            out_suffix = _resolve_output_suffix(path.suffix, output_format)
-            params = _imwrite_params(out_suffix)
-            out_path = (output_dir / rel).with_suffix(out_suffix)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Блоки layout нужны и для расширения crop-зоны, и для debug-оверлея.
             # При удалении пальцев с защитой текста они уже посчитаны в remove_fingers;
