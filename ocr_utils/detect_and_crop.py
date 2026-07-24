@@ -57,7 +57,7 @@ from skimage.exposure import rescale_intensity
 from tqdm import tqdm
 
 from ocr_utils.finger_removal.finger_inpaint import lama_inpaint, roi_bounds_list
-from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_components
+from ocr_utils.finger_removal.masking import build_finger_mask, keep_border_components, drop_fingers_on_content
 from ocr_utils.finger_removal.masking import _suppress_nested_boxes
 from ocr_utils.finger_removal.finger_shadow import SHADOW_METHODS, correct_finger_shadow
 from ocr_utils.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
@@ -335,14 +335,28 @@ def remove_fingers(
         with log_timing("layout_polygons", log_name):
             layout_polys = layout_polygons(rgb)
         info = f"{info}, layout: блоков={len(layout_polys)}"
-        if protect_mode == PROTECT_LIMIT_LAMA:
-            before = int(np.count_nonzero(mask))
+        if layout_polys:
             layout_mask = polygons_to_mask(mask.shape, layout_polys, layout_pad_px)
-            mask = limit_paint_zone(mask, mask_predilate, layout_mask)
-            after = int(np.count_nonzero(mask))
-            info = f"{info}, зона закраски {before}→{after} px"
-            if after == 0:
-                return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
+            # Ложные «пальцы» на печатном контенте (лица на портретах) убираем из
+            # маски ещё ДО закраски — иначе LaMa затрёт сам контент. Работает в
+            # обоих режимах защиты (и copy-back, и limit-lama).
+            with log_timing("drop_fingers_on_content", log_name):
+                mask, mask_predilate, dropped = drop_fingers_on_content(
+                    mask, mask_predilate, layout_mask, dilate_px, asymmetric_dilation_ratio, FINGER_EDGE_FRAC
+                )
+            if dropped:
+                info = f"{info}, ложных пальцев на контенте убрано={dropped}"
+                if want_boxes:
+                    predilate = mask_predilate
+                if int(np.count_nonzero(mask)) == 0:
+                    return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
+            if protect_mode == PROTECT_LIMIT_LAMA:
+                before = int(np.count_nonzero(mask))
+                mask = limit_paint_zone(mask, mask_predilate, layout_mask)
+                after = int(np.count_nonzero(mask))
+                info = f"{info}, зона закраски {before}→{after} px"
+                if after == 0:
+                    return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
     with log_timing("brighten_finger_zone", log_name):
@@ -354,7 +368,7 @@ def remove_fingers(
     # кадра: rgb_bright уже подкрашен под LaMa и вернул бы контент со сдвигом яркости.
     if protect_text and protect_mode == PROTECT_COPY_BACK and layout_polys:
         with log_timing("copy_back_layout", log_name):
-            rgb_clean, restored = copy_back_layout(rgb, rgb_clean, layout_polys, mask, mask_predilate, layout_pad_px)
+            rgb_clean, restored = copy_back_layout(rgb, rgb_clean, layout_polys, mask, layout_pad_px)
         info = f"{info}, восстановлено блоков={restored}"
 
     return cv2.cvtColor(rgb_clean, cv2.COLOR_RGB2BGR), mask, roi_bboxes, yolo_boxes, info, predilate, layout_polys
@@ -1470,7 +1484,9 @@ def main(
                     tqdm.write(f"  Пальцы: {finger_info} ({path.name})")
 
             with log_timing("page_mask", path.name):
-                mask = page_mask(bgr, device, pad_tb_px=detect_pad_tb_px)  # E1 — силуэт разворота (светлые страницы + куски обложки)
+                mask = page_mask(
+                    bgr, device, pad_tb_px=detect_pad_tb_px
+                )  # E1 — силуэт разворота (светлые страницы + куски обложки)
 
             # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
             if shadow_method != "none" and finger_mask is not None:

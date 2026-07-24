@@ -57,6 +57,11 @@ CLAMP_CLASSES = ["binder clip", "colored clip", "office clip", "clip", "clamp", 
 # Палец никогда не занимает больше этой доли кадра — отсекаем гигантские ложные маски
 MAX_FINGER_AREA_FRAC = 0.12
 
+# Доля площади СЫРОГО (до дилатации) блоба пальца, лежащая внутри контентного блока
+# Surya, при которой блоб считается ложным пальцем на печатном контенте (лицо на
+# портрете). См. drop_fingers_on_content.
+FINGER_LAYOUT_OVERLAP_DROP = 0.50
+
 # Кэш загруженных моделей (чтобы не грузить заново на каждом кадре)
 _MODEL_CACHE: dict = {}
 
@@ -138,6 +143,75 @@ def keep_border_components(
         if touches_border or touches_seed:
             out[comp] = 255
     return out
+
+
+def drop_fingers_on_content(
+    mask: np.ndarray,
+    predilate: np.ndarray,
+    layout_mask: np.ndarray,
+    dilate_px: int,
+    asymmetric_dilation_ratio: float,
+    edge_frac: float,
+    overlap_thr: float = FINGER_LAYOUT_OVERLAP_DROP,
+) -> "tuple[np.ndarray, np.ndarray, int]":
+    """Убирает ложные «пальцы», распознанные на печатном контенте.
+
+    Компонент СЫРОЙ (до дилатации) маски ``predilate`` считается ложным, если
+    ≥``overlap_thr`` его площади лежит внутри контентных блоков ``layout_mask`` И
+    он НЕ касается краевой рамки кадра (ширина ``edge_frac``). Логика: настоящий
+    палец входит С КРАЯ кадра по чистой бумаге, поэтому касается рамки и в блок
+    Surya не попадает; а лицо на напечатанном портрете — внутреннее и целиком
+    внутри блока Surya (детектор пальца принимает его за кожу).
+
+    Оценка ведётся ДО дилатации: она склеивает ложный блоб (портрет) с настоящим
+    пальцем в один компонент, и на раздутой маске доля «внутри блока» размывается.
+
+    Убрав ложные компоненты из сырой маски, ЗАНОВО строим дилатированную маску (те
+    же параметры дилатации + отсев не-краевых компонент через
+    ``keep_border_components``), чтобы вместе с ложным ядром ушла и его раздутая
+    кайма.
+
+    Возвращает (дилатированная маска, сырая маска, число убранных компонентов).
+    """
+    if int(np.count_nonzero(predilate)) == 0 or int(np.count_nonzero(layout_mask)) == 0:
+        return mask, predilate, 0
+
+    h, w = predilate.shape[:2]
+    frame_w = max(1, int(edge_frac * w))
+    frame_h = max(1, int(edge_frac * h))
+    border = np.zeros((h, w), dtype=bool)
+    border[:frame_h, :] = True
+    border[h - frame_h :, :] = True
+    border[:, :frame_w] = True
+    border[:, w - frame_w :] = True
+    layout_bool = layout_mask > 0
+
+    num, labels = cv2.connectedComponents((predilate > 0).astype(np.uint8), connectivity=8)
+    cleaned = predilate.copy()
+    dropped = 0
+    for i in range(1, num):
+        comp = labels == i
+        area = int(comp.sum())
+        if area == 0:
+            continue
+        inside = int(np.count_nonzero(comp & layout_bool))
+        if inside / area < overlap_thr:
+            continue
+        if bool(np.any(comp & border)):  # касается рамки — настоящий палец, не трогаем
+            continue
+        cleaned[comp] = 0
+        dropped += 1
+
+    if dropped == 0:
+        return mask, predilate, 0
+    if int(np.count_nonzero(cleaned)) == 0:
+        return cleaned, cleaned, dropped  # все компоненты оказались ложными — пустая маска
+
+    new_mask = (
+        dilate_finger_zones(cleaned, dilate_px, max_ratio=asymmetric_dilation_ratio) if dilate_px > 0 else cleaned
+    )
+    new_mask = keep_border_components(new_mask, edge_frac=edge_frac)
+    return new_mask, cleaned, dropped
 
 
 def skin_edge_mask(rgb: np.ndarray, edge_frac: float = 0.12, min_area_frac: float = 0.0015) -> np.ndarray:
