@@ -89,6 +89,25 @@ COLOR_LAMA_ROI = (0, 255, 255)  # жёлтый — контекстная ROI-р
 COLOR_COPY_MASK = (0, 165, 255)  # оранжевый — область копирования E2 (маска после доп. эрозии)
 COLOR_LAYOUT_BLOCK = (255, 255, 0)  # голубой — блок Surya layout (защищён от закраски)
 
+# --- Паразитные (артефактные) блоки layout ---------------------------------
+# На пустых/почти пустых страницах Surya иногда рисует один блок почти на всю
+# страницу. Такой блок раздувает crop-зону (``crop_ext_with_layout`` тянется до
+# него) и мешает закраске пальцев. Когда область книги уже известна (page_mask,
+# зелёный контур на оверлее), отсеиваем такие блоки из расчёта crop-зоны по двум
+# эвристикам (см. ``classify_parasitic_layouts``):
+#   H1: площадь блока > LAYOUT_PARASITE_MAX_BOOK_AREA_FRAC площади книги;
+#   H2: блок раздувает грубый axis-aligned bbox книги более чем на
+#       LAYOUT_PARASITE_MAX_BBOX_GROWTH_FRAC (по площади).
+# Паразитные блоки на debug-оверлее рисуются ПУНКТИРОМ (нормальные — сплошным).
+#
+# Порог H1 = 0.50 выбран консервативно: лучше пропустить часть гигантских
+# паразитных блоков, чем ложно пометить настоящий крупный блок. Для справки по
+# данным: паразитный блок = целая пустая страница ≈ 45%+ площади книги, а самый
+# крупный НОРМАЛЬНЫЙ одиночный блок (плотное оглавление) ≈ 33%. При 0.50 почти
+# пустая страница IMG_0104 (44.7%) под H1 не подпадёт — это осознанный компромисс.
+LAYOUT_PARASITE_MAX_BOOK_AREA_FRAC = 0.50  # H1
+LAYOUT_PARASITE_MAX_BBOX_GROWTH_FRAC = 0.30  # H2 (N)
+
 # Поиск правильного поворота разворота: перебор углов ± предела с шагом (градусы)
 ROT_RANGE_DEG = 35
 ROT_STEP_DEG = 1
@@ -752,6 +771,53 @@ def crop_ext_with_layout(
     return (minx, miny, maxx, maxy)
 
 
+def classify_parasitic_layouts(
+    layout_polys: "list[np.ndarray]",
+    book_mask: np.ndarray,
+    layout_pad_px: "int | tuple[int, int]",
+    max_book_area_frac: float = LAYOUT_PARASITE_MAX_BOOK_AREA_FRAC,
+    max_bbox_growth_frac: float = LAYOUT_PARASITE_MAX_BBOX_GROWTH_FRAC,
+) -> "list[bool]":
+    """Для каждого полигона layout — флаг «паразитный» (артефакт на пустой странице).
+
+    Требует уже известную область книги ``book_mask`` (силуэт разворота E1, тот же,
+    что рисуется зелёным на debug-оверлее). Блок паразитный, если выполнено ЛЮБОЕ:
+
+    H1 — площадь блока больше ``max_book_area_frac`` площади книги (целая пустая
+         страница ≈ половина разворота; нормальные блоки — куски страницы, мельче).
+    H2 — блок раздувает грубый axis-aligned bbox книги более чем на
+         ``max_bbox_growth_frac``: берём объединение bbox книги и bbox блока (с
+         запасом ``layout_pad_px``, как при защите/рисовании) и сравниваем площадь с
+         площадью одного bbox книги. Ловит блоки, вылезшие за пределы страниц.
+
+    Возвращает список флагов, выровненный с ``layout_polys``.
+    """
+    if not layout_polys:
+        return []
+    book_area = int(np.count_nonzero(book_mask))
+    bx, by, bw, bh = cv2.boundingRect((book_mask > 0).astype(np.uint8))
+    book_bbox_area = bw * bh
+    px, py = layout_pad_px if isinstance(layout_pad_px, (tuple, list)) else (layout_pad_px, layout_pad_px)
+
+    flags: list[bool] = []
+    for poly in layout_polys:
+        area = float(cv2.contourArea(poly.reshape(-1, 1, 2).astype(np.float32)))
+        # H1 — блок занимает слишком большую долю самой книги.
+        h1 = book_area > 0 and area > max_book_area_frac * book_area
+        # H2 — блок сильно раздувает грубый bbox книги.
+        h2 = False
+        if book_bbox_area > 0:
+            xs, ys = poly[:, 0], poly[:, 1]
+            lminx, lminy = xs.min() - px, ys.min() - py
+            lmaxx, lmaxy = xs.max() + px, ys.max() + py
+            uw = max(bx + bw, lmaxx) - min(bx, lminx)
+            uh = max(by + bh, lmaxy) - min(by, lminy)
+            growth = uw * uh / book_bbox_area - 1.0
+            h2 = growth > max_bbox_growth_frac
+        flags.append(bool(h1 or h2))
+    return flags
+
+
 def bridge_component_gaps(mask: np.ndarray, work_side: int = WORK_SIDE) -> np.ndarray:
     """По строкам заполняет промежуток МЕЖДУ первым и последним отрезком маски —
     часть канонической маски разворота (см. ``page_mask``), используется во всех
@@ -1046,6 +1112,7 @@ def draw_overlay(
     copy_mask: Optional[np.ndarray] = None,
     finger_mask_predilate: Optional[np.ndarray] = None,
     layout_polygons: Optional[list] = None,
+    parasitic_layout_polygons: Optional[list] = None,
     layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
     crop_ext: Optional[tuple] = None,
 ) -> np.ndarray:
@@ -1057,7 +1124,9 @@ def draw_overlay(
     жёлтая ROI-рамка контекста для LaMa, голубые тонкие контуры блоков Surya layout
     (``--protect-text-layout``) — они защищены от закраски. Контуры блоков рисуются
     УЖЕ с запасом ``layout_pad_px`` (как в маске защиты), т.е. показывают фактически
-    защищённую зону, а не «впритык» очерченный Surya полигон.
+    защищённую зону, а не «впритык» очерченный Surya полигон. ``parasitic_layout_polygons``
+    (артефакты на пустых страницах, исключённые из crop-зоны) рисуются тем же голубым
+    цветом, но ПУНКТИРОМ.
 
     ``crop_ext`` — финальный ext вырезаемой зоны (с припусками и расширением под
     layout); если не задан, crop-зона рисуется по ``ext`` с ``margins`` (без учёта
@@ -1089,6 +1158,11 @@ def draw_overlay(
         layout_mask = polygons_to_mask(out.shape, layout_polygons, layout_pad_px)
         contours, _ = cv2.findContours(layout_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(out, contours, -1, COLOR_LAYOUT_BLOCK, max(1, thickness // 2), lineType=cv2.LINE_AA)
+    # Паразитные (артефактные) блоки layout — тем же цветом, но ПУНКТИРОМ: они
+    # исключены из расчёта crop-зоны (см. classify_parasitic_layouts).
+    if parasitic_layout_polygons:
+        para_mask = polygons_to_mask(out.shape, parasitic_layout_polygons, layout_pad_px)
+        _draw_dashed_contours(out, para_mask, COLOR_LAYOUT_BLOCK, max(1, thickness // 2))
     if lama_roi_bboxes is not None:
         for x1, y1, x2, y2 in lama_roi_bboxes:
             cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_LAMA_ROI, thickness, cv2.LINE_AA)
@@ -1538,8 +1612,30 @@ def main(
             if layout_polys is None and protect_text_layout:
                 with log_timing("layout_polygons", path.name):
                     layout_polys = layout_polygons(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            # Отсев паразитных layout: теперь, когда известна область книги (mask),
+            # исключаем артефактные блоки (целая пустая страница и т.п.) из расчёта
+            # crop-зоны — иначе они сильно раздувают вырезаемую область. Для crop-зоны
+            # и её оверлея берём только «хорошие» блоки; паразитные рисуем пунктиром.
+            #
+            # TODO (на будущее): если паразитный блок пересекался с первичной зоной
+            # пальца, то закраска этого пальца шла НЕКОРРЕКТНО (блок ложно защитил
+            # контент — на самом деле там пусто). После отсева таких блоков стоило бы
+            # ПОВТОРИТЬ закраску именно пересекавшихся с ними пальцев. А при включённом
+            # copy-back — заново скопировать обратно оставшиеся (не-паразитные) блоки,
+            # пересекающиеся с зоной пальца. Сейчас отсев влияет только на crop-зону и
+            # оверлей: закраска/защита считаются раньше (до page_mask), где область
+            # книги ещё неизвестна.
+            good_polys = layout_polys
+            parasitic_polys: list = []
+            if layout_polys:
+                with log_timing("classify_parasitic_layouts", path.name):
+                    par_flags = classify_parasitic_layouts(layout_polys, mask, layout_pad_px)
+                good_polys = [p for p, par in zip(layout_polys, par_flags) if not par]
+                parasitic_polys = [p for p, par in zip(layout_polys, par_flags) if par]
+                if parasitic_polys:
+                    tqdm.write(f"  Паразитных layout: {len(parasitic_polys)} (исключены из crop) ({path.name})")
             with log_timing("polygons_to_mask", path.name):
-                layout_mask = polygons_to_mask(mask.shape, layout_polys, layout_pad_px) if layout_polys else None
+                layout_mask = polygons_to_mask(mask.shape, good_polys, layout_pad_px) if good_polys else None
 
             crop_ext: Optional[tuple] = None
             if geom is None:
@@ -1588,7 +1684,8 @@ def main(
                         finger_boxes,
                         copy_mask=copy_mask,
                         finger_mask_predilate=finger_mask_predilate,
-                        layout_polygons=layout_polys,
+                        layout_polygons=good_polys,
+                        parasitic_layout_polygons=parasitic_polys,
                         layout_pad_px=layout_pad_px,
                         crop_ext=crop_ext,
                     )
