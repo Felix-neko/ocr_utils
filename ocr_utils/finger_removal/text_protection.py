@@ -79,20 +79,27 @@ LAYOUT_WORK_SIDE = 2048
 
 # --- Фильтр «мусорных» блоков layout ---------------------------------------
 # Surya на нетекстовых страницах (яркая обложка, пустая страница с пальцем)
-# иногда выдаёт один огромный блок Figure/Picture во весь журнал/во всю высоту
-# кадра с низкой уверенностью. Такой блок — не контент, а артефакт: защищать под
-# ним нечего, зато он ложно закрывает от закраски палец и раздувает crop-зону.
-# Отбрасываем блок, если ОДНОВРЕМЕННО:
-#   * класс входит в LAYOUT_JUNK_CLASSES (только нетекстовые — текст так не врёт);
-#   * уверенность ниже LAYOUT_JUNK_MAX_CONFIDENCE;
-#   * И при этом ЛИБО он покрывает > LAYOUT_JUNK_MIN_BOOK_AREA_FRAC площади книги,
-#     ЛИБО его верх и низ оба вплотную (в пределах LAYOUT_JUNK_EDGE_TOL_FRAC высоты)
-#     подходят к границе кадра.
+# иногда выдаёт один огромный блок во весь журнал/во всю высоту кадра. Такой блок
+# — не контент, а артефакт: защищать под ним нечего, зато он ложно закрывает от
+# закраски палец и раздувает crop-зону. Блок отбрасывается, если выполнено ЛЮБОЕ:
+#
+# (A) БЕЗУСЛОВНЫЕ геометрические отбросы (при любом классе и любой уверенности —
+#     на пустых страницах Surya уверенно ошибается, класс/conf бесполезны):
+#       * площадь блока БОЛЬШЕ площади самой книги (блок вылез за пределы страниц);
+#       * площадь блока больше MAX_LAYOUT_VIEWPORT_RATIO площади кадра.
+#
+# (B) Мягкая эвристика для средних Figure/Picture — только при ОДНОВРЕМЕННО:
+#       * класс входит в LAYOUT_JUNK_CLASSES (текст так не врёт);
+#       * уверенность ниже LAYOUT_JUNK_MAX_CONFIDENCE;
+#       * И ЛИБО он покрывает > LAYOUT_JUNK_MIN_BOOK_AREA_FRAC площади книги, ЛИБО
+#         его верх и низ оба вплотную (в пределах LAYOUT_JUNK_EDGE_TOL_FRAC высоты)
+#         к границе кадра.
 # Настоящие иллюстрации (Picture с высоким conf, разумной площади) — не трогаются.
 LAYOUT_JUNK_CLASSES = ("Figure", "Picture")
 LAYOUT_JUNK_MAX_CONFIDENCE = 0.60  # доля 0..1, не проценты
 LAYOUT_JUNK_MIN_BOOK_AREA_FRAC = 0.70  # доля площади области книги
 LAYOUT_JUNK_EDGE_TOL_FRAC = 0.02  # «вплотную к краю» — в пределах этой доли высоты кадра
+MAX_LAYOUT_VIEWPORT_RATIO = 0.90  # блок крупнее этой доли площади кадра — заведомо мусор
 
 _LAYOUT_PREDICTOR = None
 
@@ -124,22 +131,30 @@ def _book_region_area(img_rgb: np.ndarray) -> int:
     return int(np.count_nonzero(fg))
 
 
-def _is_junk_layout_block(label: str, confidence: float, polygon: np.ndarray, img_h: int, book_area: int) -> bool:
+def _is_junk_layout_block(
+    label: str, confidence: float, polygon: np.ndarray, img_h: int, img_w: int, book_area: int
+) -> bool:
     """Признак «мусорного» блока layout (см. пороги LAYOUT_JUNK_* выше).
 
-    ``polygon`` — в координатах того же кадра, что ``img_h``/``book_area``.
+    ``polygon`` — в координатах того же кадра, что ``img_h``/``img_w``/``book_area``.
     """
+    area = float(cv2.contourArea(polygon.reshape(-1, 1, 2).astype(np.float32)))
+
+    # (A) Безусловные геометрические отбросы — при любом классе и уверенности.
+    if book_area > 0 and area > book_area:  # блок крупнее самой книги — вылез за страницы
+        return True
+    if area > MAX_LAYOUT_VIEWPORT_RATIO * img_h * img_w:  # почти весь кадр
+        return True
+
+    # (B) Мягкая эвристика для средних мусорных Figure/Picture.
     if label not in LAYOUT_JUNK_CLASSES:
         return False
     if confidence >= LAYOUT_JUNK_MAX_CONFIDENCE:
         return False
     ys = polygon[:, 1]
-    # Покрывает почти всю книгу.
-    area = float(cv2.contourArea(polygon.reshape(-1, 1, 2).astype(np.float32)))
-    too_big = book_area > 0 and area > LAYOUT_JUNK_MIN_BOOK_AREA_FRAC * book_area
-    # Верх и низ оба вплотную к границе кадра.
+    too_big = book_area > 0 and area > LAYOUT_JUNK_MIN_BOOK_AREA_FRAC * book_area  # почти вся книга
     tol = LAYOUT_JUNK_EDGE_TOL_FRAC * img_h
-    full_height = float(ys.min()) <= tol and float(ys.max()) >= img_h - tol
+    full_height = float(ys.min()) <= tol and float(ys.max()) >= img_h - tol  # верх и низ у края
     return too_big or full_height
 
 
@@ -149,9 +164,9 @@ def layout_polygons(rgb: np.ndarray) -> "list[np.ndarray]":
     Кадр уменьшается до ``LAYOUT_WORK_SIDE`` по длинной стороне, полигоны
     возвращаются пересчитанными обратно в координаты полного кадра.
 
-    «Мусорные» блоки (огромный Figure/Picture во весь журнал или во всю высоту
-    кадра с низкой уверенностью — см. ``_is_junk_layout_block``) отбрасываются:
-    они не контент, а артефакт детекции. Настоящие иллюстрации сохраняются.
+    «Мусорные» блоки (огромный блок во весь разворот/во всю высоту кадра — см.
+    ``_is_junk_layout_block``) отбрасываются: они не контент, а артефакт детекции
+    на пустых/нетекстовых страницах. Настоящие иллюстрации сохраняются.
     """
     from PIL import Image as PILImage
 
@@ -162,12 +177,12 @@ def layout_polygons(rgb: np.ndarray) -> "list[np.ndarray]":
     result = load_layout_predictor()([PILImage.fromarray(small)])[0]
     # Фильтруем в координатах уменьшенного кадра (там же, где детекция), затем
     # уцелевшие полигоны возвращаем в координаты полного кадра.
-    sh = small.shape[0]
+    sh, sw = small.shape[:2]
     book_area = _book_region_area(small)
     polys: list[np.ndarray] = []
     for box in result.bboxes:
         poly = np.asarray(box.polygon, dtype=np.float32)
-        if _is_junk_layout_block(box.label, float(box.confidence), poly, sh, book_area):
+        if _is_junk_layout_block(box.label, float(box.confidence), poly, sh, sw, book_area):
             continue
         polys.append(poly / scale)
     return polys
