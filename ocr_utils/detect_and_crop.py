@@ -501,7 +501,7 @@ def _contained_subboxes(boxes: np.ndarray, keep: np.ndarray, kept: np.ndarray) -
     return np.array(extra, dtype=boxes.dtype).reshape(-1, 4)
 
 
-def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
+def detect_page_mask(bgr: np.ndarray, device: str, frame_area: Optional[float] = None) -> np.ndarray:
     """Бинарная маска (uint8 0/255) области страниц: YOLO-World боксы → SAM силуэт.
 
     Боксы класса из ``FABRIC_CLASSES`` (ткань/подложка) отбрасываются сразу.
@@ -513,7 +513,11 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     по одному широкому боксу разворота силуэт SAM рыхлый и недобирает края страниц.
     """
     h, w = bgr.shape[:2]
-    img_area = h * w
+    # Доли «near-full-frame» боксов/масок считаются относительно frame_area — площади
+    # ИСХОДНОГО кадра БЕЗ добавленного pad_tb_px чёрного поля (см. page_mask). Иначе
+    # padding занижает долю, и мусорный full-frame бокс проскакивает под пороги
+    # LARGE_BOX_CONF_TIERS (см. IMG_0017). Если не задано — весь переданный кадр.
+    frame_area = float(h * w) if frame_area is None else frame_area
 
     yolo = load_yolo_world(DEFAULT_YOLO_WORLD)
     det = yolo.predict(bgr, conf=CONF, device=device, verbose=False)
@@ -545,12 +549,12 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
     bw = boxes[:, 2] - boxes[:, 0]
     bh = boxes[:, 3] - boxes[:, 1]
     area = bw * bh
-    size_ok = (area >= MIN_PAGE_FRAC * img_area) & (area <= MAX_PAGE_FRAC * img_area)
+    size_ok = (area >= MIN_PAGE_FRAC * frame_area) & (area <= MAX_PAGE_FRAC * frame_area)
     # Плюс: near-full-frame боксы с недостаточной уверенностью — это шум YOLO-World, чей
     # SAM-силуэт сгребает фон и руку по краям (см. LARGE_BOX_CONF_TIERS / IMG_0012, IMG_0014).
     junk_fullframe = np.zeros(len(boxes), dtype=bool)
     for frac_thr, conf_thr in LARGE_BOX_CONF_TIERS:
-        junk_fullframe |= (area >= frac_thr * img_area) & (confs < conf_thr)
+        junk_fullframe |= (area >= frac_thr * frame_area) & (confs < conf_thr)
     keep_size = size_ok & ~junk_fullframe
     boxes, confs = boxes[keep_size], confs[keep_size]
     if len(boxes) == 0:
@@ -572,12 +576,12 @@ def detect_page_mask(bgr: np.ndarray, device: str) -> np.ndarray:
             m_bin = (m > 0.5).astype(np.uint8)
             if m_bin.shape != (h, w):
                 m_bin = cv2.resize(m_bin, (w, h), interpolation=cv2.INTER_NEAREST)
-            if MIN_PAGE_FRAC * img_area <= m_bin.sum() <= MAX_PAGE_FRAC * img_area:
+            if MIN_PAGE_FRAC * frame_area <= m_bin.sum() <= MAX_PAGE_FRAC * frame_area:
                 mask = cv2.bitwise_or(mask, m_bin * 255)
     return mask
 
 
-def page_mask(bgr: np.ndarray, device: str, pad_tb_px: int = 0) -> np.ndarray:
+def page_mask(bgr: np.ndarray, device: str, pad_tb_px: int = 0, _unpad_ratio: float = 1.0) -> np.ndarray:
     """Полная маска разворота в разрешении кадра (детекция на уменьшенной копии).
 
     Результат уже включает ``bridge_component_gaps`` — то есть промежуток между
@@ -591,17 +595,24 @@ def page_mask(bgr: np.ndarray, device: str, pad_tb_px: int = 0) -> np.ndarray:
     указанное число пикселей, а маску вернуть уже без неё (в координатах исходного
     кадра). Приём для снимков, где книга занимает кадр целиком по вертикали и
     детектится «вся область как разворот»: чёрная рамка даёт SAM явную тёмную
-    границу и отодвигает YOLO-боксы от краёв, а рост площади кадра выводит
-    near-full-frame боксы из-под порогов LARGE_BOX_CONF_TIERS.
+    границу и отодвигает YOLO-боксы от краёв.
+
+    ВАЖНО: доли near-full-frame боксов при этом считаются относительно ИСХОДНОГО
+    кадра (без добавленной рамки) — иначе рост площади кадра занижал бы долю и
+    мусорный full-frame бокс проскакивал под пороги LARGE_BOX_CONF_TIERS (см.
+    IMG_0017: с рамкой маска раздувалась до 0.99 кадра). Для этого во внутренний
+    вызов пробрасывается ``_unpad_ratio`` = доля исходной высоты в padded-кадре.
     """
     h, w = bgr.shape[:2]
     if pad_tb_px > 0:
         padded = cv2.copyMakeBorder(bgr, pad_tb_px, pad_tb_px, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-        mask = page_mask(padded, device)
+        mask = page_mask(padded, device, _unpad_ratio=h / float(h + 2 * pad_tb_px))
         return mask[pad_tb_px : pad_tb_px + h, :]
     scale = WORK_SIDE / max(h, w) if max(h, w) > WORK_SIDE else 1.0
     work = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
-    mask = detect_page_mask(work, device)
+    # Площадь ИСХОДНОГО кадра (без padding) в координатах work — знаменатель для долей.
+    frame_area = float(work.shape[0] * work.shape[1]) * _unpad_ratio
+    mask = detect_page_mask(work, device, frame_area=frame_area)
     if scale != 1.0:
         mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
     mask = refine_page_mask(mask)
