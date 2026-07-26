@@ -1,0 +1,83 @@
+# Бинарные веса моделей
+*.pt
+*.pth
+*.onnx
+*.pb
+*.h5
+*.safetensors
+*.bin
+*.ckpt
+*.weights
+
+# Директории с весами
+finger_models/
+dewarp_models/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+
+# Large data files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Images (тестовые картинки/heatmaps, не нужны для индексации кода)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+
+# Lock files (слишком большие)
+uv.lock
+poetry.lock
+package-lock.json
+yarn.lock
+
+# Third-party code
+third_party/
+
+# Склонированный апстрим-репозиторий CVAT (тянется автоматически в docker/up.sh,
+# содержит свой .git и node_modules-масштаб кода — не нужен для индексации)
+docker/cvat-src/
