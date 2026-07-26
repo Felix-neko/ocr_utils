@@ -1,10 +1,9 @@
-"""ocr_utils — postprocess PDF magazine scans: add OCR layer keeping source images."""
+"""ocr_utils — обработка сканов книг и журналов.
 
-# Импорт pipeline опционален: подпакеты (например, finger_removal) должны
-# запускаться даже когда зависимости основного pipeline недоступны.
-try:
-    from ocr_utils.pipeline import process_single_pdf, process_directory
+Рабочий пайплайн — ``ocr_utils.scan_cropping``: детекция разворота, удаление
+придерживающего страницу пальца, поворот и вырезка crop-зоны. Неподдерживаемые
+эксперименты и старый PDF-OCR-пайплайн лежат в ``ocr_utils.legacy``.
 
-    __all__ = ["process_single_pdf", "process_directory"]
-except Exception:
-    __all__ = []
+Здесь намеренно ничего не импортируется: подпакеты тянут тяжёлые зависимости
+(torch, ultralytics, surya), и грузить их при любом ``import ocr_utils`` незачем.
+"""

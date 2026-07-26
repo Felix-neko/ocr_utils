@@ -62,7 +62,7 @@ def extract_images_from_pdf(pdf_path: Path, output_dir: Path, pdf_basename: str 
         raise FileNotFoundError(f"PDF-файл не найден: {pdf_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if pdf_basename is None:
         pdf_basename = pdf_path.stem
 
@@ -89,33 +89,33 @@ def extract_images_from_pdf(pdf_path: Path, output_dir: Path, pdf_basename: str 
                 all_images.append(img_dict)
             except Exception as e:
                 continue
-        
+
         # Если несколько изображений (MRC) - рендерим всю страницу
         if len(all_images) > 1:
             try:
                 # Находим максимальное разрешение среди изображений
                 max_width = max(img["width"] for img in all_images)
                 max_height = max(img["height"] for img in all_images)
-                
+
                 # Рендерим страницу с разрешением, соответствующим наибольшему изображению
                 # Вычисляем DPI на основе размера страницы и желаемого разрешения
                 page_rect = page.rect
                 dpi_x = (max_width / page_rect.width) * 72
                 dpi_y = (max_height / page_rect.height) * 72
                 dpi = int(max(dpi_x, dpi_y))
-                
+
                 # Рендерим страницу
                 pix = page.get_pixmap(dpi=dpi)
                 img_bytes = pix.tobytes("png")
-                
+
                 output_path = output_dir / f"{pdf_basename}_{page_idx + 1:04d}.png"
                 output_path.write_bytes(img_bytes)
                 extracted_count += 1
-                
+
             except Exception as e:
                 logger.warning("Не удалось отрендерить страницу %d из %s: %s", page_idx, pdf_path, e)
                 continue
-        
+
         # Если одно изображение - извлекаем его напрямую
         elif len(all_images) == 1:
             try:
@@ -183,14 +183,14 @@ def extract_images_recursive(input_dir: Path, output_dir: Path, show_progress: b
 
     results = {}
     total_pdfs = len(pdf_files)
-    
+
     if show_progress:
         iterator = tqdm(
             pdf_files,
             desc="Обработка PDF",
             unit="файл",
             total=total_pdfs,
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
         )
     else:
         iterator = pdf_files
@@ -235,10 +235,7 @@ def main(input_dir: Path, output_dir: Path, no_progress: bool, verbose: bool):
       uv run python -m ocr_utils.pdf_utils /path/to/pdfs /path/to/output
       uv run python -m ocr_utils.pdf_utils ~/Documents/scans ~/Pictures/extracted --no-progress
     """
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, format="%(levelname)s: %(message)s")
 
     try:
         results = extract_images_recursive(input_dir, output_dir, show_progress=not no_progress)

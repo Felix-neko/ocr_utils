@@ -28,7 +28,7 @@ echo "  output    = $OUTPUT_DIR"
 echo "  debug     = $DEBUG_DIR"
 echo "  x-margins = $X_MARGINS | y-margins = $Y_MARGINS"
 
-uv run python -m ocr_utils.detect_and_crop \
+uv run python -m ocr_utils.scan_cropping \
     --input-dir  "$INPUT_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir  "$DEBUG_DIR" \
