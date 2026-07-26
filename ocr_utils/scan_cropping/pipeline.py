@@ -62,7 +62,7 @@ from ocr_utils.scan_cropping.geometry import (
 )
 from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suffix, write_image
 from ocr_utils.scan_cropping.layout_filtering import classify_parasitic_layouts
-from ocr_utils.scan_cropping.levels import N_EROSION_PX, compensate_levels
+from ocr_utils.scan_cropping.levels import compensate_levels
 from ocr_utils.scan_cropping.overlay import draw_overlay
 from ocr_utils.scan_cropping.page_detection import page_mask
 from ocr_utils.timing import log_timing
@@ -91,7 +91,6 @@ class CropParams:
 
     # Компенсация уровней и обрезка краёв силуэта книги
     compensate_levels: bool = False
-    erosion_px: int = N_EROSION_PX
     extra_erosion_px: int = EXTRA_EROSION_PX
 
     # Вырезка
@@ -188,11 +187,6 @@ def process_frame(path: Path, params: CropParams, models) -> None:
     # E2 — область копирования: E1 с обрезанными периферийными фрагментами обложки
     with log_timing("trim_cover_fragments", path.name):
         copy_mask = trim_cover_fragments(mask, params.extra_erosion_px)
-    if params.compensate_levels:
-        with log_timing("compensate_levels", path.name):
-            bgr_leveled = compensate_levels(bgr, mask, params.erosion_px)
-    else:
-        bgr_leveled = bgr
 
     # Блоки layout нужны и для расширения crop-зоны, и для debug-оверлея.
     # При удалении пальцев с защитой текста они уже посчитаны в remove_fingers;
@@ -227,10 +221,16 @@ def process_frame(path: Path, params: CropParams, models) -> None:
 
     crop_ext: Optional[tuple] = None
     if geom is None:
-        # Разворот не найден — кладём оригинал, чтобы не терять файл в пайплайне
+        # Разворот не найден — кладём оригинал, чтобы не терять файл в пайплайне.
+        # Кропа не было, поэтому уровни (если просили) считаем по области книги:
+        # гистограмма всего кадра здесь включала бы чёрный фон стола.
         tqdm.write(f"  Разворот не найден, сохраняю оригинал: {rel}")
+        out_img = bgr
+        if params.compensate_levels:
+            with log_timing("compensate_levels", path.name):
+                out_img = compensate_levels(bgr, copy_mask)
         with log_timing("write_image", path.name):
-            write_image(out_path, bgr_leveled, write_params, params.force_dpi)
+            write_image(out_path, out_img, write_params, params.force_dpi)
     else:
         with log_timing("crop_geometry", path.name):
             cx, cy, angle, ext = geom
@@ -253,9 +253,9 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                 # fill_outside_mask здесь НЕ нужен: crop_pixel_exact заполняет всю
                 # зону вне E2 сам — в осях crop-зоны, продолжая линию корешка прямо
                 # (в fill_outside_mask этих осей нет, и Вороной её загибает).
-                fade_color = book_mean_color(bgr_leveled, copy_mask)
+                fade_color = book_mean_color(bgr, copy_mask)
                 crop = crop_pixel_exact(
-                    bgr_leveled,
+                    bgr,
                     cx,
                     cy,
                     angle,
@@ -270,9 +270,16 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                 # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем цветом края
                 with log_timing(f"fill_outside_mask[{params.bg_fill_method}]", path.name):
                     bgr_for_crop = fill_outside_mask(
-                        bgr_leveled, copy_mask, method=params.bg_fill_method, blur_px=params.bg_fill_blur_px
+                        bgr, copy_mask, method=params.bg_fill_method, blur_px=params.bg_fill_blur_px
                     )
                 crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, params.upscale)
+        # Уровни — уже по вырезанному кадру: он весь состоит из книги и продлённого
+        # от неё цвета, поэтому гистограмма по нему и есть гистограмма результата
+        # (см. compensate_levels). Стретч монотонный и общий для всего кадра, так
+        # что шов между содержимым и заливкой «ушей» остаётся незаметным.
+        if params.compensate_levels:
+            with log_timing("compensate_levels", path.name):
+                crop = compensate_levels(crop)
         with log_timing("write_image", path.name):
             write_image(out_path, crop, write_params, params.force_dpi)
 

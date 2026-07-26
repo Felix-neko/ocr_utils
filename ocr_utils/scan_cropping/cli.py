@@ -39,7 +39,6 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import (
 from ocr_utils.scan_cropping.geometry import EXTRA_EROSION_PX
 from ocr_utils.scan_cropping.gpu_models import GpuModels
 from ocr_utils.scan_cropping.image_io import collect_images
-from ocr_utils.scan_cropping.levels import N_EROSION_PX
 from ocr_utils.scan_cropping.pipeline import CropParams, run_batch
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
@@ -119,12 +118,6 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     default=False,
     show_default=True,
     help="Растягивать уровни по перцентилям внутри маски страницы (минус эрозия)",
-)
-@click.option(
-    "--erosion-px",
-    default=N_EROSION_PX,
-    show_default=True,
-    help="Эрозия маски страницы (пикс.) перед расчётом уровней (--compensate-levels)",
 )
 @click.option(
     "--extra-erosion-px",
@@ -301,7 +294,6 @@ def main(
     skip_if_exists: bool,
     output_format: Optional[str],
     do_compensate_levels: bool,
-    erosion_px: int,
     extra_erosion_px: int,
     upscale: Optional[float],
     crop_mode: str,
@@ -339,7 +331,6 @@ def main(
         output_format=output_format,
         force_dpi=force_dpi,
         compensate_levels=do_compensate_levels,
-        erosion_px=erosion_px,
         extra_erosion_px=extra_erosion_px,
         crop_mode=crop_mode,
         upscale=upscale,
@@ -374,7 +365,7 @@ def main(
         logger.info(
             "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
             "skip-if-exists: %s | "
-            "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
+            "output-format: %s | compensate-levels: %s | extra-erosion-px=%d | upscale: %s | "
             "crop-mode: %s (fill=%s, fill-blur-px=%g, fill-fade=%g) | "
             "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
             "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
@@ -389,7 +380,6 @@ def main(
             skip_if_exists,
             output_format or "как у входа",
             do_compensate_levels,
-            erosion_px,
             extra_erosion_px,
             upscale if upscale is not None else "без апскейла",
             crop_mode,

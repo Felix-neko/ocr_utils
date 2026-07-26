@@ -19,6 +19,7 @@ import numpy as np
 from typing import Optional
 
 from ocr_utils.scan_cropping.geometry import rotation_matrix
+from ocr_utils.scan_cropping.morphology import erode_disk
 from ocr_utils.scan_cropping.page_detection import WORK_SIDE
 
 # Заливка фона за пределами силуэта книги (перед rotated-crop): эрозия маски
@@ -55,8 +56,7 @@ def _eroded_mean_color(bgr: np.ndarray, mask: np.ndarray, erosion_px: int) -> np
     """
     sample_sel = mask
     if erosion_px > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_px * 2 + 1, erosion_px * 2 + 1))
-        eroded = cv2.erode(mask, k)
+        eroded = erode_disk(mask, erosion_px)
         if np.any(eroded > 0):
             sample_sel = eroded
     return bgr[sample_sel > 0].mean(axis=0)
