@@ -8,16 +8,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-#INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-#INPUT_DIR="/mnt/system/raw/плохие сканы  ВЭ/06"
-#INPUT_DIR="/mnt/system/raw/ve_80s/in"
-#INPUT_DIR="/mnt/system/raw/ve_80s/in/1989/06 проверить зональный пересвет"
-#OUTPUT_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/out"
-#DEBUG_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/debug"
-
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-OUTPUT_DIR="/mnt/system/raw/mts/iter_10/out"
-DEBUG_DIR="/mnt/system/raw/mts/iter_10/debug"
+OUTPUT_DIR="/mnt/system/raw/mts/iter_12/cropped"
+DEBUG_DIR="/mnt/system/raw/mts/iter_12/debug"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -31,8 +24,8 @@ uv run python -m ocr_utils.detect_and_crop \
     --recursive \
     --top-margin -120 \
     --bottom-margin -180 \
-    --left-margin -180 \
-    --right-margin -180 \
+    --left-margin -230 \
+    --right-margin -230 \
     --output-format tiff \
     --force-dpi=300 \
     --compensate-levels \
@@ -46,5 +39,9 @@ uv run python -m ocr_utils.detect_and_crop \
     --bg-fill-method=nearest \
     --bg-fill-blur-px=16 \
     --log-level=INFO \
-    --remove-fingers
+    --remove-fingers \
+    --crop-mode=pixel-exact \
+    --crop-fill-method=replicate \
+    --crop-fill-blur-px=32 \
+    --crop-fill-fade=0.0 \
 

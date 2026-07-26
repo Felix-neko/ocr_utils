@@ -9,9 +9,34 @@ from typing import Sequence
 
 from ocr_utils.config import OCR_LANGUAGE, OCR_UPSCALE_RATIO
 from ocr_utils.ocr import run_ocr
-from ocr_utils.splitting import split_pdf_pages
 
 logger = logging.getLogger(__name__)
+
+
+def _subset_pdf(src_pdf: Path, tmp_dir: Path, pages: Sequence[int] | slice | None) -> Path:
+    """PDF только из выбранных страниц (или сам ``src_pdf``, если выбраны все).
+
+    Раньше отбор страниц делался попутно разбивкой разворотов; разбивка вынесена
+    во внешний ScanTailor, а отбор остался нужен для ``--pages``.
+    """
+    if pages is None:
+        return src_pdf
+
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(str(src_pdf))
+    try:
+        indices = list(range(doc.page_count))[pages] if isinstance(pages, slice) else list(pages)
+        out = fitz.open()
+        for idx in indices:
+            out.insert_pdf(doc, from_page=idx, to_page=idx)
+        subset_path = tmp_dir / f"{src_pdf.stem}_pages.pdf"
+        out.save(str(subset_path))
+        out.close()
+    finally:
+        doc.close()
+    logger.info("Отобрано страниц: %d → %s", len(indices), subset_path)
+    return subset_path
 
 
 def process_single_pdf(
@@ -26,15 +51,16 @@ def process_single_pdf(
     rotate_pages: bool = True,
     intermediate_pdf_path: Path | str | None = None,
     second_intermediate_pdf_path: Path | str | None = None,
-    intermediate_page_pics_dir: Path | None = None,
 ) -> Path:
-    """Обработать один PDF: разбить развороты на страницы, добавить OCR-слой.
+    """Обработать один PDF: добавить OCR-слой, сохранив исходные изображения.
+
+    Разбивка разворотов на страницы здесь НЕ делается — она вынесена во внешний
+    ScanTailor, и на вход ожидается PDF с уже разрезанными страницами.
 
     Алгоритм:
-    1. Разбить развороты на отдельные страницы → промежуточный PDF #1 (исходные изображения).
-    2. Подготовка изображений: deskew (вне ocrmypdf) + upscale → промежуточный PDF #2.
-    3. OCR через ocrmypdf с clean/rotate → промежуточный PDF #3.
-    4. Перенос текстового слоя из PDF #3 на изображения из PDF #1 → финальный PDF.
+    1. Подготовка изображений: deskew (вне ocrmypdf) + upscale → промежуточный PDF #2.
+    2. OCR через ocrmypdf с clean/rotate → промежуточный PDF #3.
+    3. Перенос текстового слоя из PDF #3 на исходные изображения → финальный PDF.
 
     Аргументы:
         src_pdf: путь к исходному PDF.
@@ -54,11 +80,6 @@ def process_single_pdf(
             None → промежуточный PDF не сохраняется.
         second_intermediate_pdf_path: путь для сохранения промежуточного PDF #2 (после deskew+upscale).
             None → промежуточный PDF не сохраняется.
-        intermediate_page_pics_dir: директория для сохранения промежуточных картинок страниц.
-            None → картинки не сохраняются.
-            Если задана, то сохранять промежуточные картинки (отдельные страницы, на которые мы нарезали книгу) в эту директорию.
-            Если директория не существует, создаётся новая. Если картинка по какому-то пути уже существует — переписывается.
-            Сохранение осуществляется без перекодировки, т.к. используется lossless crop.
 
     Возвращает:
         Path к выходному PDF.
@@ -84,15 +105,12 @@ def process_single_pdf(
     try:
         logger.info("Обработка: %s → %s", src_pdf, dst_pdf)
 
-        # Шаг 1: разбить развороты на отдельные страницы → промежуточный PDF #1
-        split_pdf = split_pdf_pages(
-            src_pdf, tmp_path, pages=pages, intermediate_page_pics_dir=intermediate_page_pics_dir
-        )
-        logger.info("Шаг 1 (разбивка) завершён: %s", split_pdf)
+        # Шаг 1: отобрать нужные страницы (при pages=None — работаем с исходным PDF)
+        ocr_src = _subset_pdf(src_pdf, tmp_path, pages)
 
         # Шаг 2: OCR через трёхэтапный процесс → финальный PDF
         run_ocr(
-            input_pdf=split_pdf,
+            input_pdf=ocr_src,
             output_pdf=dst_pdf,
             language=language,
             upscale_ratio=upscale_ratio,
@@ -115,40 +133,20 @@ def _process_one(args: tuple) -> tuple[str, str | None]:
 
     Возвращает (относительный путь, None) при успехе или (относительный путь, текст ошибки) при ошибке.
     """
-    (
-        src_pdf_str,
-        dst_pdf_str,
-        language,
-        upscale_ratio,
-        deskew,
-        clean,
-        rotate_pages,
-        intermediate_page_pics_dir,
-        only_save_page_pics,
-    ) = args
+    (src_pdf_str, dst_pdf_str, language, upscale_ratio, deskew, clean, rotate_pages) = args
     src_pdf = Path(src_pdf_str)
     dst_pdf = Path(dst_pdf_str)
     rel = src_pdf.name
     try:
-        if only_save_page_pics:
-            # Только сохраняем картинки-страницы, без OCR
-            import tempfile
-
-            with tempfile.TemporaryDirectory(prefix="ocr_utils_") as tmp_dir:
-                split_pdf_pages(
-                    src_pdf=src_pdf, tmp_dir=Path(tmp_dir), intermediate_page_pics_dir=intermediate_page_pics_dir
-                )
-        else:
-            process_single_pdf(
-                src_pdf=src_pdf,
-                dst_pdf=dst_pdf,
-                language=language,
-                upscale_ratio=upscale_ratio,
-                deskew=deskew,
-                clean=clean,
-                rotate_pages=rotate_pages,
-                intermediate_page_pics_dir=intermediate_page_pics_dir,
-            )
+        process_single_pdf(
+            src_pdf=src_pdf,
+            dst_pdf=dst_pdf,
+            language=language,
+            upscale_ratio=upscale_ratio,
+            deskew=deskew,
+            clean=clean,
+            rotate_pages=rotate_pages,
+        )
         return (rel, None)
     except Exception as e:
         logger.error("Ошибка при обработке %s: %s", rel, e)
@@ -163,8 +161,6 @@ def process_directory(
     deskew: bool = True,
     clean: bool = True,
     rotate_pages: bool = True,
-    save_intermediate_page_pics: bool = False,
-    only_save_page_pics: bool = False,
 ) -> dict[str, str | None]:
     """Рекурсивно обработать все PDF в директории.
 
@@ -176,10 +172,6 @@ def process_directory(
         deskew: выравнивать ли страницы при OCR.
         clean: очищать ли шум при OCR.
         rotate_pages: автоповорот страниц при OCR.
-        save_intermediate_page_pics: если включено, то рядом с каждым файлом сохраняемым выходным PDF-файлом
-            создавать папку {имя_выходного_pdf}.page_pics и сохранять туда промежуточные картинки.
-        only_save_page_pics: если включено, то только сохранить картинки-страницы от каждой PDF
-            и дальше обработку не вести.
 
     Возвращает:
         dict: {относительный_путь: None (успех) или строка ошибки}.
@@ -206,25 +198,7 @@ def process_directory(
         rel_path = pdf_path.relative_to(src_dir)
         out_path = dst_dir / rel_path
 
-        # Определяем директорию для промежуточных картинок
-        if save_intermediate_page_pics or only_save_page_pics:
-            page_pics_dir = out_path.parent / f"{out_path.stem}.page_pics"
-        else:
-            page_pics_dir = None
-
-        tasks.append(
-            (
-                str(pdf_path),
-                str(out_path),
-                language,
-                upscale_ratio,
-                deskew,
-                clean,
-                rotate_pages,
-                page_pics_dir,
-                only_save_page_pics,
-            )
-        )
+        tasks.append((str(pdf_path), str(out_path), language, upscale_ratio, deskew, clean, rotate_pages))
 
     results: dict[str, str | None] = {}
 
@@ -265,9 +239,7 @@ if __name__ == "__main__":
     #     deskew=True,
     # )
 
-    result = process_directory(
-        src, dst, language="rus", upscale_ratio=3, deskew=True, clean=True, rotate_pages=True, only_save_page_pics=True
-    )
+    result = process_directory(src, dst, language="rus", upscale_ratio=3, deskew=True, clean=True, rotate_pages=True)
 
     # print(f"\nГотово! Результат сохранён в: {result}")
     # print("Проверяем количество страниц...")

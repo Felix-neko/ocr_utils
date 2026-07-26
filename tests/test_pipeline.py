@@ -36,7 +36,7 @@ class TestProcessSinglePdf:
         assert out_path.parent.exists()
 
     def test_pipeline_with_mocked_ocr(self, mixed_pdf: Path, tmp_dir: Path) -> None:
-        """Полный пайплайн с замоканным OCR: проверяем, что промежуточный PDF создаётся корректно."""
+        """Полный пайплайн с замоканным OCR: страницы уходят в OCR как есть, без разбивки."""
         out_path = tmp_dir / "result.pdf"
         intermediate_page_counts = []
 
@@ -56,9 +56,10 @@ class TestProcessSinglePdf:
             process_single_pdf(src_pdf=mixed_pdf, dst_pdf=out_path, tmp_dir=tmp_dir)
 
         assert out_path.exists()
-        # Промежуточный PDF должен содержать 4 страницы (1 + 2 + 1)
+        # Разворот больше не режется пополам (разбивка вынесена в ScanTailor),
+        # поэтому в OCR уходят все 3 исходные страницы как есть.
         assert len(intermediate_page_counts) == 1
-        assert intermediate_page_counts[0] == 4
+        assert intermediate_page_counts[0] == 3
 
     def test_temp_dir_cleanup(self, portrait_pdf: Path, tmp_dir: Path) -> None:
         """При tmp_dir=None временная директория должна быть очищена."""
@@ -190,7 +191,7 @@ class TestProcessSinglePdfRealOcr:
         assert "Тестовый" in text or "текст" in text or "OCR" in text
 
     def test_full_pipeline_with_spread(self, landscape_spread_pdf: Path, tmp_dir: Path) -> None:
-        """Полный пайплайн с разворотом: должен разбиться на 2 страницы."""
+        """Полный пайплайн с разворотом: разворот остаётся одной страницей (разбивка — в ScanTailor)."""
         dst_pdf = tmp_dir / "result.pdf"
 
         result = process_single_pdf(src_pdf=landscape_spread_pdf, dst_pdf=dst_pdf)
@@ -199,40 +200,14 @@ class TestProcessSinglePdfRealOcr:
         assert dst_pdf.exists()
 
         result_doc = fitz.open(str(dst_pdf))
-        assert len(result_doc) == 2
+        assert len(result_doc) == 1
         result_doc.close()
 
     def test_full_pipeline_with_mixed_pages(self, mixed_pdf: Path, tmp_dir: Path) -> None:
-        """Полный пайплайн с mixed PDF: портрет + разворот + портрет → 4 страницы."""
+        """Полный пайплайн с mixed PDF: портрет + разворот + портрет → 3 страницы (без разбивки)."""
         dst_pdf = tmp_dir / "result.pdf"
 
-        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, oversample_dpi=300)
-
-        assert result == dst_pdf
-        assert dst_pdf.exists()
-
-        result_doc = fitz.open(str(dst_pdf))
-        assert len(result_doc) == 4
-        result_doc.close()
-
-    def test_full_pipeline_with_page_selection(self, mixed_pdf: Path, tmp_dir: Path) -> None:
-        """Полный пайплайн с выбором страниц: обработать только страницу 1 (разворот)."""
-        dst_pdf = tmp_dir / "result.pdf"
-
-        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, pages=[1], oversample_dpi=300)
-
-        assert result == dst_pdf
-        assert dst_pdf.exists()
-
-        result_doc = fitz.open(str(dst_pdf))
-        assert len(result_doc) == 2
-        result_doc.close()
-
-    def test_full_pipeline_with_slice(self, mixed_pdf: Path, tmp_dir: Path) -> None:
-        """Полный пайплайн с slice: обработать страницы 0:2 (портрет + разворот)."""
-        dst_pdf = tmp_dir / "result.pdf"
-
-        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, pages=slice(0, 2), oversample_dpi=300)
+        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf)
 
         assert result == dst_pdf
         assert dst_pdf.exists()
@@ -241,12 +216,38 @@ class TestProcessSinglePdfRealOcr:
         assert len(result_doc) == 3
         result_doc.close()
 
+    def test_full_pipeline_with_page_selection(self, mixed_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с выбором страниц: обработать только страницу 1 (разворот) → 1 страница."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, pages=[1])
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        assert len(result_doc) == 1
+        result_doc.close()
+
+    def test_full_pipeline_with_slice(self, mixed_pdf: Path, tmp_dir: Path) -> None:
+        """Полный пайплайн с slice: обработать страницы 0:2 (портрет + разворот)."""
+        dst_pdf = tmp_dir / "result.pdf"
+
+        result = process_single_pdf(src_pdf=mixed_pdf, dst_pdf=dst_pdf, pages=slice(0, 2))
+
+        assert result == dst_pdf
+        assert dst_pdf.exists()
+
+        result_doc = fitz.open(str(dst_pdf))
+        assert len(result_doc) == 2
+        result_doc.close()
+
     def test_full_pipeline_with_all_options_disabled(self, portrait_pdf: Path, tmp_dir: Path) -> None:
         """Полный пайплайн с отключёнными deskew, clean, rotate."""
         dst_pdf = tmp_dir / "result.pdf"
 
         result = process_single_pdf(
-            src_pdf=portrait_pdf, dst_pdf=dst_pdf, oversample_dpi=300, deskew=False, clean=False, rotate_pages=False
+            src_pdf=portrait_pdf, dst_pdf=dst_pdf, deskew=False, clean=False, rotate_pages=False
         )
 
         assert result == dst_pdf
@@ -269,7 +270,7 @@ class TestProcessDirectoryRealOcr:
             doc.close()
 
         dst = tmp_dir / "dst"
-        results = process_directory(src, dst, oversample_dpi=300)
+        results = process_directory(src, dst)
 
         assert len(results) == 2
         assert all(err is None for err in results.values())
@@ -292,7 +293,7 @@ class TestProcessDirectoryRealOcr:
         doc2.close()
 
         dst = tmp_dir / "dst"
-        results = process_directory(src, dst, oversample_dpi=300)
+        results = process_directory(src, dst)
 
         assert len(results) == 2
         assert all(err is None for err in results.values())

@@ -1,4 +1,4 @@
-"""ocr_utils — postprocess PDF magazine scans: split spreads into pages, add OCR layer."""
+"""ocr_utils — postprocess PDF magazine scans: add OCR layer keeping source images."""
 
 # Импорт pipeline опционален: подпакеты (например, finger_removal) должны
 # запускаться даже когда зависимости основного pipeline недоступны.

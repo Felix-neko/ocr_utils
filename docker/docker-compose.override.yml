@@ -1,0 +1,99 @@
+# Наложение поверх cvat-src/docker-compose.yml.
+#
+# Зачем всё это:
+#   * На машине может быть другой CVAT из апстрим-compose, который жёстко
+#     задаёт name: cvat, container_name: cvat_* и тома cvat_cvat_*. Чтобы наш
+#     стек не сталкивался с ним и не писал в чужую БД, мы даём проекту своё имя
+#     (cvat_mts) и переименовываем контейнеры в cvat_mts_*. Тома и сеть тогда
+#     тоже получают префикс cvat_mts_ автоматически.
+#   * Монтируем папку с картинками (IMAGES_DIR) в /home/django/share (ro) —
+#     чтобы заводить задачи «из share» без загрузки файлов через браузер.
+#   * Отключаем прожорливую аналитику (grafana + vector) через профиль.
+#     ClickHouse оставлен: от него depends_on сервер и воркеры (убрать нельзя),
+#     но простаивающий он почти ничего не ест.
+
+name: cvat_mts
+
+x-share: &share
+  type: bind
+  source: ${IMAGES_DIR}
+  target: /home/django/share
+  read_only: true
+
+services:
+  cvat_db:
+    container_name: cvat_mts_db
+
+  cvat_redis_inmem:
+    container_name: cvat_mts_redis_inmem
+
+  cvat_redis_ondisk:
+    container_name: cvat_mts_redis_ondisk
+
+  cvat_server:
+    container_name: cvat_mts_server
+    environment:
+      CVAT_ANALYTICS: 0
+    volumes:
+      - *share
+
+  cvat_worker_utils:
+    container_name: cvat_mts_worker_utils
+    volumes:
+      - *share
+
+  cvat_worker_import:
+    container_name: cvat_mts_worker_import
+    volumes:
+      - *share
+
+  cvat_worker_export:
+    container_name: cvat_mts_worker_export
+    environment:
+      CVAT_ANALYTICS: 0
+    volumes:
+      - *share
+
+  cvat_worker_annotation:
+    container_name: cvat_mts_worker_annotation
+    volumes:
+      - *share
+
+  cvat_worker_webhooks:
+    container_name: cvat_mts_worker_webhooks
+
+  cvat_worker_quality_reports:
+    container_name: cvat_mts_worker_quality_reports
+
+  cvat_worker_chunks:
+    container_name: cvat_mts_worker_chunks
+    volumes:
+      - *share
+
+  cvat_worker_consensus:
+    container_name: cvat_mts_worker_consensus
+
+  cvat_ui:
+    container_name: cvat_mts_ui
+
+  cvat_opa:
+    container_name: cvat_mts_opa
+
+  cvat_clickhouse:
+    container_name: cvat_mts_clickhouse
+
+  traefik:
+    container_name: cvat_mts_traefik
+    environment:
+      TRAEFIK_PROVIDERS_DOCKER_NETWORK: cvat_mts_cvat
+    # !override — заменяем список портов целиком (иначе compose дописал бы
+    # к базовым 8080/8090 ещё и наш маппинг). Дашборд-порт 8090 не нужен.
+    ports: !override
+      - ${CVAT_PORT:-8080}:8080
+
+  # Аналитика — в профиль, чтобы не стартовала (на неё никто не depends_on).
+  cvat_vector:
+    profiles: ["analytics"]
+
+  cvat_grafana:
+    profiles: ["analytics"]

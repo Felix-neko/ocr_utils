@@ -9,9 +9,11 @@
   3. К bbox применяются припуски по каждой стороне отдельно ``--left-margin`` /
      ``--top-margin`` / ``--right-margin`` / ``--bottom-margin`` (пиксели; >0 —
      расширить наружу, <0 — сжать внутрь) → финальная crop-зона.
-  4. Исходный кадр поворачивается на найденный угол вокруг центра тяжести, из него
-     вырезается crop-зона (выпрямленный прямоугольник) и кладётся в ``--output-dir``
-     под тем же именем файла.
+  4. Crop-зона вырезается в ``--output-dir`` под тем же именем файла — способом
+     ``--crop-mode``: ``rotate`` (по умолчанию) поворачивает кадр на найденный угол
+     вокруг центра тяжести и вырезает выпрямленный прямоугольник; ``pixel-exact``
+     копирует ту же зону пиксель-в-пиксель в минимальный осевой холст, не трогая
+     исходные пиксели (книга остаётся наклонённой, выпрямление — снаружи).
 
 Если задана ``--debug-dir`` — туда пишется кадр с оверлеями (всегда JPEG, ДО
 удаления пальцев и компенсации уровней): зелёная граница разворота (E1),
@@ -27,7 +29,13 @@ ROI-рамка контекста, переданного в LaMa.
     ``--erosion-px`` (по умолчанию 20).
   - ``--upscale`` — увеличивает выходной холст перед поворотом/кропом (по
     умолчанию не задан — апскейл вообще не считается); сэмплирование всегда
-    из исходного кадра.
+    из исходного кадра. При ``--crop-mode=pixel-exact`` игнорируется.
+  - ``--crop-mode`` — способ вырезки: ``rotate`` | ``pixel-exact`` (см. выше и
+    ``crop_rotated`` / ``crop_pixel_exact``). Для ``pixel-exact`` заполнение зоны вне
+    книги настраивается через ``--crop-fill-method`` (``replicate`` — продлить край по
+    нормали к сторонам crop-зоны, ``voronoi`` — цвет ближайшей точки границы),
+    ``--crop-fill-blur-px`` и ``--crop-fill-fade``. В этом режиме ``--bg-fill-*`` не
+    участвуют: заливку целиком делает ``crop_pixel_exact``.
   - ``--remove-fingers/--no-remove-fingers`` (включено по умолчанию) — перед
     детекцией разворота и кропом детектирует и закрашивает через LaMa палец,
     придерживающий страницу (``ocr_utils.finger_removal``), чтобы он не искажал
@@ -189,6 +197,22 @@ BG_FILL_EROSION_PX = 100
 BG_FILL_AVERAGE = "average"  # один усреднённый цвет по всей странице (старый способ)
 BG_FILL_NEAREST = "nearest"  # цвет ближайшего пикселя границы E2 (Вороной, distance transform)
 BG_FILL_METHODS = (BG_FILL_AVERAGE, BG_FILL_NEAREST)
+
+# Способы вырезки crop-зоны (значения --crop-mode), см. crop_rotated / crop_pixel_exact.
+CROP_MODE_ROTATE = "rotate"  # повернуть кадр на найденный угол и вырезать выпрямленный прямоугольник
+CROP_MODE_PIXEL_EXACT = "pixel-exact"  # скопировать пиксель-в-пиксель в осевой холст, книга остаётся наклонённой
+CROP_MODES = (CROP_MODE_ROTATE, CROP_MODE_PIXEL_EXACT)
+
+# Заполнение «ушей» между наклонённым crop-bbox и осевым холстом (--crop-mode=pixel-exact).
+# replicate — продление краевых пикселей bbox наружу по нормали к его сторонам
+# (clamp-to-edge/BORDER_REPLICATE в осях bbox): линии, выходящие из crop-зоны (корешок
+# разворота), продолжаются прямо. voronoi — цвет ближайшей точки границы bbox: у углов
+# bbox расходится веером и загибает такие линии, ломая разбивку разворота в ScanTailor.
+CROP_FILL_REPLICATE = "replicate"
+CROP_FILL_VORONOI = "voronoi"
+CROP_FILL_METHODS = (CROP_FILL_REPLICATE, CROP_FILL_VORONOI)
+CROP_FILL_BLUR_PX = 48.0  # макс. σ размытия заливки (растёт с расстоянием от crop-bbox)
+CROP_FILL_FADE = 1.0  # доля выцветания к среднему цвету книги на самом дальнем пикселе (0 — не выцветать)
 
 # Доп. «обрезка» краёв силуэта книги перед копированием, пикс. Маска страницы на
 # тёмном фоне захватывает не только светлые страницы, но и куски сравнительно
@@ -895,6 +919,25 @@ def trim_cover_fragments(
     тормозит (см. fill_outside_mask/compensate_levels), а для «обрезки» краёв
     точность полного разрешения не нужна — граница потом всё равно у бумажных
     полей, не у текста.
+
+    Морфология идёт на холсте, добитом нулями на ``2*d`` с каждой стороны, и
+    результат обрезается обратно. Без этого маска, подходящая к рамке кадра
+    ближе ``extra_erosion_px``, после диляции упирается в границу кадра, а
+    ``cv2.erode`` по умолчанию считает всё за пределами кадра ФОНОМ МАСКИ
+    (``morphologyDefaultBorderValue()`` = +inf) и с этой стороны маску не
+    подъедает — оставался прилипший к рамке «язык», сточенный только с боков
+    (см. IMG_0011 из ve_80s: у корешка верх E1 в 74 px от края кадра, и E2 вместо
+    отступа 110 px дотягивался до y=0; «язык» был на всех 15 кадрах партии).
+    Нулевой холст даёт одинаковый отступ по всему контуру, в том числе от рамки
+    кадра.
+
+    Альтернатива «просто передать эрозии ``borderValue=0``» ПРОВЕРЕНА И ОТВЕРГНУТА:
+    «языки» она тоже убирает и считается на ~25% быстрее (1.9 с против 2.6 с на
+    кадр), но диляция при этом обрезается рамкой кадра, и у самой рамки эрозия
+    съедает уже не ``d``, а ``2*d`` — вместо контура книги вдоль края кадра идёт
+    горизонтальная «полка» с отступом 2*``extra_erosion_px`` (на проверенных кадрах
+    на 25-35 px глубже нужного, до 1.6% пикселей выходного кадра). Экономия секунды
+    того не стоит.
     """
     if extra_erosion_px <= 0:
         return mask
@@ -904,11 +947,57 @@ def trim_cover_fragments(
     d = max(1, int(round(extra_erosion_px * scale)))
     k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * d + 1, 2 * d + 1))
     k_ero = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * (2 * d) + 1, 2 * (2 * d) + 1))
-    out = cv2.dilate(small, k_dil, iterations=1)
+    # Запаса 2*d хватает: диляция выносит маску за рамку максимум на d, а эрозия
+    # смотрит на 2*d вокруг каждого пикселя исходной области.
+    pad = 2 * d
+    padded = cv2.copyMakeBorder(small, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    out = cv2.dilate(padded, k_dil, iterations=1)
     out = cv2.erode(out, k_ero, iterations=1)
+    out = out[pad : pad + small.shape[0], pad : pad + small.shape[1]]
     if scale < 1.0:
         out = cv2.resize(out, (w, h), interpolation=cv2.INTER_NEAREST)
     return out
+
+
+def _eroded_mean_color(bgr: np.ndarray, mask: np.ndarray, erosion_px: int) -> np.ndarray:
+    """Средний цвет ``bgr`` внутри ``mask``, эрозированной на ``erosion_px`` (BGR float (3,)).
+
+    Эрозия — чтобы в среднее не попал шумный край силуэта и подтёкший из-за края
+    тёмный фон. Если эрозия съела маску целиком (узкая область), берётся исходная
+    маска. ``erosion_px`` — в том же разрешении, в котором переданы ``bgr``/``mask``.
+    """
+    sample_sel = mask
+    if erosion_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_px * 2 + 1, erosion_px * 2 + 1))
+        eroded = cv2.erode(mask, k)
+        if np.any(eroded > 0):
+            sample_sel = eroded
+    return bgr[sample_sel > 0].mean(axis=0)
+
+
+def book_mean_color(
+    bgr: np.ndarray, mask: np.ndarray, erosion_px: int = BG_FILL_EROSION_PX, work_side: int = WORK_SIDE
+) -> Optional[np.ndarray]:
+    """Средний цвет области книги (``mask``, сильно эрозированной) — BGR float (3,) или None.
+
+    Тот же способ, что даёт цвет заливки в ``fill_outside_mask(method='average')``:
+    сильная эрозия отсекает край силуэта, и остаётся «чистая бумага/обложка».
+    Считается на копии, уменьшенной до ``work_side`` (среднее по 30-48 Мп маске —
+    заметная и лишняя трата). ``None``, если маска пуста.
+    """
+    if not np.any(mask > 0):
+        return None
+    h, w = mask.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    if scale < 1.0:
+        small_mask = cv2.resize(mask, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST)
+        small_bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        erosion_px = max(1, int(round(erosion_px * scale)))
+    else:
+        small_mask, small_bgr = mask, bgr
+    if not np.any(small_mask > 0):  # маска исчезла при уменьшении
+        return None
+    return _eroded_mean_color(small_bgr, small_mask, erosion_px)
 
 
 def _nearest_edge_fill(small_bgr: np.ndarray, e2_mask: np.ndarray) -> np.ndarray:
@@ -997,13 +1086,7 @@ def fill_outside_mask(
         # края/подтёкшего фона). Локальным методам эрозия не нужна: они берут цвет у
         # самой границы E2 (уже обрезанной trim_cover_fragments).
         small_erosion_px = max(1, int(round(erosion_px * scale))) if scale < 1.0 else erosion_px
-        sample_sel = small_mask
-        if small_erosion_px > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (small_erosion_px * 2 + 1, small_erosion_px * 2 + 1))
-            eroded = cv2.erode(small_mask, k)
-            if np.any(eroded > 0):
-                sample_sel = eroded
-        avg_color = small_bgr[sample_sel > 0].mean(axis=0)
+        avg_color = _eroded_mean_color(small_bgr, small_mask, small_erosion_px)
         out = bgr.copy()
         out[~sel] = avg_color.astype(np.uint8)
         return out
@@ -1047,6 +1130,243 @@ def crop_rotated(
     dst = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
     m = cv2.getPerspectiveTransform(src, dst)
     return cv2.warpPerspective(bgr, m, (out_w, out_h), flags=flags)
+
+
+def _voronoi_fill(canvas: np.ndarray, known: np.ndarray, work_side: int) -> np.ndarray:
+    """Заливка холста «по Вороному» от области ``known`` (см. ``_nearest_edge_fill``).
+
+    Считается на копии, уменьшенной до ``work_side``, и растягивается обратно:
+    заливка гладкая по построению, а ``distance_transform_edt`` на 30-48 Мп заметно
+    тормозит. Возвращает BGR uint8 в размер ``canvas``.
+    """
+    h, w = canvas.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    if scale < 1.0:
+        size = (int(w * scale), int(h * scale))
+        small_known = cv2.resize(known, size, interpolation=cv2.INTER_NEAREST)
+        if np.any(small_known):  # если «уши» тоньше шага уменьшения — считаем в полный размер
+            small_canvas = cv2.resize(canvas, size, interpolation=cv2.INTER_AREA)
+            return cv2.resize(_nearest_edge_fill(small_canvas, small_known), (w, h), interpolation=cv2.INTER_LINEAR)
+    return _nearest_edge_fill(canvas, known)
+
+
+def _clamp_to_edge(img: np.ndarray, known: np.ndarray) -> np.ndarray:
+    """Двумерный clamp-to-edge: краевые пиксели ``known`` продлеваются наружу по осям.
+
+    Для каждого неизвестного пикселя берётся ближайший известный ПО ОСИ — по столбцу
+    (продление вверх/вниз) либо по строке (влево/вправо), смотря что ближе:
+      * индекс строки зажимается между первой и последней известной строкой ЕГО столбца,
+        индекс колонки — между первой и последней известной колонкой ЕГО строки;
+      * из двух вариантов берётся тот, где идти ближе (если один невозможен — другой);
+      * если ни в строке, ни в столбце известного нет (углы) — строка добирается
+        вертикальным продлением от ближайшей строки-донора.
+
+    Оба «зажима» обязаны считаться по известным пикселям именно своей строки/своего
+    столбца, и выбор между ними — по расстоянию. Граница книги (E2) криволинейна: у
+    нижних строк она уходит правее края crop-зоны, и столбец там известен только сверху.
+    Если в таком столбце всё равно продлевать вертикально, цвет берётся с далёкого
+    верхнего пикселя — в выходном кадре это давало резкую светлую полосу вдоль левого
+    «уха» (IMG_0042), хотя настоящий край книги был в паре пикселей сбоку.
+
+    ``img`` BGR, ``known`` — маска известного (uint8 0/255) того же размера.
+    """
+    known_b = known > 0
+    h, w = known_b.shape
+    rows = np.arange(h, dtype=np.int32)[:, None]
+    cols = np.arange(w, dtype=np.int32)[None, :]
+
+    has_col = known_b.any(axis=0)
+    first_r = np.argmax(known_b, axis=0).astype(np.int32)
+    last_r = (h - 1 - np.argmax(known_b[::-1], axis=0)).astype(np.int32)
+    src_r = np.clip(rows, first_r[None, :], last_r[None, :])
+    vert = np.take_along_axis(img, src_r[..., None].astype(np.intp), axis=0)
+    if has_col.all():
+        return vert
+
+    has_row = known_b.any(axis=1)
+    first_c = np.argmax(known_b, axis=1).astype(np.int32)
+    last_c = (w - 1 - np.argmax(known_b[:, ::-1], axis=1)).astype(np.int32)
+    src_c = np.clip(cols, first_c[:, None], last_c[:, None])
+    horz = np.take_along_axis(img, src_c[..., None].astype(np.intp), axis=1)
+
+    # Кому идти ближе: вверх/вниз по столбцу или вбок по строке.
+    dist_v = np.abs(src_r - rows)
+    dist_h = np.abs(src_c - cols)
+    use_v = has_col[None, :] & (~has_row[:, None] | (dist_v <= dist_h))
+    out = np.where(use_v[..., None], vert, horz)
+
+    if not has_row.all():
+        donor = np.broadcast_to(has_row[:, None], (h, w))
+        first_d = np.argmax(donor, axis=0)
+        last_d = h - 1 - np.argmax(donor[::-1], axis=0)
+        out = np.take_along_axis(
+            out, np.clip(rows, first_d[None, :], last_d[None, :])[..., None].astype(np.intp), axis=0
+        )
+    return out
+
+
+def _replicate_edge_fill(canvas: np.ndarray, known: np.ndarray, angle: float) -> np.ndarray:
+    """Продление краевых пикселей ``known`` НАРУЖУ ПО ОСЯМ CROP-ЗОНЫ (clamp-to-edge).
+
+    Это обычная replicate-экстраполяция края (``cv2.BORDER_REPLICATE``, np.pad(mode=
+    'edge')), только выполненная не в осях кадра, а в осях повёрнутой crop-зоны: холст
+    поворачивается на ``-angle``, там край продлевается по столбцам/строкам
+    (``_clamp_to_edge``), и результат поворачивается обратно. Для верхней/нижней
+    стороны это в точности «краевой пиксель поднимается перпендикулярно стороне».
+
+    Зачем это вместо ``_voronoi_fill``. Вороной тянет цвет ближайшей точки границы, и у
+    выпуклых углов границы (угол crop-зоны, край страницы у корешка) ближайшей для целой
+    области оказывается ОДНА точка — заливка расходится оттуда веером. Тёмная линия
+    корешка, выходящая из зоны, в таком веере загибается, и ScanTailor перестаёт
+    находить по ней разрез разворота (см. IMG_0004/IMG_0034 из ve_80s). Clamp-to-edge
+    продолжает её прямо — по нормали к стороне crop-зоны, т.е. в выходном кадре под тем
+    же наклоном, под которым лежит книга.
+
+    Поворот считается интерполяцией, но результат берётся ТОЛЬКО вне ``known``, поэтому
+    исходные пиксели crop-зоны это не затрагивает.
+    """
+    h, w = canvas.shape[:2]
+    r = _rotation_matrix(angle)
+    cos_a, sin_a = abs(float(r[0, 0])), abs(float(r[0, 1]))
+    rw = int(np.ceil(w * cos_a + h * sin_a))
+    rh = int(np.ceil(w * sin_a + h * cos_a))
+    # Аффинное преобразование холст → оси crop-зоны (local = R @ rel), с центрированием.
+    m = np.zeros((2, 3), dtype=np.float64)
+    m[:, :2] = r
+    m[:, 2] = np.array([rw / 2.0, rh / 2.0]) - r @ np.array([w / 2.0, h / 2.0])
+
+    # Перед поворотом убираем неизвестные (чёрные) пиксели тем же продлением в осях
+    # холста: иначе билинейная интерполяция поворота размажет их внутрь известной зоны,
+    # и продление вынесет эту грязь наружу.
+    base = _clamp_to_edge(canvas, known)
+    rot_img = cv2.warpAffine(base, m, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    rot_known = cv2.warpAffine(known, m, (rw, rh), flags=cv2.INTER_NEAREST)
+    if not np.any(rot_known):  # поворот «потерял» тонкую маску — продлеваем без него
+        return base
+    rot_filled = _clamp_to_edge(rot_img, rot_known)
+    return cv2.warpAffine(
+        rot_filled, cv2.invertAffineTransform(m), (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
+
+
+def _blur_downscaled(img: np.ndarray, sigma: float, work_side: int) -> np.ndarray:
+    """Гауссово размытие через уменьшенную копию (σ на 30-48 Мп стоит секунды).
+
+    Результат размытия гладкий, поэтому уменьшение/растяжение на нём не сказывается.
+    """
+    h, w = img.shape[:2]
+    scale = work_side / max(h, w) if max(h, w) > work_side else 1.0
+    if scale < 1.0:
+        small = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        small = cv2.GaussianBlur(small, (0, 0), max(float(sigma * scale), 0.5))
+        return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+    return cv2.GaussianBlur(img, (0, 0), max(float(sigma), 0.5))
+
+
+def crop_pixel_exact(
+    bgr: np.ndarray,
+    cx: float,
+    cy: float,
+    angle: float,
+    crop_ext: tuple,
+    fade_color: Optional[np.ndarray] = None,
+    blur_px: float = CROP_FILL_BLUR_PX,
+    fade_strength: float = CROP_FILL_FADE,
+    fill_method: str = CROP_FILL_REPLICATE,
+    content_mask: Optional[np.ndarray] = None,
+    work_side: int = WORK_SIDE,
+) -> np.ndarray:
+    """Вырез crop-зоны БЕЗ поворота: пиксель-в-пиксель, книга остаётся наклонённой.
+
+    Альтернатива ``crop_rotated`` (см. ``--crop-mode``). ``crop_rotated`` пересэмплирует
+    ВЕСЬ кадр интерполяцией — на скромном разрешении и заметном угле это слегка мылит
+    текст, а лечится только апскейлом (и раздутым файлом). Здесь исходные пиксели не
+    трогаются вовсе: берётся минимальный ОСЕВОЙ bbox, в который вписан повёрнутый
+    crop-bbox, и содержимое копируется из кадра как есть. Выпрямлять разворот в этом
+    режиме предполагается снаружи (ScanTailor), уже по неиспорченным пикселям.
+
+    Цена — «уши» между наклонённым crop-bbox и осевым холстом (тем больше, чем больше
+    угол). Они не обрезаются, а заполняются так, чтобы не мозолить глаз и не сбивать
+    последующую обработку:
+      1. базовая заливка, способ ``fill_method`` (см. ``CROP_FILL_METHODS``):
+         ``replicate`` — краевые пиксели продлеваются наружу по осям crop-зоны, т.е. по
+         НОРМАЛИ к её сторонам (``_replicate_edge_fill``); ``voronoi`` — цвет ближайшей
+         точки границы (``_voronoi_fill``). Разница важна для линий, выходящих из зоны
+         (корешок разворота): replicate продолжает их прямо, Вороной у выпуклых углов
+         границы расходится веером и загибает их — см. ``_replicate_edge_fill``;
+      2. размытие, растущее с расстоянием от crop-bbox (σ до ``blur_px``): у шва резко,
+         вдали — гладко. ВНИМАНИЕ: размытие смазывает и продолженную линию корешка,
+         поэтому под разбивку в ScanTailor его лучше держать в нуле;
+      3. выцветание к ``fade_color`` (средний цвет книги, см. ``book_mean_color``) —
+         линейно по расстоянию, на самом дальнем пикселе доля ``fade_strength``
+         (1.0 — уходит в средний цвет полностью, 0 — не выцветать).
+    Расстояние нормируется на максимальное в самих «ушах», поэтому и размытие, и
+    выцветание доходят до конца при любом угле и размере кадра.
+
+    Часть осевого холста может выйти за границы исходного кадра (при положительных
+    припусках) — эти пиксели считаются неизвестными наравне с «ушами» и заполняются
+    так же, а не остаются чёрными.
+
+    ``content_mask`` (в координатах КАДРА) — область настоящего контента, обычно E2
+    (силуэт книги после ``trim_cover_fragments``). Если задана, «известным» считается
+    её пересечение с crop-bbox, и заливка идёт от края КНИГИ, а не от края bbox. Это
+    важно: между краем книги и краем crop-зоны обычно лежит полоса в десятки пикселей
+    (припуски меньше ``--extra-erosion-px``), и без ``content_mask`` её пришлось бы
+    заполнять отдельно — в ``fill_outside_mask``, где осей crop-зоны нет и заливка
+    Вороного веером загибает линию корешка (см. ``_replicate_edge_fill``).
+    """
+    corners = _bbox_corners(cx, cy, angle, crop_ext)
+    x0, y0 = int(np.floor(corners[:, 0].min())), int(np.floor(corners[:, 1].min()))
+    x1, y1 = int(np.ceil(corners[:, 0].max())), int(np.ceil(corners[:, 1].max()))
+    out_w, out_h = max(1, x1 - x0), max(1, y1 - y0)
+
+    h, w = bgr.shape[:2]
+    out = np.zeros((out_h, out_w, 3), dtype=bgr.dtype)
+    # Пиксель-в-пиксель: пересечение осевого bbox с кадром копируется срезом, без ресэмплинга.
+    valid = np.zeros((out_h, out_w), dtype=np.uint8)
+    sx0, sy0, sx1, sy1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
+    if sx1 > sx0 and sy1 > sy0:
+        out[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = bgr[sy0:sy1, sx0:sx1]
+        valid[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = 255
+
+    box = np.zeros((out_h, out_w), dtype=np.uint8)
+    cv2.fillPoly(box, [np.round(corners - np.array([x0, y0], dtype=np.float32)).astype(np.int32)], 255)
+    known = cv2.bitwise_and(box, valid)
+    if content_mask is not None:
+        content = np.zeros((out_h, out_w), dtype=np.uint8)
+        if sx1 > sx0 and sy1 > sy0:
+            content[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = content_mask[sy0:sy1, sx0:sx1]
+        if np.any(cv2.bitwise_and(known, content)):  # пустое пересечение — заливать не от чего
+            known = cv2.bitwise_and(known, content)
+    outside = known == 0
+    if not np.any(known) or not np.any(outside):
+        return out
+
+    if fill_method == CROP_FILL_REPLICATE:
+        filled = _replicate_edge_fill(out, known, angle)
+    else:
+        filled = _voronoi_fill(out, known, work_side)
+
+    # Одна карта расстояний до crop-bbox на оба эффекта. Нормируем её на максимум
+    # внутри «ушей»: их глубина зависит от угла и размера кадра, и без нормировки
+    # (как в _distance_weighted_blur, где вес насыщается только к 4σ) на мелких
+    # «ушах» и размытие, и выцветание не успевали бы набрать силу.
+    dist = cv2.distanceTransform((known == 0).astype(np.uint8), cv2.DIST_L2, 3)
+    dist_max = float(dist.max())
+    if dist_max > 0 and (blur_px > 0 or (fade_color is not None and fade_strength > 0)):
+        norm = (dist / dist_max).astype(np.float32)[..., None]
+        filled = filled.astype(np.float32)
+        if blur_px > 0:
+            # У шва резко (вес 0 — заливка стыкуется с краем страницы без ореола),
+            # на самом дальнем пикселе — полное размытие σ=blur_px.
+            filled = filled * (1.0 - norm) + _blur_downscaled(filled, blur_px, work_side) * norm
+        if fade_color is not None and fade_strength > 0:
+            alpha = float(fade_strength) * norm
+            target = np.asarray(fade_color, dtype=np.float32).reshape(1, 1, 3)
+            filled = filled * (1.0 - alpha) + target * alpha
+        filled = np.clip(filled, 0, 255).astype(np.uint8)
+    out[outside] = filled[outside]
+    return out
 
 
 def _draw_dashed_line(
@@ -1350,6 +1670,44 @@ def _resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> st
     help="Апскейл выходного изображения перед поворотом/кропом (по умолчанию — без апскейла)",
 )
 @click.option(
+    "--crop-mode",
+    type=click.Choice(CROP_MODES, case_sensitive=False),
+    default=CROP_MODE_ROTATE,
+    show_default=True,
+    help="Способ вырезки crop-зоны: rotate — повернуть кадр на найденный угол и вырезать "
+    "выпрямленный прямоугольник (интерполяция всего кадра; на скромном разрешении и большом "
+    "угле слегка мылит); pixel-exact — скопировать crop-зону пиксель-в-пиксель в минимальный "
+    "осевой холст, книга остаётся наклонённой (выпрямлять снаружи, напр. в ScanTailor), "
+    "«уши» по углам заполняются заливкой (см. --crop-fill-blur-px / --crop-fill-fade). "
+    "В режиме pixel-exact --upscale не применяется (он бы вернул интерполяцию)",
+)
+@click.option(
+    "--crop-fill-method",
+    type=click.Choice(CROP_FILL_METHODS, case_sensitive=False),
+    default=CROP_FILL_REPLICATE,
+    show_default=True,
+    help="Способ заливки «ушей» (--crop-mode=pixel-exact): replicate — продлить краевые пиксели "
+    "crop-зоны наружу по нормали к её сторонам (clamp-to-edge): линия корешка, выходящая из "
+    "зоны, продолжается прямо и ScanTailor находит по ней разрез; voronoi — цвет ближайшей "
+    "точки границы зоны: у углов расходится веером и загибает такие линии",
+)
+@click.option(
+    "--crop-fill-blur-px",
+    default=CROP_FILL_BLUR_PX,
+    type=float,
+    show_default=True,
+    help="Макс. σ размытия заливки «ушей» (--crop-mode=pixel-exact): у границы crop-зоны "
+    "размытия нет, вдали растёт до этого значения; 0 — не размывать",
+)
+@click.option(
+    "--crop-fill-fade",
+    default=CROP_FILL_FADE,
+    type=float,
+    show_default=True,
+    help="Доля выцветания заливки «ушей» к среднему цвету книги (--crop-mode=pixel-exact) на "
+    "самом дальнем от crop-зоны пикселе: 1 — полностью уходит в средний цвет, 0 — не выцветать",
+)
+@click.option(
     "--remove-fingers/--no-remove-fingers",
     "do_remove_fingers",
     default=True,
@@ -1475,6 +1833,10 @@ def main(
     erosion_px: int,
     extra_erosion_px: int,
     upscale: Optional[float],
+    crop_mode: str,
+    crop_fill_method: str,
+    crop_fill_blur_px: float,
+    crop_fill_fade: float,
     do_remove_fingers: bool,
     finger_dilate_px: int,
     finger_zone_light_increment: "tuple[float, float]",
@@ -1489,7 +1851,7 @@ def main(
     detect_pad_tb_px: int,
     log_level: str,
 ) -> None:
-    """Находит разворот, выпрямляет его поворотом и вырезает crop-зону в OUTPUT_DIR."""
+    """Находит разворот и вырезает crop-зону в OUTPUT_DIR (способ — см. --crop-mode)."""
     logging.getLogger().setLevel(log_level.upper())
     output_dir.mkdir(parents=True, exist_ok=True)
     if debug_dir is not None:
@@ -1508,6 +1870,7 @@ def main(
         "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
         "skip-if-exists: %s | "
         "output-format: %s | compensate-levels: %s (erosion-px=%d) | extra-erosion-px=%d | upscale: %s | "
+        "crop-mode: %s (fill=%s, fill-blur-px=%g, fill-fade=%g) | "
         "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
         "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
         "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d",
@@ -1524,6 +1887,10 @@ def main(
         erosion_px,
         extra_erosion_px,
         upscale if upscale is not None else "без апскейла",
+        crop_mode,
+        crop_fill_method,
+        crop_fill_blur_px,
+        crop_fill_fade,
         do_remove_fingers,
         finger_dilate_px,
         finger_zone_light_increment[0],
@@ -1539,6 +1906,8 @@ def main(
         bg_fill_blur_px,
         detect_pad_tb_px,
     )
+    if crop_mode == CROP_MODE_PIXEL_EXACT and upscale is not None:
+        logger.warning("--upscale игнорируется при --crop-mode=%s: он вернул бы интерполяцию", CROP_MODE_PIXEL_EXACT)
 
     for path in tqdm(files, desc="Crop", unit="img"):
         _t_frame = timeit.default_timer()
@@ -1671,13 +2040,31 @@ def main(
                             cv2.bitwise_not(_ext_to_mask(mask.shape, cx, cy, angle, margined)),
                         )
                         copy_mask = cv2.bitwise_or(copy_mask, cv2.bitwise_and(mask, ring))
-                # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем цветом края (--bg-fill-method)
-                with log_timing(f"fill_outside_mask[{bg_fill_method}]", path.name):
-                    bgr_for_crop = fill_outside_mask(
-                        bgr_leveled, copy_mask, method=bg_fill_method, blur_px=bg_fill_blur_px
-                    )
-                with log_timing("crop_rotated", path.name):
-                    crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, upscale)
+                with log_timing(f"crop[{crop_mode}]", path.name):
+                    if crop_mode == CROP_MODE_PIXEL_EXACT:
+                        # fill_outside_mask здесь НЕ нужен: crop_pixel_exact заполняет всю
+                        # зону вне E2 сам — в осях crop-зоны, продолжая линию корешка прямо
+                        # (в fill_outside_mask этих осей нет, и Вороной её загибает).
+                        fade_color = book_mean_color(bgr_leveled, copy_mask)
+                        crop = crop_pixel_exact(
+                            bgr_leveled,
+                            cx,
+                            cy,
+                            angle,
+                            crop_ext,
+                            fade_color,
+                            crop_fill_blur_px,
+                            crop_fill_fade,
+                            crop_fill_method,
+                            copy_mask,
+                        )
+                    else:
+                        # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем цветом края
+                        with log_timing(f"fill_outside_mask[{bg_fill_method}]", path.name):
+                            bgr_for_crop = fill_outside_mask(
+                                bgr_leveled, copy_mask, method=bg_fill_method, blur_px=bg_fill_blur_px
+                            )
+                        crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, upscale)
                 with log_timing("write_image", path.name):
                     _write_image(out_path, crop, params, force_dpi)
 
