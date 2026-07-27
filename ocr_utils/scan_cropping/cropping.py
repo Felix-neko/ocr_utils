@@ -151,16 +151,33 @@ def crop_pixel_exact(
     dist = cv2.distanceTransform((known == 0).astype(np.uint8), cv2.DIST_L2, 3)
     dist_max = float(dist.max())
     if dist_max > 0 and (blur_px > 0 or (fade_color is not None and fade_strength > 0)):
-        norm = (dist / dist_max).astype(np.float32)[..., None]
-        filled = filled.astype(np.float32)
+        # Размытие и выцветание считаем ТОЛЬКО в заполняемых пикселях: наружу
+        # уходит ровно ``filled[outside]``, а его обычно 0.3-0.5% холста. Раньше
+        # весь холст разворачивался во float32 (30 МБ → 120 МБ) и по нему шло
+        # несколько проходов, из которых 99.5% результата выбрасывалось.
+        # Арифметика поэлементная и на тех же типах, так что значения те же.
+        vals = filled[outside].astype(np.float32)
+        norm = (dist[outside] / dist_max).astype(np.float32)[:, None]
         if blur_px > 0:
-            # У шва резко (вес 0 — заливка стыкуется с краем страницы без ореола),
-            # на самом дальнем пикселе — полное размытие σ=blur_px.
-            filled = filled * (1.0 - norm) + blur_downscaled(filled, blur_px, work_side) * norm
+            # Размытая версия нужна целиком (ядро тянет соседей из известной зоны),
+            # поэтому её единственную считаем по всему холсту; выбираем из неё опять
+            # же только наши пиксели. У шва резко (вес 0 — заливка стыкуется с краем
+            # страницы без ореола), на самом дальнем пикселе — полное размытие σ=blur_px.
+            #
+            # ВАЖНО: на вход размытию идёт float32, а не uint8. Внутри
+            # blur_downscaled кадр уменьшается, размывается и растягивается обратно;
+            # на uint8 каждый из этих шагов округляется, и цвет заливки расходится с
+            # прежним (проверено: при --crop-fill-method=voronoi расхождение видно
+            # на глаз в diff). Приведение типа стоит один проход по холсту — это
+            # всё ещё в разы дешевле прежнего варианта, который гонял во float32
+            # весь холст и делал по нему несколько проходов смешивания.
+            blurred = blur_downscaled(filled.astype(np.float32), blur_px, work_side)
+            vals = vals * (1.0 - norm) + blurred[outside] * norm
         if fade_color is not None and fade_strength > 0:
             alpha = float(fade_strength) * norm
-            target = np.asarray(fade_color, dtype=np.float32).reshape(1, 1, 3)
-            filled = filled * (1.0 - alpha) + target * alpha
-        filled = np.clip(filled, 0, 255).astype(np.uint8)
-    out[outside] = filled[outside]
+            target = np.asarray(fade_color, dtype=np.float32).reshape(1, 3)
+            vals = vals * (1.0 - alpha) + target * alpha
+        out[outside] = np.clip(vals, 0, 255).astype(np.uint8)
+    else:
+        out[outside] = filled[outside]
     return out
