@@ -116,6 +116,8 @@ class CropParams:
 
     # Детекция разворота
     detect_pad_tb_px: int = 250
+    # Радиус смыкания силуэта разворота, пикс.; None — по размеру кадра
+    page_close_px: Optional[int] = None
 
 
 def process_frame(path: Path, params: CropParams, models) -> None:
@@ -175,7 +177,7 @@ def process_frame(path: Path, params: CropParams, models) -> None:
 
     with log_timing("page_mask", path.name):
         # E1 — силуэт разворота (светлые страницы + куски обложки)
-        mask = page_mask(bgr, models, pad_tb_px=params.detect_pad_tb_px)
+        mask = page_mask(bgr, models, pad_tb_px=params.detect_pad_tb_px, close_px=params.page_close_px)
 
     # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
     if params.shadow_method != "none" and finger_mask is not None:

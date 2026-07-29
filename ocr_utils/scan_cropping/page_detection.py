@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.finger_removal.masking import _suppress_nested_boxes
+from ocr_utils.scan_cropping.morphology import close_disk
 
 
 # Настоящая тканевая подложка в этой съёмке — тёмная (чёрный/тёмно-синий стол).
@@ -40,6 +41,28 @@ LARGE_BOX_CONF_TIERS = ((0.91, 0.05), (0.94, 0.10))
 # компоненты считается шумом и отбрасывается; крупнее — это вторая страница
 # разворота (см. IMG_0058.jpg), а не шум, и должна остаться в маске.
 SECOND_PAGE_MIN_AREA_FRAC = 0.2
+
+# Радиус смыкания силуэта в refine_page_mask — ДОЛЯ длинной стороны кадра, а не
+# фиксированное число пикселей (переопределяется из CLI — --page-close-px).
+#
+# Почему доля. Смыкание работает на кадре в полном разрешении и должно перекрывать
+# межстрочный интервал: SAM на плотно набранной странице нередко возвращает силуэт
+# НЕ листа, а самого текста (маска идёт по глифам), и страницу собирает обратно
+# именно смыкание. Межстрочный интервал растёт вместе с разрешением съёмки, значит
+# и радиус обязан. Прежнее фиксированное ядро 15×15 при iterations=2 (радиус ≈14 px)
+# подбиралось на паках 300 DPI (~4700 px по длинной стороне); на паке 450 DPI
+# (~7000 px) его перестало хватать, и верх левой страницы выпадал из маски — а с
+# ним и из зоны копирования, после чего crop_pixel_exact затирал его заливкой
+# (см. IMG_0017.jpg / IMG_0019.jpg, 1977/07).
+#
+# Значение подобрано свипом по радиусу на 23 кадрах пака 450 DPI и 36 кадрах паков
+# 300 DPI. На 450 DPI (r=45 px) верх левой страницы возвращается на место, покрытие
+# маски растёт 0.503 → 0.704 у IMG_0017 и 0.516 → 0.705 у IMG_0019; дальнейший рост
+# радиуса не меняет уже ничего (плато — на фон маска не переливается). На 300 DPI
+# (r=30 px) результат совпадает с прежним r=14 на 35 кадрах из 36 (на одном верх
+# маски стал точнее), покрытие отличается не более чем на 0.002 — регрессии нет:
+# там SAM отдаёт нормальный силуэт листа, и радиус смыкания просто не работает.
+PAGE_CLOSE_FRAC = 0.0065
 # Порог для _suppress_nested_boxes (keep_new_area_frac): бокс, переросший
 # локальный якорь сверх growth_factor, всё же оставляем, если он добавляет ≥ этой
 # доли НЕ покрытой принятыми боксами площади. YOLO-World иногда не даёт отдельного
@@ -57,30 +80,49 @@ PAGE_SUBBOX_CONTAIN = 0.85
 PAGE_SUBBOX_MAX_AREA_FRAC = 0.9
 
 
-def refine_page_mask(mask: np.ndarray) -> np.ndarray:
+def page_close_px(shape, close_px: Optional[int] = None) -> int:
+    """Радиус смыкания силуэта для кадра формы ``shape``, пикс.
+
+    ``close_px`` не ``None`` — берётся как есть (значение ``--page-close-px``),
+    иначе считается как ``PAGE_CLOSE_FRAC`` длинной стороны кадра (см. там же,
+    почему доля, а не константа). Итог ≈ 30 px на паках 300 DPI и ≈ 45 px на 450 DPI.
+    """
+    if close_px is not None:
+        return max(0, int(close_px))
+    return max(1, int(round(PAGE_CLOSE_FRAC * max(shape[0], shape[1]))))
+
+
+def refine_page_mask(mask: np.ndarray, close_px: Optional[int] = None) -> np.ndarray:
     """Смыкание разрывов + крупные связные области + заливка дыр.
 
     Левая и правая страницы разворота часто детектируются ДВУМЯ отдельными
     боксами (левая половина / правая половина или обложка), и у SAM-силуэтов
     между ними остаётся зазор в пару пикселей у корешка — тогда они оказываются
-    РАЗНЫМИ связными компонентами. Поэтому смыкание (``MORPH_CLOSE``) нужно
-    делать ДО выбора «крупных» компонентов, а не после — иначе одна из половин
-    разворота (например, обложка) отбрасывается целиком как «шум».
+    РАЗНЫМИ связными компонентами. Поэтому смыкание нужно делать ДО выбора
+    «крупных» компонентов, а не после — иначе одна из половин разворота
+    (например, обложка) отбрасывается целиком как «шум».
+
+    Смыкание вдобавок собирает страницу обратно, когда SAM вернул силуэт НЕ листа,
+    а напечатанного на нём ТЕКСТА (маска идёт по глифам — так бывает на плотно
+    набранных страницах). Тогда радиус должен перекрывать межстрочный интервал,
+    поэтому он и берётся долей от размера кадра — см. ``PAGE_CLOSE_FRAC`` и
+    ``page_close_px``, ``close_px`` переопределяет его напрямую в пикселях.
+    Смыкание — диском через distance transform (``morphology.close_disk``): на
+    полном кадре в 37 Мп ядро ``cv2`` нужного радиуса стоило бы секунды.
 
     Если детектор вместо двух отдельных боксов на страницы выдал ОДИН бокс на
     весь разворот (см. ``_suppress_nested_boxes``), у SAM-силуэта в этом боксе
-    зазор у корешка получается намного шире 15px — смыкание его не устраняет, и
-    страницы остаются раздельными компонентами. Раньше здесь оставляли только
-    САМУЮ БОЛЬШУЮ компоненту — тогда вторая страница (сопоставимая по площади с
-    первой) отбрасывалась целиком (см. IMG_0058.jpg: осталась только левая
-    страница). Поэтому теперь оставляем ВСЕ компоненты не меньше
-    ``SECOND_PAGE_MIN_AREA_FRAC`` от площади самой крупной — мелкий мусор
+    зазор у корешка получается намного шире радиуса смыкания — оно его не
+    устраняет, и страницы остаются раздельными компонентами. Раньше здесь
+    оставляли только САМУЮ БОЛЬШУЮ компоненту — тогда вторая страница
+    (сопоставимая по площади с первой) отбрасывалась целиком (см. IMG_0058.jpg:
+    осталась только левая страница). Поэтому теперь оставляем ВСЕ компоненты не
+    меньше ``SECOND_PAGE_MIN_AREA_FRAC`` от площади самой крупной — мелкий мусор
     (обрывки текста, шум SAM) настолько мельче страницы, что не проходит порог.
     """
     if int(np.count_nonzero(mask)) == 0:
         return mask
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    mask = close_disk(mask, page_close_px(mask.shape, close_px))
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     if num > 1:
         areas = stats[1:, cv2.CC_STAT_AREA]
@@ -195,7 +237,9 @@ def detect_page_mask(bgr: np.ndarray, models, frame_area: Optional[float] = None
     return mask
 
 
-def page_mask(bgr: np.ndarray, models, pad_tb_px: int = 0, _unpad_ratio: float = 1.0) -> np.ndarray:
+def page_mask(
+    bgr: np.ndarray, models, pad_tb_px: int = 0, close_px: Optional[int] = None, _unpad_ratio: float = 1.0
+) -> np.ndarray:
     """Полная маска разворота в разрешении кадра (детекция на уменьшенной копии).
 
     Результат уже включает ``bridge_component_gaps`` — то есть промежуток между
@@ -211,6 +255,11 @@ def page_mask(bgr: np.ndarray, models, pad_tb_px: int = 0, _unpad_ratio: float =
     детектится «вся область как разворот»: чёрная рамка даёт SAM явную тёмную
     границу и отодвигает YOLO-боксы от краёв.
 
+    ``close_px`` — радиус смыкания силуэта в ``refine_page_mask``, пикс.; ``None`` —
+    считать по размеру кадра (см. ``page_close_px``). Смыкание идёт по кадру ДО
+    добавления рамки: доля берётся от настоящего размера кадра, и рамка её не
+    искажает.
+
     ВАЖНО: доли near-full-frame боксов при этом считаются относительно ИСХОДНОГО
     кадра (без добавленной рамки) — иначе рост площади кадра занижал бы долю и
     мусорный full-frame бокс проскакивал под пороги LARGE_BOX_CONF_TIERS (см.
@@ -220,7 +269,9 @@ def page_mask(bgr: np.ndarray, models, pad_tb_px: int = 0, _unpad_ratio: float =
     h, w = bgr.shape[:2]
     if pad_tb_px > 0:
         padded = cv2.copyMakeBorder(bgr, pad_tb_px, pad_tb_px, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-        mask = page_mask(padded, models, _unpad_ratio=h / float(h + 2 * pad_tb_px))
+        mask = page_mask(
+            padded, models, close_px=page_close_px((h, w), close_px), _unpad_ratio=h / float(h + 2 * pad_tb_px)
+        )
         return mask[pad_tb_px : pad_tb_px + h, :]
     scale = WORK_SIDE / max(h, w) if max(h, w) > WORK_SIDE else 1.0
     work = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
@@ -229,7 +280,7 @@ def page_mask(bgr: np.ndarray, models, pad_tb_px: int = 0, _unpad_ratio: float =
     mask = detect_page_mask(work, models, frame_area=frame_area)
     if scale != 1.0:
         mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    mask = refine_page_mask(mask)
+    mask = refine_page_mask(mask, close_px)
     return bridge_component_gaps(mask)
 
 
@@ -240,7 +291,7 @@ def bridge_component_gaps(mask: np.ndarray, work_side: int = WORK_SIDE) -> np.nd
 
     SAM иногда рвёт силуэт разворота вдоль корешка (широкий, неравномерный по
     высоте зазор между левой и правой страницей — от десятков до сотен пикселей,
-    ``MORPH_CLOSE`` в ``refine_page_mask`` не бриджит его целиком) либо
+    смыкание в ``refine_page_mask`` не бриджит его целиком) либо
     фрагментирует силуэт по малоинформативным/пустым участкам страницы (см.
     IMG_0033/0034/0030.jpg) — тогда эта область выпадает из региона интереса:
     не только закрашивается фоном при кропе, но и не учитывается при поиске угла

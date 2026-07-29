@@ -179,6 +179,7 @@ uv run python -m ocr_utils.defocus_detection --help
 ```
 defocus_detection/
 ├── detect_defocus.py   # CLI: разбор опций, прогон, печать отчёта
+├── compare_focus_series.py  # отдельный CLI: выбор лучшего дубля ОДНОЙ страницы (см. ниже)
 ├── pipeline.py         # оркестрация analyze() + сводный вердикт (B-гейт, A/C/E)
 ├── moire.py            # основной метод: муар, градиент (A), гейт обложек (B), зона (C)
 ├── fft_hf.py           # независимый метод HF/MID для кросс-проверки (E)
@@ -190,4 +191,24 @@ defocus_detection/
 ```
 
 Зависимости (уже в `pyproject.toml`): `rawpy`, `numpy`, `scipy`, `Pillow`,
-`opencv-python-headless`, `click`, `tqdm`.
+`opencv-python-headless`, `click`, `tqdm`, `matplotlib`.
+
+---
+
+## Соседняя задача: выбор лучшего дубля одной страницы
+
+`compare_focus_series.py` решает **другую** задачу: снято несколько дублей ОДНОГО разворота
+(охота за фокусом на док-камере) — какой оставить?
+
+```bash
+uv run python -m ocr_utils.legacy.defocus_detection.compare_focus_series "/путь/к/дублям" \
+    --md-report focus_series_report.md --figures-dir focus_series_figs/
+```
+
+Ключевой момент: дубли почти никогда не сняты с одного расстояния, масштаб страницы в
+пикселях гуляет на десятки процентов, и пиксельные метрики резкости (lapvar, Tenengrad) при
+уменьшении масштаба **растут** — наивное сравнение уверенно выбирает самый мягкий кадр.
+Поэтому кадры сперва регистрируются друг к другу (SIFT+RANSAC), а размытие меряется как
+разница квадратов σ по наклону `log(PSD_a/PSD_b)` от `f²` в *страничных* частотах — сперва
+вовсе без ресемплинга, затем после приведения всех кадров к общему масштабу. Пример готового
+отчёта — `focus_series_report.md` в корне репозитория.

@@ -276,6 +276,18 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     "даёт SAM тёмную границу и отодвигает боксы от краёв. 0 — выкл",
 )
 @click.option(
+    "--page-close-px",
+    type=int,
+    default=None,
+    show_default=True,
+    help="Радиус смыкания силуэта разворота, пикс. По умолчанию считается по размеру кадра "
+    "(≈30 px при 300 DPI, ≈45 px при 450 DPI). Смыкание собирает страницу обратно, когда SAM "
+    "вернул силуэт не листа, а напечатанного текста (маска идёт по глифам), поэтому радиус "
+    "должен перекрывать межстрочный интервал и растёт вместе с разрешением съёмки. Мало — верх "
+    "страницы выпадает из маски и затирается заливкой при кропе; много — лишнего не съедает, "
+    "но и не помогает",
+)
+@click.option(
     "--log-level",
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=False),
     default="WARNING",
@@ -312,6 +324,7 @@ def main(
     bg_fill_method: str,
     bg_fill_blur_px: float,
     detect_pad_tb_px: int,
+    page_close_px: Optional[int],
     log_level: str,
 ) -> None:
     """Находит разворот и вырезает crop-зону в OUTPUT_DIR (способ — см. --crop-mode)."""
@@ -348,6 +361,7 @@ def main(
         text_protect_mode=text_protect_mode,
         layout_pad_px=layout_pad_px,
         detect_pad_tb_px=detect_pad_tb_px,
+        page_close_px=page_close_px,
     )
 
     files = collect_images(input_dir, recursive)
@@ -369,7 +383,8 @@ def main(
             "crop-mode: %s (fill=%s, fill-blur-px=%g, fill-fade=%g) | "
             "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
             "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
-            "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d",
+            "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d | "
+            "page-close-px: %s",
             len(files),
             models.device,
             left_margin,
@@ -400,6 +415,7 @@ def main(
             bg_fill_method,
             bg_fill_blur_px,
             detect_pad_tb_px,
+            page_close_px if page_close_px is not None else "по размеру кадра",
         )
         run_batch(files, params, models)
 
