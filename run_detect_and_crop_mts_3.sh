@@ -9,9 +9,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 #INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-3 1977-07 - 1978-03 (450 DPI)"
-OUTPUT_DIR="/mnt/system/raw/mts/pack_3_v_1/cropped"
-DEBUG_DIR="/mnt/system/raw/mts/pack_3_v_1/debug"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-4 1978-04 - 1985 (450 DPI)"
+OUTPUT_DIR="/media/felix/SYSTEM/raw/mts/pack_4_v_1/cropped"
+DEBUG_DIR="/media/felix/SYSTEM/raw/mts/pack_4_v_1/debug"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -25,8 +25,8 @@ uv run python -m ocr_utils.scan_cropping \
     --recursive \
     --top-margin -180 \
     --bottom-margin -270 \
-    --left-margin -340 \
-    --right-margin -340 \
+    --left-margin -360 \
+    --right-margin -360 \
     --output-format tiff \
     --force-dpi=450 \
     --compensate-levels \
