@@ -31,7 +31,7 @@ uv run python -m ocr_utils.scan_cropping \
     --force-dpi=450 \
     --compensate-levels \
     --finger-dilate-px=120 \
-    --max-asymmetric-dilation-ratio=1.6 \
+    --max-asymmetric-dilation-ratio=1.
     --finger-zone-light-increment=20,20 \
     --extra-erosion-px=120 \
     --protect-text-layout \
