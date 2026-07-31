@@ -61,4 +61,29 @@ def resolve_output_suffix(orig_suffix: str, output_format: Optional[str]) -> str
     """Суффикс выходного файла: как у входа, если ``output_format`` не задан."""
     if output_format is None:
         return orig_suffix
-    return ".png" if output_format.lower() == "png" else ".tiff"
+    fmt = output_format.lower()
+    if fmt == "png":
+        return ".png"
+    if fmt in ("jpg", "jpeg"):
+        return ".jpg"
+    return ".tiff"
+
+
+def read_dpi(path: Path, default: Optional[int] = None) -> Optional[int]:
+    """Разрешение исходного файла (точек на дюйм) или ``default``, если тега нет.
+
+    Нужно, чтобы протащить DPI из входного файла в выходной: ``cv2.imwrite`` тег
+    разрешения не пишет вовсе, а OCR-движки по нему судят о кегле — скан 600 dpi,
+    сохранённый без тега, читается как страница в 96 dpi и распознаётся заметно хуже.
+    Пишет это значение обратно ``write_image(..., force_dpi=...)``.
+    """
+    try:
+        with PILImage.open(path) as img:
+            dpi = img.info.get("dpi")
+    except OSError:
+        return default
+    if not dpi:
+        return default
+    # PIL отдаёт пару (x, y), иногда как Rational — берём горизонтальное.
+    value = int(round(float(dpi[0])))
+    return value or default
