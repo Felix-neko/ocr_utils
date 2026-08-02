@@ -131,6 +131,19 @@ logger = logging.getLogger(__name__)
     ),
 )
 @click.option(
+    "--use-surya-layout/--no-use-surya-layout",
+    "use_surya_layout",
+    default=False,
+    show_default=True,
+    help=(
+        "Размечать страницу нейросетью Surya и защищать блоки-иллюстрации (класс Picture) "
+        "той же защитной маской, что и текст. Без флага страница с крупной фотографией "
+        "целиком копируется как есть; с флагом фотография защищается, а фон вокруг текста "
+        "сглаживается. Пороги Оцу и детектор растра при этом считаются по кадру БЕЗ "
+        "иллюстраций. Стоит ~0.7 с на кадр (GPU) и требует весов Surya."
+    ),
+)
+@click.option(
     "--log-level",
     default="WARNING",
     show_default=True,
@@ -152,6 +165,7 @@ def main(
     dilate_px: Optional[float],
     blur_mult: float,
     blur_mode: str,
+    use_surya_layout: bool,
     log_level: str,
 ) -> None:
     """Сглаживает фон сканов, не трогая контент: подготовка к бинаризации в FineReader."""
@@ -175,6 +189,7 @@ def main(
         dilate_px=dilate_px,
         blur_mult=blur_mult,
         blur_mode=blur_mode.lower(),
+        use_surya_layout=use_surya_layout,
     )
 
     files = collect_images(input_dir, recursive)
@@ -183,7 +198,7 @@ def main(
         return
 
     logger.info(
-        "Файлов: %d | маска: %s (bias=%.2f%s) | припуск: %s | размытие: x%.1f, режим %s | выход: %s%s",
+        "Файлов: %d | маска: %s (bias=%.2f%s) | припуск: %s | размытие: x%.1f, режим %s | выход: %s%s%s",
         len(files),
         params.method,
         params.threshold_bias,
@@ -193,6 +208,7 @@ def main(
         params.blur_mode,
         params.output_format or "как у входа",
         ", серый" if params.to_gray else "",
+        " | Surya layout: защита иллюстраций" if params.use_surya_layout else "",
     )
 
     run_batch(files, params)

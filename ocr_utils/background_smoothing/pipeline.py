@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+from ocr_utils.background_smoothing.layout import analysis_roi, make_detector, polygons_mask
 from ocr_utils.background_smoothing.processing import (
     DEFAULT_BLUR_MULT,
     DEFAULT_SAUVOLA_K,
@@ -43,6 +44,14 @@ COLOR_DILATED = (0, 255, 255)  # жёлтый — защитная маска M_
 COLOR_PRIMARY = (0, 0, 255)  # красный — первичная маска M_primary (найденный контент)
 ALPHA_DILATED = 0.25
 ALPHA_PRIMARY = 0.45
+
+# Рамка вокруг блоков-иллюстраций Surya (--use-surya-layout): ярко-сиреневая, без
+# заливки — под ней должно быть видно саму фотографию, чтобы по оверлею судить,
+# насколько точно сеть её обвела.
+COLOR_PICTURE = (255, 0, 200)
+# Толщина рамки как доля длинной стороны кадра (~5 px при 6200 px): константа в
+# пикселях была бы невидима на 21-Мп кадре и жирной на превью.
+PICTURE_OUTLINE_FRAC = 0.0008
 
 
 @dataclass
@@ -74,8 +83,13 @@ class SmoothParams:
     blur_mult: float = DEFAULT_BLUR_MULT
     blur_mode: str = BLUR_MODE_MASKED
 
+    # Разметка страницы нейросетью (защита растровых иллюстраций)
+    use_surya_layout: bool = False
 
-def draw_overlay(bgr: np.ndarray, m_primary: np.ndarray, m_dilated: np.ndarray) -> np.ndarray:
+
+def draw_overlay(
+    bgr: np.ndarray, m_primary: np.ndarray, m_dilated: np.ndarray, picture_polys: "list[np.ndarray] | None" = None
+) -> np.ndarray:
     """Исходный кадр с полупрозрачной заливкой обеих масок.
 
     Показывает именно ВХОД обработки: по оверлею видно, что было найдено как
@@ -84,6 +98,10 @@ def draw_overlay(bgr: np.ndarray, m_primary: np.ndarray, m_dilated: np.ndarray) 
     сгладился, а где просто не было контента.
 
     Порядок важен: ``M_dilated`` крупнее и кладётся первой, ``M_primary`` — поверх.
+
+    ``picture_polys`` (при ``--use-surya-layout``) обводятся ярко-сиреневой рамкой
+    поверх всего: заливка показала бы, что блок защищён, но не показала бы, ГДЕ
+    именно сеть провела границу иллюстрации, а это и есть то, что нужно проверять.
     """
     out = bgr.copy()
     for mask, color, alpha in ((m_dilated, COLOR_DILATED, ALPHA_DILATED), (m_primary, COLOR_PRIMARY, ALPHA_PRIMARY)):
@@ -96,11 +114,23 @@ def draw_overlay(bgr: np.ndarray, m_primary: np.ndarray, m_dilated: np.ndarray) 
         # на кадре в 21 Мп это лишние 63 МБ на каждую из двух масок.
         tint = np.asarray(color, dtype=np.float32) * alpha
         out[sel] = (out[sel] * (1.0 - alpha) + tint).astype(np.uint8)
+
+    if picture_polys:
+        thickness = max(1, int(round(PICTURE_OUTLINE_FRAC * max(bgr.shape[0], bgr.shape[1]))))
+        cv2.polylines(
+            out, [np.round(p).astype(np.int32) for p in picture_polys], True, COLOR_PICTURE, thickness, cv2.LINE_AA
+        )
     return out
 
 
 def _write_overlay(
-    path: Path, params: SmoothParams, rel: Path, bgr: np.ndarray, m_primary: np.ndarray, m_dilated: np.ndarray
+    path: Path,
+    params: SmoothParams,
+    rel: Path,
+    bgr: np.ndarray,
+    m_primary: np.ndarray,
+    m_dilated: np.ndarray,
+    picture_polys: "list[np.ndarray] | None" = None,
 ) -> None:
     """Пишет debug-оверлей, если задан ``debug_dir``; иначе ничего не делает.
 
@@ -112,14 +142,27 @@ def _write_overlay(
     dbg_path = (params.debug_dir / rel).with_suffix(".jpg")
     dbg_path.parent.mkdir(parents=True, exist_ok=True)
     with log_timing("overlay", path.name):
-        cv2.imwrite(str(dbg_path), draw_overlay(bgr, m_primary, m_dilated), imwrite_params(".jpg"))
+        overlay = draw_overlay(bgr, m_primary, m_dilated, picture_polys)
+        cv2.imwrite(str(dbg_path), overlay, imwrite_params(".jpg"))
 
 
-def process_frame(path: Path, params: SmoothParams) -> None:
+def process_frame(path: Path, params: SmoothParams, detector=None) -> None:
     """Обрабатывает один кадр и пишет результат (и оверлей, если задан ``debug_dir``).
 
     Кадр, который трогать нельзя (чистый лист, обложка, растровая вкладка), копируется
     на выход без изменений — см. :func:`has_content` и :func:`has_halftone`.
+
+    ``detector`` — ``layout.LayoutDetector`` при ``--use-surya-layout``, иначе ``None``.
+    Порядок при включённом флаге такой:
+
+    1. Surya находит блоки-иллюстрации; всё остальное поле кадра становится областью
+       анализа ``roi``.
+    2. Проверки «есть ли контент» и «нет ли растра» идут ПО ``roi`` — то есть по
+       остатку страницы. Детектор растра при этом остаётся страховкой: если растр
+       нашёлся и ВНЕ найденных иллюстраций (полосная фотография, обложка, которую
+       layout не разметил), кадр по-прежнему копируется как есть.
+    3. Только если остаток прошёл обе проверки, строится маска и размывается фон.
+       Иллюстрации входят в защитную маску с тем же припуском, что и текст.
 
     Сообщения печатаются через ``tqdm.write``, чтобы не разрывать прогресс-бар.
     """
@@ -140,20 +183,29 @@ def process_frame(path: Path, params: SmoothParams) -> None:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     src = gray if params.to_gray else bgr
 
+    picture_polys: "list[np.ndarray]" = []
+    if detector is not None:
+        with log_timing("surya_layout", path.name):
+            picture_polys = detector.picture_polygons(bgr, gray)
+    m_picture = polygons_mask(gray.shape, picture_polys)
+    roi = analysis_roi(m_picture, picture_polys)
+
     # Два случая, когда кадр трогать нельзя, и оба кончаются копированием как есть
     # (пропустить файл совсем значило бы оставить дыру в паке):
     #   * контент не выделяется — Оцу режет собственное зерно, маске верить нельзя;
     #   * есть крупная растровая область — обложка или полутоновая вкладка, там зерно
     #     и есть содержимое, а размытие выело бы его островами.
+    # Обе проверки — по области анализа ``roi``, то есть без уже опознанных иллюстраций.
     skip_reason = ""
-    if not has_content(gray):
+    if not has_content(gray, roi):
         skip_reason = "контент не выделяется (чистый лист?)"
-    elif has_halftone(gray):
+    elif has_halftone(gray, roi=roi):
         skip_reason = "крупная растровая область (обложка или вкладка?)"
     if skip_reason:
         tqdm.write(f"  {skip_reason}, копирую без изменений: {path.name}")
         write_image(out_path, src, imwrite_params(out_suffix), read_dpi(path))
-        _write_overlay(path, params, rel, bgr, np.zeros(gray.shape, np.uint8), np.zeros(gray.shape, np.uint8))
+        zeros = np.zeros(gray.shape, np.uint8)
+        _write_overlay(path, params, rel, bgr, zeros, zeros, picture_polys)
         return
 
     with log_timing("primary_mask", path.name):
@@ -163,11 +215,17 @@ def process_frame(path: Path, params: SmoothParams) -> None:
             bias=params.threshold_bias,
             sauvola_k=params.sauvola_k,
             window=params.sauvola_window,
+            roi=roi,
         )
 
     radius = dilate_radius(gray.shape, params.dilate_px)
     with log_timing("dilate", path.name):
         m_dilated = dilate_disk(m_primary, radius)
+        # Иллюстрации присоединяются к защитной маске ПОСЛЕ отдельной дилатации тем же
+        # радиусом: припуск у них такой же, как у текста, а объединять маски до
+        # дилатации нельзя — на оверлее фотография залилась бы красным как «контент».
+        if picture_polys:
+            m_dilated = cv2.bitwise_or(m_dilated, dilate_disk(m_picture, radius))
 
     with log_timing(f"blur[{params.blur_mode}]", path.name):
         weight = None if params.blur_mode == BLUR_MODE_PLAIN else (m_dilated == 0).astype(np.uint8)
@@ -177,7 +235,7 @@ def process_frame(path: Path, params: SmoothParams) -> None:
         final = compose(src, blurred, m_dilated)
 
     write_image(out_path, final, imwrite_params(out_suffix), read_dpi(path))
-    _write_overlay(path, params, rel, bgr, m_primary, m_dilated)
+    _write_overlay(path, params, rel, bgr, m_primary, m_dilated, picture_polys)
 
 
 def run_batch(files: "list[Path]", params: SmoothParams) -> None:
@@ -185,11 +243,15 @@ def run_batch(files: "list[Path]", params: SmoothParams) -> None:
 
     Ошибка на отдельном кадре печатается с трейсбеком и не прерывает пачку:
     на прогоне в сотню сканов обиднее потерять всё из-за одного битого файла.
+
+    Детектор layout создаётся здесь один раз на всю пачку (веса Surya грузятся
+    при первом кадре) и передаётся в :func:`process_frame`.
     """
+    detector = make_detector(params.use_surya_layout)
     for path in tqdm(files, desc="BgSmooth", unit="img"):
         t_frame = timeit.default_timer()
         try:
-            process_frame(path, params)
+            process_frame(path, params, detector)
             logger.info("%7.0f мс: ИТОГО кадр (%s)", (timeit.default_timer() - t_frame) * 1000.0, path.name)
         except Exception as e:
             import traceback

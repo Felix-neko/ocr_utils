@@ -91,37 +91,69 @@ def odd(value: int) -> int:
     return value if value % 2 else value + 1
 
 
-def global_threshold(gray: np.ndarray, bias: float = DEFAULT_THRESHOLD_BIAS) -> float:
+def analysis_samples(gray: np.ndarray, roi: "np.ndarray | None") -> np.ndarray:
+    """Пиксели, по которым считаются пороги: весь кадр либо только область ``roi``.
+
+    ``roi`` (uint8 0/255 того же размера) отсекает участки, чья гистограмма не
+    относится к делу, — при ``--use-surya-layout`` это блоки-иллюстрации: средние
+    тона фотографии тянут порог Оцу вверх, и часть бумаги вокруг текста уезжает
+    под маску. Выборка приводится к столбцу (N, 1): ``cv2.threshold`` ждёт
+    двумерный массив, а порядок пикселей для гистограммных методов не важен.
+    """
+    if roi is None:
+        return gray
+    return gray[roi > 0].reshape(-1, 1)
+
+
+def _otsu(samples: np.ndarray) -> float:
+    """Порог Оцу по выборке пикселей."""
+    t_otsu, _ = cv2.threshold(samples, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return float(t_otsu)
+
+
+def global_threshold(gray: np.ndarray, bias: float = DEFAULT_THRESHOLD_BIAS, roi: "np.ndarray | None" = None) -> float:
     """Порог Оцу, сдвинутый в сторону бумаги на долю ``bias`` расстояния до неё.
 
     Уровень бумаги берётся как медиана пикселей светлее Оцу — то есть порог целиком
     вычисляется из поданной картинки, без привязки к конкретному паку. ``bias = 0``
     даёт чистый Оцу, ``bias = 1`` — уровень бумаги (маска станет почти всем кадром).
+
+    ``roi`` ограничивает выборку (см. :func:`analysis_samples`); сам порог потом
+    применяется ко всему кадру.
     """
-    t_otsu, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    lighter = gray[gray > t_otsu]
+    samples = analysis_samples(gray, roi)
+    if samples.size == 0:  # анализировать нечего (весь кадр — иллюстрация)
+        return 0.0
+    t_otsu = _otsu(samples)
+    lighter = samples[samples > t_otsu]
     if lighter.size == 0:  # одноцветный кадр — сдвигать не от чего
-        return float(t_otsu)
+        return t_otsu
     paper = float(np.median(lighter))
-    return float(t_otsu) + bias * (paper - float(t_otsu))
+    return t_otsu + bias * (paper - t_otsu)
 
 
-def has_content(gray: np.ndarray) -> bool:
+def has_content(gray: np.ndarray, roi: "np.ndarray | None" = None) -> bool:
     """Есть ли на кадре что-то темнее бумаги, или это чистый лист.
 
     Оцу делит гистограмму надвое всегда, даже когда делить нечего, поэтому на пустой
     странице маска контента получилась бы размером в половину кадра, а результат —
     пятнистым (половина размыта, половина нет). Сравниваем медианы двух классов:
     настоящий текст даёт разрыв в сотни уровней, зерно чистой бумаги — единицы.
+
+    ``roi`` ограничивает выборку (см. :func:`analysis_samples`). Пустая область —
+    ``False``: если весь кадр занят иллюстрациями, сглаживать вне них нечего.
     """
-    t_otsu, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    darker, lighter = gray[gray <= t_otsu], gray[gray > t_otsu]
+    samples = analysis_samples(gray, roi)
+    if samples.size == 0:
+        return False
+    t_otsu = _otsu(samples)
+    darker, lighter = samples[samples <= t_otsu], samples[samples > t_otsu]
     if darker.size == 0 or lighter.size == 0:
         return False
     return float(np.median(lighter)) - float(np.median(darker)) >= MIN_CONTENT_CONTRAST
 
 
-def has_halftone(gray: np.ndarray, min_frac: float = HALFTONE_MIN_FRAC) -> bool:
+def has_halftone(gray: np.ndarray, min_frac: float = HALFTONE_MIN_FRAC, roi: "np.ndarray | None" = None) -> bool:
     """Есть ли на кадре крупная растровая (полутоновая) область — обложка или вкладка.
 
     Сглаживать такие кадры нельзя: их зерно — это само изображение, а не фактура фона,
@@ -131,12 +163,30 @@ def has_halftone(gray: np.ndarray, min_frac: float = HALFTONE_MIN_FRAC) -> bool:
 
     Считается на копии, уменьшенной в ``HALFTONE_DOWNSCALE`` раз: признак крупный,
     и гонять морфологию по кадру в 21 Мп ради него незачем.
+
+    ``roi`` исключает область из поиска И из знаменателя доли. При
+    ``--use-surya-layout`` туда попадают уже найденные иллюстрации: искать растр на
+    фотографии бессмысленно — он там заведомо есть, и вопрос ровно в том, есть ли
+    он ЕЩЁ и в остальной части страницы.
     """
     h, w = gray.shape[:2]
-    small = cv2.resize(gray, (max(1, w // HALFTONE_DOWNSCALE), max(1, h // HALFTONE_DOWNSCALE)), cv2.INTER_AREA)
-    mid = ((small > HALFTONE_LO) & (small < HALFTONE_HI)).astype(np.uint8)
+    size = (max(1, w // HALFTONE_DOWNSCALE), max(1, h // HALFTONE_DOWNSCALE))
+    # Интерполяция ИМЕНОВАННЫМ аргументом: третий позиционный у cv2.resize — это dst,
+    # и cv2.INTER_AREA там молча проглатывался, а уменьшение шло INTER_LINEAR.
+    small = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+    mid = (small > HALFTONE_LO) & (small < HALFTONE_HI)
+
+    area = float(mid.size)
+    if roi is not None:
+        roi_small = cv2.resize(roi, size, interpolation=cv2.INTER_NEAREST) > 0
+        mid &= roi_small
+        area = float(np.count_nonzero(roi_small))
+        if area == 0.0:
+            return False
+
     kernel = np.ones((HALFTONE_OPEN_PX, HALFTONE_OPEN_PX), np.uint8)
-    return float(cv2.morphologyEx(mid, cv2.MORPH_OPEN, kernel).mean()) > min_frac
+    opened = cv2.morphologyEx(mid.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+    return float(np.count_nonzero(opened)) / area > min_frac
 
 
 def _local_mean_std(gray: np.ndarray, window: int) -> "tuple[np.ndarray, np.ndarray]":
@@ -175,6 +225,7 @@ def primary_mask(
     bias: float = DEFAULT_THRESHOLD_BIAS,
     sauvola_k: float = DEFAULT_SAUVOLA_K,
     window: "int | None" = None,
+    roi: "np.ndarray | None" = None,
 ) -> np.ndarray:
     """Первичная маска контента ``M_primary`` (uint8 0/255): напечатанное и подозрение на него.
 
@@ -193,14 +244,19 @@ def primary_mask(
     срабатываний на чистом поле нет. Но чем меньше ``sauvola_k``, тем ближе порог к
     бумаге, и на каком-то значении под защиту начнёт попадать просвет с оборота: он
     будет не размыт, а лишь не тронут. Это осознанный размен в пользу контента.
+
+    ``roi`` ограничивает область, ПО КОТОРОЙ считается глобальный порог (см.
+    :func:`analysis_samples`); сама маска строится по всему кадру. Внутри
+    исключённых блоков-иллюстраций её значение роли не играет: такие блоки
+    защищаются целиком и отдельно (см. ``pipeline.process_frame``).
     """
     if method not in MASK_METHODS:
         raise ValueError(f"неизвестный метод бинаризации: {method!r} (доступны {MASK_METHODS})")
 
-    if not has_content(gray):  # чистый лист — защищать нечего, сглаживается весь кадр
+    if not has_content(gray, roi):  # чистый лист — защищать нечего, сглаживается весь кадр
         return np.zeros(gray.shape, np.uint8)
 
-    mask = gray <= global_threshold(gray, bias)
+    mask = gray <= global_threshold(gray, bias, roi)
 
     if method == METHOD_SAUVOLA:
         mean, std = _local_mean_std(gray, sauvola_window(gray.shape, window))
