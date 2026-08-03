@@ -23,7 +23,13 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from ocr_utils.background_smoothing.processing import has_halftone
+from ocr_utils.background_smoothing.processing import (
+    HALFTONE_DOWNSCALE,
+    HALFTONE_HI,
+    HALFTONE_LO,
+    HALFTONE_OPEN_PX,
+    has_halftone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,30 @@ PICTURE_LABELS = ("Picture",)
 # экономит секунды на одной только конвертации (то же значение и по той же причине,
 # что в ``scan_cropping.finger_removal.text_protection``).
 LAYOUT_WORK_SIDE = 2048
+
+# --- Притяжение блоков к реальному растру ----------------------------------
+# Surya размечает не «растровое изображение», а ВИЗУАЛЬНЫЙ БЛОК, и на смонтированной
+# полосе может обвести всю дизайнерскую плашку целиком, прихватив пустую бумагу и
+# срезав край самой фотографии. Пример: 1967/08 IMG_0094_1L, блок conf=0.62 —
+# заголовок вместе с портретом, причём верх портрета (y 424..708) остался снаружи.
+#
+# Поэтому к блокам добавляются СВЯЗНЫЕ РАСТРОВЫЕ ОБЛАСТИ, которые с ними граничат:
+# та же маска средних тонов, что и в ``has_halftone``, но со смыканием и разбором на
+# связные компоненты. Защищается ОБЪЕДИНЕНИЕ прямоугольника Surya и охватывающих
+# прямоугольников таких компонент.
+#
+# Именно объединение, а не замена: компонента обводит лишь ту часть фотографии, что
+# попала в средние тона, и на снимке со светлым небом она заметно уже самого снимка
+# (замер, 1968/01 IMG_0015_2R: блок y 1089..2926, компонента y 1376..2908). Замена
+# срезала бы 287 px неба, и по фотографии прошёл бы шов сглаживания — это хуже, чем
+# оставить лишнюю бумагу несглаженной. Объединение не сжимает блок никогда.
+# Ядро смыкания на копии 1/4: сводит зерно одной фотографии в одну компоненту.
+# Побочный эффект у самой рамки кадра: за пределами массива морфология считает фон
+# «своим», поэтому область, подошедшая к краю ближе чем на половину ядра, дотягивается
+# до края. Для фотографии, свёрстанной в обрез, это как раз верно, а лишний защищённый
+# поясок в 60 px по краю скана ничего не стоит.
+RASTER_CLOSE_PX = 31
+RASTER_MIN_AREA_PX = 900  # площадь на копии 1/4 (~120x120 в полном кадре): мельче — крапина, не иллюстрация
 
 
 class LayoutDetector:
@@ -119,20 +149,91 @@ def is_raster_block(gray: np.ndarray, polygon: np.ndarray) -> bool:
     return has_halftone(gray[y1:y2, x1:x2])
 
 
+def _rect(x1: float, y1: float, x2: float, y2: float) -> np.ndarray:
+    """Прямоугольник как полигон из 4 точек — в том же виде, в каком их отдаёт Surya."""
+    return np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+
+
+def raster_regions(
+    gray: np.ndarray, polygons: "list[np.ndarray]", downscale: int = HALFTONE_DOWNSCALE
+) -> "list[np.ndarray]":
+    """Связные растровые области, граничащие с блоками ``polygons`` (их bbox-полигоны).
+
+    Считается на копии 1/``downscale``: маска средних тонов → размыкание (убирает
+    каймы букв, как в :func:`has_halftone`) → смыкание (сводит зерно одной
+    фотографии в одну компоненту) → связные компоненты. Возвращаются охватывающие
+    прямоугольники тех компонент, которые пересекают хоть один блок и не меньше
+    ``RASTER_MIN_AREA_PX``.
+
+    Это ДОБАВКА к блокам, а не замена — мотивировка у констант ``RASTER_*`` выше.
+    Компонента может выходить за блок (ровно так возвращается срезанный край
+    фотографии) и может целиком лежать внутри него (тогда объединение ничего не
+    меняет — так на всех корректных блоках 1968/01).
+
+    Растровые области, не граничащие ни с одним блоком, СЮДА НЕ ПОПАДАЮТ: они
+    остаются в области анализа, и кадр с ними задержит ``has_halftone`` — страховка
+    на промах разметки от этого не слабеет.
+    """
+    if not polygons:
+        return []
+
+    h, w = gray.shape[:2]
+    size = (max(1, w // downscale), max(1, h // downscale))
+    small = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+    mid = ((small > HALFTONE_LO) & (small < HALFTONE_HI)).astype(np.uint8)
+    mid = cv2.morphologyEx(mid, cv2.MORPH_OPEN, np.ones((HALFTONE_OPEN_PX,) * 2, np.uint8))
+    mid = cv2.morphologyEx(mid, cv2.MORPH_CLOSE, np.ones((RASTER_CLOSE_PX,) * 2, np.uint8))
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mid, 8)
+    if count <= 1:  # растра на кадре нет вовсе
+        return []
+
+    regions = []
+    for poly in polygons:
+        pts = poly.reshape(-1, 2) / downscale
+        x1, y1 = np.clip(np.floor(pts.min(axis=0)), 0, None).astype(int)
+        x2 = min(int(np.ceil(pts[:, 0].max())), labels.shape[1])
+        y2 = min(int(np.ceil(pts[:, 1].max())), labels.shape[0])
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        # Все компоненты блока сводятся в ОДИН прямоугольник: одна фотография
+        # распадается на несколько пятен (светлое небо, засвеченный лоб портрета
+        # в средние тона не попадают), и по отдельности они оставили бы между
+        # собой незащищённые прорехи прямо внутри снимка.
+        boxes = [
+            stats[label, :4]
+            for label in np.unique(labels[y1:y2, x1:x2])
+            if label and stats[label, cv2.CC_STAT_AREA] >= RASTER_MIN_AREA_PX
+        ]
+        if not boxes:
+            continue
+        boxes = np.asarray(boxes, dtype=int)
+        left, top = boxes[:, 0].min(), boxes[:, 1].min()
+        right, bottom = (boxes[:, 0] + boxes[:, 2]).max(), (boxes[:, 1] + boxes[:, 3]).max()
+        regions.append(_rect(left * downscale, top * downscale, right * downscale, bottom * downscale))
+    return regions
+
+
 def polygons_mask(shape: "tuple[int, ...]", polygons: "list[np.ndarray]") -> np.ndarray:
     """Бинарная маска (uint8 0/255) объединения полигонов; пустой список — нулевая маска.
 
     Припуск здесь не добавляется: маска идёт в общую дилатацию защитной маски и
     получает тот же припуск, что и текст (см. ``pipeline.process_frame``).
+
+    Полигоны заливаются ПО ОДНОМУ намеренно. ``cv2.fillPoly`` со списком контуров
+    считает их одной фигурой и заливает по правилу чётности, поэтому вложенные
+    прямоугольники взаимно уничтожаются: прямоугольник растра внутри блока Surya
+    вычитал бы блок (замер: покрытие кадра падало с 48.6% до 3.8%).
     """
     mask = np.zeros(shape[:2], dtype=np.uint8)
-    if polygons:
-        cv2.fillPoly(mask, [np.round(p).astype(np.int32) for p in polygons], 255)
+    for poly in polygons:
+        cv2.fillPoly(mask, [np.round(poly).astype(np.int32)], 255)
     return mask
 
 
 def analysis_roi(picture_mask: np.ndarray, polygons: "list[np.ndarray]") -> Optional[np.ndarray]:
-    """Область, по которой считать пороги и искать растр: весь кадр МИНУС иллюстрации.
+    """Область, по которой считать пороги и искать растр: весь кадр МИНУС ``picture_mask``.
 
     Фотография портит обе статистики кадра. Гистограмма: её средние тона тянут порог
     Оцу вверх, и часть бумаги вокруг текста уезжает под маску. Детектор растра:
