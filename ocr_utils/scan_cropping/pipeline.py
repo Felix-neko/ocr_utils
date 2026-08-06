@@ -60,6 +60,7 @@ from ocr_utils.scan_cropping.geometry import (
     min_area_rotated_bbox,
     trim_cover_fragments,
 )
+from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE
 from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suffix, write_image
 from ocr_utils.scan_cropping.layout_filtering import classify_parasitic_layouts
 from ocr_utils.scan_cropping.levels import compensate_levels
@@ -107,6 +108,7 @@ class CropParams:
     finger_dilate_px: int = FINGER_DILATE_PX
     finger_zone_light_increment: "tuple[float, float]" = (FINGER_ZONE_LIGHT_INCREMENT, FINGER_ZONE_LIGHT_INCREMENT)
     asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
+    lama_roi_max_side: int = LAMA_ROI_MAX_SIDE
     shadow_method: str = "none"
 
     # Защита контента от закраски
@@ -169,6 +171,7 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                     protect_text=params.protect_text_layout,
                     protect_mode=params.text_protect_mode,
                     layout_pad_px=params.layout_pad_px,
+                    lama_roi_max_side=params.lama_roi_max_side,
                     log_name=path.name,
                 )
             )

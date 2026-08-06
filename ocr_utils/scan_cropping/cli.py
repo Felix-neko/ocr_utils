@@ -37,7 +37,7 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import (
     PROTECT_MODES,
 )
 from ocr_utils.scan_cropping.geometry import EXTRA_EROSION_PX
-from ocr_utils.scan_cropping.gpu_models import GpuModels
+from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE, GpuModels
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.pipeline import CropParams, run_batch
 
@@ -194,6 +194,16 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     "либо 'слева,справа' (напр. 15,30) — если свет в кадре падает не симметрично",
 )
 @click.option(
+    "--lama-roi-max-side",
+    default=LAMA_ROI_MAX_SIDE,
+    type=int,
+    show_default=True,
+    help="До какой длинной стороны уменьшать ROI перед прогоном LaMa (0 — гнать в нативном "
+    "разрешении): на 450 DPI сеть не вытягивает широкую дыру и заливает зону пальца серой "
+    "кашей темнее бумаги; на уменьшенном ROI заливка получается чистой, а обратный апскейл "
+    "внутри дыры ничего не портит — контента там нет",
+)
+@click.option(
     "--force-dpi",
     default=None,
     type=int,
@@ -315,6 +325,7 @@ def main(
     do_remove_fingers: bool,
     finger_dilate_px: int,
     finger_zone_light_increment: "tuple[float, float]",
+    lama_roi_max_side: int,
     force_dpi: Optional[int],
     asymmetric_dilation_ratio: float,
     protect_text_layout: bool,
@@ -355,6 +366,7 @@ def main(
         remove_fingers=do_remove_fingers,
         finger_dilate_px=finger_dilate_px,
         finger_zone_light_increment=finger_zone_light_increment,
+        lama_roi_max_side=lama_roi_max_side,
         asymmetric_dilation_ratio=asymmetric_dilation_ratio,
         shadow_method=shadow_method,
         protect_text_layout=protect_text_layout,
@@ -381,7 +393,8 @@ def main(
             "skip-if-exists: %s | "
             "output-format: %s | compensate-levels: %s | extra-erosion-px=%d | upscale: %s | "
             "crop-mode: %s (fill=%s, fill-blur-px=%g, fill-fade=%g) | "
-            "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | force-dpi: %s | "
+            "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | "
+            "lama-roi-max-side: %s | force-dpi: %s | "
             "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
             "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d | "
             "page-close-px: %s",
@@ -405,6 +418,7 @@ def main(
             finger_dilate_px,
             finger_zone_light_increment[0],
             finger_zone_light_increment[1],
+            lama_roi_max_side if lama_roi_max_side > 0 else "нативное разрешение",
             force_dpi if force_dpi is not None else "не трогать",
             asymmetric_dilation_ratio,
             protect_text_layout,

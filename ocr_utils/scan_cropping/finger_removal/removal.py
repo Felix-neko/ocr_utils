@@ -13,6 +13,7 @@ from typing import Optional
 
 from ocr_utils.scan_cropping.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
 from ocr_utils.scan_cropping.finger_removal.inpaint_roi import roi_bounds_list
+from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE
 from ocr_utils.scan_cropping.finger_removal.masking import (
     build_finger_mask,
     drop_fingers_on_content,
@@ -116,6 +117,7 @@ def remove_fingers(
     protect_text: bool = False,
     protect_mode: str = PROTECT_LIMIT_LAMA,
     layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
+    lama_roi_max_side: int = LAMA_ROI_MAX_SIDE,
     log_name: str = "",
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray], Optional[list]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking + GpuModels.inpaint) в BGR-кадре.
@@ -148,6 +150,10 @@ def remove_fingers(
     (``brighten_finger_zone``) — LaMa иначе заливает дыру заметно темнее
     окружающей бумаги. Если палец не найден — кадр возвращается без
     изменений.
+
+    ``lama_roi_max_side`` — до какой длинной стороны уменьшать ROI перед сетью
+    (см. ``gpu_models.LAMA_ROI_MAX_SIDE``): на нативных 450 DPI широкая дыра
+    заливается серой кашей.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     with log_timing("build_finger_mask", log_name):
@@ -203,7 +209,9 @@ def remove_fingers(
     with log_timing("brighten_finger_zone", log_name):
         rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
     with log_timing("lama_inpaint", log_name):
-        rgb_clean = models.inpaint(rgb_bright, mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
+        rgb_clean = models.inpaint(
+            rgb_bright, mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE, roi_max_side=lama_roi_max_side
+        )
 
     # Копирование блоков обратно — строго ПОСЛЕ закраски и с ИСХОДНОГО (неосветлённого)
     # кадра: rgb_bright уже подкрашен под LaMa и вернул бы контент со сдвигом яркости.

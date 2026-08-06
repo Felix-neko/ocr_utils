@@ -59,6 +59,33 @@ HAND_CLASSES = ["hand", "finger", "thumb", "fingertip", "human hand", "fingernai
 LAMA_WEIGHTS = MODELS_DIR / "big-lama.pt"
 LAMA_URL = "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt"
 
+# Длинная сторона, до которой ROI уменьшается ПЕРЕД прогоном LaMa (0 — не уменьшать).
+# У самой модели никаких настроек размера нет: это torchscript-модуль (img, mask),
+# которому нужна лишь кратность 8 (см. _pad_to_modulo). Сеть полностью свёрточная и
+# съест любое разрешение, но обучена она на мелких кропах, и на нативных 450 DPI
+# рецептивного поля не хватает: дыра шириной в сотни пикселей заливается серой
+# кашей вместо бумаги (на 0390.jpg из «досканы-1 1970-07» маска 738×1384 в ROI
+# 1018×2268 давала в зоне пальца 143 при бумаге 212 — темнее, чем был сам палец).
+# Внутри дыры терять нечего, контента там нет по определению, поэтому обратный
+# апскейл заливки ничего не портит.
+# То же самое в обёртках вокруг LaMa (IOPaint/lama-cleaner) называется
+# hd_strategy=RESIZE; наш покомпонентный ROI — это их hd_strategy=CROP.
+#
+# ПОЧЕМУ 512, А НЕ 1024. Важен не размер ROI сам по себе, а размер ДЫРЫ в масштабе
+# сети: чем дальше центр дыры от ближайшего известного пикселя, тем меньше сети на
+# что опереться, и она тянет в дыру ближайшую сильную структуру — например, тёмную
+# полосу стола за краем кадра. Замер по 13 кадрам «досканы-1 1970-07» (яркость
+# заливки в части зоны пальца, лежащей на книге; бумага вокруг 203-224):
+#   нативно — 143-177, лимит 1024 — 156-187, лимит 512 — 157-192,
+# т.е. 512 не хуже 1024 нигде. А на 0060.jpg лимит 1024 давал 150 против 198 у 512
+# и даже 175 у нативного прогона: там палец входит СНИЗУ, ROI обрезан нижней рамкой
+# кадра (1577×1362 вместо обычных ~1000×2250) и лимит по длинной стороне ужимает его
+# всего в 0.65 раза — дыра остаётся 599×658 (в остальных кадрах при том же лимите она
+# ужимается до ~330×625, т.е. вдвое меньше по площади и вдвое ближе к контексту), и
+# LaMa вытягивает в неё чёрный стол снизу. При 512 дыра там становится 300×329, и
+# заливка чистая. Значение задаётся из CLI (--lama-roi-max-side).
+LAMA_ROI_MAX_SIDE = 512
+
 # Веса DocShadow по вариантам (кладутся руками в finger_models/docshadow/).
 DOCSHADOW_DIR = MODELS_DIR / "docshadow"
 DOCSHADOW_WEIGHTS = {"sd7k": "SD7K.pth", "kligler": "Kligler.pth", "jung": "Jung.pth"}
@@ -261,7 +288,13 @@ class GpuModels:
     # --------------------------------------------------------
 
     def inpaint(
-        self, rgb: np.ndarray, mask: np.ndarray, padding: int = 64, feather: int = 9, roi_scale: float = 1.5
+        self,
+        rgb: np.ndarray,
+        mask: np.ndarray,
+        padding: int = 64,
+        feather: int = 9,
+        roi_scale: float = 1.5,
+        roi_max_side: int = LAMA_ROI_MAX_SIDE,
     ) -> np.ndarray:
         """Закрашивает область под маской (LaMa) — «зарисовать пальцы».
 
@@ -271,7 +304,9 @@ class GpuModels:
                 (например, два пальца с разных краёв кадра);
             padding: контекстное поле вокруг компоненты маски, пикс.;
             feather: ширина растушёвки шва при вклеивании, пикс.;
-            roi_scale: во сколько раз растянуть ROI от центра после padding.
+            roi_scale: во сколько раз растянуть ROI от центра после padding;
+            roi_max_side: длинная сторона, до которой ROI уменьшается перед сетью
+                (0 — прогон в нативном разрешении), см. ``LAMA_ROI_MAX_SIDE``.
 
         Возвращает закрашенную картинку RGB uint8 (H, W, 3) того же размера.
         Пиксели вне маски и вне полосы растушёвки совпадают с исходными.
@@ -296,11 +331,26 @@ class GpuModels:
             x1, y1, x2, y2 = bounds
             roi = result[y1:y2, x1:x2]
             mroi = comp[y1:y2, x1:x2]
-            result[y1:y2, x1:x2] = blend_roi(roi, self._lama_fill_roi(roi, mroi), mroi, feather)
+            result[y1:y2, x1:x2] = blend_roi(roi, self._lama_fill_roi(roi, mroi, roi_max_side), mroi, feather)
         return result
 
-    def _lama_fill_roi(self, roi: np.ndarray, mroi: np.ndarray) -> np.ndarray:
-        """Прогон LaMa по одному ROI; возвращает заполненный ROI (RGB uint8, тот же размер)."""
+    def _lama_fill_roi(self, roi: np.ndarray, mroi: np.ndarray, max_side: int = LAMA_ROI_MAX_SIDE) -> np.ndarray:
+        """Прогон LaMa по одному ROI; возвращает заполненный ROI (RGB uint8, тот же размер).
+
+        При ``max_side > 0`` и ROI крупнее этого размера сеть работает по уменьшенной
+        копии, а заливка возвращается апскейлом (зачем — см. ``LAMA_ROI_MAX_SIDE``).
+        Маска уменьшается ``INTER_AREA`` с порогом «хоть сколько-нибудь задето», т.е.
+        уменьшенная дыра слегка НАКРЫВАЕТ исходную: иначе по её краю осталась бы
+        полупрозрачная кожа с интерполяции. Вклеивается результат всё равно только
+        под полноразмерной маской (``blend_roi``), так что этот запас ничего не портит.
+        """
+        if max_side > 0 and max(roi.shape[:2]) > max_side:
+            small_h, small_w = (max(1, round(s * max_side / max(roi.shape[:2]))) for s in roi.shape[:2])
+            small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_AREA)
+            msmall = cv2.resize(mroi, (small_w, small_h), interpolation=cv2.INTER_AREA)
+            filled = self._lama_fill_roi(small, (msmall > 0).astype(np.uint8) * 255, max_side=0)
+            return cv2.resize(filled, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_CUBIC)
+
         img = (roi.astype(np.float32) / 255.0).transpose(2, 0, 1)  # CHW
         msk = ((mroi > 0).astype(np.float32))[None, ...]  # 1HW
 
