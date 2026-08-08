@@ -10,3 +10,5 @@ build/
 /finger_models/
 /third_party/
 /dewarp_models/
+/ai_slop/
+!/ai_slop/.gitkeep
