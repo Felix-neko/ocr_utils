@@ -6,18 +6,14 @@
 #
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Скрипт лежит в run_scripts/<подсистема>/, а пути внутри отсчитываются от корня
+# репозитория — поднимаемся на два уровня.
+cd "$(dirname "$0")/../.."
 
 #INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-#INPUT_DIR="/mnt/system/raw/плохие сканы  ВЭ/06"
-#INPUT_DIR="/mnt/system/raw/ve_80s/in"
-#INPUT_DIR="/mnt/system/raw/ve_80s/in/1989/06 проверить зональный пересвет"
-#OUTPUT_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/out"
-#DEBUG_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/debug"
-
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/Экономист/пак-2 (450 dpi)/1991/01"
-OUTPUT_DIR="/mnt/system/raw/economist/pak2/iter_1/out/1991/01"
-DEBUG_DIR="/mnt/system/raw/economist/pak2/iter_1/debug/1991/01"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/1977 - 1978-03 (300 dpi, лёгкие расфокусы)"
+OUTPUT_DIR="/mnt/system/raw/mts/77_78_defocus/cropped"
+DEBUG_DIR="/mnt/system/raw/mts/77_78_defocus/debug"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -29,21 +25,26 @@ uv run python -m ocr_utils.scan_cropping \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir "$DEBUG_DIR" \
     --recursive \
-    --top-margin -180 \
-    --bottom-margin -270 \
-    --left-margin -310 \
-    --right-margin -310 \
+    --top-margin -120 \
+    --bottom-margin -180 \
+    --left-margin -230 \
+    --right-margin -230 \
     --output-format tiff \
-    --force-dpi=450 \
+    --force-dpi=300 \
     --compensate-levels \
-    --finger-dilate-px=120 \
-    --max-asymmetric-dilation-ratio=1.6 \
-    --finger-zone-light-increment=20,40 \
-    --extra-erosion-px=165 \
+    --finger-dilate-px=60 \
+    --max-asymmetric-dilation-ratio=2 \
+    --finger-zone-light-increment=20,20 \
+    --extra-erosion-px=110 \
     --protect-text-layout \
     --text-protect-mode=copy-back-layout-zones \
-    --layout-pad-px=18,72 \
+    --layout-pad-px=12,48 \
     --bg-fill-method=nearest \
     --bg-fill-blur-px=16 \
-    --remove-fingers
+    --log-level=INFO \
+    --remove-fingers \
+    --crop-mode=pixel-exact \
+    --crop-fill-method=replicate \
+    --crop-fill-blur-px=32 \
+    --crop-fill-fade=0.0 \
 

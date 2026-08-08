@@ -4,7 +4,7 @@
 **Кадр:** `/mnt/system/raw/ve_test/out/1962/02/IMG_0088.tiff`
 (вход: `.../неразобранное/2026-13-07-ВЭ/1962/02/IMG_0088.jpg`,
 debug-оверлей: `/mnt/system/raw/ve_test/debug/1962/02/IMG_0088.jpg`)
-**Конфиг прогона:** `run_detect_and_crop_ve_k48.sh` (dilate-px=120, max-asymmetric-dilation-ratio=1.6,
+**Конфиг прогона:** `run_scripts/scan_cropping/run_detect_and_crop_ve_k48.sh` (dilate-px=120, max-asymmetric-dilation-ratio=1.6,
 protect-text-layout + copy-back-layout-zones, bg-fill=nearest).
 
 ## Симптом

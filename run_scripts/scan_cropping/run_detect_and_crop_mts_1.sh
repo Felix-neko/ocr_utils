@@ -6,7 +6,9 @@
 #
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Скрипт лежит в run_scripts/<подсистема>/, а пути внутри отсчитываются от корня
+# репозитория — поднимаемся на два уровня.
+cd "$(dirname "$0")/../.."
 
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-1 1966-1976 (300 DPI)"
 OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/cropped"

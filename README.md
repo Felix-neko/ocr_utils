@@ -25,7 +25,7 @@ uv run python -m ocr_utils.scan_cropping \
 ```
 
 Полный список опций — `uv run python -m ocr_utils.scan_cropping --help`.
-Готовые прогоны под конкретные партии сканов лежат в `run_detect_and_crop*.sh`.
+Готовые прогоны под конкретные партии сканов лежат в `run_scripts/scan_cropping/`.
 
 Ключевые опции:
 

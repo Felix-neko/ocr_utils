@@ -13,7 +13,9 @@
 #
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Скрипт лежит в run_scripts/<подсистема>/, а пути внутри отсчитываются от корня
+# репозитория — поднимаемся на два уровня.
+cd "$(dirname "$0")/../.."
 
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/Готовое"
 BASE_DIR="/mnt/SYSTEM/raw/mts/pack1_background_blurring"

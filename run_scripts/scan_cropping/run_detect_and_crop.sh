@@ -14,7 +14,9 @@
 set -euo pipefail
 
 # Работаем из корня проекта (папка, где лежит этот скрипт)
-cd "$(dirname "$0")"
+# Скрипт лежит в run_scripts/<подсистема>/, а пути внутри отсчитываются от корня
+# репозитория — поднимаемся на два уровня.
+cd "$(dirname "$0")/../.."
 
 INPUT_DIR="${1:-ocr_utils/finger_removal/inpainted_lama}"
 OUTPUT_DIR="${2:-ocr_utils/finger_removal/inpainted_lama_cropped}"

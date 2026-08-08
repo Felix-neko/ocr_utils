@@ -4,7 +4,7 @@
 с последовательным доступом». Все числа ниже — замеры на этой машине, а не оценки.
 
 **Стенд:** RTX 5060 Ti 16 ГБ, 16 ядер, 135 ГБ RAM. Кадры 3733×4456×3 = **50 МБ**
-(партия МТС «в работе», 3 кадра). Профиль запуска — как в `run_detect_and_crop_mts_1.sh`
+(партия МТС «в работе», 3 кадра). Профиль запуска — как в `run_scripts/scan_cropping/run_detect_and_crop_mts_1.sh`
 (`pixel-exact`, `--protect-text-layout`, `copy-back-layout-zones`, `--bg-fill-method=nearest`).
 
 ---

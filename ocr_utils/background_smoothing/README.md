@@ -474,7 +474,7 @@ uv run python -m ocr_utils.background_smoothing \
     --log-level INFO
 ```
 
-Готовый скрипт с этими параметрами — `run_background_smoothing_mts_gotovoe.sh` в
+Готовый скрипт с этими параметрами — `run_scripts/background_smoothing/run_background_smoothing_mts.sh` в
 корне репозитория.
 
 Подобрать параметры на одной странице, ничего не пропуская из-за уже готовых файлов:

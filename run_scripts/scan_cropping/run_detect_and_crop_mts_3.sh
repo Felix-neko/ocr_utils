@@ -6,12 +6,14 @@
 #
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Скрипт лежит в run_scripts/<подсистема>/, а пути внутри отсчитываются от корня
+# репозитория — поднимаемся на два уровня.
+cd "$(dirname "$0")/../.."
 
 #INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/1977 - 1978-03 (300 dpi, лёгкие расфокусы)"
-OUTPUT_DIR="/mnt/system/raw/mts/77_78_defocus/cropped"
-DEBUG_DIR="/mnt/system/raw/mts/77_78_defocus/debug"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/досканы-1 1970-07 - 1970-09 (450 DPI)/"
+OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/досканы-1 1970-07 - 1970-09 (450 DPI)/v3/cropped"
+DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/досканы-1 1970-07 - 1970-09 (450 DPI)/v3/debug"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -23,20 +25,20 @@ uv run python -m ocr_utils.scan_cropping \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir "$DEBUG_DIR" \
     --recursive \
-    --top-margin -120 \
-    --bottom-margin -180 \
-    --left-margin -230 \
-    --right-margin -230 \
+    --top-margin -180 \
+    --bottom-margin -270 \
+    --left-margin -360 \
+    --right-margin -360 \
     --output-format tiff \
-    --force-dpi=300 \
+    --force-dpi=450 \
     --compensate-levels \
-    --finger-dilate-px=60 \
-    --max-asymmetric-dilation-ratio=2 \
-    --finger-zone-light-increment=20,20 \
-    --extra-erosion-px=110 \
+  --finger-dilate-px=120 \
+    --max-asymmetric-dilation-ratio=1. \
+    --finger-zone-light-increment=10,10 \
+    --extra-erosion-px=120 \
     --protect-text-layout \
     --text-protect-mode=copy-back-layout-zones \
-    --layout-pad-px=12,48 \
+    --layout-pad-px=18,72 \
     --bg-fill-method=nearest \
     --bg-fill-blur-px=16 \
     --log-level=INFO \
