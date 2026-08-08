@@ -57,6 +57,7 @@ ocr_utils/
 │   ├── image_io.py         #   чтение/запись файлов
 │   ├── pipeline.py         #   оркестрация одного кадра + обход пачки
 │   └── cli.py              #   только click
+├── defocus_detection/      # поиск расфокусов в папке: см. ocr_utils/defocus_detection/README.md
 ├── legacy/                 # помойка: см. ocr_utils/legacy/README.md
 ├── docx_md/                # конвертация docx ↔ md
 ├── pdf_utils/              # извлечение картинок из PDF
@@ -68,9 +69,21 @@ DocShadow) живут в одном объекте `scan_cropping.gpu_models.Gpu
 создаётся один раз на прогон в `cli.py` и передаётся по пайплайну вместо строки
 `device`; Surya и DocShadow грузятся только если их просят соответствующие опции.
 
-Заброшенные эксперименты (dewarp, детекция расфокуса, поиск печатей) и старый
-пайплайн «PDF → OCR-слой» лежат в `ocr_utils/legacy/` — они импортируются, но не
-поддерживаются и не покрыты тестами.
+Заброшенные эксперименты (dewarp, поиск печатей, ранние детекторы расфокуса) и
+старый пайплайн «PDF → OCR-слой» лежат в `ocr_utils/legacy/` — они импортируются,
+но не поддерживаются и не покрыты тестами.
+
+## Поиск расфокусов
+
+`ocr_utils/defocus_detection/` ранжирует сканы папки по качеству фокуса и показывает
+самые подозрительные — те, что стоит переснять:
+
+```bash
+uv run python -m ocr_utils.defocus_detection "/путь/к/выпуску" --worst-percent 5 --zonal-percent 5
+```
+
+Подробности, список алгоритмов и результаты валидации — в
+`ocr_utils/defocus_detection/README.md` и `defocus_detection_validation_report.md`.
 
 ## Тесты и форматирование
 
