@@ -33,6 +33,18 @@ class Method(str, Enum):
     LOCAL = "local"
 
 
+class Mode(str, Enum):
+    """Режим работы скрипта.
+
+    COPY — копировать лучший файл из каждой группы в выходную папку.
+    REPORT — ничего не копировать, только напечатать отчёт по группам дубликатов
+    (группы из одного файла в отчёт не попадают).
+    """
+
+    COPY = "copy"
+    REPORT = "report"
+
+
 def read_raf_image(path: Path) -> np.ndarray:
     """Читает RAF-файл и возвращает RGB-массив.
 
@@ -339,7 +351,14 @@ def build_groups(all_names: list[str], duplicates: dict[str, list[str]]) -> list
 @click.argument(
     "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-30/992_FUJI"
 )
-@click.argument("output_dir", default="/mnt/system/raw/1967_10_12")
+@click.argument("output_dir", required=False, default="/mnt/system/raw/1967_10_12")
+@click.option(
+    "--mode",
+    default="copy",
+    show_default=True,
+    type=click.Choice([m.value for m in Mode]),
+    help="Режим: copy — копировать лучший файл группы в output_dir, report — только отчёт по группам из 2+ файлов",
+)
 @click.option("--n-search", default=5, show_default=True, help="Макс. расстояние в позициях между кадрами одной группы")
 @click.option(
     "--method",
@@ -369,6 +388,7 @@ def build_groups(all_names: list[str], duplicates: dict[str, list[str]]) -> list
 def main(
     input_dir: str,
     output_dir: str,
+    mode: str,
     n_search: int,
     method: str,
     min_similarity: float,
@@ -378,13 +398,19 @@ def main(
     """Выбирает самый резкий RAF-файл из каждой группы дубликатов.
 
     Основная функция скрипта. Сканирует папку с RAF-файлами, находит дубликаты
-    одним из двух методов (CNN или локальные признаки), группирует их, выбирает
-    самый резкий файл из каждой группы и копирует в выходную папку.
+    одним из двух методов (CNN или локальные признаки), группирует их и выбирает
+    самый резкий файл из каждой группы. В режиме copy лучшие файлы копируются
+    в выходную папку, в режиме report — только печатается отчёт по группам
+    из двух и более файлов.
 
     Args:
         input_dir: Путь к папке с исходными RAF-файлами.
         output_dir: Путь к папке для сохранения лучших файлов.
             Будет создана автоматически, если не существует.
+            В режиме report не используется.
+        mode: Режим работы: 'copy' — копировать лучший файл из каждой группы,
+            'report' — только вывести отчёт по группам дубликатов (2+ файла),
+            ничего не копируя.
         n_search: Размер скользящего окна — максимальное расстояние в позициях
             между кадрами, которые могут быть признаны дубликатами.
             Типичное значение: 3-10.
@@ -402,20 +428,23 @@ def main(
             (например, полоса vs. разворот). Типичное значение: 1.1-1.3.
 
     Returns:
-        None. Результаты выводятся в консоль, файлы копируются в output_dir.
+        None. Результаты выводятся в консоль, в режиме copy файлы копируются
+        в output_dir.
     """
     m = Method(method)
+    mode_enum = Mode(mode)
 
     in_path = Path(input_dir)
     out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    if mode_enum is Mode.COPY:
+        out_path.mkdir(parents=True, exist_ok=True)
 
     raf_files = sorted(in_path.glob("*.[Rr][Aa][Ff]"))
     if not raf_files:
         click.echo(f"RAF-файлы не найдены в {in_path}")
         return
 
-    click.echo(f"Найдено {len(raf_files)} RAF-файлов в {in_path}, метод: {m.value}")
+    click.echo(f"Найдено {len(raf_files)} RAF-файлов в {in_path}, метод: {m.value}, режим: {mode_enum.value}")
 
     all_names = [f.stem + ".jpg" for f in raf_files]
     sharpness: dict[str, float] = {}
@@ -480,6 +509,19 @@ def main(
 
     dup_groups = [g for g in groups if len(g) > 1]
     click.echo(f"\nГрупп дубликатов: {len(dup_groups)}, одиночных файлов: {len(groups) - len(dup_groups)}")
+
+    if mode_enum is Mode.REPORT:
+        # Только отчёт: перечисляем группы из 2+ файлов, ничего не копируем.
+        # Группы и файлы внутри них сортируем по имени, чтобы отчёт был воспроизводимым.
+        for idx, group in enumerate(sorted(dup_groups, key=min), 1):
+            best_jpeg = max(group, key=lambda j: sharpness[j])
+            click.echo(f"\nГруппа {idx} / {len(dup_groups)} ({len(group)} файлов):")
+            for jpeg_name in sorted(group):
+                marker = "  <-- лучший" if jpeg_name == best_jpeg else ""
+                click.echo(f"    {raf_by_jpeg[jpeg_name].name}: резкость={sharpness[jpeg_name]:.1f}{marker}")
+        if not dup_groups:
+            click.echo("Групп с двумя и более файлами нет")
+        return
 
     # Шаг 5: копируем лучший файл из каждой группы
     dup_counter = 0
