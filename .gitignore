@@ -12,3 +12,30 @@ build/
 /dewarp_models/
 /ai_slop/
 !/ai_slop/.gitkeep
+
+# Выхлоп прогонов, а не исходники. Отчёты-РАЗБОРЫ (*_report.md и подобные) в репозитории
+# как раз лежат — они написаны руками и объясняют, почему всё устроено так. А вот то, что
+# печатает сам инструмент по конкретной партии, привязано к чужой файловой системе и
+# устаревает с первым же перезапуском.
+/defocus_si_*.csv
+/defocus_si_*.md
+/defocus_si_*.txt
+/defocus_si_*_worst/
+/defocus_lines_si_*.csv
+/defocus_lines_si_*.md
+/defocus_lines_si_*.txt
+/defocus_lines_si_*_worst/
+/defocus_lines_si_*_debug/
+/defocus_compare_*/
+/surya_lines_check/
+/.cache/
+# Папки симлинков от --link-dir: ссылки указывают на /mnt/dump3 и на другой машине битые.
+*_worst/
+# Списки страниц и прочие рабочие выписки по партиям.
+/si_*.txt
+/select_best_raws_*_report.txt
+/focus_series_250/
+# Пробные кадры и логи прогонов.
+/IMG_*.tiff
+/ocr_utils/background_smoothing/run_log.txt
+/ocr_utils/legacy/stamp_and_writing_detection/test_pics/
