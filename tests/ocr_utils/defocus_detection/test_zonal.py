@@ -56,12 +56,40 @@ def blur_band(image: np.ndarray, start: float, end: float, sigma: float, axis: i
     return out
 
 
+def blur_corner(image: np.ndarray, sigma: float, right: bool = True, bottom: bool = True) -> np.ndarray:
+    """Размывает один угол кадра, плавно наращивая размытие к самому углу.
+
+    Именно этот случай не ловится ни горизонтальными, ни вертикальными полосами:
+    завал угла размазывается по всей длине полосы любой из двух осей.
+
+    Args:
+        image: Полутоновый кадр.
+        sigma: Максимальная сигма размытия в углу.
+        right: True — угол правый, False — левый.
+        bottom: True — угол нижний, False — верхний.
+
+    Returns:
+        Кадр с размытым углом.
+    """
+    height, width = image.shape
+    ys = np.linspace(0.0, 1.0, height)[:, None]
+    xs = np.linspace(0.0, 1.0, width)[None, :]
+    # Расстояние до угла в долях диагонали: 0 в самом углу, 1 в противоположном.
+    # xs растёт вправо, ys — вниз, поэтому до ПРАВОГО края расстояние 1 - xs.
+    distance = np.sqrt((1.0 - xs if right else xs) ** 2 + (1.0 - ys if bottom else ys) ** 2) / np.sqrt(2.0)
+    weight = np.clip(1.0 - distance / 0.5, 0.0, 1.0)
+
+    out = image.astype(np.float32)
+    blurred = cv2.GaussianBlur(out, (0, 0), sigma)
+    return (out * (1.0 - weight) + blurred * weight).astype(np.uint8)
+
+
 def drop(image: np.ndarray, axis: str = "rows") -> float:
     """Перепад резкости внутри кадра, посчитанный боевыми параметрами.
 
     Args:
         image: Полутоновый кадр.
-        axis: Ось профиля.
+        axis: Направление профиля.
 
     Returns:
         Относительный перепад; 0.0, если оценить не удалось.
@@ -125,13 +153,70 @@ def test_columns_axis_finds_a_left_right_gradient() -> None:
     assert drop(tilted, axis="rows") < drop(tilted, axis="cols")
 
 
+@pytest.mark.parametrize(
+    ("right", "bottom", "expected"),
+    [
+        (True, True, "правый нижний угол"),
+        (False, True, "левый нижний угол"),
+        (True, False, "правый верхний угол"),
+        (False, False, "левый верхний угол"),
+    ],
+)
+def test_soft_corner_is_detected_and_named(right: bool, bottom: bool, expected: str) -> None:
+    """Завал любого из четырёх углов обязан находиться и называться правильно.
+
+    Ради этого случая профиль и обобщён на произвольное направление: провал в углу
+    может не дотянуть до верха списка ни по горизонтальным полосам, ни по вертикальным.
+    """
+    corner = blur_corner(page(), sigma=1.8, right=right, bottom=bottom)
+    result = zonal_defocus(corner, make_grid(corner.shape), axis="all")
+    assert result is not None
+    assert result.drop > drop(page(), axis="all") + 0.10, f"перепад в углу всего {result.drop:.3f}"
+    assert expected in result.where(), f"ждали «{expected}», получили «{result.where()}»"
+
+
+def test_diagonal_direction_earns_its_place() -> None:
+    """Есть углы, которые ни одна из осей сетки не видит так же хорошо, как диагональ.
+
+    Правый верхний угол — как раз такой: по диагонали ``anti`` перепад в полтора раза
+    больше, чем по любой из осей. Без диагональных направлений такой кадр остался бы
+    в середине списка.
+    """
+    corner = blur_corner(page(), sigma=1.8, right=True, bottom=False)
+    assert drop(corner, axis="anti") > 1.5 * max(drop(corner, axis="rows"), drop(corner, axis="cols"))
+
+
+def test_all_axes_picks_the_worst_direction() -> None:
+    """Режим all обязан сам находить нужное направление во всех трёх типах зон."""
+    cases = {
+        "низ": blur_band(page(), 0.6, 1.0, sigma=1.6),
+        "право": blur_band(page(), 0.6, 1.0, sigma=1.6, axis=1),
+        "правый верхний угол": blur_corner(page(), sigma=1.8, right=True, bottom=False),
+    }
+    for expected, image in cases.items():
+        result = zonal_defocus(image, make_grid(image.shape), axis="all")
+        assert result is not None, expected
+        assert expected in result.where(), f"ждали «{expected}», получили «{result.where()}»"
+        # Худшее направление и попадает в drop — остальные посчитаны, но не выбраны.
+        assert result.drop == max(result.drops.values())
+
+
+def test_flat_page_stays_flat_in_all_axes_mode() -> None:
+    """Максимум по четырём направлениям не должен превращать ровный кадр в зональный.
+
+    Максимум коррелированных величин смещён вверх, и это неизбежно; проверяем, что
+    смещение осталось в пределах порога, ниже которого кадр считается ровным.
+    """
+    assert drop(page(), axis="all") < 0.08
+
+
 def test_blank_page_has_no_zonal_estimate() -> None:
     """На кадре без текста судить о зоне не по чему — должно вернуться None."""
     blank = np.full((SIZE, SIZE), 235, dtype=np.uint8)
     assert zonal_defocus(blank, make_grid(blank.shape)) is None
 
 
-@pytest.mark.parametrize("axis", ["rows", "cols"])
+@pytest.mark.parametrize("axis", ["rows", "cols", "diag", "anti"])
 def test_result_reports_profile_and_bands(axis: str) -> None:
     """Результат должен нести профиль и индексы полос — они идут в отчёт."""
     result = zonal_defocus(page(), make_grid((SIZE, SIZE)), axis=axis)

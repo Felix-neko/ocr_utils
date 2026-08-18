@@ -1,5 +1,7 @@
 """Сквозные проверки CLI: отбор худших, форматы файлов, отчёты."""
 
+import re
+
 import cv2
 import numpy as np
 import pytest
@@ -217,3 +219,63 @@ def test_markdown_has_both_tables(folder, tmp_path) -> None:
     overall, zonal = text.split("## 2. Зональный расфокус")
     assert overall.count("](") == 3
     assert zonal.count("](") == 2
+
+
+def test_markdown_links_are_file_uris(tmp_path) -> None:
+    """Ссылки обязаны нести схему file:// и быть URL-кодированы.
+
+    Без схемы в ссылке остаётся голый абсолютный путь, и просмотрщик markdown считает
+    ведущий слэш корнем документа, а не файловой системы: клик молча не срабатывает.
+    Пробелы и кириллица в именах папок при этом должны уехать в проценты — иначе ссылка
+    обрывается на первом же пробеле.
+    """
+    directory = tmp_path / "Социалистическая индустрия 1985"
+    directory.mkdir()
+    for i, sigma in enumerate((0.7, 1.8)):
+        cv2.imwrite(str(directory / f"00{i}0_1.png"), blur(draw_page(seed=i, **PAGE), sigma))
+
+    md = tmp_path / "r.md"
+    run(str(directory), "--worst-count", "1", "--no-zonal", "--md-report", str(md))
+    text = md.read_text(encoding="utf-8")
+
+    assert "](file:///" in text, text
+    assert "%20" in text and "%D0%A1" in text, "путь с кириллицей и пробелами не закодирован"
+    assert "](/" not in text.replace("](file:///", ""), "остался путь без схемы"
+
+
+def test_link_dir_ranks_symlinks(folder, tmp_path) -> None:
+    """--link-dir раскладывает отобранные кадры симлинками в порядке отчёта.
+
+    Это обходной путь для просмотрщиков, которые не пускают на file:// из markdown
+    (PyCharm, Chrome): папку открывают напрямую и листают.
+    """
+    links = tmp_path / "worst"
+    run(str(folder), "--worst-count", "3", "--zonal-count", "2", "--link-dir", str(links))
+
+    overall = sorted(p.name for p in (links / "overall").iterdir())
+    assert len(overall) == 3
+    # Позиция первой и с ведущим нулём — иначе алфавитный порядок разъедется с отчётом.
+    assert overall[0].startswith("01_") and overall[2].startswith("03_")
+    # Дальше метрика, потом исходное имя: "01_1.234_soft_00.png".
+    assert all(re.fullmatch(r"0\d_[\d.]+_\w+\.png", name) for name in overall), overall
+
+    zonal = sorted(p.name for p in (links / "zonal").iterdir())
+    assert len(zonal) == 2
+    # У зонального отчёта метрика — перепад в процентах, как в таблице.
+    assert all(re.fullmatch(r"0\d_\+\d+%_\w+\.png", name) for name in zonal), zonal
+    # Симлинки ведут на настоящие файлы, а не на самих себя.
+    for link in (links / "overall").iterdir():
+        assert link.is_symlink() and link.resolve().exists()
+
+
+def test_link_dir_is_refreshed_but_never_deletes_real_files(folder, tmp_path) -> None:
+    """Повторный прогон чистит свои симлинки, но чужой файл трогать не смеет."""
+    links = tmp_path / "worst"
+    run(str(folder), "--worst-count", "3", "--no-zonal", "--link-dir", str(links))
+    run(str(folder), "--worst-count", "2", "--no-zonal", "--link-dir", str(links))
+    assert len(list((links / "overall").iterdir())) == 2, "старые симлинки не убраны"
+
+    (links / "overall" / "заметки.txt").write_text("не удалять", encoding="utf-8")
+    result = CliRunner().invoke(main, [str(folder), "--worst-count", "2", "--no-zonal", "--link-dir", str(links)])
+    assert result.exit_code != 0
+    assert (links / "overall" / "заметки.txt").exists(), "обычный файл удалён — так нельзя"

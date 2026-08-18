@@ -189,6 +189,33 @@ def _accumulate(
     return totals
 
 
+def amplitude_threshold(gray: np.ndarray, amp_rel: float = DEFAULT_AMP_REL, amp_min: float = DEFAULT_AMP_MIN) -> float:
+    """Минимальная амплитуда перепада, ниже которой он считается шумом.
+
+    Порог привязан к контрасту самого кадра: p95 амплитуд определяют крупные контрастные
+    детали (заголовки, рамки, границы иллюстраций), которые лёгкий расфокус почти не
+    трогает, — поэтому порог не «уезжает» вслед за размытием, но подстраивается под
+    экспозицию и ISO. Считаем его по каждой восьмой строке: счёт вчетверо дешевле, а на
+    сотнях тысяч замеров p95 от прореживания не двигается.
+
+    Вынесено в отдельную функцию, потому что при замере по областям строк порог обязан
+    считаться по ВСЕМУ кадру и передаваться в каждый кусок готовым: в кропе одной строки
+    p95 амплитуд — это уже не «чернила кадра», а разброс внутри самих букв, и порог
+    получился бы у каждого куска свой.
+
+    Args:
+        gray: Полутоновый кадр.
+        amp_rel: Доля от p95 амплитуд кадра.
+        amp_min: Абсолютный минимум амплитуды в уровнях 8 бит.
+
+    Returns:
+        Порог амплитуды в уровнях 8 бит.
+    """
+    img = gray.astype(np.float64)
+    probe = img[:: max(1, img.shape[0] // 400)]
+    return max(amp_min, amp_rel * float(np.percentile(_row_runs(probe)["amplitude"], 95)))
+
+
 def edge_stats(
     gray: np.ndarray,
     grid: Grid,
@@ -196,6 +223,7 @@ def edge_stats(
     amp_min: float = DEFAULT_AMP_MIN,
     max_run: int = DEFAULT_MAX_RUN,
     min_edges: int = DEFAULT_MIN_EDGES,
+    amp_threshold: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Карты замеров краёв по тайлам: субпиксельная σ, целая длина участка, число краёв.
 
@@ -210,20 +238,16 @@ def edge_stats(
         amp_min: Абсолютный минимум амплитуды в уровнях 8 бит.
         max_run: Максимальная длина участка, ещё считающаяся штрихом.
         min_edges: Минимум замеров в тайле, иначе σ и длина участка = NaN.
+        amp_threshold: Готовый порог амплитуды; None — посчитать по поданному кадру
+            (см. ``amplitude_threshold``).
 
     Returns:
         Словарь с массивами (ny, nx): ``sigma`` — средняя σ края в пикселях,
         ``run`` — средняя длина монотонного участка, ``count`` — число принятых краёв.
     """
     img = gray.astype(np.float64)
-
-    # Порог амплитуды привязан к контрасту самого кадра: p95 амплитуд определяют крупные
-    # контрастные детали (заголовки, рамки, границы иллюстраций), которые лёгкий расфокус
-    # почти не трогает, — поэтому порог не «уезжает» вслед за размытием, но подстраивается
-    # под экспозицию и ISO. Считаем его по каждой восьмой строке: счёт вчетверо дешевле,
-    # а на сотнях тысяч замеров p95 от прореживания не двигается.
-    probe = img[:: max(1, img.shape[0] // 400)]
-    amp_threshold = max(amp_min, amp_rel * float(np.percentile(_row_runs(probe)["amplitude"], 95)))
+    if amp_threshold is None:
+        amp_threshold = amplitude_threshold(gray, amp_rel, amp_min)
 
     totals = _accumulate(img, grid, amp_threshold, max_run)
     enough = totals["count"] >= min_edges
@@ -265,6 +289,34 @@ def _tile_sharpness(gray: np.ndarray, grid: Grid) -> np.ndarray:
         return 1.0 / np.maximum(sigma, 1e-3)
 
 
+def _region_sharpness(crop: np.ndarray, context: object) -> tuple[float, float]:
+    """Резкость одного куска строки: обратная субпиксельная ширина края и число краёв.
+
+    Порога «достаточно ли краёв» здесь НЕТ намеренно. Кусок строки в сотню раз меньше
+    тайла по площади, и требовать от него тайловых ``DEFAULT_MIN_EDGES`` значило бы
+    выбрасывать куски целиком — причём тем чаще, чем сильнее наклон строки (наклон
+    укорачивает кусок). Получился бы обрыв замеров ровно там, где искажения сильнее.
+    Вместо порога кусок возвращает свой вес — число измеренных перепадов, — а решение
+    «хватило ли статистики» принимается уже на уровне СТРОКИ, где куски сложены вместе
+    (см. ``Algorithm.pool`` и ``lines.measure``).
+
+    Args:
+        crop: Полутоновый кусок строки.
+        context: Порог амплитуды, посчитанный по всему кадру (``amplitude_threshold``).
+
+    Returns:
+        Пара (1/σ, число краёв); вес 0 означает «в куске не нашлось ни одного перепада».
+    """
+    height, width = crop.shape[:2]
+    grid = Grid(ny=1, nx=1, height=height, width=width)
+    stats = edge_stats(crop, grid, min_edges=1, amp_threshold=context)
+    sigma = float(stats["sigma"][0, 0])
+    count = float(stats["count"][0, 0])
+    if not np.isfinite(sigma) or count <= 0:
+        return float("nan"), 0.0
+    return 1.0 / max(sigma, 1e-3), count
+
+
 ALGORITHM = Algorithm(
     name="edge_width",
     summary="субпиксельная ширина края штриха (Marziliano/JNB): не зависит ни от количества текста, ни от кегля",
@@ -272,4 +324,9 @@ ALGORITHM = Algorithm(
     unit="1/σ",
     display=lambda score: 1.0 / score if score > 0 else float("nan"),
     display_unit="σ края, px",
+    # σ измеряется в пикселях, поэтому её осмысленно делить на высоту строки и получать
+    # «размытие в долях кегля» — то, что определяет читаемость мелкого текста.
+    length_scaled=True,
+    region_sharpness=_region_sharpness,
+    frame_context=amplitude_threshold,
 )

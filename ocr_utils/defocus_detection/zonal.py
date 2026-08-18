@@ -7,31 +7,58 @@
 Эталонный пример — DSCF0196 из папки 1979 года: 129-е место из 317 по общему баллу и
 2-е по перепаду (разбор в `defocus_detection_validation_report.md`, § 8).
 
-КАК МЕРЯЕТСЯ. Кадр режется на сетку вдвое мельче основной, по каждому тайлу считается
-ширина края σ, затем строится ПРОФИЛЬ по горизонтальным полосам (полоса = ряд тайлов),
-и метрика — относительный перепад между самой резкой и самой мягкой полосой.
+КУДА МОЖЕТ ПРИЙТИСЬ ПРОВАЛ. В пределах одной подшивки встречается и мягкий верх, и
+мягкий бок, и один заваленный угол: снимают с рук, и плоскость съёмки заваливается
+каждый раз по-своему. Поэтому профиль строится не по осям сетки, а вдоль ПРОИЗВОЛЬНОГО
+направления: тайлы проецируются на единичный вектор, а полоса — это бин проекции.
+Четыре направления (см. ``DIRECTIONS``) покрывают все три случая:
 
-Три решения, без которых это не работает (проверено на размеченной папке):
+    rows  ↓   полосы горизонтальные — ловит мягкий верх или низ;
+    cols  →   полосы вертикальные   — ловит мягкий левый или правый край;
+    diag  ↘   полосы перпендикулярны главной диагонали — крайние бины это
+              левый верхний и правый нижний УГЛЫ;
+    anti  ↙   то же для второй диагонали: правый верхний и левый нижний углы.
+
+В режиме ``axis="all"`` (по умолчанию) считаются все четыре, а в отчёт идёт худшее из
+них — с указанием, куда именно пришёлся провал. Диагональные направления нужны именно
+для углов: завал одного угла размазывается по всей длине и горизонтальной, и
+вертикальной полосы, и по обеим осям выглядит вдвое слабее, чем он есть.
+
+КАК МЕРЯЕТСЯ. Кадр режется на сетку вдвое мельче основной, по каждому тайлу считается
+ширина края σ, тайлы фильтруются на однородность набора, из них собирается профиль σ
+по полосам выбранного направления, и метрика — относительный перепад между самой
+резкой и самой мягкой полосой.
+
+Четыре решения, без которых это не работает (проверено на размеченной папке):
 
 1. **Только однородные тайлы тела-текста.** σ зависит от того, чем набран кусок полосы:
    узкая колонка мелким шрифтом или жирный курсивный лозунг дают большую σ и при
    идеальном фокусе. Поэтому в профиль берутся только тайлы, у которых И число краёв,
    И средняя длина штриха попадают в коридоры перцентилей этого же кадра.
 
-2. **Полосы поперёк колонок, а не вдоль.** Горизонтальная полоса пересекает все колонки
-   разворота и усредняет вёрстку; вертикальная целиком лежит внутри одной колонки и
-   наследует её кегль. На реальной выборке столбцовый профиль оказался бесполезен:
-   в топ стабильно лезли кадры из-за узкой колонки другим шрифтом у правого поля,
-   одной и той же у всех выпусков. Ось выбирается параметром ``axis``, по умолчанию
-   горизонтальные полосы — они верны для газет и книг с вертикальными колонками.
+2. **Полоса пересекает вёрстку, а не лежит вдоль неё.** Горизонтальная полоса пересекает
+   все колонки разворота и усредняет набор; вертикальная целиком лежит внутри одной
+   колонки и наследует её кегль. Отсюда известный перекос: направление ``cols`` шумнее
+   ``rows`` на газетном материале — у него в каждой полосе меньше независимой вёрстки.
+   Это цена за возможность увидеть мягкий бок, и платить её приходится (§ «Шум по
+   направлениям» в README): фильтры однородности снимают перекос лишь частично.
 
-3. **Сглаживание профиля и разнос полос.** Без них метрика срабатывает на паре соседних
-   полос, то есть на шуме. Профиль сглаживается по три полосы, а самая резкая и самая
-   мягкая обязаны отстоять друг от друга минимум на ``min_separation`` полос: оптический
-   завал — это плавный градиент через полкадра, а не скачок между соседями.
+3. **Сглаживание профиля и разнос полос — в долях кадра, а не в полосах.** Оптический
+   завал — плавный градиент через полкадра, а не скачок между соседями. Раньше и окно
+   сглаживания, и минимальный разнос были фиксированы в полосах (3), что молча означало
+   «четверть кадра» на альбомном превью 4416×2944 с его двенадцатью полосами — и всего
+   одну девятую кадра на портретном 2944×4416, где полос двадцать восемь. Теперь обе
+   величины задаются долей от числа полос (``SMOOTH_FRACTION``, ``MIN_SEPARATION_FRACTION``)
+   и на исходной альбомной сетке дают ровно прежние 3 — калибровка 1979 года сохранена.
+
+4. **Полосы нарезаются по кадру, а не по тексту.** Границы бинов считаются от всей сетки
+   тайлов, а не от тех, что прошли фильтр однородности: иначе кадр, где текст занимает
+   верхнюю половину, получил бы полосы вдвое толще, и перепад стал бы несравним с соседним
+   кадром.
 """
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -56,10 +83,70 @@ DEFAULT_MIN_PAPER = 0.18
 DEFAULT_MARGIN = 1
 # Минимум однородных тайлов в полосе, иначе полоса не участвует.
 DEFAULT_MIN_TILES = 4
-# Минимальный разнос самой резкой и самой мягкой полосы (в полосах).
-DEFAULT_MIN_SEPARATION = 3
+# …но у диагональных направлений крайние полосы КОРОТКИЕ по построению: полоса возле
+# угла состоит из двух-трёх тайлов, сколько бы их ни было в кадре. Требовать от неё
+# четыре — значит выбросить сам угол, то есть ровно то место, ради которого диагональ
+# и заведена. Поэтому от короткой полосы требуется не абсолютное число тайлов, а доля
+# от того, что в ней вообще есть; ниже двух тайлов не опускаемся ни при каких условиях,
+# иначе полосу определяет один случайный кусок вёрстки.
+MIN_BAND_COVERAGE = 0.5
+MIN_BAND_TILES = 2
+# Какую долю самых мягких тайлов считать «мягким пятном» при назывании зоны.
+SOFT_QUANTILE = 0.90
+# Насколько далеко (в долях кадра) пятно должно уехать от центра тяжести текста, чтобы
+# называть сторону. Замерено на синтетике: у ровного кадра смещение не превышает 0.07,
+# у настоящих зон — от 0.12 (слабый угол) до 0.42 (мягкий верх). Порог посередине этого
+# зазора; сдвигать его вниз нельзя — мягкий низ начнёт называться нижним углом из-за
+# побочного смещения по второй оси (там 0.10).
+SOFT_OFFSET = 0.11
+# Минимальный разнос самой резкой и самой мягкой полосы — в долях от числа полос.
+# 0.25 — это ровно прежние 3 полосы из 12 на альбомном превью, на котором подбирались
+# пороги; на портретном кадре с 28 полосами то же требование даёт 7 полос, а не 3.
+MIN_SEPARATION_FRACTION = 0.25
+# Полуокно сглаживания профиля — тоже доля от числа полос. 1/12 воспроизводит прежнее
+# «±1 полоса из 12»: сглаживать надо по одному и тому же куску кадра, а не по одному
+# и тому же числу полос.
+SMOOTH_FRACTION = 1.0 / 12.0
 
-AXES = ("rows", "cols")
+# Направление профиля: единичный вектор (ux, uy) в координатах тайлов, вдоль которого
+# растёт номер полосы (ось y смотрит вниз). Сама полоса перпендикулярна этому вектору.
+# Названия концов профиля — для отчёта: (где начало, где конец).
+DIRECTIONS: dict[str, tuple[tuple[float, float], tuple[str, str]]] = {
+    "rows": ((0.0, 1.0), ("верх", "низ")),
+    "cols": ((1.0, 0.0), ("лево", "право")),
+    "diag": ((math.sqrt(0.5), math.sqrt(0.5)), ("левый верхний угол", "правый нижний угол")),
+    "anti": ((-math.sqrt(0.5), math.sqrt(0.5)), ("правый верхний угол", "левый нижний угол")),
+}
+
+# Значение --zonal-axis, означающее «посчитать все направления и взять худшее».
+ALL_AXES = "all"
+AXES = (*DIRECTIONS, ALL_AXES)
+
+
+def zone_name(dx: float, dy: float, threshold: float = SOFT_OFFSET) -> str:
+    """Называет часть кадра по смещению относительно его центра.
+
+    Args:
+        dx: Смещение по горизонтали в долях кадра (минус — влево).
+        dy: Смещение по вертикали в долях кадра (минус — вверх).
+        threshold: Ниже какого смещения сторона не называется.
+
+    Returns:
+        Строка вида «низ», «правый нижний угол» или «середина».
+    """
+    vertical = "верх" if dy < -threshold else ("низ" if dy > threshold else "")
+    horizontal = "лево" if dx < -threshold else ("право" if dx > threshold else "")
+    if vertical and horizontal:
+        # Родительный падеж собирается вручную: словарь на четыре угла короче
+        # и честнее любой попытки склонять по правилам.
+        corner = {
+            ("верх", "лево"): "левый верхний угол",
+            ("верх", "право"): "правый верхний угол",
+            ("низ", "лево"): "левый нижний угол",
+            ("низ", "право"): "правый нижний угол",
+        }
+        return corner[(vertical, horizontal)]
+    return vertical or horizontal or "середина"
 
 
 @dataclass
@@ -69,11 +156,16 @@ class ZonalResult:
     Attributes:
         drop: Относительный перепад ширины края между самой резкой и самой мягкой
             полосой: 0.0 — кадр ровный, 0.3 — в мягкой полосе штрих на 30 % шире.
+            В режиме "all" — худшее (наибольшее) из значений по всем направлениям.
         best: Индекс самой резкой полосы.
         worst: Индекс самой мягкой полосы.
         n_bands: Всего полос в кадре.
-        axis: По какой оси строился профиль ("rows" — горизонтальные полосы).
+        axis: Направление, по которому получен ``drop`` (ключ ``DIRECTIONS``).
         profile: Сглаженный профиль σ по полосам (NaN там, где тайлов не хватило).
+        drops: Перепад по каждому посчитанному направлению — для CSV и калибровки.
+            У направлений, где профиль не собрался, значения нет.
+        offset: Смещение мягкого пятна относительно текста в долях кадра (dx, dy):
+            по нему называется зона. None — если мягких тайлов не нашлось.
     """
 
     drop: float
@@ -82,20 +174,28 @@ class ZonalResult:
     n_bands: int
     axis: str
     profile: list[float]
+    drops: dict[str, float] = field(default_factory=dict)
+    offset: tuple[float, float] | None = None
 
     def where(self) -> str:
         """Человекочитаемое описание, какая часть кадра поплыла.
 
+        Зона называется по смещению мягкого пятна, а НЕ по тому, какое направление
+        дало наибольший перепад. Причина: направления сильно коррелированы — крайние
+        полосы диагонали это те же правые углы, что и крайние полосы cols, поэтому у
+        краевых случаев «победившее» направление скачет между cols и diag от кадра
+        к кадру (замерено: на мягком правом крае cols=0.383 против diag=0.380).
+        Смещение пятна такой двусмысленности не имеет и отвечает ровно на вопрос
+        «куда смотреть».
+
         Returns:
-            Строка вида «низ (полоса 10 из 12, резче всего 4)».
+            Строка вида «низ (rows 10/12, резче 4)» либо «правый нижний угол
+            (diag 20/25, резче 3)».
         """
-        if self.axis == "rows":
-            names = ("верх", "середина", "низ")
-        else:
-            names = ("лево", "центр", "право")
-        position = self.worst / max(self.n_bands - 1, 1)
-        label = names[0] if position < 0.34 else (names[1] if position < 0.67 else names[2])
-        return f"{label} ({self.worst + 1} из {self.n_bands}, резче всего {self.best + 1})"
+        detail = f"({self.axis} {self.worst + 1}/{self.n_bands}, резче {self.best + 1})"
+        if self.offset is None:
+            return f"зона не локализована {detail}"
+        return f"{zone_name(*self.offset)} {detail}"
 
 
 def fine_grid(shape: tuple[int, int], grid: Grid) -> Grid:
@@ -130,7 +230,11 @@ def paper_map(gray: np.ndarray, grid: Grid) -> np.ndarray:
 
 
 def _smooth(profile: np.ndarray) -> np.ndarray:
-    """Сглаживает профиль по три полосы, не размазывая его на пустые полосы.
+    """Сглаживает профиль, не размазывая его на пустые полосы.
+
+    Ширина окна — доля от длины профиля (``SMOOTH_FRACTION``), а не фиксированное число
+    полос: сглаживать надо один и тот же кусок кадра независимо от того, на сколько
+    полос он нарезан.
 
     Args:
         profile: Профиль по полосам, NaN там, где полоса не измерена.
@@ -139,34 +243,35 @@ def _smooth(profile: np.ndarray) -> np.ndarray:
         Сглаженный профиль; NaN остаются NaN (иначе край кадра «подтянулся» бы
         к соседу и попал в отчёт как самая мягкая полоса).
     """
+    half = max(1, round(profile.size * SMOOTH_FRACTION))
     out = np.full_like(profile, np.nan)
     for k in range(profile.size):
         if not np.isfinite(profile[k]):
             continue
-        window = profile[max(0, k - 1) : k + 2]
+        window = profile[max(0, k - half) : k + half + 1]
         window = window[np.isfinite(window)]
         out[k] = window.mean()
     return out
 
 
-def band_profile(
+def homogeneous_mask(
     sigma: np.ndarray,
     count: np.ndarray,
-    axis: str = "rows",
     run: np.ndarray | None = None,
     paper: np.ndarray | None = None,
     count_corridor: tuple[float, float] = DEFAULT_COUNT_CORRIDOR,
     run_corridor: tuple[float, float] = DEFAULT_RUN_CORRIDOR,
     min_paper: float = DEFAULT_MIN_PAPER,
     margin: int = DEFAULT_MARGIN,
-    min_tiles: int = DEFAULT_MIN_TILES,
 ) -> np.ndarray:
-    """Строит профиль ширины края по полосам, по однородным тайлам тела-текста.
+    """Отбирает тайлы однородно набранного тела-текста.
+
+    Маска считается один раз на кадр и переиспользуется всеми направлениями профиля:
+    от направления она не зависит, а стоит перцентилей по всей сетке.
 
     Args:
         sigma: Карта σ по тайлам мелкой сетки.
         count: Карта числа измеренных краёв по тем же тайлам.
-        axis: "rows" — горизонтальные полосы, "cols" — вертикальные.
         run: Карта средней длины монотонного участка (прокси кегля и начертания);
             None — не фильтровать по ней.
         paper: Карта доли пикселей бумаги в тайле; None — не фильтровать по ней.
@@ -174,52 +279,161 @@ def band_profile(
         run_corridor: Коридор перцентилей длины штриха.
         min_paper: Минимальная доля бумаги в тайле (отсев полутоновых фотографий).
         margin: Сколько крайних рядов/столбцов тайлов выбросить.
-        min_tiles: Минимум однородных тайлов в полосе.
 
     Returns:
-        Профиль средней σ по полосам; NaN там, где тайлов не хватило.
+        Булев массив размера ``sigma``: True — тайл годится в профиль.
     """
     if not np.isfinite(sigma).any():
         # Кадр без текста (обложка, чистый лист): мерить нечего, а перцентили по массиву
         # из одних NaN только сыплют предупреждениями.
-        return np.full(sigma.shape[0] if axis == "rows" else sigma.shape[1], np.nan)
+        return np.zeros(sigma.shape, dtype=bool)
 
     low, high = np.nanpercentile(count, count_corridor)
-    homogeneous = (count >= low) & (count <= high) & np.isfinite(sigma)
+    mask = (count >= low) & (count <= high) & np.isfinite(sigma)
     if run is not None:
         run_low, run_high = np.nanpercentile(run, run_corridor)
-        homogeneous &= (run >= run_low) & (run <= run_high)
+        mask &= (run >= run_low) & (run <= run_high)
     if paper is not None:
-        homogeneous &= paper >= min_paper
+        mask &= paper >= min_paper
     if margin > 0:
-        homogeneous[:margin, :] = homogeneous[-margin:, :] = False
-        homogeneous[:, :margin] = homogeneous[:, -margin:] = False
+        mask[:margin, :] = mask[-margin:, :] = False
+        mask[:, :margin] = mask[:, -margin:] = False
+    return mask
 
-    if axis == "cols":
-        sigma, homogeneous = sigma.T, homogeneous.T
-    profile = np.full(sigma.shape[0], np.nan)
-    for k in range(sigma.shape[0]):
-        selected = homogeneous[k]
-        if selected.sum() >= min_tiles:
-            profile[k] = sigma[k][selected].mean()
+
+def band_index(shape: tuple[int, int], axis: str) -> tuple[np.ndarray, int]:
+    """Раскладывает тайлы сетки по полосам выбранного направления.
+
+    Тайл относится к полосе по проекции своего центра на направляющий вектор; шаг
+    полосы — один тайл, поэтому для "rows" номера полос совпадают с номерами рядов
+    сетки, а для "cols" — со столбцами. Границы бинов отсчитываются от всей сетки,
+    а не от прошедших фильтр тайлов: иначе толщина полосы зависела бы от того, где
+    на кадре оказался текст.
+
+    Args:
+        shape: Размер сетки тайлов (ny, nx).
+        axis: Ключ из ``DIRECTIONS``.
+
+    Returns:
+        Кортеж (массив (ny, nx) с номером полосы для каждого тайла, число полос).
+    """
+    (ux, uy), _ = DIRECTIONS[axis]
+    ny, nx = shape
+    cy = np.arange(ny, dtype=np.float64)[:, None] + 0.5
+    cx = np.arange(nx, dtype=np.float64)[None, :] + 0.5
+    projection = ux * cx + uy * cy
+    start = projection.min()
+    index = np.floor(projection - start).astype(int)
+    return index, int(index.max()) + 1
+
+
+def band_profile(
+    sigma: np.ndarray,
+    mask: np.ndarray,
+    axis: str = "rows",
+    min_tiles: int = DEFAULT_MIN_TILES,
+    margin: int = DEFAULT_MARGIN,
+) -> np.ndarray:
+    """Строит профиль ширины края по полосам заданного направления.
+
+    Args:
+        sigma: Карта σ по тайлам мелкой сетки.
+        mask: Маска однородных тайлов из ``homogeneous_mask``.
+        axis: Направление профиля, ключ ``DIRECTIONS``.
+        min_tiles: Минимум однородных тайлов в длинной полосе.
+        margin: Сколько крайних рядов/столбцов тайлов не считается доступными
+            (те же, что вычеркнула ``homogeneous_mask``).
+
+    Returns:
+        Профиль средней σ по полосам; NaN там, где тайлов не хватило.
+    """
+    index, n_bands = band_index(sigma.shape, axis)
+    inside = np.zeros(sigma.shape, dtype=bool)
+    inside[margin : sigma.shape[0] - margin or None, margin : sigma.shape[1] - margin or None] = True
+
+    profile = np.full(n_bands, np.nan)
+    for k in range(n_bands):
+        in_band = index == k
+        available = int((in_band & inside).sum())
+        if available == 0:
+            continue
+        required = max(MIN_BAND_TILES, min(min_tiles, round(available * MIN_BAND_COVERAGE)))
+        selected = mask & in_band
+        if selected.sum() >= required:
+            profile[k] = sigma[selected].mean()
     return profile
 
 
-def profile_drop(profile: np.ndarray, min_separation: int = DEFAULT_MIN_SEPARATION) -> tuple[float, int, int] | None:
+def _centroid(mask: np.ndarray) -> np.ndarray:
+    """Центр тяжести отмеченных тайлов в долях кадра.
+
+    Args:
+        mask: Булева маска тайлов.
+
+    Returns:
+        Массив [x, y] в [0, 1]; 0 — левый верхний угол кадра.
+    """
+    ys, xs = np.nonzero(mask)
+    ny, nx = mask.shape
+    return np.array([(xs + 0.5).mean() / nx, (ys + 0.5).mean() / ny])
+
+
+def soft_offset(sigma: np.ndarray, mask: np.ndarray, quantile: float = SOFT_QUANTILE) -> tuple[float, float] | None:
+    """Куда смещено мягкое пятно относительно самого текста.
+
+    Два решения, каждое из которых на синтетике решает исход:
+
+    1. **Берётся верхний квантиль по σ, а не все тайлы с весом.** Центр тяжести всех
+       тайлов с весом σ утягивает к середине кадра масса нормальных тайлов, и разница
+       между мягким углом и ровным кадром пропадает в третьем знаке.
+
+    2. **Смещение считается от центра тяжести ТЕКСТА, а не от центра кадра.** Текст на
+       полосе расположен несимметрично (поля, шапка, подвал), и у совершенно ровного
+       кадра пятно самых мягких тайлов само по себе оказывается смещённым от геометрического
+       центра — на синтетике на 0.07 доли кадра. Вычитание базового центра тяжести
+       убирает этот сдвиг и оставляет только эффект расфокуса.
+
+    Args:
+        sigma: Карта σ по тайлам мелкой сетки.
+        mask: Маска однородных тайлов из ``homogeneous_mask``.
+        quantile: Какую долю самых мягких тайлов считать пятном.
+
+    Returns:
+        Смещение (dx, dy) в долях кадра: положительное dx — пятно правее текста,
+        положительное dy — ниже. None, если однородных тайлов не набралось.
+    """
+    if mask.sum() < MIN_BAND_TILES:
+        return None
+    threshold = float(np.quantile(sigma[mask], quantile))
+    soft = mask & (sigma >= threshold)
+    if not soft.any():
+        return None
+    dx, dy = _centroid(soft) - _centroid(mask)
+    return (float(dx), float(dy))
+
+
+def profile_drop(profile: np.ndarray, min_separation: int | None = None) -> tuple[float, int, int] | None:
     """Находит наибольший перепад между разнесёнными полосами профиля.
 
     Args:
         profile: Сглаженный профиль σ по полосам.
-        min_separation: Минимальное расстояние между полосами (в полосах).
+        min_separation: Минимальное расстояние между полосами в полосах; None —
+            взять ``MIN_SEPARATION_FRACTION`` от длины профиля.
 
     Returns:
         Кортеж (перепад, индекс резкой полосы, индекс мягкой) либо None, если
         измеренных полос слишком мало.
     """
+    if min_separation is None:
+        min_separation = max(1, round(profile.size * MIN_SEPARATION_FRACTION))
     # Нулевая σ бывает только на синтетике с идеальными ступеньками (на реальном снимке
     # край всегда шире пикселя), но делить на неё нельзя, поэтому такие полосы отбрасываем.
     known = np.where(np.isfinite(profile) & (profile > 0))[0]
-    if known.size < min_separation + 1:
+    # Условий два, и они про разное: полос должно хватать на осмысленное среднее И
+    # среди них должны найтись достаточно разнесённые. Второе не следует из первого:
+    # у диагональных направлений измеренные полосы часто сбиваются в середину профиля,
+    # где тайлов много, и формально их число велико, а разноса нет.
+    if known.size < min_separation + 1 or int(known.max()) - int(known.min()) < min_separation:
         return None
     best: tuple[float, int, int] | None = None
     for sharp in known:
@@ -232,28 +446,47 @@ def profile_drop(profile: np.ndarray, min_separation: int = DEFAULT_MIN_SEPARATI
     return best
 
 
-def zonal_defocus(gray: np.ndarray, grid: Grid, axis: str = "rows", **kwargs) -> ZonalResult | None:
+def zonal_defocus(gray: np.ndarray, grid: Grid, axis: str = ALL_AXES, **kwargs) -> ZonalResult | None:
     """Оценивает зональный расфокус кадра.
+
+    В режиме ``axis="all"`` профиль строится по всем направлениям ``DIRECTIONS``, и
+    в результат идёт худшее из них. Максимум по четырём коррелированным величинам
+    смещён вверх и на ровном кадре: разбор этого смещения — в README, § «Шум по
+    направлениям». Отдельные значения сохраняются в ``ZonalResult.drops``, так что
+    сравнивать кадры можно и по одному выбранному направлению.
 
     Args:
         gray: Полутоновый кадр.
         grid: Основная сетка тайлов (внутри используется вдвое более мелкая).
-        axis: Ось профиля: "rows" (по умолчанию) или "cols".
-        **kwargs: Параметры отбора полос, см. ``band_profile``.
+        axis: Направление профиля или "all" (по умолчанию) — все сразу.
+        **kwargs: Параметры отбора тайлов, см. ``homogeneous_mask``, плюс ``min_tiles``.
 
     Returns:
-        ``ZonalResult`` либо None, если измеримых полос не набралось (обложка,
-        пустой лист, кадр без текста).
+        ``ZonalResult`` либо None, если измеримых полос не набралось ни по одному
+        направлению (обложка, пустой лист, кадр без текста).
     """
+    min_tiles = kwargs.pop("min_tiles", DEFAULT_MIN_TILES)
+    margin = kwargs.get("margin", DEFAULT_MARGIN)
     fine = fine_grid(gray.shape, grid)
     stats = edge_stats(gray, fine)
-    profile = _smooth(
-        band_profile(stats["sigma"], stats["count"], axis=axis, run=stats["run"], paper=paper_map(gray, fine), **kwargs)
-    )
-    found = profile_drop(profile)
-    if found is None:
-        return None
-    drop, best, worst = found
-    return ZonalResult(
-        drop=drop, best=best, worst=worst, n_bands=profile.size, axis=axis, profile=[float(v) for v in profile]
-    )
+    mask = homogeneous_mask(stats["sigma"], stats["count"], run=stats["run"], paper=paper_map(gray, fine), **kwargs)
+
+    wanted = tuple(DIRECTIONS) if axis == ALL_AXES else (axis,)
+    best: ZonalResult | None = None
+    drops: dict[str, float] = {}
+    for name in wanted:
+        profile = _smooth(band_profile(stats["sigma"], mask, axis=name, min_tiles=min_tiles, margin=margin))
+        found = profile_drop(profile)
+        if found is None:
+            continue
+        drop, sharp, soft = found
+        drops[name] = drop
+        if best is None or drop > best.drop:
+            best = ZonalResult(
+                drop=drop, best=sharp, worst=soft, n_bands=profile.size, axis=name, profile=[float(v) for v in profile]
+            )
+
+    if best is not None:
+        best.drops = drops
+        best.offset = soft_offset(stats["sigma"], mask)
+    return best
