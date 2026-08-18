@@ -11,9 +11,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 #INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/досканы-1 1970-07 - 1970-09 (450 DPI)/"
-OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/досканы-1 1970-07 - 1970-09 (450 DPI)/v3/cropped"
-DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/досканы-1 1970-07 - 1970-09 (450 DPI)/v3/debug"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-5 (1985 и далее + немножко пересканов) (450 DPI)"
+OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-5 (1985 и далее + немножко пересканов) (450 DPI)/cropped"
+DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-5 (1985 и далее + немножко пересканов) (450 DPI)/debug"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
@@ -32,9 +32,9 @@ uv run python -m ocr_utils.scan_cropping \
     --output-format tiff \
     --force-dpi=450 \
     --compensate-levels \
-  --finger-dilate-px=120 \
-    --max-asymmetric-dilation-ratio=1. \
-    --finger-zone-light-increment=10,10 \
+    --finger-dilate-px=90 \
+    --max-asymmetric-dilation-ratio=2. \
+    --finger-zone-light-increment=20,20 \
     --extra-erosion-px=120 \
     --protect-text-layout \
     --text-protect-mode=copy-back-layout-zones \
