@@ -18,6 +18,7 @@ from ocr_utils.scan_cropping.finger_removal.masking import (
     build_finger_mask,
     drop_fingers_on_content,
     keep_border_components,
+    keep_border_seeded_zones,
 )
 from ocr_utils.scan_cropping.finger_removal.text_protection import (
     DEFAULT_LAYOUT_PAD_PX,
@@ -40,7 +41,7 @@ FINGER_CONF = 0.01
 # Дилатация маски пальца (build_finger_mask default=12) — тонкая мягкая тень по
 # краю силуэта (полутона на стыке кожа/бумага) иначе не докрашивается.
 FINGER_DILATE_PX = 40
-# Доля кадра для проверки контакта с рамкой в keep_border_components. Настоящий
+# Доля кадра для проверки контакта с рамкой в keep_border_seeded_zones. Настоящий
 # палец физически ОБРЕЗАН рамкой кадра (рука уходит за границу снимка), поэтому
 # его маска доходит почти до самого края (~0 px). Узкая полоса надёжнее широкой:
 # при 0.12 на 36-Мп сканах полоса ~430 px, и в неё попадают внутренние тёмные
@@ -49,6 +50,10 @@ FINGER_DILATE_PX = 40
 # 11.4 % высоты — пролезала впритык под 12 %). Настоящий палец здесь на 0 %,
 # так что зазор огромный, 4 % чисто разделяет случаи.
 FINGER_EDGE_FRAC = 0.04
+# Считать ли краевой признак ПО ЯДРАМ маски (до дилатации) — см.
+# keep_border_seeded_zones и --drop-inner-finger-cores. False возвращает прежнее
+# поведение: keep_border_components по уже раздутой маске.
+DROP_INNER_FINGER_CORES = True
 FINGER_PADDING = 64  # контекст вокруг маски пальца для LaMa, пикс. (см. inpaint_roi.py)
 # ROI для LaMa увеличивается в FINGER_ROI_SCALE раз от центра (после padding) —
 # без этого LaMa не видит достаточно кромки/фона и заливает дыру доминирующим
@@ -114,6 +119,7 @@ def remove_fingers(
     dilate_px: int = FINGER_DILATE_PX,
     light_increment: "float | tuple[float, float]" = FINGER_ZONE_LIGHT_INCREMENT,
     asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO,
+    drop_inner_cores: bool = DROP_INNER_FINGER_CORES,
     protect_text: bool = False,
     protect_mode: str = PROTECT_LIMIT_LAMA,
     layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
@@ -145,8 +151,12 @@ def remove_fingers(
     не проверяет контакт нейромаски с рамкой кадра — из-за этого крупные ФОТО
     людей/рук на самой странице (в глубине кадра, не с края) иногда ложно
     принимаются за палец. Настоящий палец всегда входит С КРАЯ кадра, поэтому
-    дополнительно отсекаем компоненты, не касающиеся рамки, через
-    ``keep_border_components``. Перед самой закраской зона пальца осветляется
+    дополнительно отсекаем ядра маски, не касающиеся рамки, через
+    ``keep_border_seeded_zones`` (краевой признак считается ДО дилатации: она
+    склеивает ложное ядро с настоящим пальцем, и на раздутой маске проверка уже
+    бесполезна). При ``drop_inner_cores=False`` (CLI:
+    ``--no-drop-inner-finger-cores``) берётся прежний вариант — отсев
+    ``keep_border_components`` по уже раздутой маске. Перед самой закраской зона пальца осветляется
     (``brighten_finger_zone``) — LaMa иначе заливает дыру заметно темнее
     окружающей бумаги. Если палец не найден — кадр возвращается без
     изменений.
@@ -171,7 +181,16 @@ def remove_fingers(
     yolo_boxes = raw_boxes if want_boxes else None
     predilate = mask_predilate if want_boxes else None
     if int(np.count_nonzero(mask)) > 0:
-        mask = keep_border_components(mask, edge_frac=FINGER_EDGE_FRAC)
+        if drop_inner_cores:
+            mask, mask_predilate, off_edge = keep_border_seeded_zones(
+                mask, mask_predilate, dilate_px, asymmetric_dilation_ratio, FINGER_EDGE_FRAC
+            )
+            if off_edge:
+                info = f"{info}, ядер не у края убрано={off_edge}"
+                if want_boxes:
+                    predilate = mask_predilate
+        else:
+            mask = keep_border_components(mask, edge_frac=FINGER_EDGE_FRAC)
         if int(np.count_nonzero(mask)) == 0:
             info = "auto(отсеяно: не у края)"
     if int(np.count_nonzero(mask)) == 0:

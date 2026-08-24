@@ -10,18 +10,34 @@ set -euo pipefail
 # репозитория — поднимаемся на два уровня.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-1 1966-1976 (300 DPI)"
-OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/cropped"
-#DEBUG_DIR="/mnt/system/raw/mts/iter_12/debug"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-1 1966-1976 (300 DPI)/1975/10"
+OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/cropped/1975/10"
+DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/debug/1975/10"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"
 echo "  output = $OUTPUT_DIR"
-#echo "  debug  = $DEBUG_DIR"
+echo "  debug  = $DEBUG_DIR"
+
+# Ложные «пальцы» на печатном контенте. По умолчанию включён
+# --drop-inner-finger-cores: ядра маски пальца, целиком лежащие в глубине кадра
+# (напечатанный портрет, принятый детектором за кожу), выбрасываются ДО дилатации —
+# иначе она склеивает их с настоящим пальцем в один компонент, тот проходит краевую
+# проверку за счёт соседа, и LaMa затирает фотографию (так был испорчен портрет на
+# IMG_0011 из 1975/10: --text-protect-mode=copy-back-layout-zones не спас, потому что
+# Surya не нашла на этом фото ни одного блока layout и возвращать было нечего).
+#
+# Чтобы ВЫКЛЮЧИТЬ и вернуть прежнее поведение (краевая проверка по уже раздутой
+# маске), добавьте в список аргументов ниже строку:
+#     --no-drop-inner-finger-cores \
+# Имеет смысл, только если детектор рвёт силуэт настоящего пальца и дальний фрагмент
+# (кончик) не достаёт до края кадра — с включённым флагом такой фрагмент отбрасывается
+# вместе с ложными. Признак в логе: «ядер не у края убрано=N» на кадрах без портретов.
 
 uv run python -m ocr_utils.scan_cropping \
     --input-dir "$INPUT_DIR" \
     --output-dir "$OUTPUT_DIR" \
+    --debug-dir "$DEBUG_DIR" \
     --recursive \
     --top-margin -120 \
     --bottom-margin -180 \

@@ -43,7 +43,12 @@ from ocr_utils.scan_cropping.cropping import (
     crop_rotated,
 )
 from ocr_utils.scan_cropping.finger_removal.finger_shadow import correct_finger_shadow
-from ocr_utils.scan_cropping.finger_removal.removal import FINGER_DILATE_PX, FINGER_ZONE_LIGHT_INCREMENT, remove_fingers
+from ocr_utils.scan_cropping.finger_removal.removal import (
+    DROP_INNER_FINGER_CORES,
+    FINGER_DILATE_PX,
+    FINGER_ZONE_LIGHT_INCREMENT,
+    remove_fingers,
+)
 from ocr_utils.scan_cropping.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
 from ocr_utils.scan_cropping.finger_removal.text_protection import (
     DEFAULT_LAYOUT_PAD_PX,
@@ -108,6 +113,7 @@ class CropParams:
     finger_dilate_px: int = FINGER_DILATE_PX
     finger_zone_light_increment: "tuple[float, float]" = (FINGER_ZONE_LIGHT_INCREMENT, FINGER_ZONE_LIGHT_INCREMENT)
     asymmetric_dilation_ratio: float = DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
+    drop_inner_finger_cores: bool = DROP_INNER_FINGER_CORES
     lama_roi_max_side: int = LAMA_ROI_MAX_SIDE
     shadow_method: str = "none"
 
@@ -168,6 +174,7 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                     dilate_px=params.finger_dilate_px,
                     light_increment=params.finger_zone_light_increment,
                     asymmetric_dilation_ratio=params.asymmetric_dilation_ratio,
+                    drop_inner_cores=params.drop_inner_finger_cores,
                     protect_text=params.protect_text_layout,
                     protect_mode=params.text_protect_mode,
                     layout_pad_px=params.layout_pad_px,

@@ -30,7 +30,11 @@ from ocr_utils.scan_cropping.cropping import (
 )
 from ocr_utils.scan_cropping.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
 from ocr_utils.scan_cropping.finger_removal.finger_shadow import SHADOW_METHODS, shadow_variant
-from ocr_utils.scan_cropping.finger_removal.removal import FINGER_DILATE_PX, FINGER_ZONE_LIGHT_INCREMENT
+from ocr_utils.scan_cropping.finger_removal.removal import (
+    DROP_INNER_FINGER_CORES,
+    FINGER_DILATE_PX,
+    FINGER_ZONE_LIGHT_INCREMENT,
+)
 from ocr_utils.scan_cropping.finger_removal.text_protection import (
     DEFAULT_LAYOUT_PAD_PX,
     PROTECT_LIMIT_LAMA,
@@ -221,6 +225,18 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     "(1 + ratio/2) по обеим. 0 — прежняя круговая дилатация",
 )
 @click.option(
+    "--drop-inner-finger-cores/--no-drop-inner-finger-cores",
+    "drop_inner_finger_cores",
+    default=DROP_INNER_FINGER_CORES,
+    show_default=True,
+    help="Убирать ядра маски пальца, целиком лежащие в глубине кадра (лицо на напечатанном "
+    "портрете, принятое детектором за кожу): настоящий палец входит С КРАЯ кадра, поэтому его "
+    "ядро касается краевой рамки. Признак считается ДО дилатации — она склеивает ложное ядро с "
+    "настоящим пальцем в один компонент, и тот проходит краевую проверку за счёт соседа. "
+    "--no-drop-inner-finger-cores возвращает прежнее поведение (проверка по уже раздутой маске); "
+    "выключать имеет смысл, если детектор рвёт силуэт пальца и дальний фрагмент не достаёт до края",
+)
+@click.option(
     "--protect-text-layout/--no-protect-text-layout",
     "protect_text_layout",
     default=False,
@@ -328,6 +344,7 @@ def main(
     lama_roi_max_side: int,
     force_dpi: Optional[int],
     asymmetric_dilation_ratio: float,
+    drop_inner_finger_cores: bool,
     protect_text_layout: bool,
     text_protect_mode: str,
     layout_pad_px: "tuple[int, int]",
@@ -369,6 +386,7 @@ def main(
         lama_roi_max_side=lama_roi_max_side,
         asymmetric_dilation_ratio=asymmetric_dilation_ratio,
         shadow_method=shadow_method,
+        drop_inner_finger_cores=drop_inner_finger_cores,
         protect_text_layout=protect_text_layout,
         text_protect_mode=text_protect_mode,
         layout_pad_px=layout_pad_px,
@@ -393,7 +411,7 @@ def main(
             "skip-if-exists: %s | "
             "output-format: %s | compensate-levels: %s | extra-erosion-px=%d | upscale: %s | "
             "crop-mode: %s (fill=%s, fill-blur-px=%g, fill-fade=%g) | "
-            "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g) | "
+            "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g, drop-inner-finger-cores=%s) | "
             "lama-roi-max-side: %s | force-dpi: %s | "
             "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
             "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d | "
@@ -418,6 +436,7 @@ def main(
             finger_dilate_px,
             finger_zone_light_increment[0],
             finger_zone_light_increment[1],
+            drop_inner_finger_cores,
             lama_roi_max_side if lama_roi_max_side > 0 else "нативное разрешение",
             force_dpi if force_dpi is not None else "не трогать",
             asymmetric_dilation_ratio,

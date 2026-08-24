@@ -87,6 +87,31 @@ def morph_cleanup(mask: np.ndarray, ksize: int = 7) -> np.ndarray:
     return mask
 
 
+def _border_frame(shape: "tuple[int, int]", edge_frac: float) -> np.ndarray:
+    """Булева маска краевой рамки кадра шириной ``edge_frac`` от соответствующей стороны."""
+    h, w = shape[:2]
+    frame_w = max(1, int(edge_frac * w))
+    frame_h = max(1, int(edge_frac * h))
+    frame = np.zeros((h, w), dtype=bool)
+    frame[:frame_h, :] = True
+    frame[h - frame_h :, :] = True
+    frame[:, :frame_w] = True
+    frame[:, w - frame_w :] = True
+    return frame
+
+
+def _redilate_cores(
+    cores: np.ndarray, dilate_px: int, asymmetric_dilation_ratio: float, edge_frac: float
+) -> np.ndarray:
+    """Заново строит зону закраски по прореженной сырой маске ``cores``.
+
+    Теми же параметрами дилатации, что и основная маска, плюс финальный отсев
+    ``keep_border_components`` — чтобы вместе с убранным ядром ушла и его кайма.
+    """
+    mask = dilate_finger_zones(cores, dilate_px, max_ratio=asymmetric_dilation_ratio) if dilate_px > 0 else cores
+    return keep_border_components(mask, edge_frac=edge_frac)
+
+
 def keep_border_components(
     mask: np.ndarray,
     edge_frac: float = 0.12,
@@ -105,16 +130,9 @@ def keep_border_components(
     Верхний порог площади отсекает гигантские ложные блобы (вся страница/обложка).
     """
     h, w = mask.shape[:2]
-    frame_w = max(1, int(edge_frac * w))
-    frame_h = max(1, int(edge_frac * h))
     min_area = int(min_area_frac * h * w)
     max_area = int(max_area_frac * h * w)
-
-    border_frame = np.zeros((h, w), dtype=bool)
-    border_frame[:frame_h, :] = True
-    border_frame[h - frame_h :, :] = True
-    border_frame[:, :frame_w] = True
-    border_frame[:, w - frame_w :] = True
+    border_frame = _border_frame(mask.shape, edge_frac)
 
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     out = np.zeros((h, w), dtype=np.uint8)
@@ -128,6 +146,51 @@ def keep_border_components(
         if touches_border or touches_seed:
             out[comp] = 255
     return out
+
+
+def keep_border_seeded_zones(
+    mask: np.ndarray, predilate: np.ndarray, dilate_px: int, asymmetric_dilation_ratio: float, edge_frac: float
+) -> "tuple[np.ndarray, np.ndarray, int]":
+    """Оставляет только зоны закраски, выросшие из КРАЕВЫХ ядер маски пальца.
+
+    Настоящий палец физически обрезан рамкой кадра (рука уходит за границу
+    снимка), поэтому его СЫРОЙ (до дилатации) блоб касается краевой рамки шириной
+    ``edge_frac``. Блоб, целиком лежащий в глубине кадра, — ложное срабатывание
+    детектора на печатном контенте (лицо на портрете, фото рук в статье).
+
+    Почему нельзя просто прогнать ``keep_border_components`` по УЖЕ раздутой
+    маске (как делалось раньше). Дилатация склеивает ложное ядро с настоящим
+    пальцем в один компонент, и тот касается рамки — ложное ядро «легализуется»
+    за счёт соседа и уезжает в закраску целиком. Ровно так был затёрт портрет на
+    IMG_0011 (1975/10): ядро портрета в 113 px от ядра пальца, дилатация 60 px с
+    обеих сторон их сомкнула.
+
+    Поэтому краевой признак считается ПО ЯДРАМ, а зона закраски пересобирается
+    только из краевых: пиксели, попавшие в раздутую зону настоящего пальца,
+    закрашиваются в любом случае (даже если лежат внутри ложного ядра) — там
+    закраска обоснована соседством с пальцем, а не ложной детекцией.
+
+    Возвращает (зона закраски, сырая маска, число убранных ядер).
+    """
+    if int(np.count_nonzero(predilate)) == 0:
+        return keep_border_components(mask, edge_frac=edge_frac), predilate, 0
+
+    border = _border_frame(predilate.shape, edge_frac)
+    num, labels = cv2.connectedComponents((predilate > 0).astype(np.uint8), connectivity=8)
+    cleaned = predilate.copy()
+    dropped = 0
+    for i in range(1, num):
+        comp = labels == i
+        if bool(np.any(comp & border)):  # касается рамки — настоящий палец, не трогаем
+            continue
+        cleaned[comp] = 0
+        dropped += 1
+
+    if dropped == 0:
+        return keep_border_components(mask, edge_frac=edge_frac), predilate, 0
+    if int(np.count_nonzero(cleaned)) == 0:
+        return cleaned, cleaned, dropped  # все ядра оказались не у края — пустая маска
+    return _redilate_cores(cleaned, dilate_px, asymmetric_dilation_ratio, edge_frac), cleaned, dropped
 
 
 def drop_fingers_on_content(
@@ -161,14 +224,7 @@ def drop_fingers_on_content(
     if int(np.count_nonzero(predilate)) == 0 or int(np.count_nonzero(layout_mask)) == 0:
         return mask, predilate, 0
 
-    h, w = predilate.shape[:2]
-    frame_w = max(1, int(edge_frac * w))
-    frame_h = max(1, int(edge_frac * h))
-    border = np.zeros((h, w), dtype=bool)
-    border[:frame_h, :] = True
-    border[h - frame_h :, :] = True
-    border[:, :frame_w] = True
-    border[:, w - frame_w :] = True
+    border = _border_frame(predilate.shape, edge_frac)
     layout_bool = layout_mask > 0
 
     num, labels = cv2.connectedComponents((predilate > 0).astype(np.uint8), connectivity=8)
@@ -191,12 +247,7 @@ def drop_fingers_on_content(
         return mask, predilate, 0
     if int(np.count_nonzero(cleaned)) == 0:
         return cleaned, cleaned, dropped  # все компоненты оказались ложными — пустая маска
-
-    new_mask = (
-        dilate_finger_zones(cleaned, dilate_px, max_ratio=asymmetric_dilation_ratio) if dilate_px > 0 else cleaned
-    )
-    new_mask = keep_border_components(new_mask, edge_frac=edge_frac)
-    return new_mask, cleaned, dropped
+    return _redilate_cores(cleaned, dilate_px, asymmetric_dilation_ratio, edge_frac), cleaned, dropped
 
 
 def skin_edge_mask(rgb: np.ndarray, edge_frac: float = 0.12, min_area_frac: float = 0.0015) -> np.ndarray:
