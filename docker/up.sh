@@ -79,15 +79,23 @@ docker exec -i \
   "$SERVER_CONTAINER" python3 /home/django/manage.py shell < create_users.py
 
 # --- проект и задачи через cvat-sdk в эфемерном контейнере ---
-echo ">> Создаю проект и задачи из share (генерация чанков — тоже долго) ..."
-docker run --rm \
-  --network "$NETWORK" \
-  --env-file .env \
-  -e CVAT_URL=http://cvat-server:8080 \
-  -v "$IMAGES_DIR":/home/django/share:ro \
-  -v "$SCRIPT_DIR/bootstrap.py":/bootstrap.py:ro \
-  python:3.11-slim \
-  sh -c "pip install --quiet --no-cache-dir --disable-pip-version-check cvat-sdk==${SDK_VERSION} && python /bootstrap.py"
+# bootstrap.py обходит ВЕСЬ share и заводит по папке с картинками одну задачу. Это верно
+# для его собственного проекта и неверно для чужих: подсистема ocr_utils.scan_markup держит
+# в том же share своё дерево паков и заводит задачи сама, с джобами по границам выпусков.
+# Поэтому шаг выключается переменной SKIP_BOOTSTRAP=1.
+if [ "${SKIP_BOOTSTRAP:-0}" = "1" ]; then
+  echo ">> SKIP_BOOTSTRAP=1 — проект и задачи не создаю (их заведёт ocr_utils.scan_markup to-cvat)."
+else
+  echo ">> Создаю проект и задачи из share (генерация чанков — тоже долго) ..."
+  docker run --rm \
+    --network "$NETWORK" \
+    --env-file .env \
+    -e CVAT_URL=http://cvat-server:8080 \
+    -v "$IMAGES_DIR":/home/django/share:ro \
+    -v "$SCRIPT_DIR/bootstrap.py":/bootstrap.py:ro \
+    python:3.11-slim \
+    sh -c "pip install --quiet --no-cache-dir --disable-pip-version-check cvat-sdk==${SDK_VERSION} && python /bootstrap.py"
+fi
 
 echo
 echo "================================================================"

@@ -1,0 +1,197 @@
+"""Заведение проекта, задач и джобов CVAT по содержимому базы.
+
+Иерархия::
+
+    пак сканов      -> проект CVAT
+    годовой комплект-> задача (task), ~1200 кадров
+    выпуск          -> джоб (job), ~100 кадров
+    полоса          -> кадр (frame)
+
+Границы джобов задаются параметром ``job_file_mapping``: это единственный способ описать
+их явно. Обычное разбиение по ``segment_size`` делит задачу на равные куски и границы
+выпусков не соблюдает, а несовместимость проверяется сервером — ``job_file_mapping``
+нельзя сочетать ни с ``segment_size``, ни с ``sorting_method``, ни с ``start_frame`` /
+``stop_frame`` / ``frame_filter`` (см. ``cvat/apps/engine/task.py``,
+``_validate_job_file_mapping``), поэтому ни одного из них мы не передаём.
+
+Картинки не грузятся по сети: задачи заводятся из share-каталога
+(``ResourceType.SHARE``), который смонтирован в ``cvat_server`` как ``/home/django/share``.
+Отсюда требование к ``--share-root`` — он должен совпадать с ``IMAGES_DIR`` в
+``docker/.env``.
+"""
+
+import logging
+
+from tqdm import tqdm
+
+from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_LIBRARY_STAMP
+from ocr_utils.scan_markup.geometry import to_cvat_rect
+
+logger = logging.getLogger(__name__)
+
+# Метки проекта. Цвета и их мотивировка — из docker/bootstrap.py: сканы жёлто-бежевые,
+# поэтому берём холодные насыщенные тона, на тёплой бумаге они видны лучше всего;
+# пурпур и голубой максимально далеки друг от друга и не сливаются при дальтонизме.
+#
+# color/grayscale — ДВУМЯ МЕТКАМИ, а не атрибутом одной: разные цвета рамок видно на
+# кадре сразу, всю полосу можно проверить одним взглядом, тогда как атрибут пришлось бы
+# открывать по каждому объекту отдельно.
+LABEL_RASTER_COLOR = "Растр цветной"
+LABEL_RASTER_GRAY = "Растр серый"
+LABEL_STAMP = "Библиотечная печать"
+
+LABELS = [
+    {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
+    {"name": LABEL_RASTER_GRAY, "type": "rectangle", "color": "#00B0FF"},  # голубой
+    {"name": LABEL_STAMP, "type": "mask", "color": "#D500F9"},  # пурпурный
+]
+
+# Метка -> значение колонки kind в базе и обратно.
+LABEL_BY_KIND = {KIND_COLOR: LABEL_RASTER_COLOR, KIND_GRAYSCALE: LABEL_RASTER_GRAY}
+KIND_BY_LABEL = {LABEL_RASTER_COLOR: KIND_COLOR, LABEL_RASTER_GRAY: KIND_GRAYSCALE}
+MASK_KIND_BY_LABEL = {LABEL_STAMP: MASK_LIBRARY_STAMP}
+
+# Качество JPEG, которым CVAT пережимает кадры уже у себя. Картинки и так уменьшены и
+# сохранены с quality=95, так что это второе пережатие — единственное заметное.
+IMAGE_QUALITY = 70
+
+
+def ensure_project(client, name: str) -> object:
+    """Проект по имени: находит существующий или создаёт с нужными метками.
+
+    Идемпотентность по ИМЕНИ, как в ``docker/bootstrap.py``: повторный прогон не должен
+    заводить второй проект с той же разметкой.
+    """
+    from cvat_sdk import models
+
+    for project in client.projects.list():
+        if project.name == name:
+            logger.info("Проект %r уже есть (id=%s), переиспользую", name, project.id)
+            return project
+
+    project = client.projects.create(
+        spec=models.ProjectWriteRequest(name=name, labels=[models.PatchedLabelRequest(**label) for label in LABELS])
+    )
+    logger.info("Проект %r создан (id=%s)", name, project.id)
+    return project
+
+
+def project_label_ids(client, project_id: int) -> dict[str, int]:
+    """``{имя метки: id}`` для проекта."""
+    labels, _ = client.api_client.labels_api.list(project_id=project_id, page_size=100)
+    return {label.name: label.id for label in labels.results}
+
+
+def find_task(client, project_id: int, name: str):
+    """Задача проекта по имени или ``None``."""
+    for task in client.tasks.list():
+        if task.project_id == project_id and task.name == name:
+            return task
+    return None
+
+
+def create_year_task(client, project_id: int, name: str, job_files: list[list[str]]):
+    """Задача-год из share-каталога, с джобами по границам выпусков.
+
+    ``job_files`` — список списков относительных путей внутри share, по одному списку на
+    выпуск. Порядок сохраняется: плоское объединение идёт в ``resources``, оно же задаёт
+    нумерацию кадров.
+    """
+    from cvat_sdk import models
+    from cvat_sdk.core.proxies.tasks import ResourceType
+
+    resources = [path for files in job_files for path in files]
+    logger.info("Создаю задачу %r: выпусков %d, кадров %d", name, len(job_files), len(resources))
+    return client.tasks.create_from_data(
+        spec=models.TaskWriteRequest(name=name, project_id=project_id),
+        resource_type=ResourceType.SHARE,
+        resources=resources,
+        data_params={"image_quality": IMAGE_QUALITY, "job_file_mapping": job_files},
+    )
+
+
+def frame_index_by_name(task) -> dict[str, int]:
+    """``{имя кадра: индекс}`` по данным СЕРВЕРА.
+
+    Индекс берётся отсюда, а не из позиции файла в переданном списке: нумерацию кадров
+    определяет сервер, и полагаться на совпадение с нашим порядком — лишнее допущение,
+    которое сломается молча и криво (разметка окажется не на тех полосах).
+    """
+    return {frame.name: index for index, frame in enumerate(task.get_frames_info())}
+
+
+def raster_shapes(pages_with_regions, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Предразметка: прямоугольники из базы -> шейпы CVAT.
+
+    ``pages_with_regions`` — последовательность ``(page, [RasterRegion, ...])``. Полосы,
+    которых нет среди кадров задачи, пропускаются: так прогон по подмножеству лет не
+    падает на чужих полосах.
+
+    Маски печатей не предзаливаются — автодетектора печатей нет, разметчик рисует их с нуля.
+    """
+    from cvat_sdk import models
+
+    shapes = []
+    for page, regions in pages_with_regions:
+        frame = frames.get(page.cvat_rel_path)
+        if frame is None:
+            continue
+        for region in regions:
+            label_id = label_ids.get(LABEL_BY_KIND[region.kind])
+            if label_id is None:
+                continue
+            x1, y1, x2, y2 = to_cvat_rect(
+                region.x1, region.y1, region.x2, region.y2, page.divisor, page.cvat_width, page.cvat_height
+            )
+            if x2 - x1 < 1 or y2 - y1 < 1:  # выродилось при делении — рисовать нечего
+                continue
+            shapes.append(
+                models.LabeledShapeRequest(type="rectangle", frame=frame, label_id=label_id, points=[x1, y1, x2, y2])
+            )
+    return shapes
+
+
+def upload_preannotations(task, shapes: list) -> int:
+    """Заливает предразметку в задачу, ЗАМЕНЯЯ имеющуюся. Возвращает число шейпов.
+
+    Замена, а не добавление: повторный прогон ``to-cvat`` по уже размеченной задаче иначе
+    удвоил бы каждый прямоугольник. Поэтому команда и требует ``--force-annotations``,
+    чтобы перезалить разметку в задачу, которая уже существует.
+    """
+    from cvat_sdk import models
+
+    if not shapes:
+        return 0
+    task.set_annotations(models.LabeledDataRequest(shapes=shapes))
+    return len(shapes)
+
+
+def assign_jobs_to_issues(task, issues) -> int:
+    """Проставляет ``issue.cvat_job_id`` по порядку джобов задачи.
+
+    Джобы задачи идут в том же порядке, что группы ``job_file_mapping``, то есть в порядке
+    выпусков. Сверяем длины: если сервер нарезал иначе, лучше честно ничего не проставить,
+    чем связать выпуски с чужими джобами.
+    """
+    jobs = sorted(task.get_jobs(), key=lambda job: job.start_frame)
+    if len(jobs) != len(issues):
+        logger.warning(
+            "Задача %r: джобов %d, выпусков %d — не связываю их, порядок ненадёжен", task.name, len(jobs), len(issues)
+        )
+        return 0
+    for job, issue in zip(jobs, issues):
+        issue.cvat_job_id = job.id
+    return len(jobs)
+
+
+def assign_annotator(client, task, username: str) -> None:
+    """Назначает все джобы задачи на аннотатора; молча пропускает, если его нет."""
+    from cvat_sdk import models
+
+    users, _ = client.api_client.users_api.list(search=username, page_size=100)
+    user_id = next((user.id for user in users.results if user.username == username), None)
+    if user_id is None:
+        logger.warning("Пользователь %r не найден — задача остаётся без назначения", username)
+        return
+    for job in task.get_jobs():
+        job.update(models.PatchedJobWriteRequest(assignee=user_id))

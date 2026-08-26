@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# Разметка пака-1 (журнал «Материально-техническое снабжение», 1966-1976).
+#
+# Пак: 11 годовых комплектов, 123 выпуска, 12 136 полос, TIFF RGB 600 dpi по ~40 МБ.
+# Оригиналы лежат на /mnt/dump3 (NTFS-3G на шпинделе), полное чтение — около полутерабайта,
+# поэтому шаги 1 и 2 читают их по одному разу каждый и оба идемпотентны: прерванный прогон
+# продолжается с того же места.
+#
+# Замер по 1966/03 (97 полос, GPU): ~1.1 с на полосу, то есть на весь пак около 4 часов.
+# Журнал текстовый, растра в нём мало — на этом выпуске нашлись обложка и одна полоса с
+# чёрными плашками схемы; так и должно быть, пустой результат на текстовой полосе это норма.
+#
+# Шаги запускаются ПО ОТДЕЛЬНОСТИ: раскомментировать нужный.
+
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+PACK_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/Готовое/пак-1"
+PACK_NAME="пак-1"
+DB="/mnt/dump3/mts_markup/pack1.sqlite"
+DB_REVIEWED="/mnt/dump3/mts_markup/pack1_reviewed.sqlite"
+DEBUG_DIR="/mnt/dump3/mts_markup/debug"
+
+# Должен совпадать с IMAGES_DIR в docker/.env, иначе cvat_server не увидит картинок.
+SHARE_ROOT="/mnt/dump3/mts_cvat_share"
+
+echo "Пак:      $PACK_DIR"
+echo "База:     $DB"
+echo "Share:    $SHARE_ROOT"
+
+# --- Шаг 1: предварительная детекция -----------------------------------------
+DETECT_ARGS=(
+    --pack-dir "$PACK_DIR"
+    --db "$DB"
+    --pack-name "$PACK_NAME"
+    # Оверлеи с подписями kind/chroma_frac: без них порог color/grayscale не откалибровать.
+    --debug-dir "$DEBUG_DIR"
+    # Продолжение прерванного прогона: уже посчитанные полосы не перечитываются.
+    # --skip-detected
+    # Один год или один выпуск — для пробы перед полным прогоном.
+    # --only-year 1966
+    # --only-issue 03
+    # Пороги color/grayscale. Смещены к color: лишний цветной JPEG стоит мегабайт,
+    # а серый вместо цветного — потерянной картинки.
+    # --chroma-thr 10
+    # --color-frac-thr 0.02
+    # Без Surya прогон идёт без GPU, но светлые фотографии теряются.
+    # --no-use-surya-layout
+)
+uv run python -m ocr_utils.scan_markup detect "${DETECT_ARGS[@]}"
+
+# --- Шаг 2: картинки и проект CVAT -------------------------------------------
+# TO_CVAT_ARGS=(
+#     --db "$DB"
+#     --pack-name "$PACK_NAME"
+#     --share-root "$SHARE_ROOT"
+#     --jobs 16
+#     # Год за годом: задача на 1200 кадров заводится не мгновенно.
+#     # --only-year 1966
+#     # Картинки уже готовы прошлым прогоном.
+#     # --skip-images
+#     # ОСТОРОЖНО: заливка заменяет разметку задачи целиком, то есть затирает ручную правку.
+#     # --force-annotations
+#     # --annotator user
+# )
+# uv run python -m ocr_utils.scan_markup to-cvat "${TO_CVAT_ARGS[@]}"
+
+# --- Шаг 3: уточнённая разметка обратно --------------------------------------
+# FROM_CVAT_ARGS=(
+#     --db "$DB"
+#     --out-db "$DB_REVIEWED"
+#     --pack-name "$PACK_NAME"
+#     # --only-year 1966
+# )
+# uv run python -m ocr_utils.scan_markup from-cvat "${FROM_CVAT_ARGS[@]}"
