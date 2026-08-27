@@ -38,6 +38,12 @@
     прямо в байтах, без перекодирования. Это только тег: количество пикселей от него
     не меняется, картинка не масштабируется.
 
+Битые выпуски:
+    Если у PDF потерялась хоть одна страница — не открылась, не содержит картинок,
+    картинка не извлеклась, — выгрузка этого выпуска выбрасывается целиком, а не
+    остаётся половиной. Половинный выпуск ничем не отличается на вид от целого, и
+    обнаружить подмену потом уже нечем. Отключается ключом --keep-broken.
+
 Параллелизм:
     PDF обрабатываются пулом процессов (--jobs, по умолчанию по числу ядер, но не больше
     DEFAULT_MAX_JOBS): работа CPU-интенсивная, а файлы друг от друга не зависят.
@@ -84,6 +90,76 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_JOBS = 16
 
 
+class BrokenPdfError(RuntimeError):
+    """В PDF потеряны страницы, и его выгрузка выброшена целиком.
+
+    Attributes:
+        pdf_path: Путь к исходному PDF
+        page_count: Сколько в нём всего страниц
+        problems: Список (номер страницы, что с ней не так)
+    """
+
+    def __init__(self, pdf_path: Path, page_count: int, problems: list[tuple[int, str]]) -> None:
+        self.pdf_path = pdf_path
+        self.page_count = page_count
+        self.problems = problems
+        super().__init__(f"{pdf_path}: {describe_problems(problems, page_count)}")
+
+
+def describe_problems(problems: list[tuple[int, str]], page_count: int) -> str:
+    """Коротко описать, что не так с выпуском.
+
+    Args:
+        problems: Список (номер страницы, причина)
+        page_count: Всего страниц в PDF
+
+    Returns:
+        Строка вида «27 страниц из 116: нет картинок (стр. 90-116)»
+    """
+    if not problems:
+        return "без проблем"
+
+    reasons: dict[str, list[int]] = {}
+    for page, reason in problems:
+        reasons.setdefault(reason, []).append(page)
+
+    parts = []
+    for reason, pages in reasons.items():
+        if len(pages) > 2 and pages == list(range(pages[0], pages[-1] + 1)):
+            where = f"стр. {pages[0]}-{pages[-1]}"
+        elif len(pages) > 4:
+            where = f"стр. {', '.join(str(p) for p in pages[:4])} и ещё {len(pages) - 4}"
+        else:
+            where = f"стр. {', '.join(str(p) for p in pages)}"
+        parts.append(f"{reason} ({where})")
+    return f"{len(problems)} страниц из {page_count}: " + "; ".join(parts)
+
+
+def _discard_output(output_dir: Path, pdf_basename: str) -> None:
+    """Убрать выгрузку выпуска, чтобы от него не осталось половины.
+
+    Удаляются файлы, названные по схеме этого экспорта — включая оставшиеся от прежних
+    прогонов, — после чего папка сносится, если опустела. Посторонние файлы не трогаем:
+    output_dir приходит снаружи, и снести её целиком было бы слишком лихо.
+
+    Args:
+        output_dir: Папка выгрузки выпуска
+        pdf_basename: Базовое имя, с которого начинаются имена файлов
+    """
+    if not output_dir.exists():
+        return
+
+    for path in output_dir.glob(f"{pdf_basename}_[0-9]*.*"):
+        if path.is_file():
+            path.unlink(missing_ok=True)
+
+    leftovers = sorted(p.name for p in output_dir.iterdir())
+    if leftovers:
+        logger.warning("В %s остались посторонние файлы, папка не удалена: %s", output_dir, ", ".join(leftovers[:5]))
+        return
+    output_dir.rmdir()
+
+
 def extract_images_from_pdf(
     pdf_path: Path,
     output_dir: Path,
@@ -91,6 +167,7 @@ def extract_images_from_pdf(
     padding: int | None = None,
     brighten: int | None = None,
     dpi: int | None = None,
+    discard_on_error: bool = True,
 ) -> int:
     """Извлечь все изображения из PDF-файла без перекодирования.
 
@@ -102,6 +179,9 @@ def extract_images_from_pdf(
         brighten: На сколько тонов из 256 осветлить цвет заливки полей. None — не осветлять
         dpi: Разрешение, которое проставить выходным файлам. None — оставить как есть.
             Это только тег: количество пикселей от него не меняется
+        discard_on_error: Если хоть одна страница потерялась — выбросить выгрузку выпуска
+            целиком и поднять BrokenPdfError. Иначе просто пожаловаться в лог и оставить,
+            что вышло
 
     Returns:
         Количество извлечённых изображений
@@ -109,6 +189,7 @@ def extract_images_from_pdf(
     Raises:
         FileNotFoundError: Если PDF-файл не существует
         ValueError: Если PDF-файл повреждён или не может быть открыт
+        BrokenPdfError: Если страницы потерялись, а discard_on_error включён
     """
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF-файл не найден: {pdf_path}")
@@ -123,13 +204,26 @@ def extract_images_from_pdf(
     except Exception as e:
         raise ValueError(f"Не удалось открыть PDF {pdf_path}: {e}")
 
+    if getattr(doc, "is_repaired", False):
+        # Само по себе не приговор, но у битых выпусков пака это первый признак.
+        logger.info("PDF %s пришлось чинить при открытии", pdf_path)
+
     extracted_count = 0
+    problems: list[tuple[int, str]] = []
 
     for page_idx in range(len(doc)):
-        page = doc[page_idx]
-        images = page.get_images(full=True)
+        page_no = page_idx + 1
+        try:
+            page = doc[page_idx]
+            images = page.get_images(full=True)
+        except Exception as e:
+            problems.append((page_no, "страница не открылась"))
+            logger.warning("Страница %d из %s не открылась: %s", page_no, pdf_path, e)
+            continue
 
         if not images:
+            # Каждая страница пака — это скан; пустая страница значит потерянный кусок PDF.
+            problems.append((page_no, "нет картинок"))
             continue
 
         # Подсчитываем количество изображений
@@ -140,7 +234,11 @@ def extract_images_from_pdf(
                 img_dict = doc.extract_image(xref)
                 all_images.append(img_dict)
             except Exception as e:
-                continue
+                logger.warning("Не удалось прочитать картинку %d на стр. %d из %s: %s", xref, page_no, pdf_path, e)
+
+        if not all_images:
+            problems.append((page_no, "картинки не читаются"))
+            continue
 
         # Если несколько изображений (MRC) - рендерим всю страницу
         if len(all_images) > 1:
@@ -161,7 +259,7 @@ def extract_images_from_pdf(
                 if pix.width < max_width or pix.height < max_height:
                     logger.warning(
                         "Страница %d из %s отрендерена в %dx%d вместо %dx%d",
-                        page_idx,
+                        page_no,
                         pdf_path,
                         pix.width,
                         pix.height,
@@ -175,52 +273,49 @@ def extract_images_from_pdf(
                 else:
                     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR if pix.n == 3 else cv2.COLOR_RGBA2BGR)
 
-                output_path = output_dir / f"{pdf_basename}_{page_idx + 1:04d}.png"
+                output_path = output_dir / f"{pdf_basename}_{page_no:04d}.png"
                 _write_raster(image, output_path, padding, brighten, dpi)
                 extracted_count += 1
 
             except Exception as e:
-                logger.warning("Не удалось отрендерить страницу %d из %s: %s", page_idx, pdf_path, e)
+                problems.append((page_no, "страница не отрендерилась"))
+                logger.warning("Не удалось отрендерить страницу %d из %s: %s", page_no, pdf_path, e)
                 continue
 
         # Если одно изображение - извлекаем его напрямую
-        elif len(all_images) == 1:
+        else:
             try:
                 img_dict = all_images[0]
                 img_bytes = img_dict["image"]
                 img_ext = img_dict["ext"]
 
                 if img_ext in ("jpeg", "jpg"):
-                    output_path = output_dir / f"{pdf_basename}_{page_idx + 1:04d}.jpg"
+                    output_path = output_dir / f"{pdf_basename}_{page_no:04d}.jpg"
                     output_path.write_bytes(
-                        _pad_jpeg(img_bytes, padding, brighten, dpi, f"{pdf_path}, страница {page_idx + 1}")
+                        _pad_jpeg(img_bytes, padding, brighten, dpi, f"{pdf_path}, страница {page_no}")
                     )
                 elif img_ext == "png":
-                    output_path = output_dir / f"{pdf_basename}_{page_idx + 1:04d}.png"
+                    output_path = output_dir / f"{pdf_basename}_{page_no:04d}.png"
                     if padding:
                         image = cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
                         if image is None:
-                            logger.warning("Не удалось декодировать PNG на странице %d из %s", page_idx, pdf_path)
-                            continue
+                            raise ValueError("PNG не декодируется")
                         _write_raster(image, output_path, padding, brighten, dpi)
                     else:
                         output_path.write_bytes(_png_with_dpi(img_bytes, dpi))
                 elif img_ext in ("jpx", "jp2"):
-                    output_path = output_dir / f"{pdf_basename}_{page_idx + 1:04d}.png"
-                    img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-                    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                    if img is not None:
-                        _write_raster(img, output_path, padding, brighten, dpi)
-                    else:
-                        logger.warning("Не удалось декодировать JPEG 2000 на странице %d из %s", page_idx, pdf_path)
-                        continue
+                    output_path = output_dir / f"{pdf_basename}_{page_no:04d}.png"
+                    img = cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if img is None:
+                        raise ValueError("JPEG 2000 не декодируется")
+                    _write_raster(img, output_path, padding, brighten, dpi)
                 else:
-                    output_path = output_dir / f"{pdf_basename}_{page_idx + 1:04d}.{img_ext}"
+                    output_path = output_dir / f"{pdf_basename}_{page_no:04d}.{img_ext}"
                     if padding:
                         logger.warning(
                             "Формат %s на странице %d из %s не поддерживает добавление полей — сохраняем как есть",
                             img_ext,
-                            page_idx,
+                            page_no,
                             pdf_path,
                         )
                     output_path.write_bytes(img_bytes)
@@ -228,9 +323,18 @@ def extract_images_from_pdf(
                 extracted_count += 1
 
             except Exception as e:
-                logger.warning("Не удалось извлечь изображение со страницы %d из %s: %s", page_idx, pdf_path, e)
+                problems.append((page_no, "картинка не извлеклась"))
+                logger.warning("Не удалось извлечь изображение со страницы %d из %s: %s", page_no, pdf_path, e)
 
+    page_count = len(doc)
     doc.close()
+
+    if problems:
+        if discard_on_error:
+            _discard_output(output_dir, pdf_basename)
+            raise BrokenPdfError(pdf_path, page_count, problems)
+        logger.warning("Выпуск %s выгружен не полностью — %s", pdf_path, describe_problems(problems, page_count))
+
     return extracted_count
 
 
@@ -341,6 +445,20 @@ def _png_with_dpi(data: bytes, dpi: int | None) -> bytes:
 
 
 @dataclass(frozen=True)
+class ExtractionReport:
+    """Итог рекурсивного обхода.
+
+    Attributes:
+        counts: {относительный путь к PDF: сколько картинок извлечено}
+        discarded: {относительный путь к PDF: чего в нём не хватило} — выпуски, выгрузка
+            которых выброшена целиком
+    """
+
+    counts: dict[str, int]
+    discarded: dict[str, str]
+
+
+@dataclass(frozen=True)
 class _PdfJob:
     """Одна задача для воркера: какой PDF куда разобрать и с какими параметрами."""
 
@@ -350,9 +468,10 @@ class _PdfJob:
     padding: int | None
     brighten: int | None
     dpi: int | None
+    discard_on_error: bool
 
 
-def _run_job(job: _PdfJob) -> tuple[int, str | None]:
+def _run_job(job: _PdfJob) -> tuple[int, str | None, str | None]:
     """Выполнить одну задачу в воркере.
 
     Исключения не выпускаем наружу: один битый PDF не должен ронять весь пул.
@@ -361,7 +480,7 @@ def _run_job(job: _PdfJob) -> tuple[int, str | None]:
         job: Что и куда разбирать
 
     Returns:
-        Кортеж (сколько картинок извлечено, текст ошибки или None)
+        Кортеж (сколько картинок извлечено, текст ошибки или None, описание потерь или None)
     """
     try:
         count = extract_images_from_pdf(
@@ -371,10 +490,28 @@ def _run_job(job: _PdfJob) -> tuple[int, str | None]:
             padding=job.padding,
             brighten=job.brighten,
             dpi=job.dpi,
+            discard_on_error=job.discard_on_error,
         )
-        return count, None
+        return count, None, None
+    except BrokenPdfError as e:
+        return 0, None, describe_problems(e.problems, e.page_count)
     except Exception as e:
-        return 0, str(e)
+        return 0, str(e), None
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    """Убрать опустевшие подпапки — например, год, все выпуски которого выброшены.
+
+    Сам root не трогаем: его создал вызывающий.
+
+    Args:
+        root: Корень выгрузки
+    """
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
 
 
 def extract_images_recursive(
@@ -385,7 +522,8 @@ def extract_images_recursive(
     brighten: int | None = None,
     dpi: int | None = None,
     jobs: int | None = None,
-) -> dict[str, int]:
+    discard_on_error: bool = True,
+) -> ExtractionReport:
     """Рекурсивно извлечь изображения из всех PDF в директории.
 
     Для каждого найденного PDF создаётся поддиректория в output_dir с тем же относительным путём,
@@ -403,9 +541,11 @@ def extract_images_recursive(
         brighten: На сколько тонов из 256 осветлить цвет заливки полей
         dpi: Разрешение, которое проставить выходным файлам. None — оставить как есть
         jobs: Сколько процессов запускать. None — по числу ядер, но не больше DEFAULT_MAX_JOBS
+        discard_on_error: Выпуск, у которого потерялась хоть одна страница, выбрасывать
+            целиком, а не оставлять половину
 
     Returns:
-        Словарь {относительный_путь_к_pdf: количество_извлечённых_изображений}
+        Отчёт: сколько картинок вышло по каждому PDF и какие выпуски выброшены
 
     Raises:
         FileNotFoundError: Если входная директория не существует
@@ -420,7 +560,7 @@ def extract_images_recursive(
 
     if not pdf_files:
         logger.warning("PDF-файлы не найдены в %s", input_dir)
-        return {}
+        return ExtractionReport({}, {})
 
     queue = {}
     for pdf_path in pdf_files:
@@ -432,12 +572,14 @@ def extract_images_recursive(
             padding=padding,
             brighten=brighten,
             dpi=dpi,
+            discard_on_error=discard_on_error,
         )
 
     worker_count = max(1, min(jobs or (os.cpu_count() or 1), DEFAULT_MAX_JOBS, len(queue)))
     logger.info("Обработка %d PDF в %d процессов", len(queue), worker_count)
 
     results: dict[str, int] = {}
+    discarded: dict[str, str] = {}
     if show_progress:
         progress = tqdm(
             total=len(queue),
@@ -448,10 +590,13 @@ def extract_images_recursive(
     else:
         progress = None
 
-    def record(rel_path: str, count: int, error: str | None) -> None:
+    def record(rel_path: str, count: int, error: str | None, losses: str | None) -> None:
         """Учесть результат одного PDF и обновить прогресс."""
         results[rel_path] = count
-        if error is not None:
+        if losses is not None:
+            discarded[rel_path] = losses
+            logger.error("✗ Выпуск %s выброшен целиком — %s", rel_path, losses)
+        elif error is not None:
             logger.error("✗ Ошибка при обработке %s: %s", rel_path, error)
         elif not show_progress:
             logger.info("✓ [%d/%d] %s: извлечено %d изображений", len(results), len(queue), rel_path, count)
@@ -472,7 +617,8 @@ def extract_images_recursive(
         if progress is not None:
             progress.close()
 
-    return results
+    _remove_empty_dirs(output_dir)
+    return ExtractionReport(results, discarded)
 
 
 @click.command()
@@ -511,6 +657,15 @@ def extract_images_recursive(
     default=None,
     help=f"Сколько PDF обрабатывать параллельно (по умолчанию — по числу ядер, но не больше {DEFAULT_MAX_JOBS})",
 )
+@click.option(
+    "--discard-broken/--keep-broken",
+    default=True,
+    help=(
+        "Выпуск, у которого потерялась хоть одна страница (страница не открылась, в ней "
+        "нет картинок, картинка не извлеклась), выбрасывать целиком, а не оставлять "
+        "половину. По умолчанию включено: половинный выпуск легко принять за целый."
+    ),
+)
 @click.option("--no-progress", is_flag=True, help="Не показывать прогресс-бар")
 @click.option("-v", "--verbose", is_flag=True, help="Подробный вывод")
 def main(
@@ -520,6 +675,7 @@ def main(
     brighten: int | None,
     dpi: int | None,
     jobs: int | None,
+    discard_broken: bool,
     no_progress: bool,
     verbose: bool,
 ):
@@ -538,18 +694,34 @@ def main(
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, format="%(levelname)s: %(message)s")
 
     try:
-        results = extract_images_recursive(
-            input_dir, output_dir, show_progress=not no_progress, padding=padding, brighten=brighten, dpi=dpi, jobs=jobs
+        report = extract_images_recursive(
+            input_dir,
+            output_dir,
+            show_progress=not no_progress,
+            padding=padding,
+            brighten=brighten,
+            dpi=dpi,
+            jobs=jobs,
+            discard_on_error=discard_broken,
         )
 
-        total_images = sum(results.values())
-        total_pdfs = len(results)
-        successful_pdfs = sum(1 for count in results.values() if count > 0)
+        total_images = sum(report.counts.values())
+        total_pdfs = len(report.counts)
+        successful_pdfs = sum(1 for count in report.counts.values() if count > 0)
 
         print(f"\n{'=' * 60}")
         print(f"Готово!")
         print(f"Обработано PDF: {successful_pdfs}/{total_pdfs}")
         print(f"Извлечено изображений: {total_images}")
+
+        if report.discarded:
+            print()
+            print(f"ВЫБРОШЕНО ЦЕЛИКОМ выпусков с потерянными страницами: {len(report.discarded)}")
+            for rel_path, losses in sorted(report.discarded.items()):
+                print(f"  {rel_path} — {losses}")
+            print()
+            print("  Их папки удалены: половинный выпуск легко принять за целый.")
+            print("  Чтобы вместо этого оставлять, что вышло, — ключ --keep-broken.")
 
     except Exception as e:
         logger.error("Ошибка: %s", e)

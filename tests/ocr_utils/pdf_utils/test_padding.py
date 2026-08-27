@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from ocr_utils.pdf_utils.extract_images import extract_images_from_pdf
+from ocr_utils.pdf_utils.extract_images import BrokenPdfError, describe_problems, extract_images_from_pdf
 from ocr_utils.pdf_utils.padding import (
     JPEG_DCT_BLOCK_SIZE,
     JPEG_MAX_MCU_SIZE,
@@ -573,3 +573,92 @@ class TestMrcPageRendering:
             assert _dpi(image) == (TARGET_DPI, TARGET_DPI)
         result = _decode(exported.read_bytes())
         assert np.allclose(result[8, 8], brighten_color(PAPER_BGR, 10), atol=8)
+
+
+def _pdf_with_blank_page(path, good_pages=2):
+    """PDF, где после нескольких нормальных страниц идёт страница без картинок.
+
+    Так выглядят битые выпуски пака: PDF обрывается, PyMuPDF его «чинит», хвост страниц
+    остаётся пустым, и экспорт молча выдавал половину выпуска.
+    """
+    import fitz
+
+    doc = fitz.open()
+    for _ in range(good_pages):
+        page = doc.new_page(width=200.0, height=280.0)
+        page.insert_image(fitz.Rect(0, 0, 200.0, 280.0), stream=_encode_jpeg(_page(600, 840)))
+    doc.new_page(width=200.0, height=280.0)  # страница без картинок
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+class TestBrokenPdf:
+    """Выпуск с потерянными страницами выбрасывается целиком."""
+
+    def test_partial_export_is_discarded(self, tmp_path) -> None:
+        """Папка выпуска не должна остаться с половиной страниц."""
+        _pdf_with_blank_page(tmp_path / "in.pdf")
+        out = tmp_path / "out"
+
+        with pytest.raises(BrokenPdfError) as excinfo:
+            extract_images_from_pdf(tmp_path / "in.pdf", out, pdf_basename="in")
+
+        assert excinfo.value.page_count == 3
+        assert excinfo.value.problems == [(3, "нет картинок")]
+        assert not out.exists(), sorted(p.name for p in out.iterdir())
+
+    def test_keep_broken_leaves_what_was_extracted(self, tmp_path) -> None:
+        """С discard_on_error=False остаётся то, что вышло, — прежнее поведение."""
+        _pdf_with_blank_page(tmp_path / "in.pdf")
+        out = tmp_path / "out"
+
+        assert extract_images_from_pdf(tmp_path / "in.pdf", out, pdf_basename="in", discard_on_error=False) == 2
+        assert len(list(out.glob("*.jpg"))) == 2
+
+    def test_leftovers_from_a_previous_run_are_swept(self, tmp_path) -> None:
+        """Файлы прошлого прогона тоже убираются — иначе половина осталась бы от него."""
+        _pdf_with_blank_page(tmp_path / "in.pdf")
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "in_0009.jpg").write_bytes("старый мусор".encode())
+
+        with pytest.raises(BrokenPdfError):
+            extract_images_from_pdf(tmp_path / "in.pdf", out, pdf_basename="in")
+        assert not out.exists()
+
+    def test_foreign_files_are_not_touched(self, tmp_path) -> None:
+        """Посторонний файл в папке не удаляем: output_dir приходит снаружи."""
+        _pdf_with_blank_page(tmp_path / "in.pdf")
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "заметки.txt").write_text("не трогать", encoding="utf-8")
+
+        with pytest.raises(BrokenPdfError):
+            extract_images_from_pdf(tmp_path / "in.pdf", out, pdf_basename="in")
+        assert (out / "заметки.txt").exists()
+        assert not list(out.glob("*.jpg"))
+
+    def test_healthy_pdf_is_untouched(self, tmp_path) -> None:
+        """У целого выпуска ничего не выбрасывается."""
+        _make_pdf(tmp_path / "in.pdf", [_encode_jpeg(_page(600, 840))] * 3)
+        assert extract_images_from_pdf(tmp_path / "in.pdf", tmp_path / "out", pdf_basename="in") == 3
+        assert len(list((tmp_path / "out").glob("*.jpg"))) == 3
+
+
+class TestProblemDescription:
+    """Как потери описываются в отчёте."""
+
+    def test_consecutive_pages_collapse_into_a_range(self) -> None:
+        problems = [(page, "нет картинок") for page in range(90, 117)]
+        assert describe_problems(problems, 116) == "27 страниц из 116: нет картинок (стр. 90-116)"
+
+    def test_reasons_are_grouped(self) -> None:
+        problems = [(11, "картинка не извлеклась")] + [(page, "нет картинок") for page in range(12, 51)]
+        described = describe_problems(problems, 50)
+        assert described.startswith("40 страниц из 50: ")
+        assert "картинка не извлеклась (стр. 11)" in described
+        assert "нет картинок (стр. 12-50)" in described
+
+    def test_no_problems(self) -> None:
+        assert describe_problems([], 50) == "без проблем"
