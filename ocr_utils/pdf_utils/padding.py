@@ -72,13 +72,7 @@ PAPER_FLATNESS_WINDOW = 5
 #: Пиксель считается «гладким», если локальное СКО яркости меньше этого порога.
 PAPER_FLATNESS_MAX_STD = 6.0
 
-#: Сглаживание гистограммы яркости перед поиском пиков (сигма гауссианы в тонах).
-PAPER_HIST_SMOOTH_SIGMA = 2.0
-
-#: Пик гистограммы считается значимым, если его высота не меньше этой доли от главного.
-PAPER_PEAK_MIN_FRACTION = 0.05
-
-#: Полуширина окна вокруг найденного пика, из которого берутся пиксели бумаги.
+#: Полуширина окна вокруг найденного тона, из которого берутся пиксели бумаги.
 PAPER_TONE_WINDOW = 12
 
 #: Минимальное число пикселей в выборке, иначе отбор ослабляется.
@@ -104,13 +98,23 @@ def estimate_paper_color(image_bgr: np.ndarray) -> tuple[int, int, int]:
     1. Картинка ужимается до :data:`PAPER_ANALYSIS_MAX_SIDE` по большей стороне.
     2. Отбираются «гладкие» пиксели — с низким локальным СКО яркости. Текст, растр
        иллюстраций и края объектов дают высокое СКО и отсеиваются; бумага — гладкая.
-    3. По гладким пикселям строится гистограмма яркости, сглаживается и в ней ищется
-       *самый светлый значимый* пик. Бумага — самая светлая крупная область скана;
-       тёмные пики (чернила, поле сканера, фотографии) остаются слева от неё. Тот же пик
-       ищется и по всем пикселям; берётся более светлый из двух — страховка на случай,
-       когда гладких пикселей бумаги не осталось совсем.
-    4. Цвет = поканальная медиана гладких пикселей, попавших в окно вокруг этого пика.
+    3. По гладким пикселям строится гистограмма яркости, и берётся её *самый массивный*
+       тон — тот, вокруг которого сосредоточено больше всего пикселей. Бумага — самая
+       большая гладкая область страницы, поэтому она и выигрывает.
+    4. Цвет = поканальная медиана гладких пикселей, попавших в окно вокруг этого тона.
        Медиана устойчива к случайным вкраплениям.
+
+    Раньше на шаге 3 брался самый *светлый* значимый пик, а не самый массивный. Это
+    оказалось ошибкой: у сканов разворотов вдоль края почти всегда виден белый фон
+    сканера, он ярче бумаги и совершенно гладкий — и выигрывал у неё. Поля заливались
+    холодным почти-белым, тогда как страница тёплая и заметно темнее. Светлее бумаги
+    может оказаться и блик, и вклеенный белый лист; массивнее бумаги — практически
+    ничто, потому что она занимает страницу целиком.
+
+    Из правила «побеждает наибольшая гладкая область» следует и его ограничение: на
+    странице, залитой краской под обрез — цветной обложке, глубокой печати по чёрному
+    фону — победит цвет краски, а не узкое белое поле по краю. Для заливки полей это
+    скорее хорошо: поле сливается со страницей, а не обводит её светлой рамкой.
 
     Args:
         image_bgr: Картинка в BGR (uint8) или в градациях серого
@@ -149,62 +153,46 @@ def estimate_paper_color(image_bgr: np.ndarray) -> tuple[int, int, int]:
         # Скан целиком «шумный» (мелкий текст на всю площадь) — анализируем всё подряд.
         flat_mask = np.ones_like(flat_mask)
 
-    # Пик ищем и по гладким пикселям, и по всем, а берём тот, что светлее. Обычно
-    # выигрывает первый — он чище. Но если на уменьшенной копии текст «размазался» и
-    # бумага целиком выпала из гладких пикселей, гладкой останется тёмная иллюстрация,
-    # и её пик будет заведомо темнее пика по всей картинке.
-    peaks = [_brightest_significant_peak(gray[flat_mask]), _brightest_significant_peak(gray)]
-    known = [tone for tone in peaks if tone is not None]
-    if not known:
+    paper_tone = _dominant_tone(gray[flat_mask])
+    if paper_tone is None:
         return PAPER_FALLBACK_COLOR_BGR
-    peak_tone = max(known)
 
-    tone_mask = np.abs(gray.astype(np.int16) - peak_tone) <= PAPER_TONE_WINDOW
+    tone_mask = np.abs(gray.astype(np.int16) - paper_tone) <= PAPER_TONE_WINDOW
     paper_mask = flat_mask & tone_mask
     if int(paper_mask.sum()) < PAPER_MIN_SAMPLE_PIXELS:
         paper_mask = tone_mask
     if int(paper_mask.sum()) == 0:
-        return (int(peak_tone), int(peak_tone), int(peak_tone))
+        return (int(paper_tone), int(paper_tone), int(paper_tone))
 
     pixels = small[paper_mask]
     color = np.median(pixels.astype(np.float32), axis=0)
     return tuple(int(round(float(c))) for c in color)  # type: ignore[return-value]
 
 
-def _brightest_significant_peak(tones: np.ndarray) -> int | None:
-    """Найти самый светлый значимый пик в гистограмме яркости.
+def _dominant_tone(tones: np.ndarray) -> int | None:
+    """Найти тон, вокруг которого сосредоточено больше всего пикселей.
+
+    Ищется не самый высокий столбик гистограммы, а окно шириной 2*PAPER_TONE_WINDOW,
+    в которое попадает больше всего пикселей. Разница принципиальная: у зернистой бумаги
+    один физический тон размазан по десятку соседних столбиков, а у идеально ровной
+    заливки (тёмная плашка, вклейка) весь её объём стоит в одном. По высоте столбика
+    выигрывала бы плашка, даже занимая втрое меньше площади; по массе окна — бумага.
+
+    Окно берётся то же самое, по которому потом считается цвет, так что выбранный тон
+    и есть центр самой населённой выборки.
 
     Args:
         tones: Одномерный массив значений яркости (uint8)
 
     Returns:
-        Яркость пика или None, если данных нет
+        Яркость самого массивного тона или None, если данных нет
     """
     if tones.size == 0:
         return None
 
-    hist = np.bincount(tones.ravel(), minlength=256).astype(np.float32)
-
-    radius = int(math.ceil(3 * PAPER_HIST_SMOOTH_SIGMA))
-    offsets = np.arange(-radius, radius + 1, dtype=np.float32)
-    kernel = np.exp(-0.5 * (offsets / PAPER_HIST_SMOOTH_SIGMA) ** 2)
-    kernel /= kernel.sum()
-    smoothed = np.convolve(hist, kernel, mode="same")
-
-    threshold = smoothed.max() * PAPER_PEAK_MIN_FRACTION
-    if threshold <= 0:
-        return None
-
-    for tone in range(254, 0, -1):
-        if smoothed[tone] < threshold:
-            continue
-        if smoothed[tone] >= smoothed[tone - 1] and smoothed[tone] >= smoothed[tone + 1]:
-            # Уточняем положение по несглаженной гистограмме в пределах окна.
-            lo = max(0, tone - PAPER_TONE_WINDOW)
-            hi = min(256, tone + PAPER_TONE_WINDOW + 1)
-            return int(lo + int(np.argmax(hist[lo:hi])))
-
-    return int(np.argmax(smoothed))
+    hist = np.bincount(tones.ravel(), minlength=256).astype(np.float64)
+    window = np.ones(2 * PAPER_TONE_WINDOW + 1, dtype=np.float64)
+    return int(np.argmax(np.convolve(hist, window, mode="same")))
 
 
 def brighten_color(color_bgr: tuple[int, int, int], amount: int | None) -> tuple[int, int, int]:

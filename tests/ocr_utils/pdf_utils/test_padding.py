@@ -104,11 +104,52 @@ class TestPaperColor:
         plain_mean = page.reshape(-1, 3).mean(axis=0)
         assert plain_mean.mean() < np.mean(PAPER_BGR) - 15, "тест бессмысленен: среднее и так равно бумаге"
 
-    def test_picks_paper_even_when_dark_area_dominates(self) -> None:
-        """Даже если тёмная иллюстрация занимает больше половины листа, бумага — самый светлый пик."""
+    def test_dark_illustration_does_not_win(self) -> None:
+        """Тёмная иллюстрация в шестую часть листа не должна перебивать бумагу."""
         page = _page()
-        page[: page.shape[0] * 2 // 3] = (60, 60, 60)
+        page[: page.shape[0] // 6] = (60, 60, 60)
         assert np.allclose(estimate_paper_color(page), PAPER_BGR, atol=8)
+
+    def test_scanner_background_does_not_win(self) -> None:
+        """Белый фон сканера по краю не должен выигрывать у бумаги.
+
+        У сканов разворотов вдоль края почти всегда видна подложка сканера: она ярче
+        бумаги и идеально гладкая. Пока брался самый светлый тон, заливка уходила
+        в холодный почти-белый вместо тёплой бумаги — теперь берётся самый массивный.
+
+        Кайма здесь — 13% площади листа; на реальных сканах пака выходило меньше (около
+        10% гладких пикселей против 24% у бумаги).
+        """
+        page = _page(600, 840)
+        border = 24
+        page[:border] = (252, 253, 255)
+        page[-border:] = (252, 253, 255)
+        page[:, :border] = (252, 253, 255)
+        page[:, -border:] = (252, 253, 255)
+
+        estimated = estimate_paper_color(page)
+        assert np.allclose(estimated, PAPER_BGR, atol=6), estimated
+
+    def test_brightest_tone_loses_to_the_most_common(self) -> None:
+        """Из двух гладких тонов побеждает тот, что занимает больше площади, а не тот, что светлее."""
+        page = np.full((400, 400, 3), PAPER_BGR, dtype=np.uint8)
+        page[:120] = (250, 250, 252)  # светлее, но меньше по площади
+        assert np.allclose(estimate_paper_color(page), PAPER_BGR, atol=3)
+
+    def test_grainy_paper_beats_a_smaller_uniform_patch(self) -> None:
+        """Зернистая бумага должна побеждать ровную плашку меньшей площади.
+
+        Тон бумаги размазан зернистостью по десятку столбиков гистограммы, а ровная
+        заливка стоит в одном — по высоте столбика выигрывала бы плашка. Считаем массу
+        в окне, поэтому выигрывает площадь.
+        """
+        rng = np.random.default_rng(0)
+        page = np.full((400, 400, 3), PAPER_BGR, dtype=np.uint8)
+        grain = rng.integers(-6, 7, size=(400, 400, 1), dtype=np.int16)
+        page = np.clip(page.astype(np.int16) + grain, 0, 255).astype(np.uint8)
+        page[:150] = (120, 120, 120)  # идеально ровная плашка на 37% листа
+
+        assert np.allclose(estimate_paper_color(page), PAPER_BGR, atol=4)
 
     def test_uniform_image(self) -> None:
         """Однотонная картинка: цвет бумаги — она сама."""
