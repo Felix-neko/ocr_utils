@@ -5,6 +5,11 @@
 делается всё, что вообще можно сделать из пикселей: размеры, DPI и параметры уменьшения
 в базу, рабочая копия 1/4 для детекции, цвет бумаги, классификация областей.
 
+Заодно с пикселями снимается отпечаток файла — sha256 плюс размер и время правки
+(``scan_markup.hashing``). Он нужен не детекции, а последующему обновлению пака: по нему
+``to-cvat`` понимает, какие полосы разошлись с тем, что уже залито в CVAT. Считать его
+здесь ничего не стоит — файл всё равно читается целиком.
+
 Детекция считается по копии 1/``HALFTONE_DOWNSCALE``, а не по полному кадру. Surya всё
 равно ужимает вход до 2048 по длинной стороне (кадр 600 dpi — 6051 px), а константы
 ``RASTER_*`` и ``HALFTONE_*`` в ``background_smoothing`` откалиброваны именно на копии 1/4.
@@ -33,6 +38,7 @@ from ocr_utils.scan_markup.detection.raster import (
     scale_box,
 )
 from ocr_utils.scan_markup.geometry import crop_size, cvat_size, divisor_for_dpi
+from ocr_utils.scan_markup.hashing import apply_stamp, full_stamp, stat_matches, stat_stamp
 from ocr_utils.scan_markup.scan_tree import count_pages, scan_pack
 
 logger = logging.getLogger(__name__)
@@ -58,6 +64,7 @@ class DetectParams:
     only_issue: str | None = None
     limit: int | None = None
     skip_detected: bool = False
+    rehash_all: bool = False
     use_surya_layout: bool = True
     chroma_thr: float = CHROMA_THR
     color_frac_thr: float = COLOR_FRAC_THR
@@ -73,6 +80,7 @@ class DetectStats:
 
     pages: int = 0
     skipped: int = 0
+    changed: int = 0
     failed: int = 0
     regions: int = 0
     color: int = 0
@@ -186,11 +194,37 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
             pages = pages[: params.limit]
 
         for _year, _issue, page in tqdm(pages, desc="детекция", unit="полоса"):
-            if params.skip_detected and page.detected_at is not None:
-                stats.skipped += 1
+            path = params.pack_dir / page.rel_path
+            try:
+                stamp = stat_stamp(path)
+            except OSError as exc:
+                stats.failed += 1
+                tqdm.write(f"ОШИБКА {page.rel_path}: {exc}")
                 continue
 
-            path = params.pack_dir / page.rel_path
+            if params.skip_detected and page.detected_at is not None and page.file_hash is not None:
+                # Дешёвая проверка идёт первой: совпали размер и время правки — файл
+                # считается прежним и не читается вовсе. Именно ради этого пропуска
+                # ``stat`` и лежит в базе: перечитать полтерабайта пака ради хешей — часы.
+                if not params.rehash_all and stat_matches(page, stamp):
+                    stats.skipped += 1
+                    continue
+                # ``stat`` разошёлся — читаем и считаем хеш. Он вполне может совпасть:
+                # файл могли просто скопировать заново, содержимое от этого не меняется.
+                # Тогда обновляем отметку и идём дальше, не трогая разметку.
+                stamp = full_stamp(path)
+                if stamp.digest == page.file_hash:
+                    apply_stamp(page, stamp)
+                    session.commit()
+                    stats.skipped += 1
+                    continue
+
+            if stamp.digest is None:
+                stamp = full_stamp(path)
+            if page.file_hash is not None and page.file_hash != stamp.digest:
+                stats.changed += 1
+                tqdm.write(f"ФАЙЛ ИЗМЕНИЛСЯ {page.rel_path}: разметка в CVAT к нему больше не относится")
+
             try:
                 width, height, dpi, regions = detect_page(path, params, detector)
             except Exception as exc:  # noqa: BLE001 — одна битая полоса не должна валить прогон
@@ -204,6 +238,9 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
             page.crop_width, page.crop_height = crop_size(width, height, divisor)
             page.cvat_width, page.cvat_height = cvat_size(width, height, divisor)
             page.detected_at = _utcnow()
+            # Отпечаток пишется ПОСЛЕ успешной детекции: полоса, на которой детекция
+            # упала, не должна выглядеть обработанной для следующего прогона.
+            apply_stamp(page, stamp)
 
             replace_raster_regions(
                 session,

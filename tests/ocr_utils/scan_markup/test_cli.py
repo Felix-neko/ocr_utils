@@ -151,3 +151,63 @@ def test_limit_and_debug_dir(pack_dir: Path, tmp_path: Path) -> None:
     with open_db(db)() as session:
         assert len(session.scalars(select(RasterRegion)).all()) == 1
     assert list(debug.glob("*.jpg"))
+
+
+def test_detect_records_file_hash(pack_dir: Path, tmp_path: Path) -> None:
+    """Отпечаток файла снимается заодно с детекцией — файл всё равно читается целиком."""
+    import hashlib
+
+    db = tmp_path / "markup.sqlite"
+    _run(pack_dir, db)
+
+    with open_db(db)() as session:
+        page = session.scalars(select(Page).where(Page.file_name == "a.tif")).one()
+        expected = hashlib.sha256((pack_dir / "1974" / "01" / "a.tif").read_bytes()).hexdigest()
+        assert page.file_hash == expected
+        assert page.hash_algo == "sha256"
+        assert page.file_size == (pack_dir / "1974" / "01" / "a.tif").stat().st_size
+        # В CVAT ещё ничего не заливали, поэтому расхождению взяться неоткуда.
+        assert page.cvat_file_hash is None
+
+
+def test_skip_detected_ignores_untouched_files(pack_dir: Path, tmp_path: Path) -> None:
+    """Повторный прогон не перечитывает то, что не менялось."""
+    db = tmp_path / "markup.sqlite"
+    _run(pack_dir, db)
+    result = _run(pack_dir, db, "--skip-detected")
+    assert "пропущено: 2" in result.output
+    assert "изменилось с прошлого прогона: 0" in result.output
+
+
+def test_skip_detected_still_reprocesses_a_replaced_file(pack_dir: Path, tmp_path: Path) -> None:
+    """Подменённую полосу --skip-detected обязан заметить и пересчитать.
+
+    Иначе флаг превращался бы в ловушку: обновил сканы, прогнал detect, а в базе остались
+    старые области от прежнего файла.
+    """
+    db = tmp_path / "markup.sqlite"
+    _run(pack_dir, db)
+
+    # Была полоса без фотографии — стала с фотографией.
+    _page_image(pack_dir / "1974" / "01" / "b.tif", with_photo=True)
+
+    result = _run(pack_dir, db, "--skip-detected")
+    assert "Полос обработано: 1" in result.output
+    assert "изменилось с прошлого прогона: 1" in result.output
+
+    with open_db(db)() as session:
+        page = session.scalars(select(Page).where(Page.file_name == "b.tif")).one()
+        assert page.raster_regions, "у подменённой полосы должна появиться найденная область"
+
+
+def test_recopied_file_with_same_content_is_not_re_detected(pack_dir: Path, tmp_path: Path) -> None:
+    """Файл переписали тем же содержимым: ``stat`` разошёлся, хеш — нет, детекция не нужна."""
+    db = tmp_path / "markup.sqlite"
+    _run(pack_dir, db)
+
+    target = pack_dir / "1974" / "01" / "a.tif"
+    target.write_bytes(target.read_bytes())  # новый mtime, то же содержимое
+
+    result = _run(pack_dir, db, "--skip-detected")
+    assert "пропущено: 2" in result.output
+    assert "изменилось с прошлого прогона: 0" in result.output

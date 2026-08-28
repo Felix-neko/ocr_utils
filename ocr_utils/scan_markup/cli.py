@@ -81,7 +81,17 @@ def main() -> None:
     "skip_detected",
     default=False,
     show_default=True,
-    help="Пропускать полосы, по которым детекция уже проходила.",
+    help="Пропускать полосы, по которым детекция уже проходила И чей файл не менялся. "
+    "«Не менялся» проверяется сначала по размеру и времени правки (без чтения файла), "
+    "и лишь при расхождении — по хешу содержимого.",
+)
+@click.option(
+    "--rehash-all/--no-rehash-all",
+    "rehash_all",
+    default=False,
+    show_default=True,
+    help="Не верить размеру и времени правки: пересчитать хеш каждой полосы. "
+    "Имеет смысл только вместе с --skip-detected и означает перечитывание всего пака.",
 )
 @click.option(
     "--use-surya-layout/--no-use-surya-layout",
@@ -136,6 +146,7 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
     stats = run_detect(params, open_db(db_path))
     click.echo(
         f"Полос обработано: {stats.pages}, пропущено: {stats.skipped}, ошибок: {stats.failed}.\n"
+        f"Файлов изменилось с прошлого прогона: {stats.changed}.\n"
         f"Растровых областей: {stats.regions} (цветных {stats.color}, серых {stats.grayscale}, "
         f"во всю полосу {stats.full_page})."
     )
@@ -180,6 +191,22 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
     help="Перезалить предразметку в уже существующую задачу. ОСТОРОЖНО: заливка заменяет "
     "разметку задачи целиком, то есть затирает ручную правку.",
 )
+@click.option(
+    "--recreate-stale/--no-recreate-stale",
+    "recreate_stale",
+    default=False,
+    show_default=True,
+    help="Пересоздать задачи-годы, в которых изменились исходники. Ручная разметка со всех "
+    "НЕизменившихся полос переносится в новую задачу, изменившиеся получают свежую "
+    "автоматическую предразметку. Без флага такие задачи только показываются в отчёте. "
+    "CVAT не умеет удалять отдельные джобы, поэтому пересоздаётся вся задача целиком.",
+)
+@click.option(
+    "--backup-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Куда класть JSON-бэкап разметки перед пересозданием задачи; " "по умолчанию — cvat_backup рядом с базой.",
+)
 @click.option("--annotator", default=None, help="Кому назначить джобы (имя пользователя CVAT).")
 @_cvat_options
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
@@ -192,8 +219,15 @@ def to_cvat_command(db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org,
     stats = run_publish(params, open_db(db_path))
     click.echo(
         f"Картинки: готово {stats.images_done}, пропущено {stats.images_skipped}, ошибок {stats.images_failed}.\n"
-        f"Задачи: создано {stats.tasks_created}, уже было {stats.tasks_existing}. Шейпов залито: {stats.shapes}."
+        f"Задачи: создано {stats.tasks_created}, уже было {stats.tasks_existing}, "
+        f"пересоздано {stats.tasks_rebuilt}. Шейпов залито: {stats.shapes}, перенесено: {stats.shapes_carried}."
     )
+    if stats.stale_years:
+        click.echo(
+            f"Разошлись с диском годы: {', '.join(stats.stale_years)} "
+            f"(изменившихся полос {stats.pages_changed}, не залитых {stats.pages_unpublished})."
+            + ("" if stats.tasks_rebuilt else " Пересоздать их: --recreate-stale.")
+        )
 
 
 @main.command("from-cvat")

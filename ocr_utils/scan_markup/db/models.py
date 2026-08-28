@@ -112,6 +112,13 @@ class Page(Base):
     Все три величины хранятся, а не выводятся из ``dpi`` на лету: ``dpi`` может быть не
     записан в теге файла и подставлен из ``--default-dpi``, а импорт разметки обязан
     пересчитывать координаты ровно тем же коэффициентом, каким они были получены.
+
+    Про отпечаток файла. ``file_hash`` — sha256 содержимого (см. ``scan_markup.hashing``),
+    ``file_size`` и ``file_mtime`` — дешёвый признак, позволяющий не перечитывать
+    неизменившийся файл. ``cvat_file_hash`` — тот же хеш, но снятый В МОМЕНТ ЗАЛИВКИ полосы
+    в CVAT. Две колонки, а не одна, именно потому, что вопрос стоит не «менялся ли файл
+    когда-нибудь», а «показывает ли CVAT сейчас то, что лежит на диске»: расхождение этих
+    двух значений и есть список полос, чья разметка больше не относится к делу.
     """
 
     __tablename__ = "pages"
@@ -130,6 +137,12 @@ class Page(Base):
     divisor: Mapped[int | None] = mapped_column(Integer, default=None)
     crop_width: Mapped[int | None] = mapped_column(Integer, default=None)
     crop_height: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    file_size: Mapped[int | None] = mapped_column(Integer, default=None)
+    file_mtime: Mapped[float | None] = mapped_column(Float, default=None)
+    file_hash: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
+    hash_algo: Mapped[str | None] = mapped_column(String(16), default=None)
+    cvat_file_hash: Mapped[str | None] = mapped_column(String(64), default=None)
 
     cvat_rel_path: Mapped[str | None] = mapped_column(Text, default=None)
     cvat_width: Mapped[int | None] = mapped_column(Integer, default=None)

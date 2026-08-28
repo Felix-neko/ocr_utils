@@ -35,6 +35,7 @@ class ImageJob:
     dst: Path
     divisor: int
     page_id: int
+    force: bool = False  # перезаписать готовую копию: исходник изменился
 
 
 @dataclass
@@ -53,8 +54,13 @@ def downscale_one(job: ImageJob, force: bool = False) -> ImageResult:
 
     Запись атомарная, через ``.part`` и ``replace``: прерванный прогон не должен оставить
     обрезанных JPEG, которые следующий запуск сочтёт готовыми.
+
+    ``force`` бывает общий (перезаписать вообще всё) и на полосу (``job.force``): второй
+    ставится тем полосам, чей исходник изменился с прошлого прогона. Без него уменьшенная
+    копия осталась бы от старого файла — в CVAT висел бы старый кадр при новом оригинале,
+    и разметка на нём выглядела бы верной.
     """
-    if job.dst.exists() and not force:
+    if job.dst.exists() and not (force or job.force):
         try:
             with Image.open(job.dst) as done:
                 return ImageResult(job.page_id, "skipped", done.width, done.height)

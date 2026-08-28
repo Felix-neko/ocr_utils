@@ -8,10 +8,43 @@
 Уже существующая задача повторно НЕ создаётся; её предразметка перезаливается только по
 ``--force-annotations``, потому что заливка заменяет разметку целиком и затёрла бы ручную
 правку разметчика.
+
+Обновление пака по частям
+-------------------------
+Сканы пересчитывают: выпуск перескали, полосу переобрезали в ScanTailor, кривой кадр
+заменили. Такие полосы находятся по отпечатку файла: ``page.file_hash`` — что лежит на
+диске сейчас, ``page.cvat_file_hash`` — что было залито в CVAT. Разошлись — кадр в CVAT
+показывает не тот файл, и разметка на нём недействительна.
+
+Дальше начинается ограничение CVAT: **обычный джоб удалить нельзя**. Сервер отвечает
+``"Only ground truth jobs can be removed"`` (``cvat/apps/engine/views.py``,
+``JobViewSet.perform_destroy``), а границы джобов задаются один раз при создании задачи
+через ``job_file_mapping``. Наименьшее, что вообще можно пересоздать, — задача, то есть
+целый годовой комплект.
+
+Пересоздавать год целиком означало бы выбросить ручную разметку всех его выпусков из-за
+одной подменённой полосы. Поэтому ``--recreate-stale`` делает не это, а следующее:
+
+1. забирает разметку старой задачи и раскладывает её по ИМЕНАМ кадров;
+2. пишет её в файл-бэкап;
+3. создаёт новую задачу под временным именем;
+4. заливает в неё перенесённую разметку — со всех кадров, КРОМЕ изменившихся, плюс
+   свежую автоматическую предразметку на сами изменившиеся;
+5. и только теперь удаляет старую задачу и переименовывает новую.
+
+Для разметчика результат неотличим от «удалили только те джобы, где менялись картинки»:
+вся его работа на неизменившихся полосах остаётся на месте. Порядок шагов выбран так,
+чтобы сбой на любом из них оставлял старую задачу нетронутой: сначала создаём, потом
+удаляем.
+
+Геометрию при переносе не пересчитываем: уменьшение делается тем же делителем из базы,
+значит кадр в новой задаче попиксельно совпадает со старым.
 """
 
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -23,15 +56,24 @@ from ocr_utils.scan_markup.cvat.project import (
     assign_jobs_to_issues,
     create_year_task,
     ensure_project,
+    fetch_shapes_by_frame,
     find_task,
     frame_index_by_name,
     project_label_ids,
     raster_shapes,
+    rename_task,
+    shapes_to_requests,
     upload_preannotations,
 )
 from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.scan_markup.hashing import is_stale_in_cvat
 
 logger = logging.getLogger(__name__)
+
+# Имя, под которым живёт задача, пока пересоздание не доведено до конца. Задача с таким
+# именем — заведомо недоделанная: её создали, а старую ещё не удалили. Следующий прогон
+# такую находит и сносит, иначе прерванное пересоздание оставит в проекте двойника.
+TEMP_SUFFIX = " (пересоздание)"
 
 
 @dataclass
@@ -47,6 +89,8 @@ class PublishParams:
     skip_images: bool = False
     force_images: bool = False
     force_annotations: bool = False
+    recreate_stale: bool = False
+    backup_dir: Path | None = None  # по умолчанию — рядом с базой
     annotator: str | None = None
     settings: CvatSettings | None = None
 
@@ -60,7 +104,120 @@ class PublishStats:
     images_failed: int = 0
     tasks_created: int = 0
     tasks_existing: int = 0
+    tasks_rebuilt: int = 0
+    pages_changed: int = 0
+    pages_unpublished: int = 0
     shapes: int = 0
+    shapes_carried: int = 0
+    stale_years: list[str] = field(default_factory=list)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def issue_drift(issue) -> tuple[list, list]:
+    """Расхождение выпуска с тем, что залито в CVAT.
+
+    Возвращает две группы полос:
+
+    * **изменившиеся** — файл на диске уже не тот, под которым размечали. Их разметку
+      переносить нельзя;
+    * **ни разу не залитые** — полоса появилась в выпуске после того, как задача была
+      создана. Дописать кадр в существующую задачу CVAT не даёт, поэтому такая полоса
+      остаётся невидимой разметчику, пока задачу не пересоздадут.
+
+    Вторая группа считается расхождением только для СУЩЕСТВУЮЩЕЙ задачи: у новой задачи
+    не залито ничего, и это нормальное состояние, а не проблема.
+    """
+    changed = [page for page in issue.pages if is_stale_in_cvat(page)]
+    added = [page for page in issue.pages if page.cvat_file_hash is None and page.cvat_rel_path]
+    return changed, added
+
+
+def year_drift(issues) -> list[tuple[object, list, list]]:
+    """Расхождения по всем выпускам года; выпуски без расхождений отбрасываются."""
+    drift = []
+    for issue in issues:
+        changed, added = issue_drift(issue)
+        if changed or added:
+            drift.append((issue, changed, added))
+    return drift
+
+
+def report_drift(year_name: str, drift: list[tuple[object, list, list]]) -> None:
+    """Печатает, какие джобы задеты и чем. Это и есть ответ на вопрос «что переделывать»."""
+    logger.warning(
+        "Задача %r разошлась с диском: затронуто выпусков (джобов) %d из уже созданной задачи.", year_name, len(drift)
+    )
+    for issue, changed, added in drift:
+        parts = []
+        if changed:
+            parts.append(f"изменилось полос {len(changed)}")
+        if added:
+            parts.append(f"добавилось полос {len(added)}")
+        logger.warning("  выпуск %s (job id=%s): %s", issue.name, issue.cvat_job_id, ", ".join(parts))
+        for page in changed[:5]:
+            logger.warning("    изменилась: %s", page.rel_path)
+        if len(changed) > 5:
+            logger.warning("    ... и ещё %d", len(changed) - 5)
+
+
+def _backup_annotations(backup_dir: Path, pack_name: str, year_name: str, task, by_frame: dict) -> Path:
+    """Складывает разметку задачи в JSON перед тем, как задачу удалят.
+
+    Страховка на случай, если перенос разметки окажется неполным: восстановить из этого
+    файла можно и руками. Стоит он копейки, а альтернатива — потерянные недели обводки.
+    """
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _utcnow().strftime("%Y%m%d-%H%M%S")
+    safe_year = year_name.replace("/", "_")
+    path = backup_dir / f"{pack_name}-{safe_year}-task{task.id}-{stamp}.json"
+    payload = {
+        "pack": pack_name,
+        "year": year_name,
+        "task_id": task.id,
+        "saved_at": stamp,
+        "frames": {name: [shape.to_dict() for shape in shapes] for name, shapes in by_frame.items()},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+    logger.info("Разметка задачи %r сохранена в %s", year_name, path)
+    return path
+
+
+def _drop_stale_temp_task(client, project_id: int, year_name: str) -> None:
+    """Сносит недоделанного двойника, оставшегося от прерванного пересоздания."""
+    leftover = find_task(client, project_id, year_name + TEMP_SUFFIX)
+    if leftover is not None:
+        logger.warning(
+            "Нашлась незавершённая задача %r (id=%s) от прерванного пересоздания — удаляю.", leftover.name, leftover.id
+        )
+        leftover.remove()
+
+
+def rebuild_year_task(client, project_id: int, year_name: str, old_task, job_files, carry) -> object:
+    """Пересоздаёт задачу-год, перенося в неё разметку с неизменившихся кадров.
+
+    ``carry`` — функция ``(frames) -> список шейпов``: она получает нумерацию кадров НОВОЙ
+    задачи и возвращает всё, что в неё надо залить. Так вся работа с базой остаётся в
+    вызывающем, а здесь — только порядок операций с сервером.
+
+    Порядок принципиален: новая задача создаётся и наполняется ДО удаления старой. Сбой на
+    любом шаге оставляет старую задачу целой, и прогон можно просто повторить.
+    """
+    temp_name = year_name + TEMP_SUFFIX
+    new_task = create_year_task(client, project_id, temp_name, job_files)
+    frames = frame_index_by_name(new_task)
+
+    shapes = carry(frames)
+    uploaded = upload_preannotations(new_task, shapes)
+    logger.info("Новая задача %r (id=%s): залито шейпов %d", year_name, new_task.id, uploaded)
+
+    old_id = old_task.id
+    old_task.remove()
+    rename_task(new_task, year_name)
+    logger.warning("Задача %r пересоздана: id %s -> %s", year_name, old_id, new_task.id)
+    return new_task
 
 
 def _prepare_year_images(session: Session, pack, params: PublishParams, stats: PublishStats) -> None:
@@ -84,7 +241,13 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
                 pages_by_id[page.id] = page
                 jobs.append(
                     ImageJob(
-                        src=pack_dir / page.rel_path, dst=params.share_root / rel, divisor=page.divisor, page_id=page.id
+                        src=pack_dir / page.rel_path,
+                        dst=params.share_root / rel,
+                        divisor=page.divisor,
+                        page_id=page.id,
+                        # Исходник изменился — старую уменьшенную копию надо переделать,
+                        # иначе в CVAT останется кадр от прежнего файла.
+                        force=is_stale_in_cvat(page),
                     )
                 )
     session.commit()
@@ -108,10 +271,22 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
     session.commit()
 
 
+def _mark_published(pages) -> None:
+    """Фиксирует, какой именно файл сейчас лежит под кадром CVAT.
+
+    Вызывается только после того, как задача действительно создана и наполнена: иначе
+    полоса считалась бы залитой, а её в CVAT нет, и расхождение никогда бы не всплыло.
+    """
+    for page in pages:
+        if page.file_hash is not None:
+            page.cvat_file_hash = page.file_hash
+
+
 def run_publish(params: PublishParams, session_factory) -> PublishStats:
     """Полный прогон ``to-cvat``."""
     stats = PublishStats()
     settings = params.settings or CvatSettings()
+    backup_dir = params.backup_dir or params.db_path.parent / "cvat_backup"
 
     warning = check_share_root(params.share_root)
     if warning:
@@ -143,15 +318,58 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                     logger.warning("Год %s: нет подготовленных картинок, пропускаю", year.name)
                     continue
 
+                _drop_stale_temp_task(client, project.id, year.name)
                 task = find_task(client, project.id, year.name)
+                rebuilt = False
+
                 if task is None:
                     task = create_year_task(client, project.id, year.name, job_files)
                     stats.tasks_created += 1
                     upload = True
                 else:
-                    logger.info("Задача %r уже есть (id=%s)", year.name, task.id)
                     stats.tasks_existing += 1
                     upload = params.force_annotations
+                    drift = year_drift(issues)
+                    if drift:
+                        changed = sum(len(pair[1]) for pair in drift)
+                        added = sum(len(pair[2]) for pair in drift)
+                        stats.pages_changed += changed
+                        stats.pages_unpublished += added
+                        stats.stale_years.append(year.name)
+                        report_drift(year.name, drift)
+                        if params.recreate_stale:
+                            changed_names = {
+                                page.cvat_rel_path for _issue, pages_changed, _a in drift for page in pages_changed
+                            }
+                            by_frame = fetch_shapes_by_frame(task)
+                            _backup_annotations(backup_dir, pack.name, year.name, task, by_frame)
+
+                            def carry(frames, _by=by_frame, _skip=changed_names, _pages=pages):
+                                # Переносим ручную разметку со всех кадров, кроме
+                                # изменившихся, и добавляем свежую автоматическую на сами
+                                # изменившиеся — их-то detect уже пересчитал.
+                                carried = shapes_to_requests(_by, frames, _skip)
+                                stats.shapes_carried += len(carried)
+                                fresh = raster_shapes(
+                                    ((p, p.raster_regions) for p in _pages if p.cvat_rel_path in _skip),
+                                    frames,
+                                    label_ids,
+                                )
+                                return carried + fresh
+
+                            task = rebuild_year_task(client, project.id, year.name, task, job_files, carry)
+                            stats.tasks_rebuilt += 1
+                            rebuilt = True
+                            upload = False  # разметка уже залита при пересоздании
+                        else:
+                            logger.warning(
+                                "Задача %r НЕ пересоздаётся. CVAT не умеет удалять обычные джобы "
+                                "(только ground truth), поэтому обновить эти выпуски можно лишь "
+                                "пересозданием всей задачи-года. Флаг --recreate-stale делает это, "
+                                "перенося ручную разметку со всех неизменившихся полос.",
+                                year.name,
+                            )
+                            continue
 
                 year.cvat_task_id = task.id
                 frames = frame_index_by_name(task)
@@ -172,18 +390,23 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                         len(pages),
                     )
                 assign_jobs_to_issues(task, issues)
-                session.commit()
 
                 if upload:
                     shapes = raster_shapes(((page, page.raster_regions) for page in pages), frames, label_ids)
                     stats.shapes += upload_preannotations(task, shapes)
                     logger.info("Задача %r: залито шейпов %d", year.name, len(shapes))
-                else:
+                elif not rebuilt:
                     logger.info(
                         "Задача %r: предразметка НЕ трогается (заливка заменяет разметку "
                         "целиком и затёрла бы ручную правку); нужна — укажите --force-annotations",
                         year.name,
                     )
+
+                # Только те, что реально сопоставились с кадром: полоса, не доехавшая до
+                # задачи, не должна считаться залитой — иначе её пропажа больше нигде
+                # не всплывёт.
+                _mark_published([page for page in pages if page.cvat_frame is not None])
+                session.commit()
 
                 if params.annotator:
                     assign_annotator(client, task, params.annotator)

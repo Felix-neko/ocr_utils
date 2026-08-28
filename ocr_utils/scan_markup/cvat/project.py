@@ -14,6 +14,11 @@
 ``stop_frame`` / ``frame_filter`` (см. ``cvat/apps/engine/task.py``,
 ``_validate_job_file_mapping``), поэтому ни одного из них мы не передаём.
 
+Границы джобов, раз заданные, изменить нельзя, и отдельный джоб нельзя даже удалить:
+``JobViewSet.perform_destroy`` отвечает ``"Only ground truth jobs can be removed"``.
+Поэтому обновить часть уже размеченного года можно лишь пересозданием всей задачи — как
+это делается без потери ручной разметки, описано в ``scan_markup.cvat.publish``.
+
 Картинки не грузятся по сети: задачи заводятся из share-каталога
 (``ResourceType.SHARE``), который смонтирован в ``cvat_server`` как ``/home/django/share``.
 Отсюда требование к ``--share-root`` — он должен совпадать с ``IMAGES_DIR`` в
@@ -195,3 +200,68 @@ def assign_annotator(client, task, username: str) -> None:
         return
     for job in task.get_jobs():
         job.update(models.PatchedJobWriteRequest(assignee=user_id))
+
+
+def fetch_shapes_by_frame(task) -> dict[str, list]:
+    """Разметка задачи, разложенная по ИМЕНАМ кадров: ``{имя кадра: [шейп, ...]}``.
+
+    Именно по именам, а не по номерам: пересозданная задача нумерует кадры заново, и
+    номера старой задачи в новой означают уже другие полосы. Имя кадра — путь внутри
+    share — устойчиво к пересозданию.
+    """
+    names = {index: frame.name for index, frame in enumerate(task.get_frames_info())}
+    by_frame: dict[str, list] = {}
+    annotations = task.get_annotations()
+    for shape in annotations.shapes:
+        name = names.get(shape.frame)
+        if name is None:
+            continue
+        by_frame.setdefault(name, []).append(shape)
+    return by_frame
+
+
+def shapes_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_names: set[str]) -> list:
+    """Сохранённые шейпы -> запросы на заливку в НОВУЮ задачу.
+
+    ``frames`` — нумерация кадров новой задачи, ``skip_names`` — кадры, чью разметку
+    переносить нельзя (файл под ними изменился, и обведённое на старом кадре к новому
+    отношения не имеет).
+
+    Геометрию не трогаем вообще. Уменьшенная копия готовится тем же делителем, что и
+    раньше, значит кадр в новой задаче попиксельно тот же, и координаты — что углы
+    прямоугольников, что RLE масок — остаются верными без единого пересчёта.
+    """
+    from cvat_sdk import models
+
+    requests = []
+    for name, shapes in by_frame.items():
+        if name in skip_names:
+            continue
+        frame = frames.get(name)
+        if frame is None:
+            continue
+        for shape in shapes:
+            requests.append(
+                models.LabeledShapeRequest(
+                    type=shape.type,
+                    frame=frame,
+                    label_id=shape.label_id,
+                    points=list(shape.points),
+                    occluded=shape.occluded,
+                    outside=shape.outside,
+                    z_order=shape.z_order,
+                    group=shape.group,
+                    rotation=shape.rotation,
+                    attributes=[
+                        models.AttributeValRequest(spec_id=attr.spec_id, value=attr.value) for attr in shape.attributes
+                    ],
+                )
+            )
+    return requests
+
+
+def rename_task(task, name: str) -> None:
+    """Переименовывает задачу."""
+    from cvat_sdk import models
+
+    task.update(models.PatchedTaskWriteRequest(name=name))

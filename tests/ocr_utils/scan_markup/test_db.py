@@ -110,3 +110,50 @@ def test_iter_pages_filters_and_orders(pack_dir: Path, session_factory) -> None:
         assert [page.file_name for _y, _i, page in iter_pages(pack)] == ["a.tif", "b.tif", "c.tif"]
         assert [page.file_name for _y, _i, page in iter_pages(pack, only_issue="02")] == ["c.tif"]
         assert list(iter_pages(pack, only_year="1999")) == []
+
+
+def test_new_columns_are_added_to_an_old_database(tmp_path):
+    """База, заведённая прошлой схемой, открывается и дополняется, а не падает.
+
+    Сценарий дорогой: detect по паку-1 — четыре часа GPU. Потерять его из-за добавленной
+    колонки нельзя, поэтому недостающие колонки дописываются при открытии.
+    """
+    import sqlite3
+
+    from sqlalchemy import create_engine, inspect
+
+    from ocr_utils.scan_markup.db.session import add_missing_columns, open_db
+
+    db = tmp_path / "old.sqlite"
+    # Строим базу "прошлой версии": та же таблица pages, но без колонок отпечатка.
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE pages ("
+            "id INTEGER PRIMARY KEY, issue_id INTEGER, file_name VARCHAR(255), "
+            "rel_path TEXT, order_index INTEGER, width INTEGER)"
+        )
+        connection.execute("INSERT INTO pages VALUES (1, 1, 'a.tif', '1974/01/a.tif', 0, 3492)")
+
+    added = add_missing_columns(create_engine(f"sqlite:///{db}"))
+    assert "pages.file_hash" in added
+    assert "pages.cvat_file_hash" in added
+
+    columns = {c["name"] for c in inspect(create_engine(f"sqlite:///{db}")).get_columns("pages")}
+    assert {"file_size", "file_mtime", "file_hash", "hash_algo", "cvat_file_hash"} <= columns
+
+    # Старая строка на месте и читается через ORM.
+    with open_db(db)() as session:
+        page = session.get(Page, 1)
+        assert page.file_name == "a.tif"
+        assert page.file_hash is None
+
+
+def test_add_missing_columns_is_idempotent(tmp_path):
+    """Повторное открытие уже дополненной базы ничего не трогает."""
+    from sqlalchemy import create_engine
+
+    from ocr_utils.scan_markup.db.session import add_missing_columns, open_db
+
+    db = tmp_path / "markup.sqlite"
+    open_db(db)
+    assert add_missing_columns(create_engine(f"sqlite:///{db}")) == []
