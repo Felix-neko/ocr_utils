@@ -11,11 +11,22 @@
 материала, где непонятно, какой метрике верить.
 """
 
-from ocr_utils.defocus_detection.metrics import edge_width, hf_mid, laplacian, moire, reblur
+from ocr_utils.defocus_detection.metrics import cpbd, dom, edge_dir, edge_width, hf_mid, laplacian, moire, reblur
 from ocr_utils.defocus_detection.metrics.base import Algorithm
 
 ALGORITHMS: dict[str, Algorithm] = {
-    a.name: a for a in (edge_width.ALGORITHM, reblur.ALGORITHM, hf_mid.ALGORITHM, moire.ALGORITHM, laplacian.ALGORITHM)
+    a.name: a
+    for a in (
+        edge_width.ALGORITHM,
+        edge_dir.ALGORITHM,
+        dom.ALGORITHM,
+        dom.ALGORITHM_EQUALIZED,
+        cpbd.ALGORITHM,
+        reblur.ALGORITHM,
+        hf_mid.ALGORITHM,
+        moire.ALGORITHM,
+        laplacian.ALGORITHM,
+    )
 }
 
 COMBO_NAME = "combo"

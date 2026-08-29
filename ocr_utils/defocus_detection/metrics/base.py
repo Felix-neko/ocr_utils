@@ -40,6 +40,11 @@ class Algorithm:
             строки складывались в общий замер строки пропорционально тому, сколько
             каждый из них намерил. None — использовать ``tile_sharpness`` с сеткой 1x1
             и площадь кропа как вес. Второй аргумент — контекст кадра из ``frame_context``.
+        supports_regions: Умеет ли метрика мерить маленький кроп — кусок одной строки.
+            False у метрик, которым нужен кусок кадра приличного размера: например,
+            спектральным, где на окне в пару десятков пикселей просто нет частотного
+            разрешения. Такие метрики работают только по сетке тайлов, и режим по
+            строкам с ними запрещён явно, а не молча возвращает NaN.
         frame_context: Что посчитать по всему кадру ОДИН раз и передать в каждый вызов
             ``region_sharpness``. Нужно метрикам, у которых порог отбора привязан к
             контрасту кадра целиком: в кропе одной строки такой порог посчитался бы по
@@ -54,6 +59,7 @@ class Algorithm:
     display_unit: str = ""
     params: dict = field(default_factory=dict)
     length_scaled: bool = False
+    supports_regions: bool = True
     region_sharpness: Callable[[np.ndarray, object], tuple[float, float]] | None = None
     frame_context: Callable[[np.ndarray], object] | None = None
 

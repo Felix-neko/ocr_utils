@@ -42,7 +42,13 @@ def mean_sigma(measurements: LineMeasurements) -> float:
     return float(1.0 / np.mean(values))
 
 
-@pytest.mark.parametrize("algorithm", list(ALGORITHMS.values()), ids=lambda a: a.name)
+# Метрики, которым нужен кусок кадра приличного размера (спектральные), по кускам строк
+# работать не могут и объявляют это флагом supports_regions. Проверять на них замер по
+# строкам нечего — режим с ними запрещён в CLI.
+REGION_ALGORITHMS = [a for a in ALGORITHMS.values() if a.supports_regions]
+
+
+@pytest.mark.parametrize("algorithm", REGION_ALGORITHMS, ids=lambda a: a.name)
 def test_sharpness_of_chunks_falls_with_blur(algorithm):
     """Любая метрика по областям строк должна монотонно падать с размытием."""
     page, polygons = draw_text_lines(height=800, width=900, stroke=4, line_height=32, seed=1)

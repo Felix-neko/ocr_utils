@@ -26,6 +26,13 @@ build/
 /defocus_lines_si_*.txt
 /defocus_lines_si_*_worst/
 /defocus_lines_si_*_debug/
+/defocus_dom_*.csv
+/defocus_dom_*.md
+/defocus_dom_*.txt
+# Таблицы признаков свипа по 4009 кадрам: 7 МБ промежуточных чисел, пересчитываются
+# из тех же снимков за несколько минут. Разбор по ним (si_metrics_tables.md) лежит рядом
+# и в репозитории остаётся.
+/defocus_calibration/*.csv
 /defocus_compare_*/
 /surya_lines_check/
 /.cache/

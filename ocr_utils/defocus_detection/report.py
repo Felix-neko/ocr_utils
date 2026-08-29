@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from ocr_utils.defocus_detection.analysis import FileResult
 from ocr_utils.defocus_detection.metrics import ALGORITHMS, COMBO_NAME, resolve
+from ocr_utils.defocus_detection.thresholds import TAG_ORDER, TAG_TITLES, Preset
 from ocr_utils.defocus_detection.zonal import DIRECTIONS
 
 
@@ -26,6 +27,18 @@ def _score_cell(value: float) -> str:
     if abs(value) >= 1:
         return f"{value:.3f}"
     return f"{value:.4f}"
+
+
+def _tag_cell(result: FileResult) -> str:
+    """Короткое имя тега для таблицы.
+
+    Args:
+        result: Результат анализа файла.
+
+    Returns:
+        Одно слово ("тяжёлый"/"средний"/"лёгкий") либо "—", если порогов кадр не превысил.
+    """
+    return TAG_TITLES[result.tag].split()[0] if result.tag else "—"
 
 
 def _extra_columns(algorithm: str) -> list[tuple[str, str]]:
@@ -96,13 +109,14 @@ def _readability(result: FileResult) -> str:
     return f"{1.0 / result.score_norm:.4f}"
 
 
-def console_table(results: list[FileResult], algorithm: str, total: int) -> str:
+def console_table(results: list[FileResult], algorithm: str, total: int, tagging: bool = False) -> str:
     """Строит текстовую таблицу отчёта (худшие сверху).
 
     Args:
         results: Уже отсортированные и, при необходимости, урезанные результаты.
         algorithm: Имя выбранного алгоритма.
         total: Сколько файлов было проанализировано всего.
+        tagging: Печатать ли колонку тега тяжести (включено при работе с порогами).
 
     Returns:
         Готовый к печати многострочный текст.
@@ -112,6 +126,8 @@ def console_table(results: list[FileResult], algorithm: str, total: int) -> str:
     lines_mode = by_lines(results)
 
     headers = ["#", f"балл ({spec_unit})", *(title for _, title in extras)]
+    if tagging:
+        headers.append("тег")
     if lines_mode:
         headers += ["σ/высота", "строк"]
     headers.append("файл")
@@ -120,6 +136,8 @@ def console_table(results: list[FileResult], algorithm: str, total: int) -> str:
     for position, result in enumerate(results, 1):
         name = result.path.name if not result.error else f"{result.path.name}  [{result.error}]"
         row = [str(position), _score_cell(result.score), *_row_values(result, algorithm)]
+        if tagging:
+            row.append(_tag_cell(result))
         if lines_mode:
             row += [_readability(result), str(result.n_lines)]
         row.append(name)
@@ -231,8 +249,10 @@ def markdown_report(
     shown: str,
     zonal_shown: str,
     aggregation: str,
+    preset: Preset | None = None,
+    tagged: list[FileResult] | None = None,
 ) -> str:
-    """Строит markdown-отчёт из двух таблиц с кликабельными ссылками на файлы.
+    """Строит markdown-отчёт из таблиц с кликабельными ссылками на файлы.
 
     Args:
         overall: Отсортированные и урезанные результаты по общему качеству фокуса.
@@ -243,6 +263,9 @@ def markdown_report(
         shown: Человекочитаемое описание отбора для первой таблицы.
         zonal_shown: То же для второй таблицы.
         aggregation: Режим агрегации тайлов.
+        preset: Действующий набор порогов либо None, если тегирование выключено.
+        tagged: Все кадры, превысившие пороги, в порядке от худшего; None — не печатать
+            третью таблицу (например, когда весь отчёт и так построен по порогам).
 
     Returns:
         Текст markdown-документа.
@@ -250,6 +273,7 @@ def markdown_report(
     spec_unit = "средний ранг" if algorithm == COMBO_NAME else ALGORITHMS[algorithm].unit
     extras = _extra_columns(algorithm)
     lines_mode = by_lines(overall)
+    tagging = preset is not None
 
     how = "по областям строк текста (surya-ocr)" if lines_mode else f"агрегация по тайлам: **{aggregation}**"
     lines = [
@@ -259,11 +283,16 @@ def markdown_report(
         "",
         f"Алгоритм: **{algorithm}**, {how}. Проанализировано файлов: {total}.",
         "",
-        "## 1. Общее качество фокуса",
-        "",
-        f"В таблице: {shown}. Сортировка — от худшего фокуса к лучшему.",
-        "",
     ]
+    if tagging:
+        lines += [
+            f"Пороги: **{preset.name}** — {preset.describe()}. Откалиброваны: {preset.source}.",
+            "",
+            "Порог абсолютный: он не зависит от того, насколько удачной вышла эта конкретная",
+            "съёмка, поэтому длину списка задаёт качество кадров, а не назначенный процент.",
+            "",
+        ]
+    lines += ["## 1. Общее качество фокуса", "", f"В таблице: {shown}. Сортировка — от худшего фокуса к лучшему.", ""]
     if lines_mode:
         lines += [
             "Колонка **σ/высота** — размытие в долях высоты строки: именно она отвечает на вопрос",
@@ -272,22 +301,37 @@ def markdown_report(
             "",
         ]
 
-    head = ["#", f"балл ({spec_unit})", *(t for _, t in extras)]
-    align = ["--:", "--:", *("--:" for _ in extras)]
-    if lines_mode:
-        head += ["σ/высота", "строк"]
-        align += ["--:", "--:"]
-    head.append("файл")
-    align.append("---")
-    lines.append("| " + " | ".join(head) + " |")
-    lines.append("|" + "|".join(align) + "|")
+    def table(rows: list[FileResult]) -> list[str]:
+        """Собирает markdown-таблицу списка кадров.
 
-    for position, result in enumerate(overall, 1):
-        cells = [str(position), _score_cell(result.score), *_row_values(result, algorithm)]
+        Args:
+            rows: Результаты в том порядке, в каком их надо напечатать.
+
+        Returns:
+            Список строк markdown — шапка, разделитель и строки таблицы.
+        """
+        head = ["#", f"балл ({spec_unit})", *(t for _, t in extras)]
+        align = ["--:", "--:", *("--:" for _ in extras)]
+        if tagging:
+            head.append("тег")
+            align.append("---")
         if lines_mode:
-            cells += [_readability(result), str(result.n_lines)]
-        cells.append(_link(result))
-        lines.append("| " + " | ".join(cells) + " |")
+            head += ["σ/высота", "строк"]
+            align += ["--:", "--:"]
+        head.append("файл")
+        align.append("---")
+        out = ["| " + " | ".join(head) + " |", "|" + "|".join(align) + "|"]
+        for position, result in enumerate(rows, 1):
+            cells = [str(position), _score_cell(result.score), *_row_values(result, algorithm)]
+            if tagging:
+                cells.append(_tag_cell(result))
+            if lines_mode:
+                cells += [_readability(result), str(result.n_lines)]
+            cells.append(_link(result))
+            out.append("| " + " | ".join(cells) + " |")
+        return out
+
+    lines += table(overall)
 
     if zonal is not None:
         lines += [
@@ -329,6 +373,27 @@ def markdown_report(
                 ]
             cells.append(_link(result))
             lines.append("| " + " | ".join(cells) + " |")
+
+    if tagging and tagged is not None:
+        number = 3 if zonal is not None else 2
+        lines += [
+            "",
+            f"## {number}. Превысили абсолютный порог",
+            "",
+            "Порог не зависит от содержимого папки, поэтому этот список — не доля, а ответ:",
+            f"кадров с размытием выше допустимого здесь **{len(tagged)} из {total}**",
+            f"({len(tagged) / total * 100:.1f} %). Пусто — значит, переснимать нечего.",
+            "",
+        ]
+        for tag in TAG_ORDER:
+            count = sum(1 for r in tagged if r.tag == tag)
+            lines.append(f"* {TAG_TITLES[tag]} (балл < {getattr(preset, tag.removeprefix('defocus_')):g}): {count}")
+        lines.append("")
+        if tagged:
+            lines += table(tagged)
+        else:
+            lines.append("_Ни один кадр порогов не превысил._")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -357,7 +422,9 @@ def _link_metric(result: FileResult, zonal: bool) -> str:
     return "нет" if cell == "—" else cell
 
 
-def write_link_dir(root: Path, overall: list[FileResult], zonal: list[FileResult] | None) -> tuple[Path, int]:
+def write_link_dir(
+    root: Path, overall: list[FileResult], zonal: list[FileResult] | None, tagged: list[FileResult] | None = None
+) -> tuple[Path, int]:
     """Раскладывает попавшие в отчёт кадры симлинками, пронумерованными по рейтингу.
 
     ЗАЧЕМ ЭТО ВООБЩЕ ЕСТЬ. Кликабельные ссылки в markdown-отчёте работают не везде:
@@ -375,9 +442,14 @@ def write_link_dir(root: Path, overall: list[FileResult], zonal: list[FileResult
 
     Args:
         root: Куда складывать; создаётся, если нет. Внутри — подпапки ``overall``
-            и ``zonal`` по числу отчётов: списки почти не пересекаются.
+            и ``zonal`` по числу отчётов: списки почти не пересекаются. При работе с
+            порогами добавляются подпапки по тегам тяжести.
         overall: Отобранные результаты первого отчёта, в порядке отчёта.
         zonal: То же для второго отчёта либо None, если он не считался.
+        tagged: Кадры, превысившие пороги; раскладываются по подпапкам ``defocus_heavy``,
+            ``defocus_medium`` и ``defocus_light``. Подпапка создаётся, даже когда в неё
+            ничего не попало: пустая папка — тоже ответ, и по ней видно, что уровень
+            проверялся, а не потерялся.
 
     Returns:
         Кортеж (путь к папке, сколько симлинков создано).
@@ -386,8 +458,12 @@ def write_link_dir(root: Path, overall: list[FileResult], zonal: list[FileResult
         LinkDirError: Если в подпапке уже лежит не симлинк. Обычные файлы не трогаем
             никогда: папку могли указать по ошибке, и удалять оригиналы недопустимо.
     """
+    groups: list[tuple[str, list[FileResult] | None]] = [("overall", overall), ("zonal", zonal)]
+    if tagged is not None:
+        groups += [(tag, [r for r in tagged if r.tag == tag]) for tag in TAG_ORDER]
+
     made = 0
-    for name, selected in (("overall", overall), ("zonal", zonal)):
+    for name, selected in groups:
         if selected is None:
             continue
         directory = root / name
@@ -410,6 +486,30 @@ def write_link_dir(root: Path, overall: list[FileResult], zonal: list[FileResult
             (directory / f"{position:0{width}d}_{metric}_{target.name}").symlink_to(target)
             made += 1
     return root, made
+
+
+def write_retake_list(path: Path, tagged: list[FileResult]) -> None:
+    """Пишет плоский список кадров на пересъёмку.
+
+    Формат выбирается по расширению: ``.csv`` — таблица «путь, тег, балл» для дальнейшей
+    обработки, любое другое — простой текст, который можно распечатать или взять с собой
+    к камере. Список пишется всегда, даже пустой: файл нулевой длины означает «переснимать
+    нечего», а отсутствие файла — «прогон не доехал», и путать эти два случая нельзя.
+
+    Args:
+        path: Куда записать.
+        tagged: Кадры, превысившие пороги, в порядке от худшего.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() == ".csv":
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["file", "tag", "score"])
+            for result in tagged:
+                writer.writerow([str(result.path), result.tag, result.score])
+        return
+    lines = [f"{TAG_TITLES[result.tag]:<18} {_score_cell(result.score):>8}  {result.path}" for result in tagged]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def write_csv(path: Path, results: list[FileResult], algorithm: str) -> None:
@@ -438,6 +538,7 @@ def write_csv(path: Path, results: list[FileResult], algorithm: str) -> None:
                 "rank",
                 "file",
                 "score",
+                "tag",
                 *metric_names,
                 *(line_headers if lines_mode else []),
                 *tile_columns,
@@ -480,6 +581,7 @@ def write_csv(path: Path, results: list[FileResult], algorithm: str) -> None:
                     position,
                     str(result.path),
                     result.score,
+                    result.tag,
                     *(result.per_metric.get(name, "") for name in metric_names),
                     *(line_values if lines_mode else []),
                     *tile_values,
