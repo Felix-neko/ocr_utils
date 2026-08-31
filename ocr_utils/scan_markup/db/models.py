@@ -8,8 +8,11 @@
 видел разметчик в CVAT. Пересчёт делается один раз на импорте (см. ``scan_markup.geometry``),
 чтобы каждый потребитель не таскал за собой коэффициент и не ошибался в нём.
 
-Миграций нет: схема заводится ``Base.metadata.create_all``. При изменении моделей базу
-пересоздают прогоном ``detect`` — она целиком выводится из файлов на диске.
+Про изменение схемы. Полноценных миграций нет, но и пересоздавать базу нельзя: в ней уже
+лежит ручная разметка из CVAT, которой на диске больше нигде нет. Поэтому новые колонки
+объявляются здесь ДОПУСКАЮЩИМИ NULL, а дописывает их в существующие таблицы
+``db.session.add_missing_columns`` при каждом открытии базы. Колонка NOT NULL и любое
+переименование — это уже настоящая миграция с заполнением, автоматически они не проедут.
 """
 
 from datetime import datetime, timezone
@@ -20,7 +23,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 # Значения колонок ``kind`` у растровой области.
 KIND_COLOR = "color"
 KIND_GRAYSCALE = "grayscale"
-RASTER_KINDS = (KIND_COLOR, KIND_GRAYSCALE)
+
+# Не иллюстрация, а ПОДОЗРЕНИЕ НА БИБЛИОТЕЧНУЮ ПЕЧАТЬ: цветной штриховой рисунок, слишком
+# мелкий, чтобы быть картинкой. Печать — это цветной штрих по определению (фиолетовая
+# мастика), и от цветного рисунка её отличает только размер: замер по паку-1 дал у печатей
+# 2.1 и 2.2% полосы против почти 100% у синего рисунка обложки.
+#
+# Отдельный ``kind``, а не маска: у нас есть только прямоугольник, а метка «Библиотечная
+# печать» в CVAT имеет тип mask, и прямоугольник под неё не положить. Отдельный ``kind``
+# заодно не даёт вырезать печать в PDF как картинку — потребители фильтруют по color и
+# grayscale. Печати всё равно предстоит закрашивать через LaMa, и знать заранее, где они
+# стоят, полезно.
+KIND_STAMP_SUSPECT = "stamp_suspect"
+
+RASTER_KINDS = (KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT)
+
+# Типы, которые действительно означают ИЛЛЮСТРАЦИЮ: их вырезают из оригинала и вклеивают
+# в PDF. ``KIND_STAMP_SUSPECT`` сюда не входит намеренно.
+PICTURE_KINDS = (KIND_COLOR, KIND_GRAYSCALE)
 
 # Значения колонки ``kind`` у маски. Пока заводится только печать, но метка «Рукописная
 # надпись» в проекте CVAT уже есть (``cvat/project.py``), и когда её начнут размечать, хватит
@@ -155,6 +175,10 @@ class Page(Base):
     cvat_frame: Mapped[int | None] = mapped_column(Integer, default=None)
 
     detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    # Версия алгоритма детекции (``detection.DETECTOR_VERSION``), которой получена разметка
+    # этой полосы. Без неё ``--skip-detected`` пропустил бы весь пак после правки детектора:
+    # отпечаток файла отвечает на вопрос «менялся ли файл», а не «менялся ли алгоритм».
+    detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     issue: Mapped[Issue] = relationship(back_populates="pages")
@@ -165,10 +189,21 @@ class Page(Base):
 class RasterRegion(Base):
     """Прямоугольник растрового изображения на полосе, координаты — ОРИГИНАЛА.
 
-    ``chroma_frac`` пишется всегда, даже когда ``kind`` уже проставлен: это доля
-    хроматичных пикселей, по которой ``kind`` и получен. Без неё перекалибровать порог
-    color/grayscale по 12 тысячам полос значило бы второй проход по полутерабайту
-    оригиналов с медленного диска.
+    Измерения пишутся всегда, даже когда ``kind`` уже проставлен: перекалибровать порог по
+    12 тысячам полос иначе значило бы второй проход по полутерабайту оригиналов с
+    медленного диска. Их три, и они не заменяют друг друга:
+
+    * ``chroma_spread`` — разброс хроматичности области, ``hypot(std(a), std(b))`` в Lab
+      после снятия налёта бумаги. ПО НЕЙ И ПРИНИМАЕТСЯ решение color/grayscale;
+    * ``chroma_self_frac`` — доля пикселей, чей оттенок отличается от собственной медианы
+      области. Подстраховка для маленькой СПЛОШНОЙ цветной плашки: у неё разброс мал;
+    * ``chroma_frac`` — доля хроматичных пикселей в абсолютном выражении. Это метрика
+      ПРОШЛОГО алгоритма, по ней размечены первые 777 областей. Считается и пишется дальше
+      только затем, чтобы старое решение можно было сравнить с новым, не перечитывая пак.
+
+    ``dot_frac`` — доля «точечных» связных компонент краски внутри области (см.
+    ``detection.dots``). По ней отличается полутоновая печать от штрихового рисунка, и по
+    ней же пороги детектора перекалибровываются без чтения оригиналов.
     """
 
     __tablename__ = "raster_regions"
@@ -184,6 +219,9 @@ class RasterRegion(Base):
     kind: Mapped[str] = mapped_column(String(16))
     full_page: Mapped[bool] = mapped_column(Boolean, default=False)
     chroma_frac: Mapped[float | None] = mapped_column(Float, default=None)
+    chroma_spread: Mapped[float | None] = mapped_column(Float, default=None)
+    chroma_self_frac: Mapped[float | None] = mapped_column(Float, default=None)
+    dot_frac: Mapped[float | None] = mapped_column(Float, default=None)
 
     source: Mapped[str] = mapped_column(String(16), default=SOURCE_AUTO)
     cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)

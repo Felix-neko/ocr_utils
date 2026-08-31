@@ -2,52 +2,59 @@
 
 Один проход по TIFF на полосу. Это дорогая часть конвейера: пак-1 — 12 136 файлов по
 ~40 МБ на медленном NTFS, то есть около полутерабайта чтения. Поэтому за одно чтение
-делается всё, что вообще можно сделать из пикселей: размеры, DPI и параметры уменьшения
-в базу, рабочая копия 1/4 для детекции, цвет бумаги, классификация областей.
+делается всё, что вообще можно сделать из пикселей: размеры, DPI в базу, полутоновые
+области, цвет бумаги, классификация областей, отпечаток файла.
 
-Заодно с пикселями снимается отпечаток файла — sha256 плюс размер и время правки
-(``scan_markup.hashing``). Он нужен не детекции, а последующему обновлению пака: по нему
-``to-cvat`` понимает, какие полосы разошлись с тем, что уже залито в CVAT. Считать его
-здесь ничего не стоит — файл всё равно читается целиком.
+СЧЁТ РАЗДАЁТСЯ ПУЛУ ПРОЦЕССОВ, запись остаётся здесь. Полосы независимы, детектор точек
+считает по полному 21-мегапиксельному кадру и упирается в CPU — то есть ровно тот случай,
+который CLAUDE.md требует распараллеливать. Писатель у SQLite при этом один: результаты
+приходят в родителя и кладутся в базу по мере готовности.
 
-Детекция считается по копии 1/``HALFTONE_DOWNSCALE``, а не по полному кадру. Surya всё
-равно ужимает вход до 2048 по длинной стороне (кадр 600 dpi — 6051 px), а константы
-``RASTER_*`` и ``HALFTONE_*`` в ``background_smoothing`` откалиброваны именно на копии 1/4.
+SURYA ЖИВЁТ В РОДИТЕЛЕ, И ПУЛ ЭТОМУ НЕ МЕШАЕТ. Видеопамять одна на всех, раздать инференс
+пулу нельзя — но это и не нужно. Работа делится на два этапа (см. ``detection.page``):
+воркеры читают файл и считают всё пиксельное, родитель зовёт GPU и собирает области. Между
+ними едет разбор на несколько мегабайт, а не 21-мегапиксельный кадр. Сериализуется таким
+образом только инференс, а чтение с медленного диска и счёт по полному кадру идут в
+шестнадцать процессов, и прогон по-прежнему упирается в диск.
 """
 
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import cv2
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
-from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
-from ocr_utils.scan_cropping.image_io import read_dpi
 from ocr_utils.scan_markup.db.models import SOURCE_AUTO, Page, RasterRegion
 from ocr_utils.scan_markup.db.repo import iter_pages, replace_raster_regions, upsert_pack
-from ocr_utils.scan_markup.detection.color_kind import CHROMA_THR, COLOR_FRAC_THR, classify, paper_color
-from ocr_utils.scan_markup.detection.raster import (
-    MERGE_GAP_PX,
-    MIN_REGION_FRAC,
-    FULL_PAGE_FRAC,
-    find_raster_boxes,
-    is_full_page,
-    scale_box,
+from ocr_utils.scan_markup.detection import DETECTOR_VERSION
+from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
+from ocr_utils.scan_markup.detection.color_kind import (
+    CHROMA_SELF_FRAC_THR,
+    CHROMA_SPREAD_THR,
+    CHROMA_THR,
+    COLOR_FRAC_THR,
 )
-from ocr_utils.scan_markup.hashing import apply_stamp, full_stamp, stat_matches, stat_stamp
+from ocr_utils.scan_markup.detection.overlay import write_debug_overlay
+from ocr_utils.scan_markup.detection.regions import LINEART_PICTURE_MIN_FRAC, SAFETY_MIN_FRAC, SURYA_LINEART_P99_PX
+from ocr_utils.scan_markup.detection.page import (
+    PageAnalysis,
+    PageOptions,
+    PageResult,
+    analyse_page,
+    finish_page,
+    surya_boxes_for,
+)
+from ocr_utils.scan_markup.hashing import apply_stamp, stat_matches, stat_stamp
 from ocr_utils.scan_markup.scan_tree import count_pages, scan_pack
 
 logger = logging.getLogger(__name__)
 
-# Ниже этого разрешения тег считается отсутствующим. TIFF без разрешения не бывает: если
-# его не записали, PIL и большинство сканеров всё равно кладут в тег 1 dpi. Взять эту
-# единицу всерьёз — значит получить делитель 1, то есть залить в CVAT полноразмерные
-# сканы, ради ухода от которых уменьшение и делается, причём молча. Порог 72 dpi ниже
-# любого осмысленного разрешения сканирования и выше всякого мусорного.
-MIN_PLAUSIBLE_DPI = 72
+# Сколько полос отдавать воркеру за раз. Полоса считается около секунды, так что накладные
+# расходы на передачу задания несущественны, а мелкий кусок лучше выравнивает хвост.
+CHUNK_SIZE = 4
 
 
 @dataclass
@@ -64,12 +71,46 @@ class DetectParams:
     skip_detected: bool = False
     rehash_all: bool = False
     use_surya_layout: bool = True
+    first_page_is_cover: bool = False
+    jobs: int = 8
     chroma_thr: float = CHROMA_THR
     color_frac_thr: float = COLOR_FRAC_THR
+    chroma_spread_thr: float = CHROMA_SPREAD_THR
+    chroma_self_frac_thr: float | None = CHROMA_SELF_FRAC_THR
     min_region_frac: float = MIN_REGION_FRAC
-    merge_gap: int = MERGE_GAP_PX
+    merge_gap: int | None = None
     full_page_frac: float = FULL_PAGE_FRAC
+    cell_px: int | None = None
+    dot_frac_thr: float | None = None
+    min_cells: int | None = None
+    lineart_p99: int = SURYA_LINEART_P99_PX
+    safety_min_frac: float = SAFETY_MIN_FRAC
+    lineart_picture_min_frac: float = LINEART_PICTURE_MIN_FRAC
     debug_dir: Path | None = None
+
+    def page_options(self) -> PageOptions:
+        """Часть параметров, которая уезжает в воркер. Обязана переживать pickle."""
+        return PageOptions(
+            default_dpi=self.default_dpi,
+            first_page_is_cover=self.first_page_is_cover,
+            chroma_thr=self.chroma_thr,
+            color_frac_thr=self.color_frac_thr,
+            chroma_spread_thr=self.chroma_spread_thr,
+            chroma_self_frac_thr=self.chroma_self_frac_thr,
+            min_region_frac=self.min_region_frac,
+            merge_gap=self.merge_gap,
+            full_page_frac=self.full_page_frac,
+            cell_px=self.cell_px,
+            dot_frac_thr=self.dot_frac_thr,
+            min_cells=self.min_cells,
+            lineart_p99=self.lineart_p99,
+            safety_min_frac=self.safety_min_frac,
+            lineart_picture_min_frac=self.lineart_picture_min_frac,
+        )
+
+    def worker_count(self) -> int:
+        """Сколько процессов заводить на пиксельный этап. GPU их не ограничивает."""
+        return max(1, self.jobs)
 
 
 @dataclass
@@ -86,83 +127,127 @@ class DetectStats:
     full_page: int = 0
 
 
+@dataclass(frozen=True)
+class _Job:
+    """Задание воркеру: что считать и чем."""
+
+    path: Path
+    rel_path: str
+    order_index: int
+    options: PageOptions
+    known_digest: str | None = None
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def detect_page(
-    path: Path, params: DetectParams, detector=None
-) -> tuple[int, int, int, list[tuple[tuple[int, int, int, int], str, float, bool]]]:
-    """Детекция по одному файлу.
+def _worker(job: _Job) -> PageAnalysis:
+    """Обёртка для ``ProcessPoolExecutor.imap`` (лямбду не запикль)."""
+    return analyse_page(job.path, job.rel_path, job.order_index, job.options, job.known_digest)
 
-    Возвращает ``(width, height, dpi, regions)``, где каждый элемент ``regions`` —
-    ``((x1, y1, x2, y2) в координатах ОРИГИНАЛА, kind, chroma_frac, full_page)``.
+
+def _needs_detection(page: Page, params: DetectParams, stamp) -> bool:
+    """Надо ли считать эту полосу заново при ``--skip-detected``.
+
+    Три условия, и все три обязательны. Полоса вообще считалась; считалась ТЕКУЩЕЙ версией
+    детектора; файл с тех пор не менялся. Без второго условия правка алгоритма не доехала бы
+    до базы вовсе: файлы-то те же, и весь пак был бы молча пропущен.
     """
-    dpi = read_dpi(path)
-    if dpi is None or dpi < MIN_PLAUSIBLE_DPI:
-        if params.default_dpi is None:
-            raise ValueError(
-                f"нет осмысленного тега разрешения (прочитано {dpi!r}), а --default-dpi не задан; "
-                "подставить разрешение наугад значило бы промахнуться в разы и залить в CVAT "
-                "кадры не того размера"
+    if page.detected_at is None or page.file_hash is None:
+        return True
+    if page.detector_version != DETECTOR_VERSION:
+        return True
+    if params.rehash_all:
+        return True
+    return not stat_matches(page, stamp)
+
+
+def _apply_result(session: Session, page: Page, result: PageResult, stats: DetectStats) -> None:
+    """Кладёт результат по полосе в базу и обновляет счётчики."""
+    if result.stamp is not None and page.file_hash is not None and page.file_hash != result.stamp.digest:
+        stats.changed += 1
+        tqdm.write(f"ФАЙЛ ИЗМЕНИЛСЯ {page.rel_path}: разметка в CVAT к нему больше не относится")
+
+    # Делитель и размеры уменьшенной копии здесь НЕ считаются: их выбирает to-cvat по
+    # своему --cvat-dpi. Отсюда уходит только то, что прочитано из файла.
+    page.width, page.height, page.dpi = result.width, result.height, result.dpi
+    page.detected_at = _utcnow()
+    page.detector_version = DETECTOR_VERSION
+    # Отпечаток пишется ПОСЛЕ успешной детекции: полоса, на которой детекция упала, не
+    # должна выглядеть обработанной для следующего прогона.
+    if result.stamp is not None:
+        apply_stamp(page, result.stamp)
+
+    replace_raster_regions(
+        session,
+        page,
+        [
+            RasterRegion(
+                x1=region.box[0],
+                y1=region.box[1],
+                x2=region.box[2],
+                y2=region.box[3],
+                kind=region.kind,
+                full_page=region.full_page,
+                chroma_frac=region.chroma_frac,
+                chroma_spread=region.chroma_spread,
+                chroma_self_frac=region.chroma_self_frac,
+                dot_frac=region.dot_frac,
+                source=SOURCE_AUTO,
             )
-        logger.debug("У %s разрешение %r, беру --default-dpi=%d", path.name, dpi, params.default_dpi)
-        dpi = params.default_dpi
-
-    bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise ValueError("не читается как изображение")
-    height, width = bgr.shape[:2]
-
-    work = cv2.resize(
-        bgr, (max(1, width // HALFTONE_DOWNSCALE), max(1, height // HALFTONE_DOWNSCALE)), interpolation=cv2.INTER_AREA
+            for region in result.regions
+        ],
     )
-    work_gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
 
-    boxes, cover = find_raster_boxes(work, work_gray, detector, params.min_region_frac, params.merge_gap)
-    if not boxes:
-        return width, height, dpi, []
-
-    # Цвет бумаги — по рабочей копии всей полосы: он один на полосу и не зависит от того,
-    # какую область мы сейчас классифицируем (мотивировка в color_kind.paper_color).
-    paper = paper_color(work)
-    work_h, work_w = work_gray.shape[:2]
-
-    regions = []
-    for box in boxes:
-        crop = work[box[1] : box[3], box[0] : box[2]]
-        kind, chroma_frac = classify(crop, paper, params.chroma_thr, params.color_frac_thr)
-        full = cover or is_full_page(box, work_w, work_h, params.full_page_frac)
-        original = scale_box(box, HALFTONE_DOWNSCALE)
-        # Кламп: рабочая копия округлялась вниз, и умножение обратно могло вылезти за кадр
-        # не больше чем на HALFTONE_DOWNSCALE - 1 пикселя.
-        original = (original[0], original[1], min(original[2], width), min(original[3], height))
-        regions.append((original, kind, chroma_frac, full))
-    return width, height, dpi, regions
+    stats.pages += 1
+    stats.regions += len(result.regions)
+    stats.color += sum(1 for region in result.regions if region.kind == "color")
+    stats.grayscale += sum(1 for region in result.regions if region.kind == "grayscale")
+    stats.full_page += sum(1 for region in result.regions if region.full_page)
 
 
-def _write_debug_overlay(debug_dir: Path, page: Page, bgr_path: Path, regions) -> None:
-    """Уменьшенный оверлей с найденными областями и подписями ``kind chroma_frac``.
+def _collect_jobs(
+    session: Session, params: DetectParams, stats: DetectStats, years
+) -> tuple[list[_Job], dict[str, Page]]:
+    """Отбирает полосы, которые надо считать, и попутно пропускает неизменившиеся."""
+    pack = upsert_pack(session, params.pack_name, params.pack_dir, years)
+    pages = list(iter_pages(pack, params.only_year, params.only_issue))
+    if params.limit is not None:
+        pages = pages[: params.limit]
 
-    Без этого порог color/grayscale не откалибровать: цифра в базе не говорит, ту ли
-    область она описывает.
-    """
-    bgr = cv2.imread(str(bgr_path), cv2.IMREAD_COLOR)
-    if bgr is None:
-        return
-    scale = 1000.0 / max(bgr.shape[:2])
-    small = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-    for (x1, y1, x2, y2), kind, chroma_frac, full in regions:
-        color = (0, 230, 118) if kind == "color" else (255, 176, 0)
-        p1 = (int(x1 * scale), int(y1 * scale))
-        p2 = (int(x2 * scale), int(y2 * scale))
-        cv2.rectangle(small, p1, p2, color, 2)
-        label = f"{kind} {chroma_frac:.3f}" + (" FULL" if full else "")
-        cv2.putText(small, label, (p1[0] + 4, p1[1] + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+    options = params.page_options()
+    jobs: list[_Job] = []
+    by_rel: dict[str, Page] = {}
+    for _year, _issue, page in pages:
+        path = params.pack_dir / page.rel_path
+        try:
+            stamp = stat_stamp(path)
+        except OSError as exc:
+            stats.failed += 1
+            tqdm.write(f"ОШИБКА {page.rel_path}: {exc}")
+            continue
 
-    out = debug_dir / f"{page.rel_path.replace('/', '__')}.jpg"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out), small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        # Дешёвая проверка идёт первой: совпали версия детектора, размер и время правки —
+        # файл не читается вовсе. Именно ради этого пропуска ``stat`` и лежит в базе.
+        if params.skip_detected and not _needs_detection(page, params, stamp):
+            stats.skipped += 1
+            continue
+
+        by_rel[page.rel_path] = page
+        # Хеш из базы отдаём воркеру, только если полосу пересчитывают из-за разъехавшегося
+        # ``stat``: совпал хеш — файл просто переписали тем же содержимым, и декодировать его
+        # незачем. Два условия, и оба обязательны. Без ``--skip-detected`` короткого замыкания
+        # быть не должно вовсе: прогон без флага — это требование пересчитать всё. А при смене
+        # версии детектора совпадение хеша ничего не значит: файл прежний, алгоритм новый.
+        stale_stat_only = (
+            params.skip_detected
+            and page.detected_at is not None
+            and page.file_hash is not None
+            and page.detector_version == DETECTOR_VERSION
+        )
+        jobs.append(_Job(path, page.rel_path, page.order_index, options, page.file_hash if stale_stat_only else None))
+    return jobs, by_rel
 
 
 def run_detect(params: DetectParams, session_factory) -> DetectStats:
@@ -186,84 +271,53 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
 
     stats = DetectStats()
     with session_factory() as session:  # type: Session
-        pack = upsert_pack(session, params.pack_name, params.pack_dir, years)
-        pages = list(iter_pages(pack, params.only_year, params.only_issue))
-        if params.limit is not None:
-            pages = pages[: params.limit]
+        jobs, by_rel = _collect_jobs(session, params, stats, years)
+        session.commit()
 
-        for _year, _issue, page in tqdm(pages, desc="детекция", unit="полоса"):
-            path = params.pack_dir / page.rel_path
-            try:
-                stamp = stat_stamp(path)
-            except OSError as exc:
+        for result in _iter_results(jobs, params, detector):
+            page = by_rel[result.rel_path]
+            if result.error:
                 stats.failed += 1
-                tqdm.write(f"ОШИБКА {page.rel_path}: {exc}")
+                tqdm.write(f"ОШИБКА {result.rel_path}: {result.error}")
                 continue
-
-            if params.skip_detected and page.detected_at is not None and page.file_hash is not None:
-                # Дешёвая проверка идёт первой: совпали размер и время правки — файл
-                # считается прежним и не читается вовсе. Именно ради этого пропуска
-                # ``stat`` и лежит в базе: перечитать полтерабайта пака ради хешей — часы.
-                if not params.rehash_all and stat_matches(page, stamp):
-                    stats.skipped += 1
-                    continue
-                # ``stat`` разошёлся — читаем и считаем хеш. Он вполне может совпасть:
-                # файл могли просто скопировать заново, содержимое от этого не меняется.
-                # Тогда обновляем отметку и идём дальше, не трогая разметку.
-                stamp = full_stamp(path)
-                if stamp.digest == page.file_hash:
-                    apply_stamp(page, stamp)
-                    session.commit()
-                    stats.skipped += 1
-                    continue
-
-            if stamp.digest is None:
-                stamp = full_stamp(path)
-            if page.file_hash is not None and page.file_hash != stamp.digest:
-                stats.changed += 1
-                tqdm.write(f"ФАЙЛ ИЗМЕНИЛСЯ {page.rel_path}: разметка в CVAT к нему больше не относится")
-
-            try:
-                width, height, dpi, regions = detect_page(path, params, detector)
-            except Exception as exc:  # noqa: BLE001 — одна битая полоса не должна валить прогон
-                stats.failed += 1
-                tqdm.write(f"ОШИБКА {page.rel_path}: {exc}")
+            if result.unchanged:
+                # Содержимое прежнее — обновляем только отметку ``stat``, разметку не трогаем.
+                apply_stamp(page, result.stamp)
+                session.commit()
+                stats.skipped += 1
                 continue
-
-            # Делитель и размеры уменьшенной копии здесь НЕ считаются: их выбирает to-cvat
-            # по своему --cvat-dpi. Отсюда уходит только то, что прочитано из файла.
-            page.width, page.height, page.dpi = width, height, dpi
-            page.detected_at = _utcnow()
-            # Отпечаток пишется ПОСЛЕ успешной детекции: полоса, на которой детекция
-            # упала, не должна выглядеть обработанной для следующего прогона.
-            apply_stamp(page, stamp)
-
-            replace_raster_regions(
-                session,
-                page,
-                [
-                    RasterRegion(
-                        x1=box[0],
-                        y1=box[1],
-                        x2=box[2],
-                        y2=box[3],
-                        kind=kind,
-                        full_page=full,
-                        chroma_frac=chroma_frac,
-                        source=SOURCE_AUTO,
-                    )
-                    for box, kind, chroma_frac, full in regions
-                ],
-            )
+            _apply_result(session, page, result, stats)
             session.commit()
-
-            stats.pages += 1
-            stats.regions += len(regions)
-            stats.color += sum(1 for _b, kind, _c, _f in regions if kind == "color")
-            stats.grayscale += sum(1 for _b, kind, _c, _f in regions if kind == "grayscale")
-            stats.full_page += sum(1 for _b, _k, _c, full in regions if full)
-
-            if params.debug_dir is not None and regions:
-                _write_debug_overlay(params.debug_dir, page, path, regions)
+            if params.debug_dir is not None and result.regions:
+                write_debug_overlay(
+                    params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, result.regions
+                )
 
     return stats
+
+
+def _iter_results(jobs: list[_Job], params: DetectParams, detector):
+    """Результаты по полосам: пиксельный этап в пуле, GPU и сборка — здесь.
+
+    ``imap`` с ``chunksize=1``, а не ``map``: воркер возвращает рабочую копию полосы на
+    несколько мегабайт, и крупными кусками они копились бы в очереди пула десятками.
+    """
+    if not jobs:
+        return
+
+    workers = params.worker_count()
+    if workers == 1:
+        analyses = (_worker(job) for job in jobs)
+        yield from _finish(analyses, len(jobs), params, detector)
+        return
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        analyses = pool.map(_worker, jobs, chunksize=1)
+        yield from _finish(analyses, len(jobs), params, detector)
+
+
+def _finish(analyses, total: int, params: DetectParams, detector):
+    """Прогон Surya и сборка областей — строго последовательно, в родителе."""
+    options = params.page_options()
+    for analysis in tqdm(analyses, total=total, desc="детекция", unit="полоса"):
+        yield finish_page(analysis, options, surya_boxes_for(analysis, detector))

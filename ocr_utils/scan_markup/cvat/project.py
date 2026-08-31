@@ -29,7 +29,7 @@ import logging
 
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_LIBRARY_STAMP
+from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT, MASK_LIBRARY_STAMP
 from ocr_utils.scan_markup.geometry import to_cvat_rect
 
 logger = logging.getLogger(__name__)
@@ -44,16 +44,29 @@ logger = logging.getLogger(__name__)
 LABEL_RASTER_COLOR = "Растр цветной"
 LABEL_RASTER_GRAY = "Растр серый"
 LABEL_STAMP = "Библиотечная печать"
+# Прямоугольник, а не маска: автодетектор находит только рамку. Разметчик по ней либо
+# обводит печать кистью под метку «Библиотечная печать», либо снимает прямоугольник, если
+# это оказался не оттиск.
+LABEL_STAMP_SUSPECT = "Подозрение на печать"
 
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
     {"name": LABEL_RASTER_GRAY, "type": "rectangle", "color": "#00B0FF"},  # голубой
     {"name": LABEL_STAMP, "type": "mask", "color": "#D500F9"},  # пурпурный
+    {"name": LABEL_STAMP_SUSPECT, "type": "rectangle", "color": "#FF6D00"},  # оранжевый
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
-LABEL_BY_KIND = {KIND_COLOR: LABEL_RASTER_COLOR, KIND_GRAYSCALE: LABEL_RASTER_GRAY}
-KIND_BY_LABEL = {LABEL_RASTER_COLOR: KIND_COLOR, LABEL_RASTER_GRAY: KIND_GRAYSCALE}
+LABEL_BY_KIND = {
+    KIND_COLOR: LABEL_RASTER_COLOR,
+    KIND_GRAYSCALE: LABEL_RASTER_GRAY,
+    KIND_STAMP_SUSPECT: LABEL_STAMP_SUSPECT,
+}
+KIND_BY_LABEL = {
+    LABEL_RASTER_COLOR: KIND_COLOR,
+    LABEL_RASTER_GRAY: KIND_GRAYSCALE,
+    LABEL_STAMP_SUSPECT: KIND_STAMP_SUSPECT,
+}
 MASK_KIND_BY_LABEL = {LABEL_STAMP: MASK_LIBRARY_STAMP}
 
 # Качество JPEG, которым CVAT пережимает кадры уже у себя. Картинки и так уменьшены и

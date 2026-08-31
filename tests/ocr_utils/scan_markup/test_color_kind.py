@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from ocr_utils.scan_markup.detection.color_kind import chroma_fraction, classify, paper_color
 from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE
+from ocr_utils.scan_markup.detection.color_kind import chroma_fraction, classify, paper_color
 
 # Цвет пожелтевшей бумаги в BGR: синего заметно меньше красного.
 PAPER_BGR = (200, 231, 255)
@@ -16,6 +16,17 @@ def _sepia_halftone(seed: int = 0, size: int = 200) -> np.ndarray:
     gray = rng.integers(60, 230, (size, size)).astype(np.float32)
     tint = np.array(PAPER_BGR, np.float32) / 255.0
     return np.clip(gray[..., None] * tint, 0, 255).astype(np.uint8)
+
+
+def _shifted_halftone(shift=(-25.0, 0.0, 25.0), size: int = 200) -> np.ndarray:
+    """Ч/б фотография с ЧУЖИМ оттенком: тени ушли в синь сильнее, чем поля полосы.
+
+    Ровно это ломало прошлую метрику. Баланс белого по бумаге выправляет один уровень
+    яркости, а у фотографии оттенок свой, и остаточная хроматичность получается высокой на
+    всей её площади. Оттенок при этом ОДИН на всю область — на том новая метрика и стоит.
+    """
+    region = _sepia_halftone(size=size).astype(np.float32)
+    return np.clip(region + np.array(shift, np.float32), 0, 255).astype(np.uint8)
 
 
 def _page_with(region: np.ndarray, size: int = 400) -> np.ndarray:
@@ -31,16 +42,11 @@ def test_paper_color_finds_the_tint() -> None:
 
 
 def test_sepia_grayscale_is_not_called_color() -> None:
-    """Серый растр на пожелтевшей бумаге — grayscale, хотя насыщенность у него есть.
-
-    Это главный случай, ради которого налёт вообще снимается: без снятия хроматичность
-    такой области выше порога на всей площади.
-    """
+    """Серый растр на пожелтевшей бумаге — grayscale, хотя насыщенность у него есть."""
     region = _sepia_halftone()
-    page = _page_with(region)
-    kind, fraction = classify(region, paper_color(page))
-    assert kind == KIND_GRAYSCALE
-    assert fraction < 0.02
+    result = classify(region, paper_color(_page_with(region)))
+    assert result.kind == KIND_GRAYSCALE
+    assert result.chroma_spread < 8.0
 
 
 def test_sepia_without_white_balance_would_look_colored() -> None:
@@ -48,35 +54,40 @@ def test_sepia_without_white_balance_would_look_colored() -> None:
     assert chroma_fraction(_sepia_halftone(), np.array([128.0, 128.0, 128.0])) > 0.5
 
 
-@pytest.mark.parametrize("rows,expected", [(10, KIND_GRAYSCALE), (40, KIND_COLOR)])
-def test_color_patch_size_decides(rows: int, expected: str) -> None:
-    """Цветная плашка переводит область в color, когда занимает заметную долю площади.
+def test_own_tint_no_longer_makes_a_photo_color() -> None:
+    """Ч/б фотография со своим оттенком остаётся grayscale, хотя доля хроматичных высока.
 
-    Порог откалиброван по 1966 (см. COLOR_FRAC_THR): у ч/б фотографий остаточная
-    хроматичность доходит до 0.052, у настоящих цветных обложек начинается с 0.177.
-    Плашка на 5% площади в этот зазор попадает и цветной область не делает, на 20% —
-    делает.
+    Это главный дефект, ради которого метрика переписана: на паке-1 таких полос набралось
+    63 штуки, и у всех абсолютная хроматичность была выше прежнего порога 0.10.
     """
+    region = _shifted_halftone()
+    result = classify(region, paper_color(_page_with(region)))
+    assert result.chroma_frac > 0.10, "иначе случай не тот — прошлая метрика тут не ошибалась"
+    assert result.kind == KIND_GRAYSCALE
+
+
+def test_many_hues_make_a_region_color() -> None:
+    """Область с РАЗНЫМИ оттенками — цветная: у неё большой разброс хроматичности."""
     region = _sepia_halftone()
-    region[:rows, :, 0] = 40  # синий вниз
-    region[:rows, :, 2] = 220  # красный вверх
-    page = _page_with(region)
-    kind, fraction = classify(region, paper_color(page))
-    assert kind == expected
-    assert fraction == pytest.approx(rows / 200, abs=0.01)
+    region[:100, :, 2] = 230  # верх в красное
+    region[100:, :, 0] = 230  # низ в синее
+    result = classify(region, paper_color(_page_with(region)))
+    assert result.kind == KIND_COLOR
+    assert result.chroma_spread > 8.0
 
 
-def test_residual_paper_tint_stays_grayscale() -> None:
-    """Ч/б фотография с остаточным налётом (доля до 0.05) в color не уезжает.
+def test_self_frac_rule_is_off_unless_asked() -> None:
+    """Второе условие по умолчанию выключено, но включается порогом.
 
-    Это главная ошибка, которую ловит порог: балансом белого по всей полосе налёт до конца
-    не снимается, у самой фотографии оттенок свой, отличный от полей.
+    Порога, который делит ч/б и цветные по этой метрике, на паке-1 не нашлось, поэтому в
+    решении она не участвует. Само число считается всегда — оно пишется в базу.
     """
-    region = _sepia_halftone()
-    region[:8, :, 2] = 210  # слабый тёплый остаток на 4% площади
-    assert classify(region, paper_color(_page_with(region)))[0] == KIND_GRAYSCALE
+    region = _shifted_halftone()
+    paper = paper_color(_page_with(region))
+    assert classify(region, paper).chroma_self_frac >= 0.0
+    assert classify(region, paper, chroma_self_frac_thr=-1.0).kind == KIND_COLOR
 
 
 def test_empty_region_is_grayscale() -> None:
     """Вырожденная область не должна ронять прогон."""
-    assert classify(np.zeros((0, 0, 3), np.uint8), np.array(PAPER_BGR, np.float32))[0] == KIND_GRAYSCALE
+    assert classify(np.zeros((0, 0, 3), np.uint8), np.array(PAPER_BGR, np.float32)).kind == KIND_GRAYSCALE

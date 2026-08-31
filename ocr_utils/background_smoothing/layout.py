@@ -94,7 +94,9 @@ class LayoutDetector:
             self._predictor = predictor
         return self._predictor
 
-    def picture_polygons(self, bgr: np.ndarray, gray: "np.ndarray | None" = None) -> "list[np.ndarray]":
+    def picture_polygons(
+        self, bgr: np.ndarray, gray: "np.ndarray | None" = None, filter_raster: bool = True
+    ) -> "list[np.ndarray]":
         """Полигоны РАСТРОВЫХ иллюстраций (4 точки) в координатах ПОДАННОГО кадра.
 
         Кадр уменьшается до ``LAYOUT_WORK_SIDE`` по длинной стороне, координаты
@@ -108,6 +110,14 @@ class LayoutDetector:
         останется невычищенным весь фон внутри рамки блока, а это бывает больше
         половины страницы.
 
+        ``filter_raster=False`` отдаёт СЫРОЙ список блоков ``Picture``, без этой
+        проверки. Нужен ``scan_markup``: там растр от штриха отличают по статистике
+        размеров пятен краски на полном кадре, а :func:`is_raster_block` меряет
+        ``has_halftone`` по копии 1/4 — на ней плотная штриховка неотличима от
+        полутоновой печати по яркости, и именно на этом признаке из пака-1 в растр
+        уехала 31 полоса со штриховыми виньетками. Своей задаче — защите от
+        сглаживания фона — проверка по-прежнему годится, поэтому умолчание прежнее.
+
         ``gray`` — серая версия кадра, если она уже посчитана вызывающим.
         """
         from PIL import Image as PILImage
@@ -119,8 +129,8 @@ class LayoutDetector:
 
         blocks = self._load()([PILImage.fromarray(rgb)])[0].bboxes
         candidates = [np.asarray(b.polygon, dtype=np.float32) / scale for b in blocks if b.label in self._labels]
-        if not candidates:
-            return []
+        if not candidates or not filter_raster:
+            return candidates
 
         if gray is None:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)

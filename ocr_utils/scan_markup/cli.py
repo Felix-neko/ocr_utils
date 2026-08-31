@@ -16,10 +16,21 @@ from ocr_utils.scan_markup.cvat.client import CvatSettings
 from ocr_utils.scan_markup.cvat.export import ExportParams, run_export
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
 from ocr_utils.scan_markup.db.session import open_db
-from ocr_utils.scan_markup.detection.color_kind import CHROMA_THR, COLOR_FRAC_THR
-from ocr_utils.scan_markup.detection.raster import FULL_PAGE_FRAC, MERGE_GAP_PX, MIN_REGION_FRAC
+from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
+from ocr_utils.scan_markup.detection.color_kind import (
+    CHROMA_SELF_FRAC_THR,
+    CHROMA_SPREAD_THR,
+    CHROMA_THR,
+    COLOR_FRAC_THR,
+)
+from ocr_utils.scan_markup.detection.recolor import RecolorParams, run_mark_covers, run_recolor
+from ocr_utils.scan_markup.detection.page import PageOptions
+from ocr_utils.scan_markup.detection.regions import LINEART_PICTURE_MIN_FRAC, SAFETY_MIN_FRAC, SURYA_LINEART_P99_PX
 from ocr_utils.scan_markup.detection.run import DetectParams, run_detect
 from ocr_utils.scan_markup.geometry import CVAT_DPI
+from ocr_utils.scan_markup.pen_marks import DEFAULT_WEIGHTS, PEN_CHROMA_THR, fix_pages
+from ocr_utils.scan_markup.validation.report import console_lines, write_csv, write_markdown
+from ocr_utils.scan_markup.validation.run import ValidateParams, run_validate
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -97,8 +108,28 @@ def main() -> None:
     "use_surya_layout",
     default=True,
     show_default=True,
-    help="Добавлять к найденным полутоновым областям блоки Picture из Surya. "
-    "Без флага не нужен GPU, но светлые фотографии будут теряться.",
+    help="ПЕРВИЧНЫЙ детектор: Surya предлагает блоки Picture, а пиксельные проверки уточняют "
+    "границу, отличают растр от штриха и решают про цвет. Нужен GPU. Без флага работают одни "
+    "пиксели — прогон дешевле, но на полосах содержания появляются ложные срабатывания "
+    "(строка отточий даёт ту же статистику, что растровая сетка).",
+)
+@click.option(
+    "--first-page-is-cover/--no-first-page-is-cover",
+    "first_page_is_cover",
+    default=True,
+    show_default=True,
+    help="Первая полоса каждого выпуска — обложка: одна цветная область во весь кадр без "
+    "пиксельной детекции. Верно для всех 123 выпусков пака-1; остальные три обложки "
+    "(вторая полоса и две последние) идут обычной детекцией — там бывает и текст, и пара "
+    "ч/б фотографий, и штриховой рисунок.",
+)
+@click.option(
+    "--jobs",
+    default=8,
+    show_default=True,
+    type=int,
+    help="Процессов на пиксельный этап (чтение, уменьшение, связные компоненты). Surya при "
+    "этом работает в родителе и в пул не уезжает, так что флаг совместим с ней.",
 )
 @click.option("--chroma-thr", default=CHROMA_THR, show_default=True, type=float, help="Порог хроматичности в Lab.")
 @click.option(
@@ -106,7 +137,73 @@ def main() -> None:
     default=COLOR_FRAC_THR,
     show_default=True,
     type=float,
-    help="Доля хроматичных пикселей, с которой область считается цветной.",
+    help="Порог ПРОШЛОЙ метрики цвета. В решении больше не участвует, само число пишется "
+    "в базу ради сравнения со старой разметкой.",
+)
+@click.option(
+    "--chroma-spread-thr",
+    default=CHROMA_SPREAD_THR,
+    show_default=True,
+    type=float,
+    help="Разброс хроматичности hypot(std(a), std(b)) в Lab, с которого область цветная. "
+    "Замер по паку-1: ч/б области 2.2..6.5, цветные обложки 9.3..19.6.",
+)
+@click.option(
+    "--chroma-self-frac-thr",
+    default=CHROMA_SELF_FRAC_THR,
+    show_default=True,
+    type=float,
+    help="Доля пикселей, отклонившихся от собственной медианы оттенка: второе условие через "
+    "«или». По умолчанию ВЫКЛЮЧЕНО — на паке-1 порога, который делит ч/б и цветные по этой "
+    "метрике, не нашлось (ч/б доходят до 0.293 при цветных от 0.092).",
+)
+@click.option(
+    "--cell-px",
+    default=None,
+    type=int,
+    help="Сторона клетки детектора точек в пикселях полосы; по умолчанию 128 при 600 dpi, "
+    "пересчитанные на её разрешение.",
+)
+@click.option(
+    "--dot-frac-thr",
+    default=None,
+    type=float,
+    help="Доля точечных пятен, с которой клетка считается растровой; по умолчанию 0.88.",
+)
+@click.option(
+    "--min-cells",
+    default=None,
+    type=int,
+    help="Сколько растровых клеток должно быть в области, чтобы она вообще считалась; "
+    "по умолчанию 3. Считается по клеткам ДО морфологии.",
+)
+@click.option(
+    "--surya-lineart-p99",
+    "lineart_p99",
+    default=SURYA_LINEART_P99_PX,
+    show_default=True,
+    type=int,
+    help="p99 площади пятна краски, с которой блок Surya считается ШТРИХОВЫМ рисунком, а не "
+    "растром. Замер: фотографии 100..4439, штрих 4761..550783. Проверяется только у блоков, "
+    "под которыми не нашлось растровых клеток.",
+)
+@click.option(
+    "--lineart-picture-min-frac",
+    default=LINEART_PICTURE_MIN_FRAC,
+    show_default=True,
+    type=float,
+    help="Доля площади полосы, с которой ЦВЕТНОЙ штриховой рисунок считается иллюстрацией. "
+    "Мельче — помечается «подозрение на печать»: библиотечная печать это цветной штрих, и "
+    "отличить её от рисунка можно только размером (печати 2.1%, рисунок обложки ~100%).",
+)
+@click.option(
+    "--safety-min-frac",
+    default=SAFETY_MIN_FRAC,
+    show_default=True,
+    type=float,
+    help="Доля площади полосы, начиная с которой область остаётся БЕЗ подтверждения Surya. "
+    "Страховка от её пропусков: отточия занимают 0.7% полосы и под порог не проходят, а самая "
+    "мелкая настоящая неподтверждённая область — 19.8%.",
 )
 @click.option(
     "--min-region-frac",
@@ -116,7 +213,10 @@ def main() -> None:
     help="Минимальная доля площади полосы для растровой области.",
 )
 @click.option(
-    "--merge-gap", default=MERGE_GAP_PX, show_default=True, type=int, help="Зазор слияния областей (копия 1/4)."
+    "--merge-gap",
+    default=None,
+    type=int,
+    help="Зазор слияния областей в пикселях полосы; по умолчанию 48 при 600 dpi, " "пересчитанные на её разрешение.",
 )
 @click.option(
     "--full-page-frac",
@@ -129,7 +229,7 @@ def main() -> None:
     "--debug-dir",
     default=None,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Куда писать оверлеи с найденными областями и подписями kind/chroma_frac.",
+    help="Куда писать оверлеи с найденными областями и подписями kind/разброс/доля точек.",
 )
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_level: str, **kwargs) -> None:
@@ -149,6 +249,227 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
         f"Растровых областей: {stats.regions} (цветных {stats.color}, серых {stats.grayscale}, "
         f"во всю полосу {stats.full_page})."
     )
+
+
+def _recolor_options(func):
+    """Общие опции ``recolor`` и ``mark-covers``: обе правят готовую базу."""
+    func = click.option("--dry-run", is_flag=True, default=False, help="Только отчёт, ничего не записывать.")(func)
+    func = click.option(
+        "--pack-dir",
+        default=None,
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+        help="Папка с оригиналами; по умолчанию берётся из базы.",
+    )(func)
+    func = click.option("--pack-name", required=True, help="Имя пака в базе.")(func)
+    func = click.option("--db", "db_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))(
+        func
+    )
+    return func
+
+
+@main.command("recolor")
+@_recolor_options
+@click.option("--jobs", default=8, show_default=True, type=int, help="Процессов на чтение оригиналов.")
+@click.option("--chroma-thr", default=CHROMA_THR, show_default=True, type=float)
+@click.option("--color-frac-thr", default=COLOR_FRAC_THR, show_default=True, type=float)
+@click.option("--chroma-spread-thr", default=CHROMA_SPREAD_THR, show_default=True, type=float)
+@click.option("--chroma-self-frac-thr", default=CHROMA_SELF_FRAC_THR, show_default=True, type=float)
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def recolor_command(db_path: Path, pack_name: str, log_level: str, **kwargs) -> None:
+    """Пересчитать color/grayscale по уже найденным областям, не перечитывая весь пак.
+
+    Читаются только полосы, у которых области есть: в паке-1 это 693 файла вместо 12 135,
+    то есть минуты вместо часов. Координаты не трогаются, ручная разметка из CVAT — тоже.
+    """
+    _set_log_level(log_level)
+    params = RecolorParams(db_path=db_path, pack_name=pack_name, **kwargs)
+    stats = run_recolor(params, open_db(db_path))
+    click.echo(
+        f"Полос прочитано: {stats.pages}, ошибок: {stats.failed}.\n"
+        f"Областей пересчитано: {stats.regions}, сменили тип: {stats.changed}."
+        + (" (--dry-run, в базу ничего не записано)" if params.dry_run else "")
+    )
+
+
+@main.command("mark-covers")
+@_recolor_options
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def mark_covers_command(db_path: Path, pack_name: str, log_level: str, **kwargs) -> None:
+    """Пометить первую полосу каждого выпуска обложкой во весь кадр. Пикселей не читает.
+
+    То же, что даёт ``detect --first-page-is-cover``, но по готовой базе и за секунды:
+    порядковый номер полосы и размеры кадра там уже есть.
+    """
+    _set_log_level(log_level)
+    params = RecolorParams(db_path=db_path, pack_name=pack_name, **kwargs)
+    stats = run_mark_covers(params, open_db(db_path))
+    click.echo(
+        f"Первых полос: {stats.pages}, помечено заново: {stats.changed}, пропущено с ошибкой: {stats.failed}."
+        + (" (--dry-run, в базу ничего не записано)" if params.dry_run else "")
+    )
+
+
+@main.command("validate")
+@click.option(
+    "--pack-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Папка пака сканов.",
+)
+@click.option(
+    "--cases-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Корень с папками-эталонами: имя папки называет тип дефекта, имена файлов внутри — "
+    "это имена оверлеев из --debug-dir.",
+)
+@click.option(
+    "--out-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Куда писать оверлеи прогона, отчёт report.md и таблицу measurements.csv.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="База прошлого прогона. Нужна для двух вещей: узнать порядковые номера полос "
+    "(без них не проверить обложку) и набрать контрольную выборку.",
+)
+@click.option("--pack-name", default=None, help="Имя пака в базе; по умолчанию — имя папки.")
+@click.option(
+    "--control",
+    "control_limit",
+    default=40,
+    show_default=True,
+    type=int,
+    help="Сколько случайных полос с уже найденными областями прогнать сверх выборки. "
+    "Страховка от обратной ошибки: чинили одно, потеряли другое. 0 — не проверять.",
+)
+@click.option("--jobs", default=8, show_default=True, type=int, help="Процессов на пиксельный этап.")
+@click.option(
+    "--use-surya-layout/--no-use-surya-layout",
+    "use_surya_layout",
+    default=True,
+    show_default=True,
+    help="Гонять первичный детектор Surya. Без него проверяются одни пиксели.",
+)
+@click.option("--first-page-is-cover/--no-first-page-is-cover", default=True, show_default=True)
+@click.option("--chroma-spread-thr", default=CHROMA_SPREAD_THR, show_default=True, type=float)
+@click.option("--chroma-self-frac-thr", default=CHROMA_SELF_FRAC_THR, show_default=True, type=float)
+@click.option("--min-region-frac", default=MIN_REGION_FRAC, show_default=True, type=float)
+@click.option("--cell-px", default=None, type=int)
+@click.option("--dot-frac-thr", default=None, type=float)
+@click.option("--min-cells", default=None, type=int)
+@click.option("--surya-lineart-p99", "lineart_p99", default=SURYA_LINEART_P99_PX, show_default=True, type=int)
+@click.option("--safety-min-frac", default=SAFETY_MIN_FRAC, show_default=True, type=float)
+@click.option("--lineart-picture-min-frac", default=LINEART_PICTURE_MIN_FRAC, show_default=True, type=float)
+@click.option("--log-level", default="WARNING", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def validate_command(
+    pack_dir: Path,
+    cases_dir: Path,
+    out_dir: Path | None,
+    db_path: Path | None,
+    pack_name: str | None,
+    control_limit: int,
+    jobs: int,
+    use_surya_layout: bool,
+    log_level: str,
+    **kwargs,
+) -> None:
+    """Прогнать детекцию по папкам-эталонам и сказать, сколько дефектов осталось.
+
+    Около сотни файлов и меньше минуты — это рабочий цикл настройки порогов. Полный прогон
+    по паку идёт часы, и крутить пороги по нему нельзя.
+    """
+    _set_log_level(log_level)
+    options = PageOptions(need_digest=False, **kwargs)
+    params = ValidateParams(
+        pack_dir=pack_dir,
+        cases_root=cases_dir,
+        options=options,
+        out_dir=out_dir,
+        jobs=jobs,
+        db_path=db_path,
+        pack_name=pack_name or pack_dir.name,
+        control_limit=control_limit if db_path is not None else 0,
+        use_surya_layout=use_surya_layout,
+    )
+    report = run_validate(params)
+    click.echo("\n".join(console_lines(report)))
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_csv(report, out_dir / "measurements.csv")
+        write_markdown(report, out_dir / "report.md", out_dir)
+        click.echo(f"\nОтчёт: {out_dir / 'report.md'}, измерения: {out_dir / 'measurements.csv'}")
+
+
+@main.command("fix-pen-marks")
+@click.option(
+    "--pack-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Папка пака сканов.",
+)
+@click.option(
+    "--out-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Куда класть починенные полосы; относительный путь внутри пака сохраняется. "
+    "ОТДЕЛЬНАЯ папка, а не сам пак: лишний файл рядом с оригиналом стал бы лишней полосой "
+    "в выпуске и сдвинул бы порядок остальных.",
+)
+@click.option(
+    "--page",
+    "pages",
+    multiple=True,
+    required=True,
+    help="Полоса внутри пака, например 1968/01/IMG_0045_2R.tif. Можно повторять.",
+)
+@click.option(
+    "--weights",
+    default=",".join(str(value) for value in DEFAULT_WEIGHTS),
+    show_default=True,
+    help="Веса линейной комбинации каналов через запятую, в порядке B,G,R. Умолчание найдено "
+    "перебором по замеру 1968/01 IMG_0045_2R: клякса уходит с 161 до 217 при бумаге 245, а "
+    "текст под ней остаётся на 118. Знак у красного отрицательный — синяя паста поглощает "
+    "красный свет и в этом канале чернее печатного текста.",
+)
+@click.option(
+    "--chroma-thr",
+    default=PEN_CHROMA_THR,
+    show_default=True,
+    type=float,
+    help="Хроматичность в Lab, с которой пиксель считается пастой. Комбинация подмешивается "
+    "ТОЛЬКО внутри найденной по этому порогу маски: на всю полосу она поднимала бы шум ради "
+    "пятна в сантиметр.",
+)
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def fix_pen_marks_command(
+    pack_dir: Path, out_dir: Path, pages: tuple[str, ...], weights: str, chroma_thr: float, log_level: str
+) -> None:
+    """Погасить следы шариковой ручки линейной комбинацией каналов вокруг самой кляксы.
+
+    Правка ИСХОДНИКА, а не детекции: пометка не растровая иллюстрация и в бинаризованный
+    PDF попадёт ровно так же, а текст под ней будет потерян.
+    """
+    _set_log_level(log_level)
+    try:
+        parsed = tuple(float(part) for part in weights.split(","))
+    except ValueError as exc:
+        raise click.BadParameter(f"веса задаются тремя числами через запятую: {exc}", param_hint="--weights")
+    if len(parsed) != 3:
+        raise click.BadParameter("нужно ровно три числа: B,G,R", param_hint="--weights")
+
+    results = fix_pages(pack_dir, list(pages), out_dir, parsed, chroma_thr)
+    for result in results:
+        if result.error:
+            click.echo(f"{result.rel_path}: {result.error}")
+        else:
+            click.echo(f"{result.rel_path} -> {result.dst} (пересчитано {result.pen_area_px} px)")
+    written = sum(1 for result in results if result.dst is not None)
+    click.echo(f"Записано: {written} из {len(results)}.")
 
 
 @main.command("to-cvat")

@@ -35,7 +35,7 @@ from ocr_utils.scan_markup.db.models import (
     YearPackage,
 )
 from ocr_utils.scan_markup.db.repo import get_pack, require_pack
-from ocr_utils.scan_markup.detection.raster import FULL_PAGE_FRAC
+from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC
 from ocr_utils.scan_markup.geometry import mask_to_original, rect_to_original
 
 logger = logging.getLogger(__name__)
