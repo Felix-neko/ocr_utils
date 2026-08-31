@@ -66,6 +66,7 @@ from ocr_utils.scan_markup.cvat.project import (
     upload_preannotations,
 )
 from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.scan_markup.geometry import CVAT_DPI, crop_size, cvat_size, divisor_for_dpi
 from ocr_utils.scan_markup.hashing import is_stale_in_cvat
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class PublishParams:
     share_root: Path
     pack_dir: Path | None = None  # по умолчанию берётся из базы
     only_year: str | None = None
+    cvat_dpi: int = CVAT_DPI
     workers: int = 8
     skip_images: bool = False
     force_images: bool = False
@@ -221,21 +223,40 @@ def rebuild_year_task(client, project_id: int, year_name: str, old_task, job_fil
 
 
 def _prepare_year_images(session: Session, pack, params: PublishParams, stats: PublishStats) -> None:
-    """Готовит уменьшенные копии для всех полос пака и записывает их параметры в базу."""
+    """Готовит уменьшенные копии для всех полос пака и записывает их параметры в базу.
+
+    Здесь же выбирается делитель: ``round(dpi полосы / --cvat-dpi)``. Он считается на этом
+    шаге, а не на ``detect``, чтобы разрешение разметки можно было сменить, не перечитывая
+    пак заново. Цена — лишняя запись в базу на каждом прогоне ``to-cvat``.
+
+    Полосе, уже залитой в CVAT, делитель не меняется: её разметка нарисована в прежнем
+    масштабе, и новый делитель сдвинул бы готовые рамки и маски. Такие полосы остаются со
+    своим коэффициентом, о чём прогон предупреждает.
+    """
     pack_dir = params.pack_dir or Path(pack.root_path)
     # Путь, который уйдёт в server_files, отсчитывается от IMAGES_DIR, а не от --share-root:
     # именно его сервер ищет внутри /home/django/share. Он же становится именем кадра,
     # поэтому хранится в базе как есть и служит ключом при обратном сопоставлении.
     prefix = share_prefix(params.share_root)
     jobs, pages_by_id = [], {}
+    frozen = 0
     for year in pack.year_packages:
         if params.only_year is not None and year.name != params.only_year:
             continue
         for issue in year.issues:
             for page in issue.pages:
-                if page.divisor is None:
-                    logger.warning("Полоса %s без делителя (не прошла detect), пропускаю", page.rel_path)
+                if page.dpi is None:
+                    logger.warning("Полоса %s без DPI (не прошла detect), пропускаю", page.rel_path)
                     continue
+                divisor = divisor_for_dpi(page.dpi, params.cvat_dpi)
+                rescaled = divisor != page.divisor
+                if rescaled and page.cvat_file_hash is not None:
+                    frozen += 1
+                    divisor, rescaled = page.divisor, False
+                if rescaled:
+                    page.divisor = divisor
+                    page.crop_width, page.crop_height = crop_size(page.width, page.height, divisor)
+                    page.cvat_width, page.cvat_height = cvat_size(page.width, page.height, divisor)
                 rel = cvat_rel_path(pack.name, page.rel_path)
                 page.cvat_rel_path = (prefix / rel).as_posix()
                 pages_by_id[page.id] = page
@@ -243,13 +264,21 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
                     ImageJob(
                         src=pack_dir / page.rel_path,
                         dst=params.share_root / rel,
-                        divisor=page.divisor,
+                        divisor=divisor,
                         page_id=page.id,
-                        # Исходник изменился — старую уменьшенную копию надо переделать,
-                        # иначе в CVAT останется кадр от прежнего файла.
-                        force=is_stale_in_cvat(page),
+                        # Переделать старую уменьшенную копию: либо изменился исходник (иначе
+                        # в CVAT останется кадр от прежнего файла), либо сменился делитель
+                        # (иначе останется кадр прежнего масштаба).
+                        force=is_stale_in_cvat(page) or rescaled,
                     )
                 )
+    if frozen:
+        logger.warning(
+            "Делитель не менялся у %d полос: они уже залиты в CVAT, и разметка на них "
+            "нарисована в прежнем масштабе. Чтобы сменить разрешение и у них, задачу-год "
+            "придётся завести заново.",
+            frozen,
+        )
     session.commit()
 
     if params.skip_images:

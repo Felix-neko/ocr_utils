@@ -37,7 +37,6 @@ from ocr_utils.scan_markup.detection.raster import (
     is_full_page,
     scale_box,
 )
-from ocr_utils.scan_markup.geometry import crop_size, cvat_size, divisor_for_dpi
 from ocr_utils.scan_markup.hashing import apply_stamp, full_stamp, stat_matches, stat_stamp
 from ocr_utils.scan_markup.scan_tree import count_pages, scan_pack
 
@@ -59,7 +58,6 @@ class DetectParams:
     db_path: Path
     pack_name: str
     default_dpi: int | None = None
-    cvat_dpi: int = 75
     only_year: str | None = None
     only_issue: str | None = None
     limit: int | None = None
@@ -232,11 +230,9 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
                 tqdm.write(f"ОШИБКА {page.rel_path}: {exc}")
                 continue
 
-            divisor = divisor_for_dpi(dpi, params.cvat_dpi)
+            # Делитель и размеры уменьшенной копии здесь НЕ считаются: их выбирает to-cvat
+            # по своему --cvat-dpi. Отсюда уходит только то, что прочитано из файла.
             page.width, page.height, page.dpi = width, height, dpi
-            page.divisor = divisor
-            page.crop_width, page.crop_height = crop_size(width, height, divisor)
-            page.cvat_width, page.cvat_height = cvat_size(width, height, divisor)
             page.detected_at = _utcnow()
             # Отпечаток пишется ПОСЛЕ успешной детекции: полоса, на которой детекция
             # упала, не должна выглядеть обработанной для следующего прогона.

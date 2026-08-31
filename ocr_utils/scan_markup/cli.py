@@ -72,7 +72,6 @@ def main() -> None:
     help="DPI для файлов без тега разрешения. Без него такие полосы пропускаются: "
     "молча взять 96 dpi значило бы промахнуться в шесть раз.",
 )
-@click.option("--cvat-dpi", default=CVAT_DPI, show_default=True, type=int, help="Разрешение копий для разметки.")
 @click.option("--only-year", default=None, help="Обработать только этот годовой комплект.")
 @click.option("--only-issue", default=None, help="Обработать только этот выпуск.")
 @click.option("--limit", default=None, type=int, help="Обработать не больше стольких полос (для проб).")
@@ -168,6 +167,15 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
     help="Папка с оригиналами; по умолчанию берётся из базы.",
 )
 @click.option("--only-year", default=None, help="Завести только этот годовой комплект.")
+@click.option(
+    "--cvat-dpi",
+    default=CVAT_DPI,
+    show_default=True,
+    type=int,
+    help="Разрешение уменьшенных копий для разметки: делитель полосы = round(её dpi / этого). "
+    "Полосам, уже залитым в CVAT, делитель не меняется — их разметка нарисована в прежнем "
+    "масштабе; чтобы перевести и их, задачу-год надо завести заново.",
+)
 @click.option("--jobs", "workers", default=8, show_default=True, type=int, help="Процессов на уменьшение картинок.")
 @click.option(
     "--skip-images/--no-skip-images",

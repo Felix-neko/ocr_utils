@@ -1,7 +1,7 @@
 """Подключение к локальному CVAT: чтение ``docker/.env`` и создание клиента.
 
 Креды и адрес живут в ``docker/.env`` рядом с compose-файлом — там же, откуда их берут
-``up.sh`` и ``bootstrap.py``. Дублировать их в опциях CLI значило бы завести второй
+``up.sh``. Дублировать их в опциях CLI значило бы завести второй
 источник правды, который рано или поздно разъедется с первым, поэтому опции CLI только
 ПЕРЕКРЫВАЮТ прочитанное.
 
@@ -58,7 +58,7 @@ class CvatSettings:
         host = env.get("CVAT_HOST", "localhost")
         port = env.get("CVAT_PORT", "8080")
         # Схема указывается ЯВНО: без неё cvat-sdk идёт по https и спотыкается об SSL,
-        # потому что сервер слушает обычный http (та же грабля, что в docker/bootstrap.py).
+        # потому что сервер слушает обычный http.
         self.url = url or os.environ.get("CVAT_URL") or f"http://{host}:{port}"
         self.user = pick(user, "ADMIN_USER", "admin")
         self.password = pick(password, "ADMIN_PASS", "admin")
@@ -118,7 +118,7 @@ def check_share_root(share_root: Path, env_path: Path = DEFAULT_ENV_PATH) -> str
         f"--share-root {share_root} лежит вне IMAGES_DIR={images_dir} из {env_path}. "
         "CVAT берёт картинки из смонтированного share и по сети их не получает, поэтому "
         "задачи заведутся пустыми. Поправьте IMAGES_DIR в docker/.env и перезапустите "
-        "docker/up.sh (с SKIP_BOOTSTRAP=1) либо укажите --share-root внутри IMAGES_DIR."
+        "docker/up.sh либо укажите --share-root внутри IMAGES_DIR."
     )
 
 

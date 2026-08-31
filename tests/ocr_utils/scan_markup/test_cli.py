@@ -71,16 +71,16 @@ def test_detect_writes_pages_and_regions(pack_dir: Path, tmp_path: Path) -> None
         assert regions[0].chroma_frac is not None
 
 
-def test_detect_computes_downscale_parameters(pack_dir: Path, tmp_path: Path) -> None:
-    """Делитель и обрезанный размер считаются на этом же проходе — они нужны шагу to-cvat."""
+def test_detect_leaves_downscale_parameters_to_publish(pack_dir: Path, tmp_path: Path) -> None:
+    """Делитель выбирает to-cvat по своему --cvat-dpi; detect пишет только прочитанное."""
     db = tmp_path / "markup.sqlite"
     _run(pack_dir, db)
 
     with open_db(db)() as session:
         page = session.scalars(select(Page)).first()
-        assert page.divisor == 8
-        assert page.crop_width == (page.width // 8) * 8
-        assert page.cvat_width == page.crop_width // 8
+        assert (page.width, page.height, page.dpi) == (SIZE[1] * 4, SIZE[0] * 4, DPI)
+        assert page.divisor is None
+        assert (page.crop_width, page.cvat_width) == (None, None)
 
 
 def test_text_only_page_has_no_regions(pack_dir: Path, tmp_path: Path) -> None:
@@ -139,7 +139,7 @@ def test_default_dpi_rescues_untagged_files(tmp_path: Path) -> None:
 
     with open_db(db)() as session:
         page = session.scalars(select(Page)).one()
-        assert page.dpi == 450 and page.divisor == 6
+        assert page.dpi == 450
 
 
 def test_limit_and_debug_dir(pack_dir: Path, tmp_path: Path) -> None:

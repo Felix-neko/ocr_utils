@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Поднимает локальный CVAT и настраивает пользователей/организацию/проект/задачи.
-# Повторный запуск безопасен (идемпотентен): клон не переклонируется, задачи
-# не дублируются.
+# Поднимает локальный CVAT и заводит пользователей с организацией.
+# Проект, задачи и джобы создаёт `ocr_utils.scan_markup to-cvat`: разбиение по годам
+# и выпускам знает только оно, из compose такое не заводится.
+# Повторный запуск безопасен (идемпотентен): клон не переклонируется.
 set -euo pipefail
 
 cd "$(dirname "$0")"
-SCRIPT_DIR="$(pwd)"
 
 # --- чтение значений из .env (без source: значения содержат пробелы/кириллицу) ---
 env_get() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
@@ -14,8 +14,6 @@ CVAT_VERSION="$(env_get CVAT_VERSION)"
 IMAGES_DIR="$(env_get IMAGES_DIR)"
 CVAT_HOST="$(env_get CVAT_HOST)"
 CVAT_PORT="$(env_get CVAT_PORT)"
-SDK_VERSION="${CVAT_VERSION#v}"          # v2.70.0 -> 2.70.0
-NETWORK="cvat_mts_cvat"                   # проект 'cvat_mts' + сеть 'cvat' (см. name: в override)
 SERVER_CONTAINER="cvat_mts_server"
 
 if [ ! -d "$IMAGES_DIR" ]; then
@@ -78,30 +76,12 @@ docker exec -i \
   -e ORG_NAME="$(env_get ORG_NAME)" \
   "$SERVER_CONTAINER" python3 /home/django/manage.py shell < create_users.py
 
-# --- проект и задачи через cvat-sdk в эфемерном контейнере ---
-# bootstrap.py обходит ВЕСЬ share и заводит по папке с картинками одну задачу. Это верно
-# для его собственного проекта и неверно для чужих: подсистема ocr_utils.scan_markup держит
-# в том же share своё дерево паков и заводит задачи сама, с джобами по границам выпусков.
-# Поэтому шаг выключается переменной SKIP_BOOTSTRAP=1.
-if [ "${SKIP_BOOTSTRAP:-0}" = "1" ]; then
-  echo ">> SKIP_BOOTSTRAP=1 — проект и задачи не создаю (их заведёт ocr_utils.scan_markup to-cvat)."
-else
-  echo ">> Создаю проект и задачи из share (генерация чанков — тоже долго) ..."
-  docker run --rm \
-    --network "$NETWORK" \
-    --env-file .env \
-    -e CVAT_URL=http://cvat-server:8080 \
-    -v "$IMAGES_DIR":/home/django/share:ro \
-    -v "$SCRIPT_DIR/bootstrap.py":/bootstrap.py:ro \
-    python:3.11-slim \
-    sh -c "pip install --quiet --no-cache-dir --disable-pip-version-check cvat-sdk==${SDK_VERSION} && python /bootstrap.py"
-fi
-
 echo
 echo "================================================================"
 echo " CVAT готов:  http://${CVAT_HOST}:${CVAT_PORT}"
 echo "   admin / admin  — создание проектов/задач, панель /admin"
 echo "   user  / user   — разметка (роль worker в орг «Клуб мазохистов»)"
+echo " Задачи заводятся отдельно:  uv run python -m ocr_utils.scan_markup to-cvat ..."
 echo " Разметка: войти как user -> выбрать организацию вверху ->"
 echo "           Tasks -> своя задача -> Job."
 echo "================================================================"

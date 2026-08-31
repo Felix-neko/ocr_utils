@@ -270,6 +270,49 @@ def test_first_publish_records_what_was_uploaded(monkeypatch, pack_db):
         assert all(p.cvat_frame is not None for p in pages)
 
 
+def test_cvat_dpi_chooses_divisor_at_publish(monkeypatch, pack_db):
+    """Разрешение разметки задаётся здесь, а не на detect: делитель пересчитывается по нему.
+
+    Готовые уменьшенные копии при этом обязаны переделаться: они сделаны прежним делителем,
+    и оставить их значило бы показать разметчику кадр не того масштаба.
+    """
+    db, factory, tmp_path = pack_db
+    _fake_cvat(monkeypatch, {}, [])
+    captured = []
+    monkeypatch.setattr(publish, "prepare_images", lambda jobs, root, workers, force: captured.extend(jobs) or [])
+
+    publish.run_publish(_params(db, tmp_path, cvat_dpi=150), factory)
+
+    assert {job.divisor for job in captured} == {4}
+    assert all(job.force for job in captured)
+    with factory() as session:
+        from ocr_utils.scan_markup.db.repo import require_pack
+
+        page = require_pack(session, "пак-1").year_packages[0].issues[0].pages[0]
+        assert page.divisor == 4
+        assert (page.crop_width, page.crop_height) == (3492, 6048)
+        assert (page.cvat_width, page.cvat_height) == (873, 1512)
+
+
+def test_published_page_keeps_its_divisor(monkeypatch, pack_db):
+    """Полосе, уже залитой в CVAT, делитель не меняют: её разметка в прежнем масштабе."""
+    db, factory, tmp_path = pack_db
+    _fake_cvat(monkeypatch, {}, [])
+    publish.run_publish(_params(db, tmp_path), factory)
+
+    captured = []
+    monkeypatch.setattr(publish, "prepare_images", lambda jobs, root, workers, force: captured.extend(jobs) or [])
+    publish.run_publish(_params(db, tmp_path, cvat_dpi=150), factory)
+
+    assert {job.divisor for job in captured} == {8}
+    assert not any(job.force for job in captured)
+    with factory() as session:
+        from ocr_utils.scan_markup.db.repo import require_pack
+
+        pages = [p for y in require_pack(session, "пак-1").year_packages for i in y.issues for p in i.pages]
+        assert {page.divisor for page in pages} == {8}
+
+
 def test_changed_file_is_reported_and_task_left_alone_without_flag(monkeypatch, pack_db):
     """Без --recreate-stale команда только показывает, какие джобы задеты."""
     db, factory, tmp_path = pack_db

@@ -26,18 +26,18 @@ JPEG втрое тяжелее `grayscale`) и где библиотечные �
 # 1. Предварительная детекция по оригиналам -> SQLite
 uv run python -m ocr_utils.scan_markup detect \
     --pack-dir "/mnt/.../Готовое/пак-1" \
-    --db /mnt/dump3/mts_markup/pack1.sqlite \
-    --debug-dir /mnt/dump3/mts_markup/debug
+    --db ~/Projects/mts_markup/pack1.sqlite \
+    --debug-dir ~/Projects/mts_markup/debug
 
 # 2. Уменьшенные копии в share + проект/задачи/джобы CVAT с предразметкой
 uv run python -m ocr_utils.scan_markup to-cvat \
-    --db /mnt/dump3/mts_markup/pack1.sqlite --pack-name пак-1 \
-    --share-root /mnt/dump3/mts_cvat_share --jobs 16
+    --db ~/Projects/mts_markup/pack1.sqlite --pack-name пак-1 \
+    --share-root ~/Projects/mts_markup/cvat_share --jobs 16
 
 # 3. Уточнённая разметка обратно в базу той же схемы
 uv run python -m ocr_utils.scan_markup from-cvat \
-    --db /mnt/dump3/mts_markup/pack1.sqlite \
-    --out-db /mnt/dump3/mts_markup/pack1_reviewed.sqlite \
+    --db ~/Projects/mts_markup/pack1.sqlite \
+    --out-db ~/Projects/mts_markup/pack1_reviewed.sqlite \
     --pack-name пак-1
 ```
 
@@ -106,9 +106,14 @@ uv run python -m ocr_utils.scan_markup from-cvat \
 ## Уменьшение для CVAT
 
 CVAT не масштабирует кадры сам: `image_quality` — только качество JPEG, разрешение чанка
-всегда 1:1 с исходником. Поэтому копии готовятся заранее, до 75 dpi.
+всегда 1:1 с исходником. Поэтому копии готовятся заранее, по умолчанию до 75 dpi
+(`--cvat-dpi` у `to-cvat`).
 
-Делитель у каждой полосы свой, из DPI файла: 600 dpi → 8, 450 dpi → 6. **Сначала обрезка**
+Делитель у каждой полосы свой, из DPI файла: 600 dpi → 8, 450 dpi → 6. Считается он на
+шаге `to-cvat`, а не на `detect`: разрешение разметки тогда меняется без повторного чтения
+пака, ценой лишней записи в базу на каждом прогоне. Полосе, уже залитой в CVAT, делитель
+не меняют — её разметка нарисована в прежнем масштабе; чтобы перевести и её, задачу-год
+надо завести заново. **Сначала обрезка**
 справа и снизу до размера, кратного делителю, и только потом деление — иначе 3492 → 436
 даёт масштаб 8.0092, и обратный пересчёт промахивается тем сильнее, чем правее объект (на
 правом краю — на 40 px).
@@ -202,8 +207,7 @@ uv run python -m ocr_utils.scan_markup to-cvat --db ... --pack-name пак-1 \
 ## Требования к окружению CVAT
 
 Картинки не грузятся по сети — задачи заводятся из share-каталога (`ResourceType.SHARE`).
-Поэтому `--share-root` должен совпадать с `IMAGES_DIR` в `docker/.env`, а `docker/up.sh`
-надо запускать с `SKIP_BOOTSTRAP=1`, иначе `bootstrap.py` заведёт из нового share свой
-старый проект.
+Поэтому `--share-root` должен лежать внутри `IMAGES_DIR` из `docker/.env` (или совпадать
+с ним): сервер видит ровно то, что смонтировано в `/home/django/share`.
 
 Адрес, учётка и организация читаются из `docker/.env`; опции `--cvat-*` их перекрывают.
