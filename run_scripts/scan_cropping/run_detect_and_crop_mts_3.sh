@@ -11,9 +11,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 #INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-4 1978-04 - 1985 (450 DPI)/"
-OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-4 1978-04 - 1985 (450 DPI)/v4/cropped"
-DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-4 1978-04 - 1985 (450 DPI)/v4/debug"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-5 (1985 и далее + немножко пересканов) (450 DPI)/"
+OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-5 (1985 и далее + немножко пересканов) (450 DPI)/v4/cropped"
+DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-5 (1985 и далее + немножко пересканов) (450 DPI)/v4/debug"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"

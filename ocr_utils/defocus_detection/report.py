@@ -508,7 +508,10 @@ def write_retake_list(path: Path, tagged: list[FileResult]) -> None:
             for result in tagged:
                 writer.writerow([str(result.path), result.tag, result.score])
         return
-    lines = [f"{TAG_TITLES[result.tag]:<18} {_score_cell(result.score):>8}  {result.path}" for result in tagged]
+    # Ширина колонки берётся из самого длинного названия уровня, а не из константы:
+    # при добавлении нового тега список иначе молча разъезжается.
+    width = max(len(title) for title in TAG_TITLES.values())
+    lines = [f"{TAG_TITLES[result.tag]:<{width}} {_score_cell(result.score):>8}  {result.path}" for result in tagged]
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 

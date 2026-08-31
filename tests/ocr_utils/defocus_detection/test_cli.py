@@ -279,3 +279,20 @@ def test_link_dir_is_refreshed_but_never_deletes_real_files(folder, tmp_path) ->
     result = CliRunner().invoke(main, [str(folder), "--worst-count", "2", "--no-zonal", "--link-dir", str(links)])
     assert result.exit_code != 0
     assert (links / "overall" / "заметки.txt").exists(), "обычный файл удалён — так нельзя"
+
+
+def test_unrecognized_files_are_named_not_swallowed(folder):
+    """Файл с непонятным расширением обязан быть назван вслух.
+
+    Случай из практики: кадр назывался ``DSCF0017.blurry.defocus_ultralightRAF`` —
+    при переименовании потерялась точка, — и молча выпал из прогона целиком. Отличить
+    чужой мусор в папке от такой опечатки может только человек, а для этого он должен
+    о файле узнать.
+    """
+    (folder / "0100_1.defocus_ultralightRAF").write_bytes(b"not an image")
+    (folder / ".hidden_sync_artifact").write_bytes(b"")
+    output = run(str(folder)).output
+    assert "Пропущено файлов: 1" in output
+    assert "0100_1.defocus_ultralightRAF" in output
+    # Скрытые файлы синхронизаторов кадрами не были и в счёт не идут.
+    assert "hidden_sync_artifact" not in output

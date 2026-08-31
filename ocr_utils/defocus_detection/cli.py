@@ -14,7 +14,7 @@ from ocr_utils.defocus_detection.analysis import (
     sort_by_zonal,
     sort_worst_first,
 )
-from ocr_utils.defocus_detection.image_io import SUPPORTED_SUFFIXES, collect_images
+from ocr_utils.defocus_detection.image_io import SUPPORTED_SUFFIXES, collect_images, unsupported_files
 from ocr_utils.defocus_detection.lines.detect import (
     DEFAULT_MIN_CONF,
     DEFAULT_MODE,
@@ -495,6 +495,19 @@ def main(
     files = collect_images(input_dir, recursive=recursive)
     if not files:
         raise click.ClickException(f"В {input_dir} не найдено поддерживаемых изображений.")
+
+    # Про пропущенные файлы говорим ВСЕГДА и до счёта. Обычно это чужой мусор в папке,
+    # но ровно так же выглядит кадр с опечаткой в расширении, и отличить их может только
+    # человек — а для этого он должен о них узнать.
+    skipped = unsupported_files(input_dir, recursive=recursive)
+    if skipped:
+        shown = ", ".join(p.name for p in skipped[:5])
+        rest = f" и ещё {len(skipped) - 5}" if len(skipped) > 5 else ""
+        click.echo(
+            f"Пропущено файлов: {len(skipped)} — не распознаны как изображения ({shown}{rest}). "
+            f"Поддерживаются: {', '.join(sorted(SUPPORTED_SUFFIXES))}.",
+            err=True,
+        )
 
     detector, line_options = None, None
     if use_surya_lines:

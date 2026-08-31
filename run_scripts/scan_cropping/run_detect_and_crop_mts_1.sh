@@ -10,9 +10,9 @@ set -euo pipefail
 # репозитория — поднимаемся на два уровня.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-1 1966-1976 (300 DPI)/1975/10"
-OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/cropped/1975/10"
-DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/debug/1975/10"
+INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-1 1966-1976 (300 DPI)/1976/09"
+OUTPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/cropped/1976/09"
+DEBUG_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/нарезка сканов/пак-1 (1966-1976)/debug/1976/09"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"

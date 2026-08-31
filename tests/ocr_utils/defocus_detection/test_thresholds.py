@@ -6,7 +6,7 @@ from click.testing import CliRunner
 from tests.ocr_utils.defocus_detection.pages import blur, draw_page
 
 from ocr_utils.defocus_detection.cli import main
-from ocr_utils.defocus_detection.thresholds import HEAVY, LIGHT, MEDIUM, PRESETS, Preset, parse_thresholds
+from ocr_utils.defocus_detection.thresholds import HEAVY, LIGHT, MEDIUM, PRESETS, ULTRALIGHT, Preset, parse_thresholds
 
 PAGE = dict(height=1536, width=1536)
 
@@ -23,6 +23,7 @@ def preset():
         heavy=1.0,
         medium=2.0,
         light=3.0,
+        ultralight=4.0,
         source="тест",
     )
 
@@ -46,7 +47,9 @@ def test_tag_boundaries_are_strictly_below(preset):
     assert preset.tag(1.5) == MEDIUM
     assert preset.tag(2.0) == LIGHT
     assert preset.tag(2.999) == LIGHT
-    assert preset.tag(3.0) == ""
+    assert preset.tag(3.0) == ULTRALIGHT
+    assert preset.tag(3.999) == ULTRALIGHT
+    assert preset.tag(4.0) == ""
 
 
 def test_unmeasured_frame_is_not_tagged(preset):
@@ -66,13 +69,22 @@ def test_preset_rejects_thresholds_out_of_order():
             heavy=3.0,
             medium=2.0,
             light=1.0,
+            ultralight=0.5,
             source="тест",
         )
 
 
 def test_parse_thresholds_requires_all_levels():
     """Частичный набор порогов не принимается: недосказанность тут дороже отказа."""
-    assert parse_thresholds("heavy=1,medium=2,light=3") == {"heavy": 1.0, "medium": 2.0, "light": 3.0}
+    # ultralight необязателен и по умолчанию равен light — полоса самого мягкого уровня
+    # пуста, и уже написанные команды с тремя уровнями означают ровно то же, что раньше.
+    assert parse_thresholds("heavy=1,medium=2,light=3") == {
+        "heavy": 1.0,
+        "medium": 2.0,
+        "light": 3.0,
+        "ultralight": 3.0,
+    }
+    assert parse_thresholds("heavy=1,medium=2,light=3,ultralight=4")["ultralight"] == 4.0
     with pytest.raises(ValueError, match="не заданы уровни"):
         parse_thresholds("heavy=1,light=3")
     with pytest.raises(ValueError, match="неизвестный уровень"):

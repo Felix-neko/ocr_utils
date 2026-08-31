@@ -31,17 +31,23 @@ import numpy as np
 HEAVY = "defocus_heavy"
 MEDIUM = "defocus_medium"
 LIGHT = "defocus_light"
+ULTRALIGHT = "defocus_ultralight"
 NO_TAG = ""
 
 # От тяжёлого к лёгкому — в этом порядке теги перечисляются в отчётах и раскладываются
 # по подпапкам симлинков.
-TAG_ORDER = (HEAVY, MEDIUM, LIGHT)
+TAG_ORDER = (HEAVY, MEDIUM, LIGHT, ULTRALIGHT)
 
-TAG_TITLES = {HEAVY: "тяжёлый расфокус", MEDIUM: "средний расфокус", LIGHT: "лёгкий расфокус"}
+TAG_TITLES = {
+    HEAVY: "тяжёлый расфокус",
+    MEDIUM: "средний расфокус",
+    LIGHT: "лёгкий расфокус",
+    ULTRALIGHT: "ультралёгкий расфокус",
+}
 
 # Оценка XMP-рейтингом: чем тяжелее брак, тем ниже звёзды. Пригодится, когда дойдут руки
 # до сайдкаров; здесь лежит рядом с тегами, чтобы соответствие было в одном месте.
-TAG_RATINGS = {HEAVY: 1, MEDIUM: 2, LIGHT: 3}
+TAG_RATINGS = {HEAVY: 1, MEDIUM: 2, LIGHT: 3, ULTRALIGHT: 4}
 
 # На чём считается порог: "raw" — сам балл метрики, "norm" — балл, нормированный на
 # высоту строки (доступен только в режиме по строкам).
@@ -65,6 +71,8 @@ class Preset:
         heavy: Ниже этого балла — тяжёлый расфокус.
         medium: Ниже этого — средний.
         light: Ниже этого — лёгкий.
+        ultralight: Ниже этого — ультралёгкий, самый мягкий уровень: список «посмотреть»,
+            а не «переснять». Равенство ``light`` означает, что полосы нет вовсе.
         source: На чём откалибровано. Пишется в отчёт, чтобы через год было понятно,
             чему верить и что перепроверять.
     """
@@ -77,6 +85,7 @@ class Preset:
     heavy: float
     medium: float
     light: float
+    ultralight: float
     source: str
 
     def __post_init__(self) -> None:
@@ -87,10 +96,11 @@ class Preset:
         """
         if self.basis not in BASES:
             raise ValueError(f"неизвестное основание порога: {self.basis}")
-        if not self.heavy <= self.medium <= self.light:
+        if not self.heavy <= self.medium <= self.light <= self.ultralight:
             raise ValueError(
                 f"пороги пресета {self.name} должны идти по возрастанию балла "
-                f"(heavy <= medium <= light), а заданы {self.heavy} / {self.medium} / {self.light}"
+                f"(heavy <= medium <= light <= ultralight), а заданы "
+                f"{self.heavy} / {self.medium} / {self.light} / {self.ultralight}"
             )
 
     def tag(self, score: float) -> str:
@@ -112,6 +122,8 @@ class Preset:
             return MEDIUM
         if score < self.light:
             return LIGHT
+        if score < self.ultralight:
+            return ULTRALIGHT
         return NO_TAG
 
     def describe(self) -> str:
@@ -121,8 +133,7 @@ class Preset:
             Строка вида «dom/best: тяжёлый < 2.92, средний < 2.96, лёгкий < 3».
         """
         levels = ", ".join(
-            f"{TAG_TITLES[tag].split()[0]} < {value:g}"
-            for tag, value in ((HEAVY, self.heavy), (MEDIUM, self.medium), (LIGHT, self.light))
+            f"{TAG_TITLES[tag].split()[0]} < {getattr(self, tag.removeprefix('defocus_')):g}" for tag in TAG_ORDER
         )
         return f"{self.algorithm}/{self.aggregation}: {levels}"
 
@@ -139,11 +150,16 @@ PRESETS: dict[str, Preset] = {
             heavy=2.92,
             medium=2.96,
             light=3.00,
+            ultralight=3.04,
             source=(
                 "«Социалистическая индустрия» 1985-1987, 4009 кадров, 176 ручных пометок. "
                 "Порог 3.00 ловит 73 % размеченного брака, помечая 7.3 % кадров; проверка на "
                 "отсмотренной глазами и чистой подшивке 1988/01-03 — 2 ложных срабатывания из 304. "
-                "Подробности: defocus_validation_si_report.md, раздел 5"
+                "Уровень ultralight (3.04) добавлен по «Экономической газете» 1982 и стоит особняком: "
+                "на той же чистой подшивке он метит 9 кадров из 304 (3 %), то есть его список ЗАВЕДОМО "
+                "содержит хорошие кадры и читается как «посмотреть», а не «переснять». Выше поднимать "
+                "нельзя: 3.08 ловит 9 из 10 самых лёгких пометок, но метит там же 112 кадров из 304. "
+                "Подробности: defocus_validation_si_report.md, разделы 5 и 6"
             ),
         ),
     )
@@ -153,18 +169,24 @@ DEFAULT_PRESET = "dom-si"
 
 
 def parse_thresholds(text: str) -> dict[str, float]:
-    """Разбирает строку вида ``heavy=2.9,medium=2.95,light=3.0``.
+    """Разбирает строку вида ``heavy=2.9,medium=2.95,light=3.0[,ultralight=3.04]``.
+
+    ``ultralight`` необязателен: без него он приравнивается к ``light``, то есть полоса
+    самого мягкого уровня пуста и тег не ставится никому. Так уже написанные команды с
+    тремя уровнями продолжают работать и означают ровно то же, что раньше.
 
     Args:
         text: Значение опции ``--tag-thresholds``.
 
     Returns:
-        Словарь с ключами ``heavy``, ``medium``, ``light``.
+        Словарь с ключами ``heavy``, ``medium``, ``light``, ``ultralight``.
 
     Raises:
-        ValueError: Если формат нарушен, ключ неизвестен или задан не весь набор.
+        ValueError: Если формат нарушен, ключ неизвестен или задан не весь
+            обязательный набор.
     """
-    wanted = ("heavy", "medium", "light")
+    wanted = ("heavy", "medium", "light", "ultralight")
+    required = wanted[:3]
     values: dict[str, float] = {}
     for chunk in text.split(","):
         chunk = chunk.strip()
@@ -180,9 +202,10 @@ def parse_thresholds(text: str) -> dict[str, float]:
             values[key] = float(raw.strip())
         except ValueError as error:
             raise ValueError(f"«{raw.strip()}» не число") from error
-    missing = [key for key in wanted if key not in values]
+    missing = [key for key in required if key not in values]
     if missing:
         raise ValueError(f"не заданы уровни: {', '.join(missing)}")
+    values.setdefault("ultralight", values["light"])
     return values
 
 

@@ -83,3 +83,33 @@ def collect_images(folder: Path, recursive: bool = False) -> list[Path]:
     pattern = "**/*" if recursive else "*"
     files = [p for p in folder.glob(pattern) if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES]
     return sorted(files)
+
+
+def unsupported_files(folder: Path, recursive: bool = False) -> list[Path]:
+    """Файлы папки, которые ``collect_images`` НЕ взял — чтобы о них было кому сказать.
+
+    ЗАЧЕМ ОТДЕЛЬНАЯ ФУНКЦИЯ. Молчаливый пропуск здесь стоит дорого: на реальном паке
+    кадр назывался ``DSCF0017.blurry.defocus_ultralightRAF`` — при переименовании
+    потерялась точка перед расширением, — и он просто не попал в прогон. Ни в отчёте, ни
+    в консоли следа не осталось, а кадр был как раз помечен вручную как размытый.
+    Сигнатуру ``collect_images`` при этом не трогаем: её зовёт ещё и
+    ``show_through_detection``, и менять контракт ради предупреждения незачем.
+
+    Скрытые файлы (имя с точки) не считаются пропущенными: это служебный мусор
+    файловых менеджеров и синхронизаторов, а не потерянные кадры.
+
+    Args:
+        folder: Папка со сканами (либо путь к одиночному файлу).
+        recursive: Обходить ли вложенные папки — так же, как в ``collect_images``.
+
+    Returns:
+        Отсортированный список путей, не подошедших под ``SUPPORTED_SUFFIXES``.
+    """
+    if folder.is_file():
+        return []
+    pattern = "**/*" if recursive else "*"
+    return sorted(
+        p
+        for p in folder.glob(pattern)
+        if p.is_file() and p.suffix.lower() not in SUPPORTED_SUFFIXES and not p.name.startswith(".")
+    )
