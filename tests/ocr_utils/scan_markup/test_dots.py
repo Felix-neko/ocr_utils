@@ -108,7 +108,7 @@ def test_is_dot_rejects_long_thin_components() -> None:
     params = _params()
     image = synthetic.paper((200, 200))
     image[100:103, 20:180] = synthetic.INK  # штрих 160x3: площадь мала, сторона велика
-    stats, _centroids = ink_components(image, params)
+    stats, _centroids, _mask = ink_components(image, params)
     assert stats.size and not is_dot(stats, params).all()
 
 
@@ -116,7 +116,8 @@ def test_dot_fraction_is_high_inside_a_screen() -> None:
     """Доля точечных пятен внутри растрового пятна близка к единице — она же идёт в базу."""
     params = _params()
     page = synthetic.with_screen(synthetic.paper(SIZE), (200, 200, 900, 1000), pitch=4, radius=1)
-    maps = cell_maps(*ink_components(page, params), page.shape[:2], params)
+    stats, centroids, _mask = ink_components(page, params)
+    maps = cell_maps(stats, centroids, page.shape[:2], params)
     assert dot_fraction(maps, (200, 200, 900, 1000)) > 0.9
 
 

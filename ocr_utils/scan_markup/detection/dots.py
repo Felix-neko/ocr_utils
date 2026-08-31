@@ -65,7 +65,7 @@
 """
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import cv2
 import numpy as np
@@ -204,20 +204,33 @@ def params_for_dpi(dpi: int | None, **overrides) -> ScreenParams:
     return replace(params, **given) if given else params
 
 
-def ink_components(gray: np.ndarray, params: ScreenParams) -> tuple[np.ndarray, np.ndarray]:
-    """Связные пятна краски на ПОЛНОМ кадре: ``(stats, centroids)`` без фона.
+def ink_components(
+    gray: np.ndarray, params: ScreenParams, with_dot_mask: bool = False
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Связные пятна краски на ПОЛНОМ кадре: ``(stats, centroids, dot_mask)`` без фона.
 
     Порог локальный, а не глобальный: у камерного скана яркость бумаги плывёт по кадру на
     десятки уровней, и один порог на всю полосу либо теряет светлый угол, либо заливает
     краской тёмный.
+
+    ``with_dot_mask`` отдаёт заодно карту ПИКСЕЛЕЙ точечных пятен — по ней считаются признаки
+    отточий (:func:`leader_dot_features`). Наружу из воркера эта карта не едет и ехать не
+    должна: 21 мегапиксель через pickle это не оптимизация, а её противоположность. Поэтому
+    признаки считаются здесь же, где карта и живёт.
     """
     ink = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, params.block_px, params.threshold_bias
     )
-    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(ink, 8)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(ink, 8)
     if count <= 1:  # на кадре нет краски вовсе
-        return np.empty((0, 5), np.int32), np.empty((0, 2), np.float64)
-    return stats[1:], centroids[1:]
+        return np.empty((0, 5), np.int32), np.empty((0, 2), np.float64), None
+
+    dot_mask = None
+    if with_dot_mask:
+        keep = np.zeros(count, bool)
+        keep[1:] = is_dot(stats[1:], params)
+        dot_mask = keep[labels]
+    return stats[1:], centroids[1:], dot_mask
 
 
 def is_dot(stats: np.ndarray, params: ScreenParams) -> np.ndarray:
@@ -345,7 +358,8 @@ def screen_boxes(gray: np.ndarray, params: ScreenParams) -> tuple[list[tuple], C
     ``dot_frac`` области и проверяются блоки Surya, — а второй проход по 21-мегапиксельному
     кадру стоит секунду на полосу и двенадцать тысяч полос на пак.
     """
-    maps = cell_maps(*ink_components(gray, params), gray.shape[:2], params)
+    stats, centroids, _mask = ink_components(gray, params)
+    maps = cell_maps(stats, centroids, gray.shape[:2], params)
     raw = raw_screen_cells(maps, params)
     mask = screen_cells(maps, params)
     return boxes_from_cells(mask, maps.cell_px, gray.shape[:2], params, raw), maps
@@ -369,7 +383,7 @@ def dot_fraction(maps: CellMaps, box: tuple[int, int, int, int]) -> float:
     return float(dots) / total if total else 0.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class ScreenRegions:
     """Связные полутоновые области полосы: карта меток по клеткам и их прямоугольники.
 
@@ -386,6 +400,9 @@ class ScreenRegions:
     labels: np.ndarray
     boxes: dict[int, tuple[int, int, int, int]]
     maps: CellMaps
+    # Признаки отточий по каждой компоненте: ``метка -> (доля пустых строк, периодичность)``.
+    # Считаются там же, где лежит карта точечных пикселей, — в воркере; наружу едут два числа.
+    leader: dict[int, tuple[float, float]] = field(default_factory=dict)
 
 
 def screen_regions(gray: np.ndarray, params: ScreenParams) -> tuple[ScreenRegions, np.ndarray, np.ndarray]:
@@ -395,9 +412,15 @@ def screen_regions(gray: np.ndarray, params: ScreenParams) -> tuple[ScreenRegion
     :func:`component_p99_in_box` для блоков Surya, а второй проход ``adaptiveThreshold`` по
     21-мегапиксельному кадру стоит секунду на полосу.
     """
-    stats, centroids = ink_components(gray, params)
+    stats, centroids, dot_mask = ink_components(gray, params, with_dot_mask=True)
     maps = cell_maps(stats, centroids, gray.shape[:2], params)
-    return regions_from_maps(maps, gray.shape[:2], params), stats, centroids
+    regions = regions_from_maps(maps, gray.shape[:2], params)
+    if dot_mask is not None:
+        scale = params.cell_px / CELL_PX
+        regions.leader.update(
+            {label: leader_dot_features(dot_mask, box, scale) for label, box in regions.boxes.items()}
+        )
+    return regions, stats, centroids
 
 
 def regions_from_maps(maps: CellMaps, shape: tuple[int, int], params: ScreenParams) -> ScreenRegions:
@@ -439,6 +462,60 @@ def union_box(regions: ScreenRegions, labels: list[int]) -> tuple[int, int, int,
     if not boxes:
         return None
     return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+# Диапазон сдвигов автокорреляции, в котором ищется период строк, — в пикселях при 600 dpi.
+# Высота строки основного текста этого журнала около 55 px, заголовков и таблиц — до 120.
+LEADER_LAG_LO_PX = 20
+LEADER_LAG_HI_PX = 140
+
+
+def leader_dot_features(dot_mask: np.ndarray, box: tuple[int, int, int, int], dpi_scale: float = 1.0) -> tuple:
+    """``(доля пустых строк, периодичность строк)`` внутри прямоугольника.
+
+    ЗАЧЕМ. Колонка отточий в таблице или оглавлении даёт ровно ту статистику, по которой
+    опознаётся растровая печать: множество мелких круглых пятен ограниченного размера. По
+    размеру, плотности, расстоянию между точками и разбросу их площади она от фотографии не
+    отличается — всё это замерено и перекрывается.
+
+    Отличается она СТРОЕНИЕМ: отточия стоят по базовым линиям текста, между линиями бумага,
+    а растровая сетка заполняет площадь сплошь. Отсюда два числа:
+
+    * доля горизонтальных линий развёртки, где нет ни одной точки;
+    * максимум автокорреляции профиля «точек в строке» на сдвигах, отвечающих высоте строки.
+
+    Замер по 6 областям с отточиями против 65 настоящих (7 фотографий, спасённых страховкой,
+    плюс 63 полосы из папки-эталона):
+
+        отточия                             пустых строк 0.477..0.651   период 0.595..0.891
+        настоящие с пустых строк >= 0.30    пустых строк до 0.696       период до 0.511
+
+    По отдельности не делит ни то, ни другое; вместе делят полностью. Смысл прозрачный:
+    фотография может быть разреженной (светлый снимок) ИЛИ периодичной (растровая сетка), но
+    не то и другое разом на масштабе строки текста.
+    """
+    x1, y1, x2, y2 = box
+    sub = dot_mask[y1:y2, x1:x2]
+    if sub.size == 0:
+        return 0.0, 0.0
+
+    rows = sub.sum(axis=1).astype(np.float32)
+    if rows.sum() < 200:  # точек слишком мало, судить не по чему
+        return 0.0, 0.0
+
+    empty_rows = float((rows == 0).mean())
+
+    profile = rows - rows.mean()
+    correlation = np.correlate(profile, profile, "full")[len(profile) - 1 :]
+    if correlation[0] <= 0:
+        return empty_rows, 0.0
+    correlation = correlation / correlation[0]
+
+    lo = max(1, round(LEADER_LAG_LO_PX * dpi_scale))
+    hi = round(LEADER_LAG_HI_PX * dpi_scale)
+    if len(correlation) <= lo + 1:
+        return empty_rows, 0.0
+    return empty_rows, float(correlation[lo : min(hi, len(correlation))].max())
 
 
 def component_p99_in_box(stats: np.ndarray, centroids: np.ndarray, box: tuple[int, int, int, int]) -> float:

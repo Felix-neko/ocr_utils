@@ -45,9 +45,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import cv2
+
+from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.scan_markup.detection import cover as cover_module
-from ocr_utils.scan_markup.detection.boxes import MIN_REGION_FRAC, keep_significant, merge_boxes
+from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC, keep_significant, merge_boxes
+from ocr_utils.scan_markup.detection.color_kind import CHROMA_SPREAD_THR
 from ocr_utils.scan_markup.detection.dots import (
+    CELL_PX,
     ScreenParams,
     ScreenRegions,
     component_p99_in_box,
@@ -103,6 +108,74 @@ LINEART_FULL_PAGE_INK_FRAC = 0.20
 # равно предстоит закрашивать, и знать заранее, где они стоят, полезно.
 LINEART_PICTURE_MIN_FRAC = 0.15
 
+# Доля площади полосы, с которой охватывающий прямоугольник ВСЕХ найденных областей
+# считается «полоса занята картинкой целиком». Работает в паре с проверкой цвета — см.
+# :func:`_fill_colour_page`.
+FULL_PAGE_COLOR_FRAC = FULL_PAGE_FRAC
+
+# Пороги «это отточия, а не растр». Отточия в таблице или оглавлении дают ровно ту
+# статистику, по которой опознаётся растровая печать, и по размеру, плотности, расстоянию
+# между точками и разбросу их площади от фотографии не отличаются — всё это замерено и
+# перекрывается. Отличается СТРОЕНИЕ: точки стоят по базовым линиям текста, между линиями
+# бумага. Замер по 6 областям с отточиями против 65 настоящих:
+#
+#     отточия                            пустых строк 0.477..0.651  период 0.595..0.891
+#     настоящие с пустых строк >= 0.30   пустых строк до 0.696      период до 0.511
+#
+# Порознь ни один признак не делит, вместе делят полностью: правило отбрасывает 6 отточий
+# из 6 и не теряет ни одной из 65 настоящих областей.
+#
+# Проверяется ТОЛЬКО у страховочных областей: все шесть ошибок оттуда, а области с блоком
+# Surya моделью уже поручены, и сужать им ворота незачем.
+LEADER_EMPTY_ROWS_THR = 0.30
+LEADER_PERIODICITY_THR = 0.52
+
+# ВТОРОЙ, НЕЗАВИСИМЫЙ признак отточий: размах яркостей после сильного уменьшения области.
+#
+# Смысл прямой: у фотографии есть светлые и тёмные места, и когда растр «расседается»
+# усреднением, остаётся непрерывный тон с широким размахом. Колонка отточий усредняется в
+# почти однородный светлый прямоугольник. Уменьшаем до ~7.5 dpi (от копии 1/4 это делитель
+# 20 при 600 dpi) и берём p95 - p5.
+#
+# Замер по тем же 6 областям с отточиями против 65 настоящих, считая от копии 1/4:
+#
+#     отточия     9.2 .. 62.6
+#     настоящие 101.2 .. 228.9
+#
+# Разделение полное, и зазор шире, чем у строкового признака (64 против 101, то есть в 1.6
+# раза), — но признаки нарочно оставлены ОБА и работают через «и»: чтобы выбросить область,
+# она должна провалить и строение, и тон. Настоящая фотография провалит оба разом с трудом,
+# а цена ошибки несимметрична — лишний прямоугольник снимается щелчком, потерянная
+# фотография не восстанавливается.
+LEADER_TONE_SPREAD_THR = 80.0
+LEADER_TONE_DIVISOR = 20
+
+# Расширение страховочной рамки до бумаги. У области без блока Surya объединять не с чем, и
+# граница берётся по сырым растровым клеткам, а они по краям снимка не добирают: светлые
+# участки фотографии клеток не дают (1973/12 IMG_0271_1L). Поэтому каждая сторона растёт,
+# пока прилегающая полоска заметно темнее бумаги.
+#
+# Брать вместо этого рамку по компоненте ПОСЛЕ замыкания проверено и отвергнуто: она растёт
+# на 10..31%, но вниз, в подпись под фотографией, а левый край снимка всё равно срезан.
+#
+# Фотография отличается от бумаги тоном по всей площади, включая светлые участки, а подпись
+# под ней — тонкий текст на белом, и средняя яркость полоски там почти бумажная, так что
+# рост на подписи останавливается. Замер: рамка встаёт ровно по краю снимка на трёх полосах.
+GROW_STEP_PX = 64
+# Подрезка того, что клеточная сетка добавила СВЕРХ блока Surya. Край области округляется
+# наружу до целой клетки (128 px при 600 dpi, около 5 мм), и в этот последний ряд попадает
+# подпись под фотографией: замер по 1974/03 IMG_0140_1L — низ фотографии 3365, низ блока
+# Surya 3396, а рамка кончалась на 3456.
+#
+# Подрезка идёт тем же признаком бумаги, что и рост, но внутрь, и НИКОГДА не заходит глубже
+# блока Surya: блок — это то, что поручила модель, и спорить с ним пикселями нельзя, иначе
+# вернётся срезание светлых краёв фотографии. Замер: 1974/03 IMG_0140_1L подрезалась ровно
+# до блока, на прочих полосах ушло 0..36 px, две полосы с двумя фотографиями не задеты.
+SHRINK_TO_BLOCK = True
+GROW_PAPER_MARGIN = 25
+GROW_PAPER_PERCENTILE = 97.0
+GROW_MAX_STEPS = 60
+
 # Откуда взялась область — от этого зависит, как её помечать (см. ``page._classify_regions``).
 SOURCE_SCREEN = "screen"  # растровая печать: клетки нашлись либо пятна мелкие
 SOURCE_LINEART = "lineart"  # штриховой рисунок: цветной идёт в разметку, чёрный — нет
@@ -150,6 +223,13 @@ def find_raster_boxes(
     lineart_ink_frac: float = LINEART_FULL_PAGE_INK_FRAC,
     lineart_p99: int = SURYA_LINEART_P99_PX,
     safety_min_frac: float = SAFETY_MIN_FRAC,
+    page_chroma_spread: float | None = None,
+    chroma_spread_thr: float = CHROMA_SPREAD_THR,
+    full_page_color_frac: float = FULL_PAGE_COLOR_FRAC,
+    leader_empty_rows_thr: float = LEADER_EMPTY_ROWS_THR,
+    leader_periodicity_thr: float = LEADER_PERIODICITY_THR,
+    leader_tone_spread_thr: float = LEADER_TONE_SPREAD_THR,
+    grow_paper_margin: int = GROW_PAPER_MARGIN,
 ) -> RasterFindings:
     """Растровые области полосы. Все координаты — в пикселях ОРИГИНАЛА.
 
@@ -191,6 +271,7 @@ def find_raster_boxes(
             claimed.update(labels)
             cells = union_box(regions, labels)
             box = block if cells is None else _union(block, cells)
+            box = shrink_to_paper(work_gray, box, block, grow_paper_margin)
             findings.append(Finding(box, SOURCE_SCREEN, dot_frac=dot_fraction(regions.maps, box)))
             continue
 
@@ -208,11 +289,18 @@ def find_raster_boxes(
             continue
         if (box[2] - box[0]) * (box[3] - box[1]) < threshold * width * height:
             continue
+        empty_rows, periodicity = regions.leader.get(label, (0.0, 0.0))
+        looks_lined = empty_rows >= leader_empty_rows_thr and periodicity >= leader_periodicity_thr
+        if looks_lined and tone_spread(work_gray, box, params) < leader_tone_spread_thr:
+            continue  # отточия в таблице, а не растровая печать: и строение, и тон против
+        box = grow_to_paper(work_gray, box, (height, width), grow_paper_margin)
         findings.append(Finding(box, SOURCE_SCREEN, dot_frac=dot_fraction(regions.maps, box)))
 
     findings = _merge_findings(findings, merge_gap, width, height, min_region_frac, min_side)
     if findings:
-        return RasterFindings(findings)
+        return RasterFindings(
+            _fill_colour_page(findings, width, height, page_chroma_spread, chroma_spread_thr, full_page_color_frac)
+        )
 
     # На полосе не нашлось ничего. Остался единственный случай, ради которого стоит смотреть
     # дальше: сплошной рисунок во весь кадр. Цветность проверит вызывающий — здесь нет ни
@@ -223,6 +311,187 @@ def find_raster_boxes(
         )
 
     return RasterFindings()
+
+
+def tone_spread(work_gray: np.ndarray, box: tuple[int, int, int, int], params: ScreenParams) -> float:
+    """Размах яркостей области после сильного уменьшения: ``p95 - p5``. Мотивировка выше.
+
+    Считается по копии 1/``HALFTONE_DOWNSCALE``, которая и так есть в родителе; делитель
+    масштабируется от разрешения полосы, чтобы «около 7.5 dpi» означало одно и то же на
+    паках 300, 450 и 600 dpi.
+    """
+    scale = params.cell_px / CELL_PX
+    divisor = max(1, round(LEADER_TONE_DIVISOR * scale))
+    x1, y1 = box[0] // HALFTONE_DOWNSCALE, box[1] // HALFTONE_DOWNSCALE
+    x2, y2 = -(-box[2] // HALFTONE_DOWNSCALE), -(-box[3] // HALFTONE_DOWNSCALE)
+    crop = work_gray[y1:y2, x1:x2]
+    if crop.size < 16:
+        return float("inf")  # судить не по чему — не мешаем области остаться
+
+    small = cv2.resize(
+        crop, (max(2, crop.shape[1] // divisor), max(2, crop.shape[0] // divisor)), interpolation=cv2.INTER_AREA
+    ).astype(np.float32)
+    return float(np.percentile(small, 95) - np.percentile(small, 5))
+
+
+def shrink_to_paper(
+    work_gray: np.ndarray,
+    box: tuple[int, int, int, int],
+    floor: tuple[int, int, int, int],
+    margin: int = GROW_PAPER_MARGIN,
+    step_px: int = GROW_STEP_PX,
+    max_steps: int = GROW_MAX_STEPS,
+) -> tuple[int, int, int, int]:
+    """Убирает с краёв рамки бумагу, но не заходит внутрь ``floor``. Мотивировка выше.
+
+    ``floor`` — блок Surya: подрезать глубже него нельзя, иначе вернётся срезание светлых
+    краёв фотографии, ради борьбы с которым и делалось объединение.
+    """
+    if margin <= 0:
+        return box
+    work_h, work_w = work_gray.shape[:2]
+    if work_h < 2 or work_w < 2:
+        return box
+
+    paper = float(np.percentile(work_gray, GROW_PAPER_PERCENTILE))
+    step = max(1, step_px // HALFTONE_DOWNSCALE)
+    x1, y1, x2, y2 = (v // HALFTONE_DOWNSCALE for v in box)
+    f0, f1, f2, f3 = (v // HALFTONE_DOWNSCALE for v in floor)
+
+    def paperish(strip: np.ndarray) -> bool:
+        return strip.size > 0 and float(strip.mean()) >= paper - margin
+
+    for _ in range(max_steps):
+        moved = False
+        edge = min(x1 + step, f0)
+        if edge > x1 and paperish(work_gray[y1:y2, x1:edge]):
+            x1, moved = edge, True
+        edge = max(x2 - step, f2)
+        if edge < x2 and paperish(work_gray[y1:y2, edge:x2]):
+            x2, moved = edge, True
+        edge = min(y1 + step, f1)
+        if edge > y1 and paperish(work_gray[y1:edge, x1:x2]):
+            y1, moved = edge, True
+        edge = max(y2 - step, f3)
+        if edge < y2 and paperish(work_gray[edge:y2, x1:x2]):
+            y2, moved = edge, True
+        if not moved:
+            break
+
+    scale = HALFTONE_DOWNSCALE
+    return x1 * scale, y1 * scale, x2 * scale, y2 * scale
+
+
+def grow_to_paper(
+    work_gray: np.ndarray,
+    box: tuple[int, int, int, int],
+    shape: tuple[int, int],
+    margin: int = GROW_PAPER_MARGIN,
+    step_px: int = GROW_STEP_PX,
+    max_steps: int = GROW_MAX_STEPS,
+) -> tuple[int, int, int, int]:
+    """Расширяет рамку, пока прилегающая полоска заметно темнее бумаги. Мотивировка выше.
+
+    Считается по копии 1/``HALFTONE_DOWNSCALE`` — полного кадра здесь нет и быть не должно,
+    а для сравнения средней яркости полоски разрешения копии хватает с запасом.
+    """
+    height, width = shape
+    work_h, work_w = work_gray.shape[:2]
+    if work_h < 2 or work_w < 2:
+        return box
+
+    paper = float(np.percentile(work_gray, GROW_PAPER_PERCENTILE))
+    step = max(1, step_px // HALFTONE_DOWNSCALE)
+    x1, y1, x2, y2 = (
+        max(0, box[0] // HALFTONE_DOWNSCALE),
+        max(0, box[1] // HALFTONE_DOWNSCALE),
+        min(work_w, -(-box[2] // HALFTONE_DOWNSCALE)),
+        min(work_h, -(-box[3] // HALFTONE_DOWNSCALE)),
+    )
+    if x2 - x1 < 1 or y2 - y1 < 1:
+        return box
+
+    def darker(strip: np.ndarray) -> bool:
+        return strip.size > 0 and float(strip.mean()) < paper - margin
+
+    for _ in range(max_steps):
+        moved = False
+        if x1 - step >= 0 and darker(work_gray[y1:y2, x1 - step : x1]):
+            x1 -= step
+            moved = True
+        if x2 + step <= work_w and darker(work_gray[y1:y2, x2 : x2 + step]):
+            x2 += step
+            moved = True
+        if y1 - step >= 0 and darker(work_gray[y1 - step : y1, x1:x2]):
+            y1 -= step
+            moved = True
+        if y2 + step <= work_h and darker(work_gray[y2 : y2 + step, x1:x2]):
+            y2 += step
+            moved = True
+        if not moved:
+            break
+
+    scale = HALFTONE_DOWNSCALE
+    return max(0, x1 * scale), max(0, y1 * scale), min(x2 * scale, width), min(y2 * scale, height)
+
+
+def _fill_colour_page(
+    findings: list[Finding],
+    width: int,
+    height: int,
+    page_chroma_spread: float | None,
+    chroma_spread_thr: float,
+    full_page_color_frac: float,
+) -> list[Finding]:
+    """Цветная полоса, занятая картинкой почти целиком, -> ОДНА область во весь кадр.
+
+    ЗАЧЕМ. Обложку разрывает то, что само картинкой не является: сплошная плашка заголовка
+    растровых клеток не даёт, компонента на ней рвётся, и полоса распадается на куски. Замер
+    по 1967/11 IMG_0052_2R: две области, 4.3% и 68.4% полосы, между ними 588 px (2.5 см), а
+    красная плашка между ними не попала в разметку вовсе.
+
+    ПОЧЕМУ НЕ ПРОСТО УВЕЛИЧИТЬ ЗАЗОР СЛИЯНИЯ. Зазор в 2.5 см на внутренней полосе — это
+    обычный просвет с подписью между двумя РАЗНЫМИ фотографиями, и слить их значило бы
+    вернуть дефект из папки «две картинки детектированы как одна большая».
+
+    РАЗДЕЛЯЕТ ЦВЕТ, а не зазор и не размер. Обложка отличается тем, что цветная ЦЕЛИКОМ.
+    Замер разброса хроматичности по всей полосе (та же метрика, что решает color/grayscale
+    у областей):
+
+        1967/11 IMG_0052_2R   обложка, надо слить          33.7
+        1966/03 IMG_0104_2R   обложка 1, контроль          26.4
+        1969/12 IMG_0150_2R   обложка 3, две ч/б фото       4.1
+        1969/11 IMG_0093_2R   две ч/б фотографии            4.8
+        1970/03 IMG_0141_2R   две ч/б фотографии            5.1
+
+    Порог берётся тот же, что у областей (``CHROMA_SPREAD_THR``), — не новая величина.
+
+    Оба условия обязательны, и каждое закрывает свою ошибку. Без проверки площади цветная
+    полоса с одной маленькой картинкой и текстом уехала бы в разметку целиком. Без проверки
+    цвета слиплись бы две ч/б фотографии, разнесённые по полосе.
+    """
+    if page_chroma_spread is None or page_chroma_spread <= chroma_spread_thr:
+        return findings
+
+    covered = (
+        min(f.box[0] for f in findings),
+        min(f.box[1] for f in findings),
+        max(f.box[2] for f in findings),
+        max(f.box[3] for f in findings),
+    )
+    if (covered[2] - covered[0]) * (covered[3] - covered[1]) < full_page_color_frac * width * height:
+        return findings
+
+    fracs = [f.dot_frac for f in findings if f.dot_frac is not None]
+    return [
+        Finding(
+            box=cover_module.cover_region(width, height),
+            source=SOURCE_SCREEN if any(f.source == SOURCE_SCREEN for f in findings) else SOURCE_LINEART,
+            full_page=True,
+            dot_frac=max(fracs) if fracs else None,
+            has_cells=any(f.has_cells for f in findings),
+        )
+    ]
 
 
 def _merge_findings(

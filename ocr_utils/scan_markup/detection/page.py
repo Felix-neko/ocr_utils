@@ -49,11 +49,17 @@ from ocr_utils.scan_markup.detection.color_kind import (
     CHROMA_SPREAD_THR,
     CHROMA_THR,
     COLOR_FRAC_THR,
+    balanced_lab,
     classify,
     paper_color,
 )
 from ocr_utils.scan_markup.detection.dots import ScreenParams, ScreenRegions, params_for_dpi, screen_regions
 from ocr_utils.scan_markup.detection.regions import (
+    FULL_PAGE_COLOR_FRAC,
+    GROW_PAPER_MARGIN,
+    LEADER_EMPTY_ROWS_THR,
+    LEADER_PERIODICITY_THR,
+    LEADER_TONE_SPREAD_THR,
     LINEART_FULL_PAGE_INK_FRAC,
     LINEART_PICTURE_MIN_FRAC,
     SAFETY_MIN_FRAC,
@@ -89,6 +95,11 @@ class PageOptions:
     lineart_p99: int = SURYA_LINEART_P99_PX
     safety_min_frac: float = SAFETY_MIN_FRAC
     lineart_picture_min_frac: float = LINEART_PICTURE_MIN_FRAC
+    full_page_color_frac: float = FULL_PAGE_COLOR_FRAC
+    leader_empty_rows_thr: float = LEADER_EMPTY_ROWS_THR
+    leader_periodicity_thr: float = LEADER_PERIODICITY_THR
+    leader_tone_spread_thr: float = LEADER_TONE_SPREAD_THR
+    grow_paper_margin: int = GROW_PAPER_MARGIN
     # None — взять пересчитанное от DPI полосы (см. dots.params_for_dpi).
     merge_gap: int | None = None
     min_region_side_px: int | None = None
@@ -246,6 +257,15 @@ def finish_page(
         return PageResult(analysis.rel_path, stamp=analysis.stamp, unchanged=True)
 
     work_gray = cv2.cvtColor(analysis.work, cv2.COLOR_BGR2GRAY)
+
+    # Цвет полосы считается ОДИН раз на всю полосу и идёт в два места: по разбросу
+    # хроматичности опознаётся цветная полоса целиком (``regions._fill_colour_page``), а по
+    # цвету бумаги классифицируются найденные области. Перевод копии 1/4 в Lab не бесплатен,
+    # и делать его дважды незачем.
+    paper = paper_color(analysis.work)
+    page_a, page_b = balanced_lab(analysis.work, paper)
+    page_chroma_spread = float(np.hypot(page_a.std(), page_b.std()))
+
     findings = find_raster_boxes(
         analysis.regions,
         analysis.stats,
@@ -262,8 +282,15 @@ def finish_page(
         lineart_ink_frac=options.lineart_ink_frac,
         lineart_p99=options.lineart_p99,
         safety_min_frac=options.safety_min_frac,
+        page_chroma_spread=page_chroma_spread,
+        chroma_spread_thr=options.chroma_spread_thr,
+        full_page_color_frac=options.full_page_color_frac,
+        leader_empty_rows_thr=options.leader_empty_rows_thr,
+        leader_periodicity_thr=options.leader_periodicity_thr,
+        leader_tone_spread_thr=options.leader_tone_spread_thr,
+        grow_paper_margin=options.grow_paper_margin,
     )
-    regions = _classify_regions(analysis, findings, options)
+    regions = _classify_regions(analysis, findings, options, paper)
     return PageResult(analysis.rel_path, analysis.width, analysis.height, analysis.dpi, regions, analysis.stamp)
 
 
@@ -275,7 +302,7 @@ def detect_page(
     return finish_page(analysis, options, surya_boxes_for(analysis, detector))
 
 
-def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions) -> list[DetectedRegion]:
+def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions, paper) -> list[DetectedRegion]:
     """Красит найденные области и решает, какие вообще идут в разметку.
 
     Правила:
@@ -301,9 +328,8 @@ def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions) ->
     if not findings.findings:
         return []
 
-    # Цвет бумаги — по копии 1/4 всей полосы: он один на полосу и не зависит от того, какую
-    # область мы сейчас классифицируем (мотивировка в color_kind.paper_color).
-    paper = paper_color(analysis.work)
+    # ``paper`` посчитан вызывающим по копии 1/4 всей полосы: он один на полосу и не зависит
+    # от того, какую область мы сейчас классифицируем (мотивировка в color_kind.paper_color).
     scale = HALFTONE_DOWNSCALE
     work_h, work_w = analysis.work.shape[:2]
 

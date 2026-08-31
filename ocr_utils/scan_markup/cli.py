@@ -25,7 +25,16 @@ from ocr_utils.scan_markup.detection.color_kind import (
 )
 from ocr_utils.scan_markup.detection.recolor import RecolorParams, run_mark_covers, run_recolor
 from ocr_utils.scan_markup.detection.page import PageOptions
-from ocr_utils.scan_markup.detection.regions import LINEART_PICTURE_MIN_FRAC, SAFETY_MIN_FRAC, SURYA_LINEART_P99_PX
+from ocr_utils.scan_markup.detection.regions import (
+    FULL_PAGE_COLOR_FRAC,
+    GROW_PAPER_MARGIN,
+    LEADER_EMPTY_ROWS_THR,
+    LEADER_PERIODICITY_THR,
+    LEADER_TONE_SPREAD_THR,
+    LINEART_PICTURE_MIN_FRAC,
+    SAFETY_MIN_FRAC,
+    SURYA_LINEART_P99_PX,
+)
 from ocr_utils.scan_markup.detection.run import DetectParams, run_detect
 from ocr_utils.scan_markup.geometry import CVAT_DPI
 from ocr_utils.scan_markup.pen_marks import DEFAULT_WEIGHTS, PEN_CHROMA_THR, fix_pages
@@ -197,6 +206,49 @@ def main() -> None:
     "отличить её от рисунка можно только размером (печати 2.1%, рисунок обложки ~100%).",
 )
 @click.option(
+    "--leader-empty-rows-thr",
+    default=LEADER_EMPTY_ROWS_THR,
+    show_default=True,
+    type=float,
+    help="Доля строк развёртки без единой точки, с которой область подозревается в отточиях.",
+)
+@click.option(
+    "--leader-periodicity-thr",
+    default=LEADER_PERIODICITY_THR,
+    show_default=True,
+    type=float,
+    help="Периодичность строк точек (автокорреляция на сдвигах высоты строки), с которой "
+    "область подозревается в отточиях. Замер: отточия 0.595..0.891, настоящие до 0.511.",
+)
+@click.option(
+    "--leader-tone-spread-thr",
+    default=LEADER_TONE_SPREAD_THR,
+    show_default=True,
+    type=float,
+    help="Размах яркостей (p95-p5) после уменьшения области примерно до 7.5 dpi, НИЖЕ "
+    "которого область подозревается в отточиях. Замер: отточия 9..63, настоящие 101..229. "
+    "Работает В ПАРЕ с двумя порогами выше: область выбрасывается, только если провалила и "
+    "строение, и тон.",
+)
+@click.option(
+    "--grow-paper-margin",
+    default=GROW_PAPER_MARGIN,
+    show_default=True,
+    type=int,
+    help="На сколько уровней ниже бумаги должна быть прилегающая полоска, чтобы страховочная "
+    "рамка росла дальше. Ноль отключает рост.",
+)
+@click.option(
+    "--full-page-color-frac",
+    default=FULL_PAGE_COLOR_FRAC,
+    show_default=True,
+    type=float,
+    help="Доля полосы, которую должен занимать охватывающий прямоугольник всех найденных "
+    "областей, чтобы ЦВЕТНАЯ полоса была помечена одной областью во весь кадр. Второе "
+    "условие — разброс цвета по всей полосе выше --chroma-spread-thr: обложка отличается "
+    "от двух ч/б фотографий не зазором, а тем, что цветная целиком (33.7 против 4.1).",
+)
+@click.option(
     "--safety-min-frac",
     default=SAFETY_MIN_FRAC,
     show_default=True,
@@ -365,6 +417,11 @@ def mark_covers_command(db_path: Path, pack_name: str, log_level: str, **kwargs)
 @click.option("--surya-lineart-p99", "lineart_p99", default=SURYA_LINEART_P99_PX, show_default=True, type=int)
 @click.option("--safety-min-frac", default=SAFETY_MIN_FRAC, show_default=True, type=float)
 @click.option("--lineart-picture-min-frac", default=LINEART_PICTURE_MIN_FRAC, show_default=True, type=float)
+@click.option("--full-page-color-frac", default=FULL_PAGE_COLOR_FRAC, show_default=True, type=float)
+@click.option("--leader-empty-rows-thr", default=LEADER_EMPTY_ROWS_THR, show_default=True, type=float)
+@click.option("--leader-periodicity-thr", default=LEADER_PERIODICITY_THR, show_default=True, type=float)
+@click.option("--leader-tone-spread-thr", default=LEADER_TONE_SPREAD_THR, show_default=True, type=float)
+@click.option("--grow-paper-margin", default=GROW_PAPER_MARGIN, show_default=True, type=int)
 @click.option("--log-level", default="WARNING", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def validate_command(
     pack_dir: Path,

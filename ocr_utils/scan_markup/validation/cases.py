@@ -32,6 +32,7 @@ MERGED = "merged"
 SPLIT = "split"
 BROKEN_SOURCE = "broken_source"
 DOT_LEADERS = "dot_leaders"
+DOT_LEADERS_TABLE = "dot_leaders_table"
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ DEFECTS = (
     Defect(MERGED, "две картинки детектированы как одна большая", "областей должно быть не меньше двух"),
     Defect(SPLIT, "растровая картинка детектирована как несколько маленьких", "область должна быть ровно одна"),
     Defect(DOT_LEADERS, "отточия в оглавлении приняты за растр", "областей быть не должно"),
+    Defect(DOT_LEADERS_TABLE, "отточия в таблице приняты за растр", "областей быть не должно"),
     Defect(
         BROKEN_SOURCE,
         "а тут надо будет просто починить картинку-исходник",

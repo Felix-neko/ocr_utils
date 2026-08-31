@@ -18,23 +18,48 @@ def paper(shape: tuple[int, int]) -> np.ndarray:
     return np.full(shape, PAPER, np.uint8)
 
 
-def screen(shape: tuple[int, int], pitch: int = 8, radius: int = 2) -> np.ndarray:
-    """Растровая сетка: точки на регулярной решётке — так печатается полутон.
+def screen(shape: tuple[int, int], pitch: int = 8, radius: int = 2, seed: int = 0) -> np.ndarray:
+    """Растровая сетка: точки на решётке с дрожанием — так печатается полутон.
 
     ``pitch`` — шаг сетки в пикселях. При 600 dpi настоящая сетка журнала это 5-10 px.
+
+    ДРОЖАНИЕ ОБЯЗАТЕЛЬНО, и это не украшение. Идеальная решётка выстраивает точки в ровные
+    строки по линиям развёртки, и признак «отточия» (``dots.leader_dot_features``) видит в
+    ней ту же периодичность строк, что у колонки точек в оглавлении: замер по идеальной
+    решётке дал пустых строк 0.47 при периодичности 0.87, то есть выше обоих порогов.
+    Настоящая растровая сетка так не выглядит — она повёрнута к развёртке, размыта камерой,
+    и размер точки гуляет с тоном; на 65 настоящих областях периодичность не превысила 0.51.
+    Без дрожания фикстура изображала бы не полутон, а как раз то, что от него отличают.
     """
     image = paper(shape)
+    rng = np.random.default_rng(seed)
     for y in range(pitch, shape[0] - pitch, pitch):
         for x in range(pitch, shape[1] - pitch, pitch):
-            cv2.circle(image, (x, y), radius, INK, -1)
+            dy, dx = rng.integers(-1, 2, 2)
+            cv2.circle(image, (int(x + dx), int(y + dy)), radius, INK, -1)
     return image
 
 
-def with_screen(page: np.ndarray, box: tuple[int, int, int, int], pitch: int = 8, radius: int = 2) -> np.ndarray:
+def with_screen(
+    page: np.ndarray, box: tuple[int, int, int, int], pitch: int = 8, radius: int = 2, seed: int = 0
+) -> np.ndarray:
     """Вклеивает растровое пятно в полосу; ``box`` — ``(x1, y1, x2, y2)``."""
     x1, y1, x2, y2 = box
-    page[y1:y2, x1:x2] = screen((y2 - y1, x2 - x1), pitch, radius)
+    page[y1:y2, x1:x2] = screen((y2 - y1, x2 - x1), pitch, radius, seed)
     return page
+
+
+def dot_leaders(shape: tuple[int, int], line_step: int = 55, dot_step: int = 30, radius: int = 3) -> np.ndarray:
+    """Колонка отточий, как в оглавлении: точки по базовым линиям текста.
+
+    Между строками — бумага; именно этим отточия и отличаются от растровой сетки, которая
+    заполняет площадь сплошь (см. ``dots.leader_dot_features``).
+    """
+    image = paper(shape)
+    for y in range(line_step, shape[0] - line_step, line_step):
+        for x in range(dot_step, shape[1] - dot_step, dot_step):
+            cv2.circle(image, (x, y), radius, INK, -1)
+    return image
 
 
 def line_art(shape: tuple[int, int], step: int = 24, thickness: int = 4) -> np.ndarray:

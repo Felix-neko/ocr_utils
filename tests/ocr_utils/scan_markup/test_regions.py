@@ -27,6 +27,10 @@ def _find(page: np.ndarray, surya_boxes, **kwargs):
     )
 
 
+def _area(box) -> int:
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
 def _page_with_photo(box=(200, 200, 900, 1000)):
     return synthetic.with_screen(synthetic.paper(SIZE), box, pitch=4, radius=1)
 
@@ -211,3 +215,149 @@ def test_small_coloured_line_art_becomes_a_stamp_suspect() -> None:
 
         big = run(path, (100, 100, 1100, 1700))  # больше половины полосы
         assert [r.kind for r in big] == [KIND_COLOR]
+
+
+def _two_patches(page):
+    """Две растровые области, разнесённые по полосе, — как верх и низ обложки.
+
+    Вместе их охватывающий прямоугольник занимает около 79% полосы, то есть проходит порог
+    «полоса занята картинкой целиком» (0.75); зазор между ними 450 px, слиянию по зазору
+    (2 мм) не поддаётся.
+    """
+    synthetic.with_screen(page, (80, 80, 1120, 700), pitch=4, radius=1)
+    synthetic.with_screen(page, (80, 1150, 1120, 1720), pitch=4, radius=1)
+    return page
+
+
+def test_colour_page_becomes_one_full_page_region() -> None:
+    """Цветная полоса, занятая находками почти целиком, — одна область во весь кадр.
+
+    Обложку разрывает то, что само картинкой не является: сплошная плашка заголовка
+    растровых клеток не даёт, и полоса распадается на куски (1967/11 IMG_0052_2R: 4.3% и
+    68.4% при зазоре 588 px). Отличает её от двух ч/б фотографий не зазор, а то, что она
+    цветная ЦЕЛИКОМ — разброс хроматичности по полосе 33.7 против 4.1..5.1.
+    """
+    page = _two_patches(synthetic.paper(SIZE))
+    regions, stats, centroids, work, params = _analyse(page)
+    blocks = [(70, 70, 1130, 710), (70, 1140, 1130, 1730)]
+
+    # Цвет полосы приходит извне: сама сборка областей ни цвета, ни бумаги не знает.
+    grey = find_raster_boxes(
+        regions, stats, centroids, work, page.shape[:2], params, blocks, order_index=1, page_chroma_spread=4.5
+    )
+    colour = find_raster_boxes(
+        regions, stats, centroids, work, page.shape[:2], params, blocks, order_index=1, page_chroma_spread=30.0
+    )
+
+    assert len(grey.findings) == 2, "ч/б полоса обязана остаться с двумя областями"
+    assert len(colour.findings) == 1 and colour.findings[0].full_page
+    assert colour.findings[0].box == (0, 0, SIZE[1], SIZE[0])
+
+
+def test_colour_page_with_one_small_area_is_not_filled() -> None:
+    """Одной маленькой картинки на цветной полосе мало, чтобы залить кадр целиком.
+
+    Без проверки площади цветная полоса с картинкой и текстом уехала бы в разметку вся.
+    """
+    page = synthetic.with_screen(synthetic.paper(SIZE), (150, 150, 700, 600), pitch=4, radius=1)
+    regions, stats, centroids, work, params = _analyse(page)
+    findings = find_raster_boxes(
+        regions,
+        stats,
+        centroids,
+        work,
+        page.shape[:2],
+        params,
+        [(140, 140, 710, 610)],
+        order_index=1,
+        page_chroma_spread=30.0,
+    )
+    assert len(findings.findings) == 1
+    assert not findings.findings[0].full_page
+
+
+def test_safety_net_rejects_dot_leaders() -> None:
+    """Колонка отточий из оглавления страховкой не подхватывается, а растр — подхватывается.
+
+    Отточия дают ровно ту статистику, по которой опознаётся растровая печать: множество
+    мелких круглых пятен. По размеру, плотности и разбросу площади они от фотографии не
+    отличаются — это замерено и перекрывается. Отличается строение: точки стоят по базовым
+    линиям текста, между линиями бумага.
+    """
+    leaders = synthetic.paper(SIZE)
+    leaders[300:1500, 300:800] = synthetic.dot_leaders((1200, 500), line_step=28, dot_step=15, radius=2)
+    screen = _page_with_photo((200, 200, 900, 1000))
+
+    assert not _find(leaders, []).findings
+    assert _find(screen, []).findings
+
+
+def test_leader_features_separate_the_two() -> None:
+    """Тот же случай на уровне признаков — чтобы при сдвиге фикстуры было видно, что поехало.
+
+    Пороги: пустых строк 0.30, периодичность 0.52.
+    """
+    leaders = synthetic.paper(SIZE)
+    leaders[300:1500, 300:800] = synthetic.dot_leaders((1200, 500), line_step=28, dot_step=15, radius=2)
+    screen = _page_with_photo((200, 200, 900, 1000))
+
+    lead = list(_analyse(leaders)[0].leader.values())
+    scr = list(_analyse(screen)[0].leader.values())
+    assert lead and scr
+    assert lead[0][0] >= 0.30 and lead[0][1] >= 0.52, f"отточия должны срабатывать: {lead[0]}"
+    assert scr[0][0] < 0.30, f"растр не должен: {scr[0]}"
+
+
+def test_safety_box_grows_to_the_edge_of_the_picture() -> None:
+    """Страховочная рамка растёт до края картинки и останавливается перед подписью.
+
+    У области без блока Surya объединять не с чем, и граница берётся по растровым клеткам,
+    а они по краям снимка не добирают: светлые участки клеток не дают. Замер на паке-1:
+    1973/12 IMG_0271_1L (640,1408,3200,3072) -> (384,1152,3200,3072).
+    """
+    page = synthetic.paper(SIZE)
+    photo = (200, 300, 1000, 1200)
+    synthetic.with_screen(page, photo, pitch=4, radius=1)
+    # Подпись под фотографией: тонкий текст на белом, средняя яркость почти бумажная.
+    page[1260:1300] = synthetic.text_page((40, SIZE[1]), line_step=40, glyph_w=14, glyph_h=30, char_step=26, margin=200)
+
+    findings = _find(page, [])
+    assert len(findings.findings) == 1
+    x1, y1, x2, y2 = findings.findings[0].box
+
+    # Рост идёт шагом GROW_STEP_PX, поэтому совпадение с краем — с точностью до шага.
+    from ocr_utils.scan_markup.detection.regions import GROW_STEP_PX
+
+    assert x1 <= photo[0] + GROW_STEP_PX and y1 <= photo[1] + GROW_STEP_PX
+    assert x2 >= photo[2] - GROW_STEP_PX and y2 >= photo[3] - GROW_STEP_PX
+    assert y2 < 1260, "рамка не должна дорастать до подписи"
+
+    # И рамка действительно выросла: без роста она заметно уже.
+    ungrown = _find(page, [], grow_paper_margin=255)
+    assert (x2 - x1) * (y2 - y1) > 1.05 * _area(ungrown.findings[0].box)
+
+
+def test_shrink_pulls_the_frame_off_the_paper_but_not_into_the_block() -> None:
+    """Подрезка снимает с рамки бумагу, добавленную округлением до клетки, и только её.
+
+    Край растровой области округляется наружу до целой клетки — при 600 dpi это 128 px,
+    около 5 мм, и в этот ряд попадает подпись под фотографией. Замер на паке-1:
+    1974/03 IMG_0140_1L (368,1560,3200,3456) -> (368,1560,3140,3396), то есть ровно до
+    низа блока Surya. Глубже блока подрезка не идёт никогда: блок — то, что поручила
+    модель, и спорить с ним пикселями значит вернуть срезание светлых краёв фотографии.
+    """
+    from ocr_utils.scan_markup.detection.regions import shrink_to_paper
+
+    photo = (200, 200, 900, 1000)
+    page = _page_with_photo(photo)
+    work = cv2.resize(page, (SIZE[1] // 4, SIZE[0] // 4), interpolation=cv2.INTER_AREA)
+
+    loose = (photo[0] - 128, photo[1] - 128, photo[2] + 128, photo[3] + 128)
+    tight = shrink_to_paper(work, loose, photo)
+    assert _area(tight) < _area(loose), "рамка по бумаге должна подрезаться"
+    assert tight[0] <= photo[0] and tight[1] <= photo[1]
+    assert tight[2] >= photo[2] and tight[3] >= photo[3]
+
+    # Тот же вызов с блоком шире картинки не двигает рамку внутрь блока.
+    block = (100, 100, 1100, 1400)
+    assert shrink_to_paper(work, block, block) == block

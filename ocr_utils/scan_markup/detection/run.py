@@ -38,7 +38,16 @@ from ocr_utils.scan_markup.detection.color_kind import (
     COLOR_FRAC_THR,
 )
 from ocr_utils.scan_markup.detection.overlay import write_debug_overlay
-from ocr_utils.scan_markup.detection.regions import LINEART_PICTURE_MIN_FRAC, SAFETY_MIN_FRAC, SURYA_LINEART_P99_PX
+from ocr_utils.scan_markup.detection.regions import (
+    FULL_PAGE_COLOR_FRAC,
+    GROW_PAPER_MARGIN,
+    LEADER_EMPTY_ROWS_THR,
+    LEADER_PERIODICITY_THR,
+    LEADER_TONE_SPREAD_THR,
+    LINEART_PICTURE_MIN_FRAC,
+    SAFETY_MIN_FRAC,
+    SURYA_LINEART_P99_PX,
+)
 from ocr_utils.scan_markup.detection.page import (
     PageAnalysis,
     PageOptions,
@@ -86,6 +95,11 @@ class DetectParams:
     lineart_p99: int = SURYA_LINEART_P99_PX
     safety_min_frac: float = SAFETY_MIN_FRAC
     lineart_picture_min_frac: float = LINEART_PICTURE_MIN_FRAC
+    full_page_color_frac: float = FULL_PAGE_COLOR_FRAC
+    leader_empty_rows_thr: float = LEADER_EMPTY_ROWS_THR
+    leader_periodicity_thr: float = LEADER_PERIODICITY_THR
+    leader_tone_spread_thr: float = LEADER_TONE_SPREAD_THR
+    grow_paper_margin: int = GROW_PAPER_MARGIN
     debug_dir: Path | None = None
 
     def page_options(self) -> PageOptions:
@@ -106,6 +120,11 @@ class DetectParams:
             lineart_p99=self.lineart_p99,
             safety_min_frac=self.safety_min_frac,
             lineart_picture_min_frac=self.lineart_picture_min_frac,
+            full_page_color_frac=self.full_page_color_frac,
+            leader_empty_rows_thr=self.leader_empty_rows_thr,
+            leader_periodicity_thr=self.leader_periodicity_thr,
+            leader_tone_spread_thr=self.leader_tone_spread_thr,
+            grow_paper_margin=self.grow_paper_margin,
         )
 
     def worker_count(self) -> int:
