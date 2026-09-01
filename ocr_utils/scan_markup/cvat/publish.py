@@ -403,12 +403,14 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 )
                                 return carried + fresh
 
-                            # Выпуски, куда добавились полосы, «завершёнными» больше не
-                            # считаются: разметчик этих кадров не видел.
+                            # «Завершённость» снимается только у выпусков, куда полосы
+                            # ДОБАВИЛИСЬ: этих кадров разметчик не видел вовсе. Замену полосы
+                            # сюда намеренно не включаем — судить, нужно ли смотреть выпуск
+                            # заново, может только человек: он знает, что на полосе.
                             reset_jobs = {
                                 index
                                 for index, issue in enumerate(issues)
-                                for drift_issue, _c, added in drift
+                                for drift_issue, _changed, added in drift
                                 if drift_issue is issue and added
                             }
                             task = rebuild_year_task(
