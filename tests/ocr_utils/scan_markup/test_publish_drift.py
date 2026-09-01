@@ -77,6 +77,10 @@ class _Task:
         self._frames = [_Frame(n) for n in frame_names]
         self._shapes = shapes
         self.uploaded = None
+        self._jobs = []
+
+    def get_jobs(self):
+        return self._jobs
 
     def get_frames_info(self):
         return self._frames
@@ -167,11 +171,15 @@ def test_backup_is_written_before_anything_is_removed(tmp_path):
 
 
 class _Job:
-    def __init__(self, job_id, start_frame):
+    def __init__(self, job_id, start_frame, state="new", stage="annotation"):
         self.id, self.start_frame = job_id, start_frame
+        self.state, self.stage = state, stage
 
     def update(self, spec):
-        pass
+        if getattr(spec, "state", None) is not None:
+            self.state = str(spec.state)
+        if getattr(spec, "stage", None) is not None:
+            self.stage = str(spec.stage)
 
 
 class _FullTask(_Task):
@@ -414,3 +422,69 @@ def test_leftover_temp_task_is_cleaned_up(monkeypatch, pack_db):
 
     publish.run_publish(_params(db, tmp_path), factory)
     assert ("remove", 99) in log
+
+
+def test_moved_page_keeps_its_markup(monkeypatch):
+    """Полоса, переехавшая в другой выпуск, не теряет разметку.
+
+    Имя кадра — это путь внутри share, и у переехавшей полосы оно другое. Сверка по полному
+    пути теряла её разметку молча: на паке-1 при переносе 1971/05 IMG_0053_1L в выпуск 04
+    переехали 82 шейпа из 83, а один пропал.
+    """
+    from ocr_utils.scan_markup.cvat.project import shapes_to_requests
+
+    by_frame = {"пак-1/1971/05/IMG_0053_1L.jpg": [_Shape(0, [1, 2, 3, 4])]}
+    frames = {"пак-1/1971/04/IMG_0053_1L.jpg": 99, "пак-1/1971/05/IMG_0053_2R.jpg": 100}
+
+    requests = shapes_to_requests(by_frame, frames, set())
+
+    assert len(requests) == 1
+    assert requests[0].frame == 99, "разметка должна приехать на кадр по новому пути"
+
+
+def test_ambiguous_move_is_not_guessed(monkeypatch):
+    """Два одинаковых имени файла — переносить некуда, гадать нельзя."""
+    from ocr_utils.scan_markup.cvat.project import shapes_to_requests
+
+    by_frame = {"пак-1/1971/05/a.jpg": [_Shape(0, [1, 2, 3, 4])]}
+    frames = {"пак-1/1971/04/a.jpg": 1, "пак-1/1971/06/a.jpg": 2}
+
+    assert shapes_to_requests(by_frame, frames, set()) == []
+
+
+def test_job_states_survive_recreation():
+    """Состояния джобов переносятся: разметка их не содержит, а работа — содержит."""
+    from ocr_utils.scan_markup.cvat.project import apply_job_states, job_states
+
+    old = _Task(7, "1971", [], [], [])
+    old._jobs = [_Job(1, 0, "completed"), _Job(2, 99, "in progress"), _Job(3, 198, "new")]
+    new = _Task(8, "1971", [], [], [])
+    new._jobs = [_Job(11, 0), _Job(12, 100), _Job(13, 199)]
+
+    assert apply_job_states(new, job_states(old)) == 2
+    assert [job.state for job in new._jobs] == ["completed", "in progress", "new"]
+
+
+def test_job_that_gained_a_page_is_not_completed_anymore():
+    """Выпуск, куда добавилась полоса, «завершённым» не остаётся: её никто не видел."""
+    from ocr_utils.scan_markup.cvat.project import apply_job_states, job_states
+
+    old = _Task(7, "1971", [], [], [])
+    old._jobs = [_Job(1, 0, "completed"), _Job(2, 99, "completed")]
+    new = _Task(8, "1971", [], [], [])
+    new._jobs = [_Job(11, 0), _Job(12, 100)]
+
+    apply_job_states(new, job_states(old), reset={1})
+
+    assert [job.state for job in new._jobs] == ["completed", "in progress"]
+
+
+def test_states_are_not_applied_when_job_count_differs():
+    """Разное число джобов — сопоставлять нечего, лучше ничего не трогать."""
+    from ocr_utils.scan_markup.cvat.project import apply_job_states
+
+    new = _Task(8, "1971", [], [], [])
+    new._jobs = [_Job(11, 0)]
+
+    assert apply_job_states(new, [("completed", "annotation"), ("new", "annotation")]) == 0
+    assert new._jobs[0].state == "new"

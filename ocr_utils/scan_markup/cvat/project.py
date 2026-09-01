@@ -357,8 +357,20 @@ def shapes_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_n
     Геометрию не трогаем вообще. Уменьшенная копия готовится тем же делителем, что и
     раньше, значит кадр в новой задаче попиксельно тот же, и координаты — что углы
     прямоугольников, что RLE масок — остаются верными без единого пересчёта.
+
+    ПОЛОСА, ПЕРЕЕХАВШАЯ В ДРУГОЙ ВЫПУСК, ищется по имени файла. Имя кадра — это путь внутри
+    share, и у переехавшей полосы оно другое: ``пак-1/1971/05/IMG_0053_1L.jpg`` стало
+    ``пак-1/1971/04/IMG_0053_1L.jpg``. Сверка по полному пути такую разметку молча теряла
+    (замер: 82 шейпа из 83 переехали, один пропал). Поэтому для не нашедшихся имён идёт
+    вторая попытка — по basename, и только если он в новой задаче ЕДИНСТВЕННЫЙ: полоса могла
+    и правда исчезнуть, а угадывать, на какой из двух одинаковых кадров лить чужую разметку,
+    нельзя.
     """
     from cvat_sdk import models
+
+    by_basename: dict[str, list[str]] = {}
+    for name in frames:
+        by_basename.setdefault(name.rsplit("/", 1)[-1], []).append(name)
 
     requests = []
     for name, shapes in by_frame.items():
@@ -366,7 +378,11 @@ def shapes_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_n
             continue
         frame = frames.get(name)
         if frame is None:
-            continue
+            candidates = by_basename.get(name.rsplit("/", 1)[-1], [])
+            if len(candidates) != 1:
+                continue
+            frame = frames[candidates[0]]
+            logger.warning("Полоса переехала: разметка с %r перенесена на %r", name, candidates[0])
         for shape in shapes:
             requests.append(
                 models.LabeledShapeRequest(
@@ -385,6 +401,49 @@ def shapes_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_n
                 )
             )
     return requests
+
+
+def job_states(task) -> list[tuple[str, str]]:
+    """``[(state, stage), ...]`` по джобам задачи В ПОРЯДКЕ КАДРОВ."""
+    return [(str(job.state), str(job.stage)) for job in sorted(task.get_jobs(), key=lambda job: job.start_frame)]
+
+
+def apply_job_states(task, states: list[tuple[str, str]], reset: set[int] | None = None) -> int:
+    """Проставляет джобам новой задачи состояния старой; возвращает число изменённых.
+
+    Состояние джоба — это ручная отметка «выпуск размечен», и разметка её не содержит:
+    в выгрузке шейпов её нет, а пересоздание заводит джобы заново, то есть все в ``new``.
+    Замер на паке-1: у года 1971 так потерялись пять ``completed`` и один ``in progress``,
+    и восстанавливать их пришлось из дампа базы CVAT.
+
+    Сопоставление ПОЗИЦИОННОЕ, а не по номерам кадров: пересоздают год как раз тогда, когда
+    состав выпуска изменился, и границы кадров уже другие. Порядок выпусков при этом тот же.
+
+    ``reset`` — позиции джобов, которым «завершён» больше не подходит: в выпуск добавилась
+    полоса, которой разметчик там не видел. Такие получают «в работе».
+    """
+    from cvat_sdk import models
+    from cvat_sdk.api_client.model.operation_status import OperationStatus
+
+    jobs = sorted(task.get_jobs(), key=lambda job: job.start_frame)
+    if len(jobs) != len(states):
+        logger.warning(
+            "Задача %r: джобов %d, сохранённых состояний %d — состояния не восстанавливаю",
+            task.name,
+            len(jobs),
+            len(states),
+        )
+        return 0
+
+    reset = reset or set()
+    changed = 0
+    for index, (job, (state, stage)) in enumerate(zip(jobs, states)):
+        target = "in progress" if index in reset and state == "completed" else state
+        if (str(job.state), str(job.stage)) == (target, stage):
+            continue
+        job.update(models.PatchedJobWriteRequest(state=OperationStatus(target), stage=models.JobStage(stage)))
+        changed += 1
+    return changed
 
 
 def rename_task(task, name: str) -> None:

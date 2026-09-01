@@ -53,6 +53,7 @@ from ocr_utils.scan_markup.cvat.client import CvatSettings, check_share_root, ma
 from ocr_utils.scan_markup.cvat.images import ImageJob, cvat_rel_path, prepare_images
 from ocr_utils.scan_markup.cvat.project import (
     TEMP_SUFFIX,
+    apply_job_states,
     assign_annotator,
     assign_jobs_to_issues,
     create_year_task,
@@ -61,6 +62,7 @@ from ocr_utils.scan_markup.cvat.project import (
     find_task,
     find_year_task,
     frame_index_by_name,
+    job_states,
     project_label_ids,
     raster_shapes,
     rename_task,
@@ -195,7 +197,9 @@ def _drop_stale_temp_task(client, project_id: int, year_name: str) -> None:
         leftover.remove()
 
 
-def rebuild_year_task(client, project_id: int, year_name: str, title: str, old_task, job_files, carry) -> object:
+def rebuild_year_task(
+    client, project_id: int, year_name: str, title: str, old_task, job_files, carry, reset_jobs=None
+) -> object:
     """Пересоздаёт задачу-год, перенося в неё разметку с неизменившихся кадров.
 
     ``carry`` — функция ``(frames) -> список шейпов``: она получает нумерацию кадров НОВОЙ
@@ -204,14 +208,24 @@ def rebuild_year_task(client, project_id: int, year_name: str, title: str, old_t
 
     Порядок принципиален: новая задача создаётся и наполняется ДО удаления старой. Сбой на
     любом шаге оставляет старую задачу целой, и прогон можно просто повторить.
+
+    ``reset_jobs`` — позиции джобов, которым «завершён» больше не подходит: в выпуск
+    добавилась полоса, которой разметчик там не видел.
     """
     temp_name = year_name + TEMP_SUFFIX
+    states = job_states(old_task)
     new_task = create_year_task(client, project_id, temp_name, job_files)
     frames = frame_index_by_name(new_task)
 
     shapes = carry(frames)
     uploaded = upload_preannotations(new_task, shapes)
     logger.info("Новая задача %r (id=%s): залито шейпов %d", year_name, new_task.id, uploaded)
+
+    # Состояния джобов не входят в разметку и при пересоздании обнулились бы: год, размеченный
+    # наполовину, выглядел бы нетронутым.
+    restored = apply_job_states(new_task, states, reset_jobs)
+    if restored:
+        logger.info("Новая задача %r: восстановлено состояний джобов %d", year_name, restored)
 
     old_id = old_task.id
     old_task.remove()
@@ -389,7 +403,17 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 )
                                 return carried + fresh
 
-                            task = rebuild_year_task(client, project.id, year.name, title, task, job_files, carry)
+                            # Выпуски, куда добавились полосы, «завершёнными» больше не
+                            # считаются: разметчик этих кадров не видел.
+                            reset_jobs = {
+                                index
+                                for index, issue in enumerate(issues)
+                                for drift_issue, _c, added in drift
+                                if drift_issue is issue and added
+                            }
+                            task = rebuild_year_task(
+                                client, project.id, year.name, title, task, job_files, carry, reset_jobs
+                            )
                             stats.tasks_rebuilt += 1
                             rebuilt = True
                             upload = False  # разметка уже залита при пересоздании
