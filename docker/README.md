@@ -29,11 +29,21 @@
 разметчик войдёт и не увидит ничего — ни ошибки, ни объяснения, просто пустой список.
 
 Если удобнее ходить по годам и выпускам, а не по плоскому списку джобов, роль повышается до
-`supervisor` — тогда видны и задачи:
+**`maintainer`** — и только до неё. Проверено на живом сервере 2.70.0: `worker` и
+`supervisor` видят ровно то, что назначено лично (`projects: 0, tasks: 0`), и разница между
+ними не в видимости, а в праве заводить задачи. Список задач открывается лишь на
+`maintainer`:
+
+| роль | projects | tasks | jobs |
+|---|---|---|---|
+| worker | 0 | 0 | 123 (назначенные) |
+| supervisor | 0 | 0 | 123 |
+| maintainer | 1 | 11 | 123 |
 
 ```bash
+# id членства — из /api/memberships?org=masochists
 curl -s -u admin:admin -X PATCH "http://localhost:8080/api/memberships/<id>" \
-     -H 'Content-Type: application/json' -d '{"role": "supervisor"}'
+     -H 'Content-Type: application/json' -d '{"role": "maintainer"}'
 ```
 
 ## Размечаем уменьшённые копии, а не оригиналы
