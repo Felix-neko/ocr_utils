@@ -705,7 +705,7 @@ def from_cvat_command(
     click.echo(
         f"Полос: {stats.pages}. Растровых областей: {stats.regions} "
         f"(цветных {stats.color}, серых {stats.grayscale}, во всю полосу {stats.full_page}). "
-        f"Масок печатей: {stats.masks}.\n"
+        f"Масок под удаление: {stats.masks}, точек экслибриса: {stats.points}.\n"
         f"Шейпов с чужими метками: {stats.unknown_labels}, кадров без полосы: {stats.unmatched_frames}."
     )
 

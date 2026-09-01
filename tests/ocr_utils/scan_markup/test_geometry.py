@@ -11,6 +11,7 @@ from ocr_utils.scan_markup.geometry import (
     cvat_size,
     divisor_for_dpi,
     mask_to_original,
+    point_to_original,
     rect_to_original,
     to_cvat_rect,
 )
@@ -95,3 +96,26 @@ def test_mask_of_wrong_size_is_rejected() -> None:
     """Маска не от того кадра — ошибка, а не молча съехавшая разметка."""
     with pytest.raises(ValueError):
         mask_to_original(np.zeros((100, 100), bool), D, W, H)
+
+
+def test_point_is_plain_scaling() -> None:
+    """Точка просто умножается на делитель."""
+    assert point_to_original(120, 300, D, W, H) == (120 * D, 300 * D)
+
+
+def test_point_at_frame_edge_stays_inside_original() -> None:
+    """Точка у края кадра НЕ дотягивается до края оригинала, но и за него не уходит.
+
+    Рамку и маску мы распространяем в обрезанную полоску: у них есть граница, и упёршаяся
+    в край кадра граница означает «объект продолжается». У точки границы нет — она сама
+    себе положение, и сдвигать её на 4 пикселя вправо значило бы указать не то место.
+    """
+    x, y = point_to_original(CVAT_W - 1, CVAT_H - 1, D, W, H)
+    assert (x, y) == ((CVAT_W - 1) * D, (CVAT_H - 1) * D)
+    assert x < CROP_W and y < CROP_H
+
+
+def test_point_outside_frame_is_clamped() -> None:
+    """Координата за кадром обрезается по оригиналу, а не даёт индекс за массивом."""
+    assert point_to_original(10**6, 10**6, D, W, H) == (W - 1, H - 1)
+    assert point_to_original(-5, -5, D, W, H) == (0, 0)

@@ -11,20 +11,30 @@ from cvat_sdk.masks import encode_mask
 
 from ocr_utils.scan_markup.cvat.export import ExportParams, ExportStats, import_task
 from ocr_utils.scan_markup.cvat.project import (
+    LABEL_EXLIBRIS,
+    LABEL_HANDWRITING,
     LABEL_RASTER_COLOR,
     LABEL_RASTER_GRAY,
     LABEL_STAMP,
     frame_index_by_name,
     raster_shapes,
 )
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_CVAT, Page, RasterRegion
+from ocr_utils.scan_markup.db.models import (
+    KIND_COLOR,
+    KIND_GRAYSCALE,
+    MASK_HANDWRITING,
+    POINT_EXLIBRIS,
+    SOURCE_CVAT,
+    Page,
+    RasterRegion,
+)
 from ocr_utils.scan_markup.db.repo import upsert_pack
 from ocr_utils.scan_markup.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
 
 W, H, D = 3492, 6051, 8
 CVAT_W, CVAT_H = 436, 756
-LABEL_IDS = {LABEL_RASTER_COLOR: 11, LABEL_RASTER_GRAY: 12, LABEL_STAMP: 13}
+LABEL_IDS = {LABEL_RASTER_COLOR: 11, LABEL_RASTER_GRAY: 12, LABEL_STAMP: 13, LABEL_HANDWRITING: 14, LABEL_EXLIBRIS: 15}
 LABEL_NAMES = {value: key for key, value in LABEL_IDS.items()}
 
 
@@ -214,3 +224,44 @@ def test_foreign_labels_are_counted_not_imported(page_and_session) -> None:
     task = _Task([page.cvat_rel_path], [_Shape("polygon", 0, 99, [1, 2, 3, 4])])
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
     assert stats.unknown_labels == 1 and page.raster_regions == []
+
+
+def test_import_stores_handwriting_with_its_own_kind(page_and_session) -> None:
+    """Второй вид маски отличается от печати только значением ``kind``, таблица одна."""
+    page, session = page_and_session
+    drawn = np.zeros((CVAT_H, CVAT_W), bool)
+    drawn[10:30, 40:90] = True
+    task = _Task([page.cvat_rel_path], [_Shape("mask", 0, LABEL_IDS[LABEL_HANDWRITING], encode_mask(drawn))])
+
+    stats = ExportStats()
+    import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
+
+    assert stats.masks == 1
+    assert page.masks[0].kind == MASK_HANDWRITING
+
+
+def test_import_stores_exlibris_point(page_and_session) -> None:
+    """Точка экслибриса едет в свою таблицу и пересчитывается в координаты оригинала."""
+    page, session = page_and_session
+    task = _Task([page.cvat_rel_path], [_Shape("points", 0, LABEL_IDS[LABEL_EXLIBRIS], [120.0, 300.0])])
+
+    stats = ExportStats()
+    import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
+
+    assert stats.points == 1 and stats.regions == 0 and stats.masks == 0
+    point = page.points[0]
+    assert (point.x, point.y) == (120 * D, 300 * D)
+    assert point.kind == POINT_EXLIBRIS
+    assert point.source == SOURCE_CVAT and point.source_divisor == D
+
+
+def test_import_replaces_points_too(page_and_session) -> None:
+    """Точки — такой же снимок состояния, как области и маски: снятое исчезает."""
+    page, session = page_and_session
+    params = ExportParams(None, None, "пак-1")
+    first = _Task([page.cvat_rel_path], [_Shape("points", 0, LABEL_IDS[LABEL_EXLIBRIS], [10.0, 20.0])])
+    import_task(first, LABEL_NAMES, {0: page}, session, params, ExportStats())
+    assert len(page.points) == 1
+
+    import_task(_Task([page.cvat_rel_path], []), LABEL_NAMES, {0: page}, session, params, ExportStats())
+    assert page.points == []

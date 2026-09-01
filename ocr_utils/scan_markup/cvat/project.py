@@ -29,7 +29,15 @@ import logging
 
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT, MASK_LIBRARY_STAMP
+from ocr_utils.scan_markup.db.models import (
+    KIND_COLOR,
+    KIND_GRAYSCALE,
+    KIND_STAMP_SUSPECT,
+    MASK_HANDWRITING,
+    MASK_LIBRARY_STAMP,
+    MASK_OTHER_REMOVAL,
+    POINT_EXLIBRIS,
+)
 from ocr_utils.scan_markup.geometry import to_cvat_rect
 
 logger = logging.getLogger(__name__)
@@ -49,11 +57,28 @@ LABEL_STAMP = "Библиотечная печать"
 # это оказался не оттиск.
 LABEL_STAMP_SUSPECT = "Подозрение на печать"
 
+# Прочее, что разметчик убирает с полосы кистью. Три отдельные метки, а не одна с атрибутом:
+# закрашивать их будет LaMa, и по видам их разносят не ради статистики, а потому что у них
+# разная цена ошибки. Печать стоит на пустом поле, и лишний захват безобиден; рукописная
+# надпись лежит поверх текста, и лишний захват сожрёт строку.
+LABEL_HANDWRITING = "Рукописная надпись"
+LABEL_OTHER_REMOVAL = "Прочее под удаление"
+# Точка, а не прямоугольник: разметчик указывает МЕСТО вставки своего экслибриса, а размер
+# знака задаётся при вклейке, не здесь.
+LABEL_EXLIBRIS = "Экслибрис"
+
+# Цвета разнесены по кругу и все насыщенные: сканы жёлто-бежевые, и бледное на них теряется.
+# Занятые тона — зелёный 150°, голубой 200°, пурпур 290°, оранжевый 25°, жёлтый 55°,
+# красный 350°; точке достался единственный свободный участок, сине-фиолетовый 250°. Белый
+# для точки не годится: на бумаге его не видно вовсе.
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
     {"name": LABEL_RASTER_GRAY, "type": "rectangle", "color": "#00B0FF"},  # голубой
-    {"name": LABEL_STAMP, "type": "mask", "color": "#D500F9"},  # пурпурный
     {"name": LABEL_STAMP_SUSPECT, "type": "rectangle", "color": "#FF6D00"},  # оранжевый
+    {"name": LABEL_STAMP, "type": "mask", "color": "#D500F9"},  # пурпурный
+    {"name": LABEL_HANDWRITING, "type": "mask", "color": "#FFEA00"},  # жёлтый
+    {"name": LABEL_OTHER_REMOVAL, "type": "mask", "color": "#FF1744"},  # красный
+    {"name": LABEL_EXLIBRIS, "type": "points", "color": "#651FFF"},  # сине-фиолетовый
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
@@ -67,7 +92,12 @@ KIND_BY_LABEL = {
     LABEL_RASTER_GRAY: KIND_GRAYSCALE,
     LABEL_STAMP_SUSPECT: KIND_STAMP_SUSPECT,
 }
-MASK_KIND_BY_LABEL = {LABEL_STAMP: MASK_LIBRARY_STAMP}
+MASK_KIND_BY_LABEL = {
+    LABEL_STAMP: MASK_LIBRARY_STAMP,
+    LABEL_HANDWRITING: MASK_HANDWRITING,
+    LABEL_OTHER_REMOVAL: MASK_OTHER_REMOVAL,
+}
+POINT_KIND_BY_LABEL = {LABEL_EXLIBRIS: POINT_EXLIBRIS}
 
 # Качество JPEG, которым CVAT пережимает кадры уже у себя. Картинки и так уменьшены и
 # сохранены с quality=95, так что это второе пережатие — единственное заметное.
@@ -79,12 +109,18 @@ def ensure_project(client, name: str) -> object:
 
     Идемпотентность по ИМЕНИ: повторный прогон не должен
     заводить второй проект с той же разметкой.
+
+    У найденного проекта метки ДОСЫЛАЮТСЯ: новый класс разметки, появившийся в ``LABELS``
+    позже, иначе не попал бы в него никогда — а пересоздавать проект ради метки нельзя, в
+    нём уже лежит работа разметчика. Досылаются только недостающие ПО ИМЕНИ; существующие не
+    трогаются вовсе, потому что смена типа или цвета метки обесценила бы нарисованное под ней.
     """
     from cvat_sdk import models
 
     for project in client.projects.list():
         if project.name == name:
             logger.info("Проект %r уже есть (id=%s), переиспользую", name, project.id)
+            add_missing_labels(client, project.id)
             return project
 
     project = client.projects.create(
@@ -92,6 +128,32 @@ def ensure_project(client, name: str) -> object:
     )
     logger.info("Проект %r создан (id=%s)", name, project.id)
     return project
+
+
+def add_missing_labels(client, project_id: int) -> list[str]:
+    """Заводит в проекте метки из ``LABELS``, которых там ещё нет. Возвращает их имена.
+
+    Метка заводится ПАТЧЕМ ПРОЕКТА, а не через ``labels_api``: там есть только ``list``,
+    ``retrieve``, ``partial_update`` и ``destroy``, создания нет вовсе. Сервер сливает
+    присланный список с имеющимся — запись без ``id`` создаётся как новая, поэтому шлём
+    только недостающие и ничего не теряем.
+    """
+    from cvat_sdk import models
+
+    present = set(project_label_ids(client, project_id))
+    missing = [label for label in LABELS if label["name"] not in present]
+    if not missing:
+        return []
+
+    client.api_client.projects_api.partial_update(
+        id=project_id,
+        patched_project_write_request=models.PatchedProjectWriteRequest(
+            labels=[models.PatchedLabelRequest(**label) for label in missing]
+        ),
+    )
+    names = [label["name"] for label in missing]
+    logger.warning("В проект id=%s дописаны метки: %s", project_id, ", ".join(names))
+    return names
 
 
 def project_label_ids(client, project_id: int) -> dict[str, int]:

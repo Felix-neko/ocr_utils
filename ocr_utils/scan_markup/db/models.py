@@ -42,10 +42,18 @@ RASTER_KINDS = (KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT)
 # в PDF. ``KIND_STAMP_SUSPECT`` сюда не входит намеренно.
 PICTURE_KINDS = (KIND_COLOR, KIND_GRAYSCALE)
 
-# Значения колонки ``kind`` у маски. Пока заводится только печать, но метка «Рукописная
-# надпись» в проекте CVAT уже есть (``cvat/project.py``), и когда её начнут размечать, хватит
-# нового значения вместо новой таблицы с той же структурой.
+# Значения колонки ``kind`` у маски. Всё это — объекты ПОД УДАЛЕНИЕ: разметчик обводит их
+# кистью, а закрашивает потом LaMa. Разные виды разнесены значениями одной колонки, а не
+# отдельными таблицами: структура у них одна и та же (RLE плюс охватывающий прямоугольник),
+# и добавление вида не стоит ни новой таблицы, ни миграции.
 MASK_LIBRARY_STAMP = "library_stamp"
+MASK_HANDWRITING = "handwriting"
+MASK_OTHER_REMOVAL = "other_removal"
+
+MASK_KINDS = (MASK_LIBRARY_STAMP, MASK_HANDWRITING, MASK_OTHER_REMOVAL)
+
+# Значения колонки ``kind`` у точки. Точка — это не объект, а МЕСТО: куда вставить экслибрис.
+POINT_EXLIBRIS = "exlibris"
 
 # Значения колонок ``source``: чем поставлена разметка.
 SOURCE_AUTO = "auto"
@@ -184,6 +192,7 @@ class Page(Base):
     issue: Mapped[Issue] = relationship(back_populates="pages")
     raster_regions: Mapped[list["RasterRegion"]] = relationship(back_populates="page", cascade="all, delete-orphan")
     masks: Mapped[list["MaskAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")
+    points: Mapped[list["PointAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")
 
 
 class RasterRegion(Base):
@@ -284,3 +293,32 @@ class MaskAnnotation(Base):
     cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)
 
     page: Mapped[Page] = relationship(back_populates="masks")
+
+
+class PointAnnotation(Base):
+    """Точка на полосе, координаты — ОРИГИНАЛА. Пока единственный вид — место экслибриса.
+
+    Отдельная таблица, а не вырожденный прямоугольник в ``raster_regions`` и не маска из
+    одного пикселя: точка отвечает на другой вопрос. Прямоугольник и маска говорят «вот
+    объект, вот его границы», а точка — «вот МЕСТО, куда положить свой знак». Границ у неё
+    нет вовсе, и хранить их нулями значило бы врать потребителю.
+
+    ``source_divisor`` — как и у маски, зернистость: точка ставилась на копии 1/divisor,
+    поэтому её положение известно с точностью до divisor пикселей оригинала (6-8).
+    """
+
+    __tablename__ = "point_annotations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), index=True)
+
+    kind: Mapped[str] = mapped_column(String(32), default=POINT_EXLIBRIS)
+
+    x: Mapped[int] = mapped_column(Integer)
+    y: Mapped[int] = mapped_column(Integer)
+
+    source_divisor: Mapped[int | None] = mapped_column(Integer, default=None)
+    source: Mapped[str] = mapped_column(String(16), default=SOURCE_CVAT)
+    cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    page: Mapped[Page] = relationship(back_populates="points")

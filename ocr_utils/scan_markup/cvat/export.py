@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from ocr_utils.scan_markup.cvat.client import CvatSettings, make_cvat_client
-from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, MASK_KIND_BY_LABEL
+from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, MASK_KIND_BY_LABEL, POINT_KIND_BY_LABEL
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
     KIND_GRAYSCALE,
@@ -31,12 +31,13 @@ from ocr_utils.scan_markup.db.models import (
     MaskAnnotation,
     Pack,
     Page,
+    PointAnnotation,
     RasterRegion,
     YearPackage,
 )
 from ocr_utils.scan_markup.db.repo import get_pack, require_pack
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC
-from ocr_utils.scan_markup.geometry import mask_to_original, rect_to_original
+from ocr_utils.scan_markup.geometry import mask_to_original, point_to_original, rect_to_original
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class ExportStats:
     grayscale: int = 0
     full_page: int = 0
     masks: int = 0
+    points: int = 0
     unknown_labels: int = 0
     unmatched_frames: int = 0
 
@@ -189,6 +191,24 @@ def shape_to_mask(shape, page: Page) -> MaskAnnotation | None:
     )
 
 
+def shape_to_point(shape, page: Page) -> PointAnnotation:
+    """Точечный шейп CVAT -> строка ``point_annotations`` в координатах оригинала.
+
+    У шейпа типа ``points`` в ``points`` лежат пары координат; берём первую. Разметчик может
+    поставить несколько точек одним объектом, но метка «Экслибрис» означает одно место, и
+    трактовать вторую точку было бы гаданием.
+    """
+    x, y = point_to_original(shape.points[0], shape.points[1], page.divisor, page.width, page.height)
+    return PointAnnotation(
+        kind=POINT_KIND_BY_LABEL.get(shape._label_name, shape._label_name),
+        x=x,
+        y=y,
+        source_divisor=page.divisor,
+        source=SOURCE_CVAT,
+        cvat_shape_id=getattr(shape, "id", None),
+    )
+
+
 def mask_from_row(row: MaskAnnotation, width: int, height: int) -> np.ndarray:
     """Обратное чтение маски из базы — bool-массив во весь кадр оригинала.
 
@@ -232,6 +252,7 @@ def import_task(
     for frame, page in pages_by_frame.items():
         regions: list[RasterRegion] = []
         masks: list[MaskAnnotation] = []
+        points: list[PointAnnotation] = []
 
         for shape in shapes_by_frame.get(frame, []):
             name = label_names.get(shape.label_id)
@@ -250,6 +271,9 @@ def import_task(
                 if mask is not None:
                     masks.append(mask)
                     stats.masks += 1
+            elif shape_type == "points" and name in POINT_KIND_BY_LABEL:
+                points.append(shape_to_point(shape, page))
+                stats.points += 1
             else:
                 stats.unknown_labels += 1
                 logger.debug("Пропускаю шейп типа %r с меткой %r", shape_type, name)
@@ -258,6 +282,7 @@ def import_task(
         # остаются согласованы с тем, что увидит следующий обход этой же сессии.
         page.raster_regions = regions
         page.masks = masks
+        page.points = points
         page.reviewed_at = _utcnow()
         stats.pages += 1
 

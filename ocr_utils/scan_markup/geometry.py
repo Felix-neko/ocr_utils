@@ -83,6 +83,19 @@ def rect_to_original(
     return ox1, oy1, expand_right_bottom(ox2, crop_w, width), expand_right_bottom(oy2, crop_h, height)
 
 
+def point_to_original(x: float, y: float, divisor: int, width: int, height: int) -> tuple[int, int]:
+    """Точка кадра CVAT -> координаты оригинала.
+
+    Распространения в обрезанную полосу (:func:`expand_right_bottom`) здесь нет намеренно:
+    оно нужно тем разметкам, у которых есть ГРАНИЦА, упирающаяся в край кадра, — рамке и
+    маске. Точка границы не имеет, она сама себе положение, и дотягивать её до края
+    оригинала значило бы сдвинуть указанное разметчиком место.
+    """
+    return min(max(int(round(x * divisor)), 0), max(width - 1, 0)), min(
+        max(int(round(y * divisor)), 0), max(height - 1, 0)
+    )
+
+
 def mask_to_original(mask: np.ndarray, divisor: int, width: int, height: int) -> np.ndarray:
     """Маска кадра CVAT -> маска оригинала: апскейл nearest и распространение в обрезанную полосу.
 
