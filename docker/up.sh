@@ -72,6 +72,7 @@ docker exec -i \
   -e ADMIN_PASS="$(env_get ADMIN_PASS)" \
   -e ANN_USER="$(env_get ANN_USER)" \
   -e ANN_PASS="$(env_get ANN_PASS)" \
+  -e ANN_ROLE="$(env_get ANN_ROLE)" \
   -e ORG_SLUG="$(env_get ORG_SLUG)" \
   -e ORG_NAME="$(env_get ORG_NAME)" \
   "$SERVER_CONTAINER" python3 /home/django/manage.py shell < create_users.py
@@ -80,7 +81,7 @@ echo
 echo "================================================================"
 echo " CVAT готов:  http://${CVAT_HOST}:${CVAT_PORT}"
 echo "   admin / admin  — создание проектов/задач, панель /admin"
-echo "   user  / user   — разметка (роль worker в орг «Клуб мазохистов»)"
+echo "   user  / user   — разметка (роль из ANN_ROLE в орг «Клуб мазохистов»)"
 echo " Задачи заводятся отдельно:  uv run python -m ocr_utils.scan_markup to-cvat ..."
 echo " Разметка: войти как user -> выбрать организацию вверху -> вкладка JOBS."
 echo "   Именно Jobs, а не Tasks: роль worker показывает только НАЗНАЧЕННОЕ лично,"
