@@ -34,8 +34,25 @@ services:
     container_name: cvat_mts_server
     environment:
       CVAT_ANALYTICS: 0
+      # Модуль настроек с доверенными origin'ами для раздачи через туннель — см. сам файл.
+      # В образе DJANGO_SETTINGS_MODULE зашит на этапе сборки, поэтому переопределяем прямо
+      # переменной, а не через CVAT_CONFIGURATION.
+      DJANGO_SETTINGS_MODULE: cvat.settings.tunnel
+      # Свой домен туннеля добавляется сюда; список целиком заменяет умолчание из файла.
+      # CVAT_CSRF_TRUSTED_ORIGINS: https://*.ru.tuna.am,http://localhost:8081
     volumes:
       - *share
+      - type: bind
+        # Путь начинается с ../ не по ошибке: docker compose разрешает относительные пути
+        # от --project-directory, а он у нас cvat-src (см. up.sh), а не папка этого файла.
+        source: ../cvat_settings_tunnel.py
+        target: /home/django/cvat/settings/tunnel.py
+        read_only: true
+    labels:
+      # Маршрут БЕЗ привязки к имени хоста — см. пояснение у cvat_ui ниже.
+      traefik.http.routers.cvat.rule: >-
+        PathPrefix(`/api/`) || PathPrefix(`/static/`) || PathPrefix(`/admin`)
+        || PathPrefix(`/django-rq`)
 
   cvat_worker_utils:
     container_name: cvat_mts_worker_utils
@@ -75,6 +92,24 @@ services:
 
   cvat_ui:
     container_name: cvat_mts_ui
+    labels:
+      # ЛЮБОЕ имя хоста, а не только localhost.
+      #
+      # В апстриме оба маршрута начинаются с Host(`${CVAT_HOST}`), то есть traefik пускает
+      # внутрь только запросы с этим именем. Запрос через туннель (Tuna, ngrok и подобные)
+      # приходит с чужим Host, не совпадает ни с одним правилом, и traefik отвечает
+      # «404 page not found» — при живом и здоровом CVAT за ним. Диагностируется одной
+      # строкой: curl -H 'Host: чужое-имя' http://localhost:8081/ даёт 404, а с
+      # Host: localhost — 200.
+      #
+      # Django здесь ни при чём: ALLOWED_HOSTS в апстрим-compose уже '*'.
+      #
+      # Приоритет маршрутов traefik определяет по длине правила, поэтому PathPrefix(`/`)
+      # у интерфейса не перехватывает /api/ — правило сервера длиннее и выигрывает.
+      #
+      # Плата за это — CVAT становится доступен по любому имени, каким его ни позвали. При
+      # раздаче наружу это и требуется, но тогда всё, что защищает данные, — пароли из .env.
+      traefik.http.routers.cvat-ui.rule: PathPrefix(`/`)
 
   cvat_opa:
     container_name: cvat_mts_opa
@@ -86,6 +121,18 @@ services:
     container_name: cvat_mts_traefik
     environment:
       TRAEFIK_PROVIDERS_DOCKER_NETWORK: cvat_mts_cvat
+      # Доверять заголовкам X-Forwarded-* от того, кто стоит впереди (туннель Tuna, ngrok).
+      #
+      # Без этого traefik их ПЕРЕЗАПИСЫВАЕТ по своей точке входа, то есть ставит
+      # X-Forwarded-Proto: http. Django с USE_X_FORWARDED_HOST и SECURE_PROXY_SSL_HEADER
+      # тогда считает, что запрос пришёл по http, а браузер прислал Origin: https://... —
+      # и проверка CSRF валится с «Origin checking failed ... does not match any trusted
+      # origins». Именно это видно в интерфейсе как «Could not send logs to the server».
+      #
+      # insecure означает «верить заголовкам от кого угодно»: порт 8081 слушает весь мир,
+      # и подделать X-Forwarded-Proto может любой. Для локального стенда, который раздают
+      # через туннель, это осознанный размен — иначе туннель не работает вовсе.
+      TRAEFIK_ENTRYPOINTS_WEB_FORWARDEDHEADERS_INSECURE: "true"
     # !override — заменяем список портов целиком (иначе compose дописал бы
     # к базовым 8080/8090 ещё и наш маппинг). Дашборд-порт 8090 не нужен.
     ports: !override
