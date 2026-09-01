@@ -157,3 +157,17 @@ def test_add_missing_columns_is_idempotent(tmp_path):
     db = tmp_path / "markup.sqlite"
     open_db(db)
     assert add_missing_columns(create_engine(f"sqlite:///{db}")) == []
+
+
+def test_colour_text_is_a_picture_kind_and_is_colour() -> None:
+    """Цветной набор вырезается как картинка и сохраняется В ЦВЕТЕ.
+
+    Тест сторожит контракт для потребителей: ``PICTURE_KINDS`` решает, вырезать ли область
+    вовсе, а ``COLOR_PICTURE_KINDS`` — сохранять ли её цветной. Потребитель, написавший
+    «цвет, если kind == color, иначе серый», обесцветил бы цветной текст молча.
+    """
+    from ocr_utils.scan_markup.db.models import COLOR_PICTURE_KINDS, KIND_COLOR_TEXT, PICTURE_KINDS
+
+    assert KIND_COLOR_TEXT in PICTURE_KINDS
+    assert KIND_COLOR_TEXT in COLOR_PICTURE_KINDS
+    assert set(COLOR_PICTURE_KINDS) <= set(PICTURE_KINDS)

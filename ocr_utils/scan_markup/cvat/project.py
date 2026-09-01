@@ -31,6 +31,7 @@ from tqdm import tqdm
 
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
+    KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
     KIND_STAMP_SUSPECT,
     MASK_HANDWRITING,
@@ -67,10 +68,19 @@ LABEL_OTHER_REMOVAL = "Прочее под удаление"
 # знака задаётся при вклейке, не здесь.
 LABEL_EXLIBRIS = "Экслибрис"
 
+# Цветной типографский набор: заголовок, поздравление, анонс — не растр и не рисунок.
+# Прямоугольник, потому что это область страницы, а не объект со сложным контуром.
+LABEL_COLOR_TEXT = "Цветной текст или штрих"
+
 # Цвета разнесены по кругу и все насыщенные: сканы жёлто-бежевые, и бледное на них теряется.
 # Занятые тона — зелёный 150°, голубой 200°, пурпур 290°, оранжевый 25°, жёлтый 55°,
 # красный 350°; точке достался единственный свободный участок, сине-фиолетовый 250°. Белый
 # для точки не годится: на бумаге его не видно вовсе.
+#
+# Круг к седьмой метке кончился, и «Цветной текст» взял тёмно-розовый 335° — соседний с
+# красным. Путаницы не будет: различать надо ПРЯМОУГОЛЬНИКИ между собой, а их всего четыре
+# (зелёный, голубой, оранжевый, тёмно-розовый), маски же рисуются заливкой и с рамкой не
+# сливаются.
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
     {"name": LABEL_RASTER_GRAY, "type": "rectangle", "color": "#00B0FF"},  # голубой
@@ -79,6 +89,7 @@ LABELS = [
     {"name": LABEL_HANDWRITING, "type": "mask", "color": "#FFEA00"},  # жёлтый
     {"name": LABEL_OTHER_REMOVAL, "type": "mask", "color": "#FF1744"},  # красный
     {"name": LABEL_EXLIBRIS, "type": "points", "color": "#651FFF"},  # сине-фиолетовый
+    {"name": LABEL_COLOR_TEXT, "type": "rectangle", "color": "#C51162"},  # тёмно-розовый
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
@@ -86,11 +97,13 @@ LABEL_BY_KIND = {
     KIND_COLOR: LABEL_RASTER_COLOR,
     KIND_GRAYSCALE: LABEL_RASTER_GRAY,
     KIND_STAMP_SUSPECT: LABEL_STAMP_SUSPECT,
+    KIND_COLOR_TEXT: LABEL_COLOR_TEXT,
 }
 KIND_BY_LABEL = {
     LABEL_RASTER_COLOR: KIND_COLOR,
     LABEL_RASTER_GRAY: KIND_GRAYSCALE,
     LABEL_STAMP_SUSPECT: KIND_STAMP_SUSPECT,
+    LABEL_COLOR_TEXT: KIND_COLOR_TEXT,
 }
 MASK_KIND_BY_LABEL = {
     LABEL_STAMP: MASK_LIBRARY_STAMP,

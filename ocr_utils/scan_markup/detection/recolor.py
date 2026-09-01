@@ -27,7 +27,7 @@ from tqdm import tqdm
 from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
-    PICTURE_KINDS,
+    KIND_GRAYSCALE,
     SOURCE_AUTO,
     Issue,
     Page,
@@ -130,12 +130,15 @@ def run_recolor(params: RecolorParams, session_factory) -> RecolorStats:
         jobs: list[_Job] = []
         regions_by_page: dict[int, list[RasterRegion]] = {}
         for page in _pages_with_regions(session, pack.id):
-            # Только иллюстрации: у ``stamp_suspect`` тип означает не цвет, а происхождение
-            # (мелкий цветной штрих), и перекраска превратила бы печать в цветную картинку.
+            # Ровно два вида, и они перечислены прямо здесь, а не взяты из ``PICTURE_KINDS``:
+            # перекраска умеет решать только «цветная или серая», и всё, что означает не цвет,
+            # она бы испортила. У ``stamp_suspect`` вид означает происхождение (мелкий цветной
+            # штрих) — перекраска превратила бы печать в картинку. У ``color_text`` — решение
+            # разметчика, и перезаписывать его измерением тем более нельзя.
             regions = [
                 region
                 for region in page.raster_regions
-                if region.source == SOURCE_AUTO and region.kind in PICTURE_KINDS
+                if region.source == SOURCE_AUTO and region.kind in (KIND_COLOR, KIND_GRAYSCALE)
             ]
             if not regions:
                 continue

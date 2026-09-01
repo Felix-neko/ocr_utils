@@ -11,6 +11,7 @@ from cvat_sdk.masks import encode_mask
 
 from ocr_utils.scan_markup.cvat.export import ExportParams, ExportStats, import_task
 from ocr_utils.scan_markup.cvat.project import (
+    LABEL_COLOR_TEXT,
     LABEL_EXLIBRIS,
     LABEL_HANDWRITING,
     LABEL_RASTER_COLOR,
@@ -21,6 +22,7 @@ from ocr_utils.scan_markup.cvat.project import (
 )
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
+    KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
     MASK_HANDWRITING,
     POINT_EXLIBRIS,
@@ -34,7 +36,14 @@ from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYe
 
 W, H, D = 3492, 6051, 8
 CVAT_W, CVAT_H = 436, 756
-LABEL_IDS = {LABEL_RASTER_COLOR: 11, LABEL_RASTER_GRAY: 12, LABEL_STAMP: 13, LABEL_HANDWRITING: 14, LABEL_EXLIBRIS: 15}
+LABEL_IDS = {
+    LABEL_RASTER_COLOR: 11,
+    LABEL_RASTER_GRAY: 12,
+    LABEL_STAMP: 13,
+    LABEL_HANDWRITING: 14,
+    LABEL_EXLIBRIS: 15,
+    LABEL_COLOR_TEXT: 16,
+}
 LABEL_NAMES = {value: key for key, value in LABEL_IDS.items()}
 
 
@@ -265,3 +274,17 @@ def test_import_replaces_points_too(page_and_session) -> None:
 
     import_task(_Task([page.cvat_rel_path], []), LABEL_NAMES, {0: page}, session, params, ExportStats())
     assert page.points == []
+
+
+def test_import_stores_colour_text_region(page_and_session) -> None:
+    """Область цветного набора — обычный прямоугольник со своим ``kind``."""
+    page, session = page_and_session
+    task = _Task([page.cvat_rel_path], [_Shape("rectangle", 0, LABEL_IDS[LABEL_COLOR_TEXT], [10, 20, 110, 220])])
+
+    stats = ExportStats()
+    import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
+
+    assert stats.regions == 1 and stats.color == 0 and stats.grayscale == 0
+    region = page.raster_regions[0]
+    assert region.kind == KIND_COLOR_TEXT
+    assert (region.x1, region.y1) == (10 * D, 20 * D)
