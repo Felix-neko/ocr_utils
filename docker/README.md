@@ -42,7 +42,7 @@
 
 ```bash
 # id членства — из /api/memberships?org=masochists
-curl -s -u admin:admin -X PATCH "http://localhost:8080/api/memberships/<id>" \
+curl -s -u admin:admin -X PATCH "http://localhost:8081/api/memberships/<id>" \
      -H 'Content-Type: application/json' -d '{"role": "maintainer"}'
 ```
 
@@ -104,7 +104,7 @@ cd docker
 
 ## Где размечать
 
-1. Открыть **http://localhost:8080**.
+1. Открыть **http://localhost:8081**.
 2. Войти как **user / user**.
 3. Вверху переключиться на организацию **«Клуб мазохистов»**.
 4. Вкладка **Tasks** → своя задача (назначена автоматически) → **Job**.
@@ -114,7 +114,7 @@ cd docker
      результат сохраняется как битовая маска.
 
 Администрирование (создание проектов/задач, панель Django) — под **admin / admin**,
-в т.ч. `http://localhost:8080/admin`.
+в т.ч. `http://localhost:8081/admin`.
 
 ## Разбиение на задачи
 

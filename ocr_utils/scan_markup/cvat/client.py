@@ -56,7 +56,9 @@ class CvatSettings:
             return option or os.environ.get(env_key) or env.get(env_key) or default
 
         host = env.get("CVAT_HOST", "localhost")
-        port = env.get("CVAT_PORT", "8080")
+        # Запасное значение повторяет docker/.env, а не общепринятый для CVAT 8080: этот
+        # порт оставлен под airflow, и промахнуться в него молча хуже, чем не подключиться.
+        port = env.get("CVAT_PORT", "8081")
         # Схема указывается ЯВНО: без неё cvat-sdk идёт по https и спотыкается об SSL,
         # потому что сервер слушает обычный http.
         self.url = url or os.environ.get("CVAT_URL") or f"http://{host}:{port}"
