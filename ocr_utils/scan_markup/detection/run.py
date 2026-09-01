@@ -48,6 +48,7 @@ from ocr_utils.scan_markup.detection.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
     LEADER_EMPTY_ROWS_THR,
+    LINEART_MAX_DOT_FRAC,
     LEADER_PERIODICITY_THR,
     LEADER_TONE_SPREAD_THR,
     LINEART_PICTURE_MIN_FRAC,
@@ -110,6 +111,7 @@ class DetectParams:
     lineart_entropy: float = LINEART_ENTROPY_THR
     lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR
     stamp_ink_contrast: float = STAMP_INK_CONTRAST_THR
+    lineart_max_dot_frac: float = LINEART_MAX_DOT_FRAC
     debug_dir: Path | None = None
 
     def page_options(self) -> PageOptions:
@@ -139,6 +141,7 @@ class DetectParams:
             lineart_entropy=self.lineart_entropy,
             lineart_screen_peak=self.lineart_screen_peak,
             stamp_ink_contrast=self.stamp_ink_contrast,
+            lineart_max_dot_frac=self.lineart_max_dot_frac,
         )
 
     def worker_count(self) -> int:

@@ -69,6 +69,7 @@ from ocr_utils.scan_markup.detection.regions import (
     LEADER_PERIODICITY_THR,
     LEADER_TONE_SPREAD_THR,
     LINEART_FULL_PAGE_INK_FRAC,
+    LINEART_MAX_DOT_FRAC,
     LINEART_PICTURE_MIN_FRAC,
     SAFETY_MIN_FRAC,
     SOURCE_LINEART,
@@ -112,6 +113,7 @@ class PageOptions:
     lineart_entropy: float = LINEART_ENTROPY_THR
     lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR
     stamp_ink_contrast: float = STAMP_INK_CONTRAST_THR
+    lineart_max_dot_frac: float = LINEART_MAX_DOT_FRAC
     # None — взять пересчитанное от DPI полосы (см. dots.params_for_dpi).
     merge_gap: int | None = None
     min_region_side_px: int | None = None
@@ -311,6 +313,7 @@ def finish_page(
         lineart_mid_frac=options.lineart_mid_frac,
         lineart_entropy=options.lineart_entropy,
         lineart_screen_peak=options.lineart_screen_peak,
+        lineart_max_dot_frac=options.lineart_max_dot_frac,
     )
     regions = _classify_regions(analysis, findings, options, paper)
     return PageResult(analysis.rel_path, analysis.width, analysis.height, analysis.dpi, regions, analysis.stamp)

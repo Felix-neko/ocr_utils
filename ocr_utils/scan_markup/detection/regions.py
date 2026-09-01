@@ -185,6 +185,15 @@ GROW_PAPER_PERCENTILE = 97.0
 GROW_MAX_STEPS = 60
 
 # Откуда взялась область — от этого зависит, как её помечать (см. ``page._classify_regions``).
+# Доля растровых клеток в рамке, ВЫШЕ которой область штрихом не признаётся никогда.
+# Фотография заполняет свой прямоугольник растром сплошь, у рисунка между штрихами бумага:
+# замер по паку-1 дал у штриха 0.60..0.85, а у портретов 1975/01 IMG_0048_1L — 0.98..1.00 при
+# том, что по тонам и по спектру они от штриха неотличимы (средние 0.18..0.22 против 0.23 у
+# штриха, энтропия 6.2..6.5 против 6.37). Отдельным признаком доля клеток не работает — она
+# стоила бы 40 настоящих областей из 402, — но как ОГРАНИЧЕНИЕ поверх связки не отнимает ни
+# одной находки: у всего пойманного штриха она ниже порога.
+LINEART_MAX_DOT_FRAC = 0.90
+
 SOURCE_SCREEN = "screen"  # растровая печать: клетки нашлись либо пятна мелкие
 SOURCE_LINEART = "lineart"  # штриховой рисунок: цветной идёт в разметку, чёрный — нет
 
@@ -251,6 +260,7 @@ def find_raster_boxes(
     lineart_mid_frac: float = LINEART_MID_FRAC_THR,
     lineart_entropy: float = LINEART_ENTROPY_THR,
     lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR,
+    lineart_max_dot_frac: float = LINEART_MAX_DOT_FRAC,
 ) -> RasterFindings:
     """Растровые области полосы. Все координаты — в пикселях ОРИГИНАЛА.
 
@@ -320,7 +330,9 @@ def find_raster_boxes(
     findings = _merge_findings(findings, merge_gap, width, height, min_region_frac, min_side)
     # Растр это или штрих, решается ПОСЛЕ слияния: признаки объёмные, и мерить их надо по
     # окончательному прямоугольнику, а не по половинке картинки.
-    findings = _mark_line_art(findings, tone, lineart_mid_frac, lineart_entropy, lineart_screen_peak)
+    findings = _mark_line_art(
+        findings, tone, lineart_mid_frac, lineart_entropy, lineart_screen_peak, lineart_max_dot_frac
+    )
     if findings:
         return RasterFindings(
             _fill_colour_page(findings, width, height, page_chroma_spread, chroma_spread_thr, full_page_color_frac)
@@ -338,7 +350,12 @@ def find_raster_boxes(
 
 
 def _mark_line_art(
-    findings: list[Finding], tone: ToneMaps | None, mid_frac_thr: float, entropy_thr: float, screen_peak_thr: float
+    findings: list[Finding],
+    tone: ToneMaps | None,
+    mid_frac_thr: float,
+    entropy_thr: float,
+    screen_peak_thr: float,
+    max_dot_frac: float,
 ) -> list[Finding]:
     """Переводит находки, похожие на штрих, из ``SOURCE_SCREEN`` в ``SOURCE_LINEART``.
 
@@ -357,6 +374,10 @@ def _mark_line_art(
         finding.tone_entropy = stats.entropy
         finding.screen_peak = stats.screen_peak
         finding.ink_contrast = stats.ink_contrast
+        # Рамка, заполненная растровыми клетками сплошь, штрихом не бывает — см.
+        # ``LINEART_MAX_DOT_FRAC``.
+        if finding.dot_frac is not None and finding.dot_frac >= max_dot_frac:
+            continue
         if looks_like_line_art(stats, mid_frac_thr, entropy_thr, screen_peak_thr):
             finding.source = SOURCE_LINEART
     return findings

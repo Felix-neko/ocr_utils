@@ -6,7 +6,12 @@ import pytest
 
 from ocr_utils.scan_markup.detection.dots import params_for_dpi, screen_regions
 from ocr_utils.scan_markup.detection.tone import tone_maps
-from ocr_utils.scan_markup.detection.regions import SOURCE_LINEART, SOURCE_SCREEN, find_raster_boxes
+from ocr_utils.scan_markup.detection.regions import (
+    LINEART_MAX_DOT_FRAC,
+    SOURCE_LINEART,
+    SOURCE_SCREEN,
+    find_raster_boxes,
+)
 from tests.ocr_utils.scan_markup import synthetic
 
 SIZE = (1800, 1200)  # полоса 300 dpi
@@ -365,25 +370,6 @@ def test_shrink_pulls_the_frame_off_the_paper_but_not_into_the_block() -> None:
     assert shrink_to_paper(work, block, block) == block
 
 
-def test_block_with_cells_over_line_art_is_still_line_art() -> None:
-    """Блок Surya с растровыми клетками под ним больше не считается растром автоматически.
-
-    Так и терялись штриховые рисунки: плотная штриховка распадается на такие же мелкие пятна,
-    что и растровая сетка, клетки под рисунком находятся исправно, и ветка «клетки есть —
-    значит растр» помечала чертёж картинкой. Теперь окончательную рамку проверяет
-    ``detection.tone``: у штриха нет ни средних тонов, ни периодики (замер по паку-1 —
-    1969/04 IMG_0024_1L и соседние).
-    """
-    page = synthetic.paper(SIZE)
-    box = (200, 200, 900, 1000)
-    page[box[1] : box[3], box[0] : box[2]] = synthetic.line_art((box[3] - box[1], box[2] - box[0]), step=10)
-    block = (180, 180, 920, 1020)
-
-    findings = _find(page, [block])
-    assert len(findings.findings) == 1
-    assert findings.findings[0].source == SOURCE_LINEART
-
-
 def test_tone_features_are_recorded_even_when_the_rule_is_silent() -> None:
     """Признаки пишутся у каждой находки: по ним пороги крутятся без чтения оригиналов."""
     findings = _find(_page_with_photo(), [(180, 180, 920, 1020)])
@@ -391,3 +377,27 @@ def test_tone_features_are_recorded_even_when_the_rule_is_silent() -> None:
     assert finding.source == SOURCE_SCREEN
     assert finding.mid_frac is not None and finding.tone_entropy is not None
     assert finding.screen_peak is not None
+
+
+def test_full_of_screen_cells_is_never_line_art() -> None:
+    """Рамка, заполненная растровыми клетками сплошь, штрихом не признаётся никогда.
+
+    Замер на паке-1: три портрета 1975/01 IMG_0048_1L по тонам и по спектру от штриха
+    неотличимы (средние тона 0.18..0.22 при 0.23 у штриха, энтропия 6.2..6.5 при 6.37), и
+    связка ``tone`` уводила их в «подозрение на печать». Отличает их доля растровых клеток:
+    у фотографий 0.98..1.00, у штриха 0.60..0.85 — фотография заполняет свой прямоугольник
+    растром сплошь, а между штрихами рисунка лежит бумага.
+
+    Фикстура здесь намеренно НЕРЕАЛИСТИЧНА: растр без размытия двухцветен, и связка ``tone``
+    честно принимает его за штрих (средние тона 0.000, энтропия 0.83). Это и нужно — так
+    проверяется, что ограничение по доле клеток срабатывает поверх сработавшего правила.
+    """
+    page = synthetic.paper(SIZE)
+    box = (200, 200, 900, 1000)
+    synthetic.with_screen(page, box, pitch=4, radius=1, blur=0.0)
+    block = (180, 180, 920, 1020)
+
+    loose = _find(page, [block], lineart_max_dot_frac=1.01).findings[0]
+    assert loose.source == SOURCE_LINEART, "по тонам резкая решётка и должна выглядеть штрихом"
+    assert loose.dot_frac is not None and loose.dot_frac > LINEART_MAX_DOT_FRAC
+    assert _find(page, [block]).findings[0].source == SOURCE_SCREEN

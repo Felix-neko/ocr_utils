@@ -35,6 +35,7 @@ from ocr_utils.scan_markup.detection.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
     LEADER_EMPTY_ROWS_THR,
+    LINEART_MAX_DOT_FRAC,
     LEADER_PERIODICITY_THR,
     LEADER_TONE_SPREAD_THR,
     LINEART_PICTURE_MIN_FRAC,
@@ -262,6 +263,15 @@ def main() -> None:
     "порогами выше: штрихом область признаётся, только если провалила все три сразу.",
 )
 @click.option(
+    "--lineart-max-dot-frac",
+    default=LINEART_MAX_DOT_FRAC,
+    show_default=True,
+    type=float,
+    help="Доля растровых клеток в рамке, ВЫШЕ которой область штрихом не признаётся никогда: "
+    "фотография заполняет прямоугольник растром сплошь. Замер: штрих 0.60..0.85, портреты "
+    "1975/01 IMG_0048_1L — 0.98..1.00.",
+)
+@click.option(
     "--stamp-ink-contrast",
     default=STAMP_INK_CONTRAST_THR,
     show_default=True,
@@ -464,6 +474,7 @@ def mark_covers_command(db_path: Path, pack_name: str, log_level: str, **kwargs)
 @click.option("--lineart-entropy", default=LINEART_ENTROPY_THR, show_default=True, type=float)
 @click.option("--lineart-screen-peak", default=LINEART_SCREEN_PEAK_THR, show_default=True, type=float)
 @click.option("--stamp-ink-contrast", default=STAMP_INK_CONTRAST_THR, show_default=True, type=float)
+@click.option("--lineart-max-dot-frac", default=LINEART_MAX_DOT_FRAC, show_default=True, type=float)
 @click.option("--grow-paper-margin", default=GROW_PAPER_MARGIN, show_default=True, type=int)
 @click.option("--log-level", default="WARNING", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def validate_command(
