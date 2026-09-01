@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from ocr_utils.scan_markup.cvat import shapes
 from ocr_utils.scan_markup.cvat.client import CvatSettings
 from ocr_utils.scan_markup.cvat.export import ExportParams, run_export
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
@@ -668,6 +669,64 @@ def to_cvat_command(db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org,
             f"(изменившихся полос {stats.pages_changed}, не залитых {stats.pages_unpublished})."
             + ("" if stats.tasks_rebuilt else " Пересоздать их: --recreate-stale.")
         )
+
+
+@main.command("count-shapes")
+@click.option("--db", "db_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--pack-name", required=True, help="Имя пака в базе.")
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Куда записать снимок. Снимается ПЕРЕД операцией, которая пересоздаёт задачи.",
+)
+@click.option(
+    "--compare",
+    "compare_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Сверить нынешнее состояние с этим снимком. Код возврата 2 — где-то стало меньше.",
+)
+@click.argument("years", nargs=-1)
+@_cvat_options
+@click.option("--log-level", default="WARNING", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def count_shapes_command(
+    db_path: Path,
+    pack_name: str,
+    out_path: Path | None,
+    compare_path: Path | None,
+    years: tuple[str, ...],
+    cvat_url,
+    cvat_user,
+    cvat_password,
+    cvat_org,
+    log_level: str,
+) -> None:
+    """Пересчитать шейпы в задачах CVAT: снимок до пересоздания и сверка после.
+
+    Без ``YEARS`` берёт все годы пака. Сверка ПОКАДРОВАЯ: пересоздание задачи переносит
+    разметку сопоставлением кадров по именам, и потеря одного шейпа в итоговой сумме не видна.
+    """
+    _set_log_level(log_level)
+    settings = CvatSettings(cvat_url, cvat_user, cvat_password, cvat_org)
+    with open_db(db_path)() as session:
+        current = shapes.snapshot(session, pack_name, list(years), settings)
+
+    if out_path is not None:
+        shapes.write_snapshot(current, out_path)
+        click.echo(
+            f"Снимок: {out_path} (годов {len(current)}, шейпов {sum(sum(v.values()) for v in current.values())})"
+        )
+
+    if compare_path is not None:
+        lines, lost = shapes.report(shapes.read_snapshot(compare_path), current)
+        click.echo("\n".join(lines))
+        if lost:
+            raise SystemExit(shapes.EXIT_LOST)
+    elif out_path is None:
+        for year, frames in sorted(current.items()):
+            click.echo(f"{year}: шейпов {sum(frames.values())} на {len(frames)} кадрах")
 
 
 @main.command("from-cvat")
