@@ -107,3 +107,66 @@ def test_new_project_is_created_with_all_labels() -> None:
 
     assert project.id == 99
     assert len(client.projects.created[0].labels) == len(LABELS)
+
+
+class _NamedTask:
+    def __init__(self, task_id: int, name: str, project_id: int = 1) -> None:
+        self.id, self.name, self.project_id = task_id, name, project_id
+
+
+class _TaskList:
+    def __init__(self, tasks) -> None:
+        self._tasks = tasks
+
+    def list(self):
+        return self._tasks
+
+
+class _TaskClient:
+    def __init__(self, tasks) -> None:
+        self.tasks = _TaskList(tasks)
+
+
+def test_year_task_name_puts_the_year_first() -> None:
+    """Имя начинается с года: по нему же идёт сортировка списка задач."""
+    from ocr_utils.scan_markup.cvat.project import year_task_name
+
+    assert year_task_name("1966", 6, 582) == "1966 · выпусков 6 · полос 582"
+
+
+def test_year_task_is_found_by_id_when_the_name_changed() -> None:
+    """Переименованная задача находится по id из базы, а не заводится заново.
+
+    Имя несёт число выпусков и полос, а они меняются при обновлении пака; переименовать
+    задачу может и разметчик. Поиск по одному имени превратил бы это в тихий дубль.
+    """
+    from ocr_utils.scan_markup.cvat.project import find_year_task
+
+    client = _TaskClient([_NamedTask(7, "как я его назвал руками")])
+
+    assert find_year_task(client, 1, "1974", task_id=7).id == 7
+    assert find_year_task(client, 1, "1974") is None, "по имени такую уже не найти — на то и id"
+
+
+def test_year_task_falls_back_to_the_name() -> None:
+    """Без id в базе годится и голый год, и имя со счётчиками."""
+    from ocr_utils.scan_markup.cvat.project import find_year_task
+
+    assert find_year_task(_TaskClient([_NamedTask(7, "1974")]), 1, "1974").id == 7
+    assert find_year_task(_TaskClient([_NamedTask(8, "1974 · выпусков 2 · полос 4")]), 1, "1974").id == 8
+
+
+def test_temp_task_is_never_taken_for_the_real_one() -> None:
+    """Недоделанный двойник от прерванного пересоздания тоже начинается с года."""
+    from ocr_utils.scan_markup.cvat.project import TEMP_SUFFIX, find_year_task
+
+    client = _TaskClient([_NamedTask(9, f"1974{TEMP_SUFFIX}")])
+    assert find_year_task(client, 1, "1974") is None
+
+
+def test_tasks_of_other_projects_are_ignored() -> None:
+    """Годы разных паков называются одинаково — проект обязан участвовать в отборе."""
+    from ocr_utils.scan_markup.cvat.project import find_year_task
+
+    client = _TaskClient([_NamedTask(7, "1974", project_id=2)])
+    assert find_year_task(client, 1, "1974") is None

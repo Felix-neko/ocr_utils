@@ -175,10 +175,49 @@ def project_label_ids(client, project_id: int) -> dict[str, int]:
     return {label.name: label.id for label in labels.results}
 
 
+# Имя, под которым живёт задача, пока пересоздание не доведено до конца. Задача с таким
+# суффиксом — заведомо недоделанная: её создали, а старую ещё не удалили.
+TEMP_SUFFIX = " (пересоздание)"
+
+
+def year_task_name(year_name: str, issues: int, pages: int) -> str:
+    """Имя задачи-года: ``1966 · выпусков 6 · полос 582``.
+
+    Существительное перед числом не случайно: так не приходится согласовывать окончание
+    («582 полосы», но «1189 полос»), а сортировка по имени остаётся сортировкой по году.
+    """
+    return f"{year_name} · выпусков {issues} · полос {pages}"
+
+
 def find_task(client, project_id: int, name: str):
-    """Задача проекта по имени или ``None``."""
+    """Задача проекта по ТОЧНОМУ имени или ``None``."""
     for task in client.tasks.list():
         if task.project_id == project_id and task.name == name:
+            return task
+    return None
+
+
+def find_year_task(client, project_id: int, year_name: str, task_id: int | None = None):
+    """Задача года: сперва по id из базы, и только потом по имени.
+
+    По id — потому что имя задачи не вечно. В него входят число выпусков и полос, а они
+    меняются при обновлении пака; и разметчик вправе переименовать задачу руками. Поиск
+    только по имени превращал бы любое такое изменение в ТИХИЙ ДУБЛЬ: прежняя задача не
+    нашлась бы, рядом выросла бы вторая с теми же кадрами, и разметка осталась бы в первой.
+
+    Запасной поиск по имени нужен для задач, заведённых до появления id в базе: годится и
+    голое ``1966``, и любое имя, начинающееся с года. Недоделанный двойник от прерванного
+    пересоздания при этом исключается явно — он тоже начинается с года.
+    """
+    tasks = [task for task in client.tasks.list() if task.project_id == project_id]
+    if task_id is not None:
+        for task in tasks:
+            if task.id == task_id:
+                return task
+    for task in tasks:
+        if task.name.endswith(TEMP_SUFFIX):
+            continue
+        if task.name == year_name or task.name.startswith(f"{year_name} "):
             return task
     return None
 

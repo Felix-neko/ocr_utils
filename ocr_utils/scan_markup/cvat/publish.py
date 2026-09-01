@@ -52,29 +52,27 @@ from sqlalchemy.orm import Session
 from ocr_utils.scan_markup.cvat.client import CvatSettings, check_share_root, make_cvat_client, share_prefix
 from ocr_utils.scan_markup.cvat.images import ImageJob, cvat_rel_path, prepare_images
 from ocr_utils.scan_markup.cvat.project import (
+    TEMP_SUFFIX,
     assign_annotator,
     assign_jobs_to_issues,
     create_year_task,
     ensure_project,
     fetch_shapes_by_frame,
     find_task,
+    find_year_task,
     frame_index_by_name,
     project_label_ids,
     raster_shapes,
     rename_task,
     shapes_to_requests,
     upload_preannotations,
+    year_task_name,
 )
 from ocr_utils.scan_markup.db.repo import require_pack
 from ocr_utils.scan_markup.geometry import CVAT_DPI, crop_size, cvat_size, divisor_for_dpi
 from ocr_utils.scan_markup.hashing import is_stale_in_cvat
 
 logger = logging.getLogger(__name__)
-
-# Имя, под которым живёт задача, пока пересоздание не доведено до конца. Задача с таким
-# именем — заведомо недоделанная: её создали, а старую ещё не удалили. Следующий прогон
-# такую находит и сносит, иначе прерванное пересоздание оставит в проекте двойника.
-TEMP_SUFFIX = " (пересоздание)"
 
 
 @dataclass
@@ -197,7 +195,7 @@ def _drop_stale_temp_task(client, project_id: int, year_name: str) -> None:
         leftover.remove()
 
 
-def rebuild_year_task(client, project_id: int, year_name: str, old_task, job_files, carry) -> object:
+def rebuild_year_task(client, project_id: int, year_name: str, title: str, old_task, job_files, carry) -> object:
     """Пересоздаёт задачу-год, перенося в неё разметку с неизменившихся кадров.
 
     ``carry`` — функция ``(frames) -> список шейпов``: она получает нумерацию кадров НОВОЙ
@@ -217,7 +215,7 @@ def rebuild_year_task(client, project_id: int, year_name: str, old_task, job_fil
 
     old_id = old_task.id
     old_task.remove()
-    rename_task(new_task, year_name)
+    rename_task(new_task, title)
     logger.warning("Задача %r пересоздана: id %s -> %s", year_name, old_id, new_task.id)
     return new_task
 
@@ -348,15 +346,20 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                     continue
 
                 _drop_stale_temp_task(client, project.id, year.name)
-                task = find_task(client, project.id, year.name)
+                title = year_task_name(year.name, len(job_files), len(pages))
+                task = find_year_task(client, project.id, year.name, year.cvat_task_id)
                 rebuilt = False
 
                 if task is None:
-                    task = create_year_task(client, project.id, year.name, job_files)
+                    task = create_year_task(client, project.id, title, job_files)
                     stats.tasks_created += 1
                     upload = True
                 else:
                     stats.tasks_existing += 1
+                    if task.name != title:
+                        # Имя несёт число выпусков и полос, а они меняются при обновлении
+                        # пака. Найдена задача по id, так что переименование безопасно.
+                        rename_task(task, title)
                     upload = params.force_annotations
                     drift = year_drift(issues)
                     if drift:
@@ -386,7 +389,7 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 )
                                 return carried + fresh
 
-                            task = rebuild_year_task(client, project.id, year.name, task, job_files, carry)
+                            task = rebuild_year_task(client, project.id, year.name, title, task, job_files, carry)
                             stats.tasks_rebuilt += 1
                             rebuilt = True
                             upload = False  # разметка уже залита при пересоздании

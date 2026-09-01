@@ -135,14 +135,20 @@ def test_rebuild_deletes_old_task_only_after_new_one_is_filled(monkeypatch, tmp_
         client=None,
         project_id=1,
         year_name="1974",
+        title="1974 · выпусков 1 · полос 1",
         old_task=old,
         job_files=[["пак-1/1974/01/a.tif"]],
         carry=lambda frames: [models.LabeledShapeRequest(type="rectangle", frame=0, label_id=11, points=[1, 2, 3, 4])],
     )
 
     assert result is new
-    assert log == [("create", "1974 (пересоздание)"), ("upload", 8, 1), ("remove", 7), ("rename", 8, "1974")]
-    assert new.name == "1974"
+    assert log == [
+        ("create", "1974 (пересоздание)"),
+        ("upload", 8, 1),
+        ("remove", 7),
+        ("rename", 8, "1974 · выпусков 1 · полос 1"),
+    ]
+    assert new.name == "1974 · выпусков 1 · полос 1"
 
 
 def test_backup_is_written_before_anything_is_removed(tmp_path):
@@ -179,6 +185,15 @@ class _FullTask(_Task):
         return self._jobs
 
 
+def _year_task(tasks_by_name, year_name: str):
+    """Задача года среди поддельных: имя теперь несёт ещё и счётчики выпусков и полос."""
+    return next(
+        task
+        for name, task in tasks_by_name.items()
+        if not name.endswith(publish.TEMP_SUFFIX) and (name == year_name or name.startswith(f"{year_name} "))
+    )
+
+
 def _fake_cvat(monkeypatch, tasks_by_name, log):
     """Подменяет всё, что ходит по сети, оставляя настоящей логику publish."""
     import contextlib
@@ -200,6 +215,21 @@ def _fake_cvat(monkeypatch, tasks_by_name, log):
     monkeypatch.setattr(publish, "prepare_images", lambda jobs, root, workers, force: [])
     monkeypatch.setattr(publish, "assign_annotator", lambda client, task, name: None)
     monkeypatch.setattr(publish, "find_task", lambda client, pid, name: tasks_by_name.get(name))
+
+    def fake_find_year(client, pid, year_name, task_id=None):
+        """Тот же отбор, что в project.find_year_task: по id, иначе по началу имени."""
+        if task_id is not None:
+            for task in tasks_by_name.values():
+                if task.id == task_id:
+                    return task
+        for name, task in tasks_by_name.items():
+            if name.endswith(publish.TEMP_SUFFIX):
+                continue
+            if name == year_name or name.startswith(f"{year_name} "):
+                return task
+        return None
+
+    monkeypatch.setattr(publish, "find_year_task", fake_find_year)
 
     def fake_create(client, project_id, name, job_files):
         log.append(("create", name))
@@ -343,7 +373,7 @@ def test_recreate_stale_keeps_markup_of_untouched_pages(monkeypatch, pack_db):
     publish.run_publish(_params(db, tmp_path), factory)
 
     # Разметчик обвёл по объекту на каждом кадре.
-    task = tasks["1974"]
+    task = _year_task(tasks, "1974")
     task._shapes = [_Shape(index, [1, 2, 3, 4]) for index in range(4)]
     changed_name = task.get_frames_info()[2].name  # первая полоса второго выпуска
 
@@ -370,7 +400,7 @@ def test_recreate_stale_keeps_markup_of_untouched_pages(monkeypatch, pack_db):
         pages = [p for y in pack.year_packages for i in y.issues for p in i.pages]
         assert all(p.cvat_file_hash == p.file_hash for p in pages), "после пересоздания расхождений быть не должно"
         # Год теперь указывает на НОВУЮ задачу, а не на удалённую.
-        new_task = next(t for t in tasks.values() if t.name == "1974" and t.id != 7)
+        new_task = next(t for t in tasks.values() if t.name.startswith("1974 ") and t.id != 7)
         assert pack.year_packages[0].cvat_task_id == new_task.id
 
 
