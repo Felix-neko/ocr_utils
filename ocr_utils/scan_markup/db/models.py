@@ -202,8 +202,16 @@ class RasterRegion(Base):
       только затем, чтобы старое решение можно было сравнить с новым, не перечитывая пак.
 
     ``dot_frac`` — доля «точечных» связных компонент краски внутри области (см.
-    ``detection.dots``). По ней отличается полутоновая печать от штрихового рисунка, и по
-    ней же пороги детектора перекалибровываются без чтения оригиналов.
+    ``detection.dots``).
+
+    ``mid_frac``, ``tone_entropy``, ``screen_peak`` — признаки «растр или штрих» из
+    ``detection.tone``: доля средних тонов, энтропия гистограммы и выступ пика растровой
+    сетки в спектре. Решение принимает их КОНЪЮНКЦИЯ, по отдельности ни один не разделяет.
+    Пишутся всегда, даже когда правило не сработало: по ним пороги детектора
+    перекалибровываются без чтения оригиналов.
+
+    ``ink_contrast`` — «бумага минус краска» внутри области. В решении растр/штрих не
+    участвует: по нему бледный оттиск библиотечной печати отличается от чёрной виньетки.
     """
 
     __tablename__ = "raster_regions"
@@ -222,6 +230,10 @@ class RasterRegion(Base):
     chroma_spread: Mapped[float | None] = mapped_column(Float, default=None)
     chroma_self_frac: Mapped[float | None] = mapped_column(Float, default=None)
     dot_frac: Mapped[float | None] = mapped_column(Float, default=None)
+    mid_frac: Mapped[float | None] = mapped_column(Float, default=None)
+    tone_entropy: Mapped[float | None] = mapped_column(Float, default=None)
+    screen_peak: Mapped[float | None] = mapped_column(Float, default=None)
+    ink_contrast: Mapped[float | None] = mapped_column(Float, default=None)
 
     source: Mapped[str] = mapped_column(String(16), default=SOURCE_AUTO)
     cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)

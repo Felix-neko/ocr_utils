@@ -54,6 +54,14 @@ from ocr_utils.scan_markup.detection.color_kind import (
     paper_color,
 )
 from ocr_utils.scan_markup.detection.dots import ScreenParams, ScreenRegions, params_for_dpi, screen_regions
+from ocr_utils.scan_markup.detection.tone import (
+    LINEART_ENTROPY_THR,
+    LINEART_MID_FRAC_THR,
+    LINEART_SCREEN_PEAK_THR,
+    STAMP_INK_CONTRAST_THR,
+    ToneMaps,
+    tone_maps,
+)
 from ocr_utils.scan_markup.detection.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
@@ -100,6 +108,10 @@ class PageOptions:
     leader_periodicity_thr: float = LEADER_PERIODICITY_THR
     leader_tone_spread_thr: float = LEADER_TONE_SPREAD_THR
     grow_paper_margin: int = GROW_PAPER_MARGIN
+    lineart_mid_frac: float = LINEART_MID_FRAC_THR
+    lineart_entropy: float = LINEART_ENTROPY_THR
+    lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR
+    stamp_ink_contrast: float = STAMP_INK_CONTRAST_THR
     # None — взять пересчитанное от DPI полосы (см. dots.params_for_dpi).
     merge_gap: int | None = None
     min_region_side_px: int | None = None
@@ -124,6 +136,10 @@ class DetectedRegion:
     chroma_spread: float | None = None
     chroma_self_frac: float | None = None
     dot_frac: float | None = None
+    mid_frac: float | None = None
+    tone_entropy: float | None = None
+    screen_peak: float | None = None
+    ink_contrast: float | None = None
 
 
 @dataclass
@@ -139,6 +155,7 @@ class PageAnalysis:
     regions: ScreenRegions | None = None
     stats: np.ndarray | None = None
     centroids: np.ndarray | None = None
+    tone: ToneMaps | None = None
     params: ScreenParams | None = None
     stamp: FileStamp | None = None
     error: str = ""
@@ -225,6 +242,7 @@ def analyse_page(
         )
         full_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         analysis.regions, analysis.stats, analysis.centroids = screen_regions(full_gray, analysis.params)
+        analysis.tone = tone_maps(full_gray, analysis.params)
         return analysis
     except Exception as exc:  # noqa: BLE001 — одна битая полоса не должна валить прогон
         return PageAnalysis(rel_path, order_index, error=str(exc))
@@ -289,6 +307,10 @@ def finish_page(
         leader_periodicity_thr=options.leader_periodicity_thr,
         leader_tone_spread_thr=options.leader_tone_spread_thr,
         grow_paper_margin=options.grow_paper_margin,
+        tone=analysis.tone,
+        lineart_mid_frac=options.lineart_mid_frac,
+        lineart_entropy=options.lineart_entropy,
+        lineart_screen_peak=options.lineart_screen_peak,
     )
     regions = _classify_regions(analysis, findings, options, paper)
     return PageResult(analysis.rel_path, analysis.width, analysis.height, analysis.dpi, regions, analysis.stamp)
@@ -307,23 +329,25 @@ def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions, pa
 
     Правила:
 
-    * растр серый    -> ``grayscale``;
-    * растр цветной  -> ``color``;
-    * штрих чёрный   -> в разметку НЕ включается вовсе: он бинаризуется как текст, и
-      вырезать из него картинку не нужно;
-    * цветная область БЕЗ РАСТРОВЫХ КЛЕТОК и мельче ``lineart_picture_min_frac``
-      -> ``stamp_suspect``, подозрение на библиотечную печать;
-    * всё остальное цветное -> ``color``.
+    * растр серый / цветной   -> ``grayscale`` / ``color``;
+    * штрих цветной и крупный -> ``color``: цветной рисунок берётся целиком;
+    * штрих чёрный            -> в разметку НЕ включается вовсе: он бинаризуется как текст,
+      и вырезать из него картинку не нужно;
+    * оттиск библиотечной печати -> ``stamp_suspect``.
 
-    Про печати. Оттиск — это цветной штрих по определению (фиолетовая мастика), и от цветного
-    рисунка его отличает только размер: замер по паку-1 дал у печатей 2.1 и 2.2% полосы против
-    почти 100% у синего рисунка обложки.
+    Про печати. Оттиск — это мелкий штрих, и опознаётся он по размеру: замер по паку-1 дал у
+    печатей 2.1 и 2.2% полосы против почти 100% у синего рисунка обложки. Но одного размера
+    мало — мелкий чёрный штрих это ещё и виньетка рубрики, которых в паке два десятка. Их
+    разделяют РАСТРОВЫЕ КЛЕТКИ:
 
-    Условие тут именно «нет растровых клеток», а не «признано штрихом». Сначала правило
-    висело на штрихе, и печать 1970/03 IMG_0104_2R сквозь него прошла: p99 площади пятна у неё
-    2728, то есть ниже порога 4600, и ветка сочла её тёмным растром. Но растр там не доказан —
-    клеток под областью нет вовсе, а тёмная полутоновая фотография на внутренней полосе этого
-    журнала в любом случае серая, не цветная. Мелкая цветная область без клеток — это оттиск.
+    * бледный штрих — оттиск. Мастика фиолетовая, но выгорает, и такие печати уезжали в
+      разметку полноценными ``grayscale``-картинками (замер по паку-1: 12 штук сверх 33,
+      опознанных по цвету). Контраст «бумага минус краска» у 10 оттисков 79..220;
+    * чёрный штрих — виньетка рубрики: типографская краска, контраст 231..254 у всех 33.
+
+    Отдельно остаётся старое условие «мелкая ЦВЕТНАЯ область без растровых клеток»: оно ловит
+    оттиски, которые ``detection.tone`` штрихом не признала. Тёмная полутоновая фотография на
+    внутренней полосе этого журнала в любом случае серая, не цветная, — значит, это оттиск.
     """
     if not findings.findings:
         return []
@@ -346,14 +370,19 @@ def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions, pa
             options.chroma_spread_thr,
             options.chroma_self_frac_thr,
         )
-        if finding.source == SOURCE_LINEART and color.kind != KIND_COLOR:
-            continue  # чёрный штрих бинаризуется как текст, вырезать из него нечего
-
         kind = color.kind
         area = (finding.box[2] - finding.box[0]) * (finding.box[3] - finding.box[1])
         small = area < options.lineart_picture_min_frac * analysis.width * analysis.height
-        if color.kind == KIND_COLOR and small and not finding.has_cells:
+        line_art = finding.source == SOURCE_LINEART
+        pale = finding.ink_contrast is not None and finding.ink_contrast < options.stamp_ink_contrast
+        stamp = small and (
+            (line_art and pale)  # бледная краска: оттиск мастикой, а не типографская виньетка
+            or (color.kind == KIND_COLOR and not finding.has_cells)  # цветной оттиск без клеток
+        )
+        if stamp:
             kind = KIND_STAMP_SUSPECT
+        elif line_art and color.kind != KIND_COLOR:
+            continue  # чёрный штрих бинаризуется как текст, вырезать из него нечего
         regions.append(
             DetectedRegion(
                 box=finding.box,
@@ -364,6 +393,10 @@ def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions, pa
                 chroma_spread=color.chroma_spread,
                 chroma_self_frac=color.chroma_self_frac,
                 dot_frac=finding.dot_frac,
+                mid_frac=finding.mid_frac,
+                tone_entropy=finding.tone_entropy,
+                screen_peak=finding.screen_peak,
+                ink_contrast=finding.ink_contrast,
             )
         )
     return regions

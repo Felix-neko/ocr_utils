@@ -25,6 +25,12 @@ from ocr_utils.scan_markup.detection.color_kind import (
 )
 from ocr_utils.scan_markup.detection.recolor import RecolorParams, run_mark_covers, run_recolor
 from ocr_utils.scan_markup.detection.page import PageOptions
+from ocr_utils.scan_markup.detection.tone import (
+    LINEART_ENTROPY_THR,
+    LINEART_MID_FRAC_THR,
+    LINEART_SCREEN_PEAK_THR,
+    STAMP_INK_CONTRAST_THR,
+)
 from ocr_utils.scan_markup.detection.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
@@ -231,6 +237,39 @@ def main() -> None:
     "строение, и тон.",
 )
 @click.option(
+    "--lineart-mid-frac",
+    default=LINEART_MID_FRAC_THR,
+    show_default=True,
+    type=float,
+    help="Доля пикселей в средних тонах, НИЖЕ которой область подозревается в штрихе. Замер: "
+    "штрих 0.032..0.322, фотографии 0.111..0.568.",
+)
+@click.option(
+    "--lineart-entropy",
+    default=LINEART_ENTROPY_THR,
+    show_default=True,
+    type=float,
+    help="Энтропия гистограммы области, НИЖЕ которой она подозревается в штрихе. Замер: "
+    "штрих 4.245..7.170, фотографии 5.770..7.721.",
+)
+@click.option(
+    "--lineart-screen-peak",
+    default=LINEART_SCREEN_PEAK_THR,
+    show_default=True,
+    type=float,
+    help="Выступ пика растровой сетки в спектре, НИЖЕ которого область подозревается в "
+    "штрихе. Замер: штрих 1.100..2.156, фотографии 1.054..49.796. Работает В СВЯЗКЕ с двумя "
+    "порогами выше: штрихом область признаётся, только если провалила все три сразу.",
+)
+@click.option(
+    "--stamp-ink-contrast",
+    default=STAMP_INK_CONTRAST_THR,
+    show_default=True,
+    type=float,
+    help="Контраст «бумага минус краска», НИЖЕ которого мелкий штрих считается оттиском "
+    "библиотечной печати, а не виньеткой рубрики. Замер: оттиски 79..220, виньетки 231..254.",
+)
+@click.option(
     "--grow-paper-margin",
     default=GROW_PAPER_MARGIN,
     show_default=True,
@@ -421,6 +460,10 @@ def mark_covers_command(db_path: Path, pack_name: str, log_level: str, **kwargs)
 @click.option("--leader-empty-rows-thr", default=LEADER_EMPTY_ROWS_THR, show_default=True, type=float)
 @click.option("--leader-periodicity-thr", default=LEADER_PERIODICITY_THR, show_default=True, type=float)
 @click.option("--leader-tone-spread-thr", default=LEADER_TONE_SPREAD_THR, show_default=True, type=float)
+@click.option("--lineart-mid-frac", default=LINEART_MID_FRAC_THR, show_default=True, type=float)
+@click.option("--lineart-entropy", default=LINEART_ENTROPY_THR, show_default=True, type=float)
+@click.option("--lineart-screen-peak", default=LINEART_SCREEN_PEAK_THR, show_default=True, type=float)
+@click.option("--stamp-ink-contrast", default=STAMP_INK_CONTRAST_THR, show_default=True, type=float)
 @click.option("--grow-paper-margin", default=GROW_PAPER_MARGIN, show_default=True, type=int)
 @click.option("--log-level", default="WARNING", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def validate_command(

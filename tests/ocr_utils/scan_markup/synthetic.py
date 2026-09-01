@@ -18,7 +18,7 @@ def paper(shape: tuple[int, int]) -> np.ndarray:
     return np.full(shape, PAPER, np.uint8)
 
 
-def screen(shape: tuple[int, int], pitch: int = 8, radius: int = 2, seed: int = 0) -> np.ndarray:
+def screen(shape: tuple[int, int], pitch: int = 8, radius: int = 2, seed: int = 0, blur: float = 0.6) -> np.ndarray:
     """Растровая сетка: точки на решётке с дрожанием — так печатается полутон.
 
     ``pitch`` — шаг сетки в пикселях. При 600 dpi настоящая сетка журнала это 5-10 px.
@@ -30,6 +30,13 @@ def screen(shape: tuple[int, int], pitch: int = 8, radius: int = 2, seed: int = 
     Настоящая растровая сетка так не выглядит — она повёрнута к развёртке, размыта камерой,
     и размер точки гуляет с тоном; на 65 настоящих областях периодичность не превысила 0.51.
     Без дрожания фикстура изображала бы не полутон, а как раз то, что от него отличают.
+
+    РАЗМЫТИЕ ТОЖЕ ОБЯЗАТЕЛЬНО. Резкая решётка двухцветна — в ней ровно два уровня яркости, —
+    а настоящий скан размыт оптикой, и между краской и бумагой лежит вся шкала полутонов.
+    Именно на ней держится ``detection.tone``: у резкой фикстуры доля средних тонов 0.000 и
+    энтропия 0.83, то есть она выглядит штриховым рисунком; при sigma 0.6 — 0.373 и 4.29,
+    как у настоящей фотографии. Больше 0.6 брать нельзя: при 0.8 точки смыкаются, и
+    ``adaptiveThreshold`` перестаёт видеть отдельные пятна вовсе.
     """
     image = paper(shape)
     rng = np.random.default_rng(seed)
@@ -37,15 +44,15 @@ def screen(shape: tuple[int, int], pitch: int = 8, radius: int = 2, seed: int = 
         for x in range(pitch, shape[1] - pitch, pitch):
             dy, dx = rng.integers(-1, 2, 2)
             cv2.circle(image, (int(x + dx), int(y + dy)), radius, INK, -1)
-    return image
+    return cv2.GaussianBlur(image, (0, 0), blur) if blur else image
 
 
 def with_screen(
-    page: np.ndarray, box: tuple[int, int, int, int], pitch: int = 8, radius: int = 2, seed: int = 0
+    page: np.ndarray, box: tuple[int, int, int, int], pitch: int = 8, radius: int = 2, seed: int = 0, blur: float = 0.6
 ) -> np.ndarray:
     """Вклеивает растровое пятно в полосу; ``box`` — ``(x1, y1, x2, y2)``."""
     x1, y1, x2, y2 = box
-    page[y1:y2, x1:x2] = screen((y2 - y1, x2 - x1), pitch, radius, seed)
+    page[y1:y2, x1:x2] = screen((y2 - y1, x2 - x1), pitch, radius, seed, blur)
     return page
 
 
@@ -62,16 +69,31 @@ def dot_leaders(shape: tuple[int, int], line_step: int = 55, dot_step: int = 30,
     return image
 
 
-def line_art(shape: tuple[int, int], step: int = 24, thickness: int = 4) -> np.ndarray:
+def line_art(
+    shape: tuple[int, int], step: int = 24, thickness: int = 4, seed: int = 0, blur: float = 0.6
+) -> np.ndarray:
     """Штриховой рисунок: длинные связные штрихи вместо точек.
 
     Плотность краски примерно та же, что у растровой сетки, — разделять детектор обязан
     именно по размеру связных пятен, а не по количеству чёрного.
+
+    ШТРИХИ НЕРЕГУЛЯРНЫ, и это существенно. Идеальная решётка параллельных линий одинаковой
+    толщины — это дифракционная решётка, и в спектре она даёт пик мощнее любого растра: замер
+    по такой фикстуре дал выступ 172 при 1.1..2.2 у настоящих чертежей из пака. Признак
+    ``tone.screen_peak`` на ней срабатывал бы наоборот. Настоящий рисунок так не выглядит: у
+    него гуляют и шаг, и толщина, и направление.
+
+    Размытие — то же, что у ``screen``: скан не бывает резким. У штриха оно поднимает долю
+    средних тонов с 0.000 до 0.103 (у растра — до 0.379), то есть разделение сохраняет.
     """
     image = paper(shape)
-    for y in range(-shape[1], shape[0] + shape[1], step):
-        cv2.line(image, (0, y), (shape[1] - 1, y + shape[1]), INK, thickness)
-    return image
+    rng = np.random.default_rng(seed)
+    y = float(-shape[1])
+    while y < shape[0] + shape[1]:
+        width = int(rng.integers(max(2, thickness - 1), thickness + 2))
+        cv2.line(image, (0, int(y)), (shape[1] - 1, int(y + shape[1] * rng.uniform(0.7, 1.3))), INK, width)
+        y += float(rng.integers(max(6, step - 8), step + 9))
+    return cv2.GaussianBlur(image, (0, 0), blur) if blur else image
 
 
 def text_page(

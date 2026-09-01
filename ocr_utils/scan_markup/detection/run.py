@@ -38,6 +38,12 @@ from ocr_utils.scan_markup.detection.color_kind import (
     COLOR_FRAC_THR,
 )
 from ocr_utils.scan_markup.detection.overlay import write_debug_overlay
+from ocr_utils.scan_markup.detection.tone import (
+    LINEART_ENTROPY_THR,
+    LINEART_MID_FRAC_THR,
+    LINEART_SCREEN_PEAK_THR,
+    STAMP_INK_CONTRAST_THR,
+)
 from ocr_utils.scan_markup.detection.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
@@ -100,6 +106,10 @@ class DetectParams:
     leader_periodicity_thr: float = LEADER_PERIODICITY_THR
     leader_tone_spread_thr: float = LEADER_TONE_SPREAD_THR
     grow_paper_margin: int = GROW_PAPER_MARGIN
+    lineart_mid_frac: float = LINEART_MID_FRAC_THR
+    lineart_entropy: float = LINEART_ENTROPY_THR
+    lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR
+    stamp_ink_contrast: float = STAMP_INK_CONTRAST_THR
     debug_dir: Path | None = None
 
     def page_options(self) -> PageOptions:
@@ -125,6 +135,10 @@ class DetectParams:
             leader_periodicity_thr=self.leader_periodicity_thr,
             leader_tone_spread_thr=self.leader_tone_spread_thr,
             grow_paper_margin=self.grow_paper_margin,
+            lineart_mid_frac=self.lineart_mid_frac,
+            lineart_entropy=self.lineart_entropy,
+            lineart_screen_peak=self.lineart_screen_peak,
+            stamp_ink_contrast=self.stamp_ink_contrast,
         )
 
     def worker_count(self) -> int:
@@ -213,6 +227,10 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
                 chroma_spread=region.chroma_spread,
                 chroma_self_frac=region.chroma_self_frac,
                 dot_frac=region.dot_frac,
+                mid_frac=region.mid_frac,
+                tone_entropy=region.tone_entropy,
+                screen_peak=region.screen_peak,
+                ink_contrast=region.ink_contrast,
                 source=SOURCE_AUTO,
             )
             for region in result.regions

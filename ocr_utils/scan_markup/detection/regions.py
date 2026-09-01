@@ -51,6 +51,14 @@ from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.scan_markup.detection import cover as cover_module
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC, keep_significant, merge_boxes
 from ocr_utils.scan_markup.detection.color_kind import CHROMA_SPREAD_THR
+from ocr_utils.scan_markup.detection.tone import (
+    LINEART_ENTROPY_THR,
+    LINEART_MID_FRAC_THR,
+    LINEART_SCREEN_PEAK_THR,
+    ToneMaps,
+    looks_like_line_art,
+    tone_stats,
+)
 from ocr_utils.scan_markup.detection.dots import (
     CELL_PX,
     ScreenParams,
@@ -193,6 +201,15 @@ class Finding:
     # иллюстрация; без них область держится либо на статистике пятен, либо на страховке,
     # и мелкую цветную из них надо ещё отличить от библиотечной печати.
     has_cells: bool = True
+    # Признаки «растр или штрих» (``detection.tone``). Пишутся в базу всегда, даже когда
+    # правило не сработало: следующая итерация порогов тогда делается по measurements.csv,
+    # без единого чтения TIFF.
+    mid_frac: float | None = None
+    tone_entropy: float | None = None
+    screen_peak: float | None = None
+    # Контраст «бумага минус краска». В решении «растр или штрих» не участвует: по нему
+    # бледный оттиск печати отличается от чёрной виньетки (см. ``page._classify_regions``).
+    ink_contrast: float | None = None
 
 
 @dataclass
@@ -230,6 +247,10 @@ def find_raster_boxes(
     leader_periodicity_thr: float = LEADER_PERIODICITY_THR,
     leader_tone_spread_thr: float = LEADER_TONE_SPREAD_THR,
     grow_paper_margin: int = GROW_PAPER_MARGIN,
+    tone: ToneMaps | None = None,
+    lineart_mid_frac: float = LINEART_MID_FRAC_THR,
+    lineart_entropy: float = LINEART_ENTROPY_THR,
+    lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR,
 ) -> RasterFindings:
     """Растровые области полосы. Все координаты — в пикселях ОРИГИНАЛА.
 
@@ -297,6 +318,9 @@ def find_raster_boxes(
         findings.append(Finding(box, SOURCE_SCREEN, dot_frac=dot_fraction(regions.maps, box)))
 
     findings = _merge_findings(findings, merge_gap, width, height, min_region_frac, min_side)
+    # Растр это или штрих, решается ПОСЛЕ слияния: признаки объёмные, и мерить их надо по
+    # окончательному прямоугольнику, а не по половинке картинки.
+    findings = _mark_line_art(findings, tone, lineart_mid_frac, lineart_entropy, lineart_screen_peak)
     if findings:
         return RasterFindings(
             _fill_colour_page(findings, width, height, page_chroma_spread, chroma_spread_thr, full_page_color_frac)
@@ -311,6 +335,31 @@ def find_raster_boxes(
         )
 
     return RasterFindings()
+
+
+def _mark_line_art(
+    findings: list[Finding], tone: ToneMaps | None, mid_frac_thr: float, entropy_thr: float, screen_peak_thr: float
+) -> list[Finding]:
+    """Переводит находки, похожие на штрих, из ``SOURCE_SCREEN`` в ``SOURCE_LINEART``.
+
+    Проверяются ВСЕ находки, а не только блоки Surya без растровых клеток: штриховка даёт
+    ровно такие же мелкие пятна, что и растр, поэтому клетки под рисунком находятся исправно
+    и до сих пор считались доказательством растра. Признаки и замеры — в ``detection.tone``.
+
+    ``tone is None`` — карты не посчитаны (старый разбор из пула, тесты по кускам кадра):
+    тогда правило молчит, и всё остаётся как было.
+    """
+    if tone is None:
+        return findings
+    for finding in findings:
+        stats = tone_stats(tone, finding.box)
+        finding.mid_frac = stats.mid_frac
+        finding.tone_entropy = stats.entropy
+        finding.screen_peak = stats.screen_peak
+        finding.ink_contrast = stats.ink_contrast
+        if looks_like_line_art(stats, mid_frac_thr, entropy_thr, screen_peak_thr):
+            finding.source = SOURCE_LINEART
+    return findings
 
 
 def tone_spread(work_gray: np.ndarray, box: tuple[int, int, int, int], params: ScreenParams) -> float:

@@ -26,6 +26,10 @@ CSV_COLUMNS = (
     "chroma_spread",
     "chroma_self_frac",
     "dot_frac",
+    "mid_frac",
+    "tone_entropy",
+    "screen_peak",
+    "ink_contrast",
 )
 
 
@@ -101,6 +105,10 @@ def write_csv(report: ValidateReport, path: Path) -> None:
                     chroma_spread=region.chroma_spread,
                     chroma_self_frac=region.chroma_self_frac,
                     dot_frac=region.dot_frac,
+                    mid_frac=region.mid_frac,
+                    tone_entropy=region.tone_entropy,
+                    screen_peak=region.screen_peak,
+                    ink_contrast=region.ink_contrast,
                 )
                 writer.writerow(row)
 

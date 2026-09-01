@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from ocr_utils.scan_markup.detection.dots import params_for_dpi, screen_regions
+from ocr_utils.scan_markup.detection.tone import tone_maps
 from ocr_utils.scan_markup.detection.regions import SOURCE_LINEART, SOURCE_SCREEN, find_raster_boxes
 from tests.ocr_utils.scan_markup import synthetic
 
@@ -22,6 +23,7 @@ def _analyse(page: np.ndarray):
 
 def _find(page: np.ndarray, surya_boxes, **kwargs):
     regions, stats, centroids, work, params = _analyse(page)
+    kwargs.setdefault("tone", tone_maps(page, params))
     return find_raster_boxes(
         regions, stats, centroids, work, page.shape[:2], params, surya_boxes=surya_boxes, order_index=1, **kwargs
     )
@@ -361,3 +363,31 @@ def test_shrink_pulls_the_frame_off_the_paper_but_not_into_the_block() -> None:
     # Тот же вызов с блоком шире картинки не двигает рамку внутрь блока.
     block = (100, 100, 1100, 1400)
     assert shrink_to_paper(work, block, block) == block
+
+
+def test_block_with_cells_over_line_art_is_still_line_art() -> None:
+    """Блок Surya с растровыми клетками под ним больше не считается растром автоматически.
+
+    Так и терялись штриховые рисунки: плотная штриховка распадается на такие же мелкие пятна,
+    что и растровая сетка, клетки под рисунком находятся исправно, и ветка «клетки есть —
+    значит растр» помечала чертёж картинкой. Теперь окончательную рамку проверяет
+    ``detection.tone``: у штриха нет ни средних тонов, ни периодики (замер по паку-1 —
+    1969/04 IMG_0024_1L и соседние).
+    """
+    page = synthetic.paper(SIZE)
+    box = (200, 200, 900, 1000)
+    page[box[1] : box[3], box[0] : box[2]] = synthetic.line_art((box[3] - box[1], box[2] - box[0]), step=10)
+    block = (180, 180, 920, 1020)
+
+    findings = _find(page, [block])
+    assert len(findings.findings) == 1
+    assert findings.findings[0].source == SOURCE_LINEART
+
+
+def test_tone_features_are_recorded_even_when_the_rule_is_silent() -> None:
+    """Признаки пишутся у каждой находки: по ним пороги крутятся без чтения оригиналов."""
+    findings = _find(_page_with_photo(), [(180, 180, 920, 1020)])
+    finding = findings.findings[0]
+    assert finding.source == SOURCE_SCREEN
+    assert finding.mid_frac is not None and finding.tone_entropy is not None
+    assert finding.screen_peak is not None
