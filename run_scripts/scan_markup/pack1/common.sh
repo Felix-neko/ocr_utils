@@ -26,6 +26,18 @@ DEBUG_DIR="$MARKUP_ROOT/debug"
 CASES_DIR="$MARKUP_ROOT/некоторые проблемные картинки"
 VALIDATE_DIR="$MARKUP_ROOT/validate"
 
+# Очистка пака (шаги 5-7): закрас разметки и размытие фона. Результат — на SSD, а не
+# на /mnt/dump3: выход весит примерно столько же, сколько вход (~300 ГиБ), и писать его
+# на шпиндельный NTFS-3G значило бы упереться в диск на всём прогоне. Плюс корень
+# /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы поверх исходных.
+CLEAN_ROOT="/mnt/system/raw/mts/pack1_background_blurred_v2"
+BLURRED_DIR="$CLEAN_ROOT/blurred"
+CLEAN_DEBUG_DIR="$CLEAN_ROOT/debug"
+
+# Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
+# невелики и живут ровно до выбора параметров.
+COMPARE_DIR="$MARKUP_ROOT/compare"
+
 # Должен лежать ВНУТРИ IMAGES_DIR из docker/.env (или совпадать с ним), иначе cvat_server
 # не увидит картинок: задачи заводятся из смонтированного share, по сети файлы не передаются.
 SHARE_ROOT="$MARKUP_ROOT/cvat_share"

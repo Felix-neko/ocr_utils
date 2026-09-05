@@ -12,7 +12,7 @@ import numpy as np
 from typing import Optional
 
 from ocr_utils.scan_cropping.finger_removal.asymmetric_dilation import DEFAULT_MAX_ASYMMETRIC_DILATION_RATIO
-from ocr_utils.scan_cropping.finger_removal.inpaint_roi import roi_bounds_list
+from ocr_utils.inpainting.roi import roi_bounds_list
 from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE
 from ocr_utils.scan_cropping.finger_removal.masking import (
     build_finger_mask,
@@ -54,10 +54,10 @@ FINGER_EDGE_FRAC = 0.04
 # keep_border_seeded_zones и --drop-inner-finger-cores. False возвращает прежнее
 # поведение: keep_border_components по уже раздутой маске.
 DROP_INNER_FINGER_CORES = True
-FINGER_PADDING = 64  # контекст вокруг маски пальца для LaMa, пикс. (см. inpaint_roi.py)
+FINGER_PADDING = 64  # контекст вокруг маски пальца для LaMa, пикс. (см. inpainting/roi.py)
 # ROI для LaMa увеличивается в FINGER_ROI_SCALE раз от центра (после padding) —
 # без этого LaMa не видит достаточно кромки/фона и заливает дыру доминирующим
-# цветом (см. inpaint_roi.py, коммит "Сделали хороший закрас с помощью lama").
+# цветом (см. inpainting/roi.py, коммит "Сделали хороший закрас с помощью lama").
 FINGER_ROI_SCALE = 1.5
 # LaMa заливает область пальца заметно ТЕМНЕЕ окружающей бумаги (проверено на
 # нескольких кадрах: разница ~25-35 отн. ед. яркости у самой маски). Поэтому

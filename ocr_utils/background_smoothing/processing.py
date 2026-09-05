@@ -24,8 +24,12 @@
 отбрасывается композицией.
 """
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
+
+from ocr_utils.scan_cropping.morphology import dilate_disk
 
 # Методы построения первичной маски (значения --method).
 METHOD_OTSU = "otsu"
@@ -75,8 +79,16 @@ SAUVOLA_WINDOW_FRAC = 0.0165
 # переходы: FineReader использует их при распознавании.
 PROTECT_DILATE_FRAC = 0.00246
 
-# Во сколько раз радиус размытия больше радиуса дилатации.
+# Во сколько раз радиус размытия больше радиуса дилатации — ЗАПАСНОЙ способ
+# задать размытие, когда его радиус не назван явно (см. :func:`blur_radius`).
 DEFAULT_BLUR_MULT = 4.0
+
+# Режимы построения размытого фона (значения --blur-mode). Живут здесь, рядом с
+# самим размытием, а не в ``pipeline``: тот их реэкспортирует ради обратной
+# совместимости импортов.
+BLUR_MODE_MASKED = "masked"
+BLUR_MODE_PLAIN = "plain"
+BLUR_MODES = (BLUR_MODE_MASKED, BLUR_MODE_PLAIN)
 
 # Число проходов box-фильтра, приближающих гауссиану (три — классический компромисс).
 BLUR_PASSES = 3
@@ -212,11 +224,39 @@ def sauvola_window(shape: "tuple[int, ...]", window: "int | None" = None) -> int
     return odd(int(round(SAUVOLA_WINDOW_FRAC * max(shape[0], shape[1]))))
 
 
-def dilate_radius(shape: "tuple[int, ...]", dilate_px: "float | None" = None) -> float:
+def dilate_radius(
+    shape: "tuple[int, ...]", dilate_px: "float | None" = None, dilate_frac: float = PROTECT_DILATE_FRAC
+) -> float:
     """Радиус дилатации защитной маски: из длинной стороны кадра, если не задан явно."""
     if dilate_px is not None:
         return max(0.0, float(dilate_px))
-    return max(1.0, PROTECT_DILATE_FRAC * max(shape[0], shape[1]))
+    return max(1.0, dilate_frac * max(shape[0], shape[1]))
+
+
+def blur_radius(
+    shape: "tuple[int, ...]",
+    blur_px: "float | None" = None,
+    blur_frac: "float | None" = None,
+    *,
+    dilate_px: float,
+    blur_mult: float = DEFAULT_BLUR_MULT,
+) -> float:
+    """Радиус размытия фона. Приоритет: явные пиксели → доля стороны → ``dilate_px * blur_mult``.
+
+    ПОЧЕМУ ЭТО ОТДЕЛЬНАЯ ВЕЛИЧИНА. Раньше радиус размытия был жёстко производным
+    от радиуса дилатации, и подобрать их независимо было нельзя: расширяешь
+    защитный поясок — вместе с ним, молча, вчетверо сильнее раздувается размытие.
+    При сравнении вариантов глазами это делает результат нечитаемым — непонятно,
+    что именно изменилось.
+
+    Запасная ветка (обе явные опции не заданы) воспроизводит прежнее поведение
+    ЧИСЛО В ЧИСЛО, поэтому у существующих прогонов ничего не сдвинулось.
+    """
+    if blur_px is not None:
+        return max(0.0, float(blur_px))
+    if blur_frac is not None:
+        return max(1.0, blur_frac * max(shape[0], shape[1]))
+    return dilate_px * blur_mult
 
 
 def primary_mask(
@@ -310,3 +350,85 @@ def compose(src: np.ndarray, blurred: np.ndarray, m_dilated: np.ndarray) -> np.n
     if src.ndim == 3:
         mask = mask[:, :, None]
     return np.where(mask, src, blurred)
+
+
+@dataclass
+class SmoothResult:
+    """Результат расчёта по кадру: итог, обе маски и разрешённые радиусы.
+
+    ``skip_reason`` непуст, когда кадр трогать нельзя, — тогда ``image`` это сам
+    исходник, а маски пустые. Отдельным полем, а не исключением: вызывающий обязан
+    такой кадр всё равно записать (пропустить файл совсем значило бы оставить дыру
+    в паке), а причину — показать человеку.
+    """
+
+    image: np.ndarray
+    m_primary: np.ndarray
+    m_dilated: np.ndarray
+    dilate_px: float
+    blur_px: float
+    skip_reason: str = ""
+
+
+def smooth_frame(
+    src: np.ndarray,
+    gray: np.ndarray,
+    *,
+    protect_mask: "np.ndarray | None" = None,
+    roi: "np.ndarray | None" = None,
+    method: str = METHOD_OTSU,
+    bias: float = DEFAULT_THRESHOLD_BIAS,
+    sauvola_k: float = DEFAULT_SAUVOLA_K,
+    sauvola_window: "int | None" = None,
+    dilate_px: "float | None" = None,
+    dilate_frac: float = PROTECT_DILATE_FRAC,
+    blur_px: "float | None" = None,
+    blur_frac: "float | None" = None,
+    blur_mult: float = DEFAULT_BLUR_MULT,
+    blur_mode: str = BLUR_MODE_MASKED,
+    check_content: bool = True,
+    check_halftone: bool = True,
+) -> SmoothResult:
+    """Полный расчёт по кадру: маска контента → размытие фона → композиция.
+
+    Аргументы:
+        src: что размывать и что вернуть — BGR или серый uint8;
+        gray: серая версия ТОГО ЖЕ кадра, по ней считаются пороги;
+        protect_mask: области, защищаемые ЦЕЛИКОМ (иллюстрации), uint8 0/255 или
+            ``None``. Приходит либо от Surya, либо из базы разметки — этому модулю
+            всё равно, откуда;
+        roi: где считать пороги (обычно кадр минус иллюстрации), см.
+            :func:`analysis_samples`;
+        dilate_px / dilate_frac: радиус защитного припуска, см. :func:`dilate_radius`;
+        blur_px / blur_frac / blur_mult: радиус размытия, см. :func:`blur_radius`;
+        check_content, check_halftone: предохранители «кадр трогать нельзя».
+
+    Возвращает :class:`SmoothResult`. Под защитной маской результат совпадает с
+    ``src`` побитово.
+
+    ``protect_mask`` дилатируется ОТДЕЛЬНО и присоединяется уже после: припуск у
+    иллюстраций такой же, как у текста, но объединять маски до дилатации нельзя —
+    на оверлее фотография залилась бы красным как «найденный контент».
+    """
+    zeros = np.zeros(gray.shape, np.uint8)
+    radius = dilate_radius(gray.shape, dilate_px, dilate_frac)
+    blur_r = blur_radius(gray.shape, blur_px, blur_frac, dilate_px=radius, blur_mult=blur_mult)
+
+    # Два случая, когда кадр трогать нельзя, и оба кончаются возвратом исходника:
+    #   * контент не выделяется — Оцу режет собственное зерно, маске верить нельзя;
+    #   * есть крупная растровая область — обложка или полутоновая вкладка, там зерно
+    #     и есть содержимое, а размытие выело бы его островами.
+    if check_content and not has_content(gray, roi):
+        return SmoothResult(src, zeros, zeros, radius, blur_r, "контент не выделяется (чистый лист?)")
+    if check_halftone and has_halftone(gray, roi=roi):
+        return SmoothResult(src, zeros, zeros, radius, blur_r, "крупная растровая область (обложка или вкладка?)")
+
+    m_primary = primary_mask(gray, method=method, bias=bias, sauvola_k=sauvola_k, window=sauvola_window, roi=roi)
+
+    m_dilated = dilate_disk(m_primary, radius)
+    if protect_mask is not None and np.any(protect_mask):
+        m_dilated = cv2.bitwise_or(m_dilated, dilate_disk(protect_mask, radius))
+
+    weight = None if blur_mode == BLUR_MODE_PLAIN else (m_dilated == 0).astype(np.uint8)
+    blurred = normalized_blur(src, weight, blur_r)
+    return SmoothResult(compose(src, blurred, m_dilated), m_primary, m_dilated, radius, blur_r)

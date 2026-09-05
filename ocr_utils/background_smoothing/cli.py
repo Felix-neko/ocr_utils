@@ -20,6 +20,7 @@ from ocr_utils.background_smoothing.processing import (
     DEFAULT_THRESHOLD_BIAS,
     MASK_METHODS,
     METHOD_OTSU,
+    PROTECT_DILATE_FRAC,
 )
 from ocr_utils.scan_cropping.image_io import collect_images
 
@@ -114,11 +115,34 @@ logger = logging.getLogger(__name__)
     ),
 )
 @click.option(
+    "--dilate-frac",
+    default=PROTECT_DILATE_FRAC,
+    show_default=True,
+    type=float,
+    help="Радиус припуска как доля длинной стороны кадра — используется, когда --dilate-px не задан.",
+)
+@click.option(
+    "--blur-px",
+    default=None,
+    type=float,
+    help=(
+        "Радиус размытия фона, пикс. Задаётся НЕЗАВИСИМО от припуска: иначе расширение защитной "
+        "маски молча усиливает и размытие, и сравнить варианты глазами нельзя. "
+        "Не задан — берётся --blur-frac, а если и он не задан, то --dilate-px x --blur-mult."
+    ),
+)
+@click.option(
+    "--blur-frac",
+    default=None,
+    type=float,
+    help="Радиус размытия как доля длинной стороны кадра. Уступает --blur-px, старше --blur-mult.",
+)
+@click.option(
     "--blur-mult",
     default=DEFAULT_BLUR_MULT,
     show_default=True,
     type=float,
-    help="Во сколько раз радиус размытия фона больше радиуса припуска.",
+    help="Во сколько раз радиус размытия фона больше радиуса припуска. Работает, когда не задан --blur-px/--blur-frac.",
 )
 @click.option(
     "--blur-mode",
@@ -163,6 +187,9 @@ def main(
     sauvola_k: float,
     sauvola_window: Optional[int],
     dilate_px: Optional[float],
+    dilate_frac: float,
+    blur_px: Optional[float],
+    blur_frac: Optional[float],
     blur_mult: float,
     blur_mode: str,
     use_surya_layout: bool,
@@ -187,6 +214,9 @@ def main(
         sauvola_k=sauvola_k,
         sauvola_window=sauvola_window,
         dilate_px=dilate_px,
+        dilate_frac=dilate_frac,
+        blur_px=blur_px,
+        blur_frac=blur_frac,
         blur_mult=blur_mult,
         blur_mode=blur_mode.lower(),
         use_surya_layout=use_surya_layout,
@@ -198,13 +228,17 @@ def main(
         return
 
     logger.info(
-        "Файлов: %d | маска: %s (bias=%.2f%s) | припуск: %s | размытие: x%.1f, режим %s | выход: %s%s%s",
+        "Файлов: %d | маска: %s (bias=%.2f%s) | припуск: %s | размытие: %s, режим %s | выход: %s%s%s",
         len(files),
         params.method,
         params.threshold_bias,
         f", k={params.sauvola_k}" if params.method != METHOD_OTSU else "",
         f"{params.dilate_px} px" if params.dilate_px is not None else "из размера кадра",
-        params.blur_mult,
+        (
+            f"{params.blur_px} px"
+            if params.blur_px is not None
+            else (f"доля {params.blur_frac}" if params.blur_frac is not None else f"x{params.blur_mult:.1f}")
+        ),
         params.blur_mode,
         params.output_format or "как у входа",
         ", серый" if params.to_gray else "",

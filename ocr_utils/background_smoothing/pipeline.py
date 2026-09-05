@@ -17,27 +17,33 @@ from tqdm import tqdm
 
 from ocr_utils.background_smoothing.layout import analysis_roi, make_detector, polygons_mask, raster_regions
 from ocr_utils.background_smoothing.processing import (
+    BLUR_MODE_MASKED,
+    BLUR_MODE_PLAIN,
+    BLUR_MODES,
     DEFAULT_BLUR_MULT,
     DEFAULT_SAUVOLA_K,
     DEFAULT_THRESHOLD_BIAS,
     METHOD_OTSU,
-    compose,
-    dilate_radius,
-    has_content,
-    has_halftone,
-    normalized_blur,
-    primary_mask,
+    PROTECT_DILATE_FRAC,
+    smooth_frame,
 )
 from ocr_utils.scan_cropping.image_io import imwrite_params, read_dpi, resolve_output_suffix, write_image
-from ocr_utils.scan_cropping.morphology import dilate_disk
 from ocr_utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
 
-# Режимы построения размытого фона (значения --blur-mode).
-BLUR_MODE_MASKED = "masked"
-BLUR_MODE_PLAIN = "plain"
-BLUR_MODES = (BLUR_MODE_MASKED, BLUR_MODE_PLAIN)
+# Режимы построения размытого фона (значения --blur-mode) переехали в
+# ``processing``, к самому размытию; здесь оставлен реэкспорт — на них ссылается
+# ``cli`` и внешний код.
+__all__ = [
+    "BLUR_MODE_MASKED",
+    "BLUR_MODE_PLAIN",
+    "BLUR_MODES",
+    "SmoothParams",
+    "draw_overlay",
+    "process_frame",
+    "run_batch",
+]
 
 # Цвета заливки масок на debug-оверлее (BGR) и их прозрачность.
 COLOR_DILATED = (0, 255, 255)  # жёлтый — защитная маска M_dilated (что НЕ размывается)
@@ -84,6 +90,11 @@ class SmoothParams:
 
     # Защитный припуск и размытие фона
     dilate_px: Optional[float] = None
+    dilate_frac: float = PROTECT_DILATE_FRAC
+    # Радиус размытия задаётся независимо от припуска; пока обе опции не заданы,
+    # он по-прежнему равен ``dilate_px * blur_mult`` (см. ``processing.blur_radius``).
+    blur_px: Optional[float] = None
+    blur_frac: Optional[float] = None
     blur_mult: float = DEFAULT_BLUR_MULT
     blur_mode: str = BLUR_MODE_MASKED
 
@@ -175,6 +186,7 @@ def process_frame(path: Path, params: SmoothParams, detector=None) -> None:
        layout не разметил), кадр по-прежнему копируется как есть.
     3. Только если остаток прошёл обе проверки, строится маска и размывается фон.
        Иллюстрации входят в защитную маску с тем же припуском, что и текст.
+       Всё это — внутри :func:`processing.smooth_frame`.
 
     Сообщения печатаются через ``tqdm.write``, чтобы не разрывать прогресс-бар.
     """
@@ -206,49 +218,33 @@ def process_frame(path: Path, params: SmoothParams, detector=None) -> None:
     m_picture = polygons_mask(gray.shape, picture_polys + raster_polys)
     roi = analysis_roi(m_picture, picture_polys)
 
-    # Два случая, когда кадр трогать нельзя, и оба кончаются копированием как есть
-    # (пропустить файл совсем значило бы оставить дыру в паке):
-    #   * контент не выделяется — Оцу режет собственное зерно, маске верить нельзя;
-    #   * есть крупная растровая область — обложка или полутоновая вкладка, там зерно
-    #     и есть содержимое, а размытие выело бы его островами.
-    # Обе проверки — по области анализа ``roi``, то есть без уже опознанных иллюстраций.
-    skip_reason = ""
-    if not has_content(gray, roi):
-        skip_reason = "контент не выделяется (чистый лист?)"
-    elif has_halftone(gray, roi=roi):
-        skip_reason = "крупная растровая область (обложка или вкладка?)"
-    if skip_reason:
-        tqdm.write(f"  {skip_reason}, копирую без изменений: {path.name}")
-        write_image(out_path, src, imwrite_params(out_suffix), read_dpi(path))
-        zeros = np.zeros(gray.shape, np.uint8)
-        _write_overlay(path, params, rel, bgr, zeros, zeros, picture_polys, raster_polys)
-        return
-
-    with log_timing("primary_mask", path.name):
-        m_primary = primary_mask(
+    # Сам расчёт — в ``processing.smooth_frame``: он общий с закрасом разметки
+    # (``scan_cleanup``), и держать его в двух копиях нельзя. Предохранители «кадр
+    # трогать нельзя» считаются там же и по области анализа ``roi``, то есть без
+    # уже опознанных иллюстраций; такой кадр всё равно записывается — пропустить
+    # файл совсем значило бы оставить дыру в паке.
+    with log_timing("smooth_frame", path.name):
+        res = smooth_frame(
+            src,
             gray,
+            protect_mask=m_picture if picture_polys else None,
+            roi=roi,
             method=params.method,
             bias=params.threshold_bias,
             sauvola_k=params.sauvola_k,
-            window=params.sauvola_window,
-            roi=roi,
+            sauvola_window=params.sauvola_window,
+            dilate_px=params.dilate_px,
+            dilate_frac=params.dilate_frac,
+            blur_px=params.blur_px,
+            blur_frac=params.blur_frac,
+            blur_mult=params.blur_mult,
+            blur_mode=params.blur_mode,
         )
+    logger.info("Радиусы: припуск %.1f px, размытие %.1f px (%s)", res.dilate_px, res.blur_px, path.name)
 
-    radius = dilate_radius(gray.shape, params.dilate_px)
-    with log_timing("dilate", path.name):
-        m_dilated = dilate_disk(m_primary, radius)
-        # Иллюстрации присоединяются к защитной маске ПОСЛЕ отдельной дилатации тем же
-        # радиусом: припуск у них такой же, как у текста, а объединять маски до
-        # дилатации нельзя — на оверлее фотография залилась бы красным как «контент».
-        if picture_polys:
-            m_dilated = cv2.bitwise_or(m_dilated, dilate_disk(m_picture, radius))
-
-    with log_timing(f"blur[{params.blur_mode}]", path.name):
-        weight = None if params.blur_mode == BLUR_MODE_PLAIN else (m_dilated == 0).astype(np.uint8)
-        blurred = normalized_blur(src, weight, radius * params.blur_mult)
-
-    with log_timing("compose", path.name):
-        final = compose(src, blurred, m_dilated)
+    if res.skip_reason:
+        tqdm.write(f"  {res.skip_reason}, копирую без изменений: {path.name}")
+    final, m_primary, m_dilated = res.image, res.m_primary, res.m_dilated
 
     write_image(out_path, final, imwrite_params(out_suffix), read_dpi(path))
     _write_overlay(path, params, rel, bgr, m_primary, m_dilated, picture_polys, raster_polys)

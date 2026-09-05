@@ -7,17 +7,22 @@ SD мощнее LaMa на текстурах, но на структурной �
 выдумывает наклейки, текст и торчащие «язычки» бумаги; ``_suppress_protrusions``
 как раз про борьбу с последними.
 
-CPU-хелперы (ROI, растушёвка, разбиение маски на компоненты) берутся из рабочего
-``scan_cropping.finger_removal.inpaint_roi``, сама LaMa — из ``GpuModels.inpaint``.
+Механика закраса (ROI, растушёвка, разбиение маски, прогон сетей) целиком
+берётся из рабочего кода: цикл — ``inpainting.apply.inpaint_by_groups``, сами сети
+— ``GpuModels``. Своего загрузчика SD здесь больше нет: пайплайн грузится там же,
+где живут остальные модели, иначе видеопамять делили бы два независимых кэша.
 """
 
 import numpy as np
-import torch
 
-from ocr_utils.scan_cropping.finger_removal.inpaint_roi import DEFAULT_ROI_SCALE, blend_roi, mask_components, roi_bounds
+from ocr_utils.inpainting.apply import inpaint_by_groups
+from ocr_utils.inpainting.backends import DEFAULT_SD_MODEL as _DEFAULT_SD_MODEL, SdParams
+from ocr_utils.inpainting.roi import DEFAULT_ROI_SCALE
 
 
-DEFAULT_SD_MODEL = "stable-diffusion-v1-5/stable-diffusion-inpainting"
+# Реэкспорт: имя модели по умолчанию задано в общем ``inpainting.backends``, а
+# здесь оставлено ради обратной совместимости импорта в ``detect_fingers``.
+DEFAULT_SD_MODEL = _DEFAULT_SD_MODEL
 # Под пальцем — кромка обложки и страниц книги, лежащей на чёрном столе. Прямо
 # подсказываем это SD, чтобы он достраивал именно фон/кромку, а не выдумывал текст.
 DEFAULT_SD_PROMPT = (
@@ -32,8 +37,6 @@ DEFAULT_SD_NEGATIVE = (
     "finger, fingers, hand, nail, skin, text, letters, numbers, words, logo, label, sticker, "
     "watermark, drawing, pattern, ornament, artifacts, blurry, distortion, extra objects, duplicate, noise"
 )
-
-_CACHE: dict = {}
 
 
 def _book_left_edge(nd: np.ndarray, run: int, frac: float) -> np.ndarray:
@@ -100,80 +103,37 @@ def _suppress_protrusions(
     return out
 
 
-def _load_sd(model_id: str, device: str):
-    """Ленивая загрузка StableDiffusionInpaintPipeline с кэшем."""
-    key = f"sd:{model_id}:{device}"
-    if key not in _CACHE:
-        from diffusers import StableDiffusionInpaintPipeline
-
-        dtype = torch.float16 if device.startswith("cuda") else torch.float32
-        pipe = StableDiffusionInpaintPipeline.from_pretrained(model_id, torch_dtype=dtype, safety_checker=None)
-        pipe = pipe.to(device)
-        pipe.set_progress_bar_config(disable=True)
-        _CACHE[key] = pipe
-    return _CACHE[key]
-
-
 def sd_inpaint(
     rgb: np.ndarray,
     mask: np.ndarray,
-    device: str = "cuda",
+    models,
     padding: int = 64,
     feather: int = 9,
     sd_prompt: str = DEFAULT_SD_PROMPT,
     sd_negative: str = DEFAULT_SD_NEGATIVE,
     sd_steps: int = 30,
     sd_guidance: float = 3.0,
-    sd_model: str = DEFAULT_SD_MODEL,
     sd_size: int = 512,
     roi_scale: float = DEFAULT_ROI_SCALE,
 ):
-    """SD-инпейнтинг ПОКОМПОНЕНТНО: для каждой связной области свой ROI (вход — ``sd_size``)."""
-    from PIL import Image
+    """SD-инпейнтинг ПОКОМПОНЕНТНО: для каждой связной области свой ROI.
 
-    comps = mask_components(mask)
-    if not comps:
-        return rgb.copy()
+    ``models`` — ``GpuModels``, созданный с ``sd_model=...``. Промпт здесь один на
+    весь кадр: под пальцем всегда одно и то же — кромка книги на тёмном столе.
+    (В закрасе разметки из CVAT промпт зависит от места на полосе, там он приходит
+    колбэком, см. ``inpainting.backends.SdFiller``.)
 
-    pipe = _load_sd(sd_model, device)
-    generator = torch.Generator(device=device).manual_seed(0)
-    result = rgb.copy()
-    for comp in comps:
-        bounds = roi_bounds(comp, padding, roi_scale, rgb.shape[:2])
-        if bounds is None:
-            continue
-        x1, y1, x2, y2 = bounds
-        roi = result[y1:y2, x1:x2]
-        mroi = comp[y1:y2, x1:x2]
-        h0, w0 = roi.shape[:2]
+    Сверх общего цикла остаётся одна пальце-специфичная поправка: SD любит
+    достроить за кромку книги торчащий «язычок» бумаги, и ``_suppress_protrusions``
+    его срезает.
+    """
+    params = SdParams(steps=sd_steps, guidance=sd_guidance, size=sd_size)
 
-        # ВАЖНО: сохраняем пропорции ROI. Если жёстко ужать в квадрат 512×512,
-        # прямая вертикальная кромка книги смазывается в диагональ/блоб и после
-        # обратного масштаба превращается в торчащую «бумажку». Поэтому масштабируем
-        # по длинной стороне до sd_size, обе стороны кратны 8 (требование SD).
-        scale = sd_size / max(h0, w0)
-        nw = max(8, int(round(w0 * scale / 8)) * 8)
-        nh = max(8, int(round(h0 * scale / 8)) * 8)
+    def fill(roi, roi_mask, _bounds):
+        filled = models.sd_fill_roi(roi, roi_mask, sd_prompt, sd_negative, params)
+        return _suppress_protrusions(roi, roi_mask, filled)
 
-        img_pil = Image.fromarray(roi).resize((nw, nh), Image.BICUBIC)
-        msk_pil = Image.fromarray((mroi > 0).astype(np.uint8) * 255).resize((nw, nh), Image.NEAREST)
-        out = pipe(
-            prompt=sd_prompt,
-            negative_prompt=sd_negative,
-            image=img_pil,
-            mask_image=msk_pil,
-            height=nh,
-            width=nw,
-            num_inference_steps=sd_steps,
-            guidance_scale=sd_guidance,
-            generator=generator,
-        ).images[0]
-
-        res = np.array(out.resize((w0, h0), Image.BICUBIC))
-        # Убираем торчащие за кромку «язычки» (фоновую часть пальца заливаем цветом стола)
-        res = _suppress_protrusions(roi, mroi, res)
-        # Вклеиваем только маскированную область — изменения SD вне маски отбрасываем
-        result[y1:y2, x1:x2] = blend_roi(roi, res, mroi, feather)
+    result, _rois = inpaint_by_groups(rgb, mask, fill, padding=padding, feather=feather, roi_scale=roi_scale)
     return result
 
 
@@ -188,13 +148,12 @@ def inpaint_fingers(
     sd_negative: str = DEFAULT_SD_NEGATIVE,
     sd_steps: int = 30,
     sd_guidance: float = 3.0,
-    sd_model: str = DEFAULT_SD_MODEL,
 ) -> np.ndarray:
     """Убирает пальцы под маской выбранным методом (``lama`` или ``sd``).
 
     ``rgb`` — RGB uint8, ``mask`` — uint8 0/255 (область пальца), ``models`` —
-    ``scan_cropping.gpu_models.GpuModels``. Возвращает RGB uint8. Пустая маска
-    возвращает исходник без изменений.
+    ``scan_cropping.gpu_models.GpuModels`` (для ``sd`` — созданный с ``sd_model=...``).
+    Возвращает RGB uint8. Пустая маска возвращает исходник без изменений.
     """
     if int(np.count_nonzero(mask)) == 0:
         return rgb.copy()
@@ -204,13 +163,12 @@ def inpaint_fingers(
         return sd_inpaint(
             rgb,
             mask,
-            device=models.device,
+            models,
             padding=padding,
             feather=feather,
             sd_prompt=sd_prompt,
             sd_negative=sd_negative,
             sd_steps=sd_steps,
             sd_guidance=sd_guidance,
-            sd_model=sd_model,
         )
     raise ValueError(f"Неизвестный метод инпейнтинга: {method}")

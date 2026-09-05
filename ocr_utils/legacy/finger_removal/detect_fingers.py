@@ -36,7 +36,7 @@ from ocr_utils.legacy.finger_removal.sd_inpaint import (
     DEFAULT_SD_PROMPT as SD_DEFAULT_PROMPT,
     inpaint_fingers,
 )
-from ocr_utils.scan_cropping.finger_removal.inpaint_roi import DEFAULT_ROI_SCALE, roi_bounds_list
+from ocr_utils.inpainting.roi import DEFAULT_ROI_SCALE, roi_bounds_list
 from ocr_utils.scan_cropping.gpu_models import GpuModels
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -70,15 +70,19 @@ DEFAULT_CLAMP_MODEL = "world:yolov8x-worldv2.pt"  # YOLO-World с классам
 # порог уверенности (см. DEFAULT_CLAMP_WORK_SIDE / DEFAULT_CLAMP_CONF ниже).
 CLAMP_CLASSES = ["binder clip", "colored clip", "office clip", "clip", "clamp", "bulldog clip"]
 
-# Ленивый одиночный GpuModels: нужен только ветке --inpaint=lama (SD грузится сам).
+# Ленивый одиночный GpuModels на процесс: он же владеет и LaMa, и пайплайном SD.
 _MODELS: "GpuModels | None" = None
 
 
-def _models(device: str) -> GpuModels:
-    """Один экземпляр GpuModels на процесс (модели грузятся при первом обращении)."""
+def _models(device: str, sd_model: "str | None" = None) -> GpuModels:
+    """Один экземпляр GpuModels на процесс (модели грузятся при первом обращении).
+
+    Детекция здесь не нужна: боксы пальцев и зажимов эта CLI ищет своими YOLO
+    поверх ultralytics, а от ``GpuModels`` ей требуется только закрас.
+    """
     global _MODELS
     if _MODELS is None:
-        _MODELS = GpuModels(device)
+        _MODELS = GpuModels(device, with_detection=False, sd_model=sd_model)
     return _MODELS
 
 
@@ -647,14 +651,13 @@ def main(
                     rgb,
                     mask,
                     method=inpaint,
-                    models=_models(device),
+                    models=_models(device, sd_model if inpaint == "sd" else None),
                     padding=padding,
                     feather=feather,
                     sd_prompt=sd_prompt,
                     sd_negative=sd_negative,
                     sd_steps=sd_steps,
                     sd_guidance=sd_guidance,
-                    sd_model=sd_model,
                 )
                 result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
 

@@ -125,51 +125,78 @@ class GpuModels:
 
     Аргументы:
         device: ``"cuda"`` / ``"cpu"``; ``None`` — cuda, если доступна.
+        with_detection: грузить YOLO-World ×2 и SAM. Нужны только вырезке
+            страниц и поиску пальцев; закрасу разметки, пришедшей из CVAT, они не
+            нужны вовсе, а стоят ~0.5 ГиБ VRAM и заметного времени на старте.
+        with_lama: грузить LaMa.
         with_layout: грузить Surya LayoutPredictor (нужен только при
             ``--protect-text-layout``; это отдельная foundation-модель, грузится
             долго и занимает заметную часть VRAM).
+        sd_model: id модели diffusers для инпейнта Stable Diffusion либо ``None``
+            — не грузить. Грузится лениво, при первом ``sd_fill_roi``: сравнение
+            бэкендов обычно начинают с LaMa, и платить за SD до первого её вызова
+            незачем.
         shadow_variant: вариант весов DocShadow (``sd7k`` / ``kligler`` / ``jung``)
             либо ``None`` — не грузить (нужен только при ``--shadow-method=docshadow-*``).
         yolo_weights, sam_weights: имена файлов весов в ``finger_models/``.
+
+    Умолчания повторяют прежнее поведение (детекция и LaMa грузятся всегда),
+    поэтому вызов из ``scan_cropping.cli`` не менялся. Обращение к незагруженной
+    модели — ``RuntimeError`` с именем флага, а не падение по ``None``.
     """
 
     def __init__(
         self,
         device: Optional[str] = None,
         *,
+        with_detection: bool = True,
+        with_lama: bool = True,
         with_layout: bool = False,
+        sd_model: Optional[str] = None,
         shadow_variant: Optional[str] = None,
         yolo_weights: str = DEFAULT_YOLO_WORLD,
         sam_weights: str = DEFAULT_SAM,
     ) -> None:
         self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(
-            "Загружаю модели на %s: YOLO-World×2, SAM, LaMa%s%s",
-            self._device,
-            ", Surya layout" if with_layout else "",
-            f", DocShadow ({shadow_variant})" if shadow_variant else "",
-        )
+        loading = [
+            name
+            for name, needed in (
+                ("YOLO-World×2, SAM", with_detection),
+                ("LaMa", with_lama),
+                ("Surya layout", with_layout),
+                (f"SD ({sd_model}, лениво)", bool(sd_model)),
+                (f"DocShadow ({shadow_variant})", bool(shadow_variant)),
+            )
+            if needed
+        ]
+        logger.info("Загружаю модели на %s: %s", self._device, ", ".join(loading) or "ничего")
 
-        from ultralytics import SAM, YOLOWorld
+        self._yolo_page = self._yolo_hand = self._sam = None
+        if with_detection:
+            from ultralytics import SAM, YOLOWorld
 
-        # ДВА инстанса одних и тех же весов YOLO-World с разными наборами классов.
-        # ``set_classes`` кодирует список классов текстовым энкодером CLIP и
-        # запоминает эмбеддинги в модели, поэтому один инстанс потребовал бы
-        # переключения классов перед каждым из двух прогонов НА КАЖДОМ кадре.
-        # Веса детектора невелики (~150 МБ), лишняя копия дешевле переключения.
-        self._yolo_page = YOLOWorld(resolve_model_path(yolo_weights))
-        self._yolo_page.set_classes(PAGE_CLASSES + FABRIC_CLASSES)
-        self._yolo_hand = YOLOWorld(resolve_model_path(yolo_weights))
-        self._yolo_hand.set_classes(HAND_CLASSES)
+            # ДВА инстанса одних и тех же весов YOLO-World с разными наборами классов.
+            # ``set_classes`` кодирует список классов текстовым энкодером CLIP и
+            # запоминает эмбеддинги в модели, поэтому один инстанс потребовал бы
+            # переключения классов перед каждым из двух прогонов НА КАЖДОМ кадре.
+            # Веса детектора невелики (~150 МБ), лишняя копия дешевле переключения.
+            self._yolo_page = YOLOWorld(resolve_model_path(yolo_weights))
+            self._yolo_page.set_classes(PAGE_CLASSES + FABRIC_CLASSES)
+            self._yolo_hand = YOLOWorld(resolve_model_path(yolo_weights))
+            self._yolo_hand.set_classes(HAND_CLASSES)
 
-        # SAM общий: страницам и пальцам нужен один и тот же сегментатор по боксам.
-        self._sam = SAM(resolve_model_path(sam_weights))
+            # SAM общий: страницам и пальцам нужен один и тот же сегментатор по боксам.
+            self._sam = SAM(resolve_model_path(sam_weights))
 
-        _ensure_lama_weights()
-        self._lama = torch.jit.load(str(LAMA_WEIGHTS), map_location=self._device)
-        self._lama.eval().to(self._device)
+        self._lama = None
+        if with_lama:
+            _ensure_lama_weights()
+            self._lama = torch.jit.load(str(LAMA_WEIGHTS), map_location=self._device)
+            self._lama.eval().to(self._device)
 
         self._layout = self._load_layout() if with_layout else None
+        self._sd_model = sd_model
+        self._sd = None
         self._shadow_variant = shadow_variant
         self._docshadow = self._load_docshadow(shadow_variant) if shadow_variant else None
 
@@ -185,7 +212,7 @@ class GpuModels:
     def close(self) -> None:
         """Отпускает модели и чистит кэш аллокатора CUDA."""
         self._yolo_page = self._yolo_hand = self._sam = None
-        self._lama = self._layout = self._docshadow = None
+        self._lama = self._layout = self._docshadow = self._sd = None
         if self._device.startswith("cuda"):
             torch.cuda.empty_cache()
 
@@ -198,6 +225,18 @@ class GpuModels:
     # --------------------------------------------------------
     # Детекция: YOLO-World
     # --------------------------------------------------------
+
+    def _require(self, model, flag: str, cli_hint: str = ""):
+        """Модель или ``RuntimeError`` с именем флага конструктора.
+
+        Формулировка та же, что у ``layout_blocks`` и ``remove_shadow``: сообщение
+        должно называть флаг, а не «модель не загружена», — иначе по трейсбеку
+        непонятно, что именно чинить.
+        """
+        if model is None:
+            tail = f" (в CLI это {cli_hint})" if cli_hint else ""
+            raise RuntimeError(f"GpuModels создан без {flag[0]}: пересоздайте объект с {flag[1]}{tail}")
+        return model
 
     def detect_page_boxes(self, bgr: np.ndarray, conf: float) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
         """Боксы-кандидаты области страницы/разворота (YOLO-World, page-классы).
@@ -217,7 +256,9 @@ class GpuModels:
         Никакой фильтрации здесь нет: пороги площади, ярусы уверенности для
         near-full-frame боксов и подавление вложенных живут в ``page_detection``.
         """
-        det = self._yolo_page.predict(bgr, conf=conf, device=self._device, verbose=False)
+        det = self._require(self._yolo_page, ("детекции", "with_detection=True")).predict(
+            bgr, conf=conf, device=self._device, verbose=False
+        )
         boxes, confs, cls = self._unpack_detections(det)
         return boxes, confs, cls >= len(PAGE_CLASSES)
 
@@ -237,7 +278,9 @@ class GpuModels:
         Отбраковка по площади бокса, вложенности и площади масок — снаружи,
         в ``finger_removal.masking``.
         """
-        det = self._yolo_hand.predict(bgr, conf=conf, device=self._device, verbose=False)
+        det = self._require(self._yolo_hand, ("детекции", "with_detection=True")).predict(
+            bgr, conf=conf, device=self._device, verbose=False
+        )
         return self._unpack_detections(det)
 
     @staticmethod
@@ -271,7 +314,9 @@ class GpuModels:
         if len(boxes) == 0:
             return np.zeros((0, h, w), dtype=bool)
 
-        seg = self._sam.predict(bgr, bboxes=boxes, device=self._device, verbose=False)
+        seg = self._require(self._sam, ("SAM", "with_detection=True")).predict(
+            bgr, bboxes=boxes, device=self._device, verbose=False
+        )
         if not seg or seg[0].masks is None:
             return np.zeros((0, h, w), dtype=bool)
 
@@ -304,7 +349,7 @@ class GpuModels:
                 (например, два пальца с разных краёв кадра);
             padding: контекстное поле вокруг компоненты маски, пикс.;
             feather: ширина растушёвки шва при вклеивании, пикс. (уходит ВНУТРЬ маски,
-                см. ``inpaint_roi.blend_roi``);
+                см. ``inpainting.roi.blend_roi``);
             roi_scale: во сколько раз растянуть ROI от центра после padding;
             roi_max_side: длинная сторона, до которой ROI уменьшается перед сетью
                 (0 — прогон в нативном разрешении), см. ``LAMA_ROI_MAX_SIDE``.
@@ -318,25 +363,25 @@ class GpuModels:
         доминирует ЧЁРНЫЙ фон. По всему снимку 5696×4272 LaMa «затягивает» дыру
         этим доминирующим чёрным. В тесном ROI сеть видит локальный контекст —
         кромку переплёта, поле страницы — и достраивает именно его.
+
+        Механика вынесена в ``ocr_utils.inpainting.apply.inpaint_by_groups``, где
+        она общая с закрасом разметки из CVAT. Здесь остаётся покомпонентное
+        разбиение (``mask_components``) — то самое поведение, что было и раньше.
         """
-        from ocr_utils.scan_cropping.finger_removal.inpaint_roi import blend_roi, mask_components, roi_bounds
+        from ocr_utils.inpainting.apply import inpaint_by_groups
+        from ocr_utils.inpainting.backends import LamaFiller
 
-        comps = mask_components(mask)
-        if not comps:
-            return rgb
-
-        result = rgb.copy()
-        for comp in comps:
-            bounds = roi_bounds(comp, padding, roi_scale, rgb.shape[:2])
-            if bounds is None:
-                continue
-            x1, y1, x2, y2 = bounds
-            roi = result[y1:y2, x1:x2]
-            mroi = comp[y1:y2, x1:x2]
-            result[y1:y2, x1:x2] = blend_roi(roi, self._lama_fill_roi(roi, mroi, roi_max_side), mroi, feather)
+        result, _bounds = inpaint_by_groups(
+            rgb,
+            mask,
+            LamaFiller(self, roi_max_side=roi_max_side),
+            padding=padding,
+            feather=feather,
+            roi_scale=roi_scale,
+        )
         return result
 
-    def _lama_fill_roi(self, roi: np.ndarray, mroi: np.ndarray, max_side: int = LAMA_ROI_MAX_SIDE) -> np.ndarray:
+    def lama_fill_roi(self, roi: np.ndarray, mroi: np.ndarray, max_side: int = LAMA_ROI_MAX_SIDE) -> np.ndarray:
         """Прогон LaMa по одному ROI; возвращает заполненный ROI (RGB uint8, тот же размер).
 
         При ``max_side > 0`` и ROI крупнее этого размера сеть работает по уменьшенной
@@ -346,11 +391,12 @@ class GpuModels:
         полупрозрачная кожа с интерполяции. Вклеивается результат всё равно только
         под полноразмерной маской (``blend_roi``), так что этот запас ничего не портит.
         """
+        self._require(self._lama, ("LaMa", "with_lama=True"))
         if max_side > 0 and max(roi.shape[:2]) > max_side:
             small_h, small_w = (max(1, round(s * max_side / max(roi.shape[:2]))) for s in roi.shape[:2])
             small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_AREA)
             msmall = cv2.resize(mroi, (small_w, small_h), interpolation=cv2.INTER_AREA)
-            filled = self._lama_fill_roi(small, (msmall > 0).astype(np.uint8) * 255, max_side=0)
+            filled = self.lama_fill_roi(small, (msmall > 0).astype(np.uint8) * 255, max_side=0)
             return cv2.resize(filled, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_CUBIC)
 
         img = (roi.astype(np.float32) / 255.0).transpose(2, 0, 1)  # CHW
@@ -367,6 +413,77 @@ class GpuModels:
             out = self._lama(it, mt)
         res = out[0].permute(1, 2, 0).detach().cpu().numpy()
         return np.clip(res * 255.0, 0, 255).astype(np.uint8)[:oh, :ow]
+
+    # --------------------------------------------------------
+    # Закраска: Stable Diffusion
+    # --------------------------------------------------------
+
+    def _load_sd(self):
+        """Ленивая загрузка StableDiffusionInpaintPipeline.
+
+        Лениво, а не в конструкторе: пайплайн весит несколько гигабайт, а
+        сравнение бэкендов почти всегда начинают с LaMa. Пока ``sd_fill_roi`` не
+        позвали ни разу, за SD не платят ни временем, ни видеопамятью.
+        """
+        from diffusers import StableDiffusionInpaintPipeline
+
+        dtype = torch.float16 if self._device.startswith("cuda") else torch.float32
+        logger.info("Загружаю Stable Diffusion inpainting: %s (%s)", self._sd_model, dtype)
+        pipe = StableDiffusionInpaintPipeline.from_pretrained(self._sd_model, torch_dtype=dtype, safety_checker=None)
+        pipe = pipe.to(self._device)
+        pipe.set_progress_bar_config(disable=True)
+        return pipe
+
+    def sd_fill_roi(self, roi: np.ndarray, mroi: np.ndarray, prompt: str, negative: str, params) -> np.ndarray:
+        """Прогон Stable Diffusion по одному ROI; заполненный ROI RGB uint8 того же размера.
+
+        Аргументы:
+            roi: кусок кадра RGB uint8;
+            mroi: что в нём закрасить, uint8 0/255;
+            prompt, negative: чем заполнять и чего не рисовать;
+            params: :class:`ocr_utils.inpainting.backends.SdParams`.
+
+        ПРОПОРЦИИ ROI СОХРАНЯЮТСЯ. Если жёстко ужать в квадрат ``size`` × ``size``,
+        прямая вертикальная кромка смазывается в диагональ и после обратного
+        масштаба превращается в торчащую «бумажку» — это уже проверено на пальцах.
+        Поэтому масштабируем по длинной стороне, а обе стороны приводим к кратности
+        8: этого требует VAE.
+
+        Генератор сидируется ``params.seed`` на КАЖДЫЙ ROI, а не один раз на кадр:
+        иначе результат зоны зависел бы от того, сколько зон закрасили до неё, и
+        два прогона сравнения с разной группировкой стали бы несопоставимы.
+        """
+        from PIL import Image as PILImage
+
+        if self._sd is None:
+            if not self._sd_model:
+                raise RuntimeError(
+                    "GpuModels создан без Stable Diffusion: пересоздайте объект с "
+                    "sd_model='stable-diffusion-v1-5/stable-diffusion-inpainting' "
+                    "(в CLI это --backend sd)"
+                )
+            self._sd = self._load_sd()
+
+        h0, w0 = roi.shape[:2]
+        scale = params.size / max(h0, w0)
+        nw = max(8, int(round(w0 * scale / 8)) * 8)
+        nh = max(8, int(round(h0 * scale / 8)) * 8)
+
+        img_pil = PILImage.fromarray(roi).resize((nw, nh), PILImage.BICUBIC)
+        msk_pil = PILImage.fromarray((mroi > 0).astype(np.uint8) * 255).resize((nw, nh), PILImage.NEAREST)
+        generator = torch.Generator(device=self._device).manual_seed(params.seed)
+        out = self._sd(
+            prompt=prompt,
+            negative_prompt=negative,
+            image=img_pil,
+            mask_image=msk_pil,
+            height=nh,
+            width=nw,
+            num_inference_steps=params.steps,
+            guidance_scale=params.guidance,
+            generator=generator,
+        ).images[0]
+        return np.array(out.resize((w0, h0), PILImage.BICUBIC))
 
     # --------------------------------------------------------
     # Разметка страницы: Surya layout
