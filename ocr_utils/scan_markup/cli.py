@@ -763,7 +763,8 @@ def from_cvat_command(
     stats = run_export(params, open_db(db_path), open_db(out_db_path))
     click.echo(
         f"Полос: {stats.pages}. Растровых областей: {stats.regions} "
-        f"(цветных {stats.color}, серых {stats.grayscale}, во всю полосу {stats.full_page}). "
+        f"(цветных {stats.color}, серых {stats.grayscale}, цветного текста {stats.color_text}, "
+        f"во всю полосу {stats.full_page}). "
         f"Масок под удаление: {stats.masks}, точек экслибриса: {stats.points}.\n"
         f"Шейпов с чужими метками: {stats.unknown_labels}, кадров без полосы: {stats.unmatched_frames}."
     )

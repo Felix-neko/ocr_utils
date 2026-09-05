@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ocr_utils.paper import INK_LEVEL, PAPER_BLUR_PX, PAPER_DILATE_PX
 from ocr_utils.background_smoothing.processing import (
     BLUR_MODE_MASKED,
     DEFAULT_BLUR_MULT,
@@ -29,6 +30,7 @@ from ocr_utils.background_smoothing.processing import (
     METHOD_SAUVOLA,
     PROTECT_DILATE_FRAC,
     MIN_GLYPH_AREA,
+    SURE_GLYPH_AREA,
     SmoothResult,
     smooth_frame,
 )
@@ -52,6 +54,11 @@ class SmoothOptions:
     sauvola_k: float = DEFAULT_SAUVOLA_K
     sauvola_window: "int | None" = None
     min_glyph_area: int = MIN_GLYPH_AREA
+    ink_level: "float | None" = INK_LEVEL
+    sure_glyph_area: int = SURE_GLYPH_AREA
+    paper_dilate_px: int = PAPER_DILATE_PX
+    paper_blur_px: int = PAPER_BLUR_PX
+    trust_strong: bool = False
     dilate_px: "float | None" = DEFAULT_DILATE_PX
     dilate_frac: float = PROTECT_DILATE_FRAC
     blur_px: "float | None" = None
@@ -80,6 +87,11 @@ def smooth_page(
         sauvola_k=opts.sauvola_k,
         sauvola_window=opts.sauvola_window,
         min_glyph_area=opts.min_glyph_area,
+        ink_level=opts.ink_level,
+        sure_glyph_area=opts.sure_glyph_area,
+        paper_dilate_px=opts.paper_dilate_px,
+        paper_blur_px=opts.paper_blur_px,
+        trust_strong=opts.trust_strong,
         dilate_px=opts.dilate_px,
         dilate_frac=opts.dilate_frac,
         blur_px=opts.blur_px,

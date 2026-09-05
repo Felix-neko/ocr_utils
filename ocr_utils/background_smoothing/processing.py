@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL, PAPER_BLUR_PX, PAPER_DILATE_PX, reflectance
 from ocr_utils.scan_cropping.morphology import dilate_disk
 
 # Методы построения первичной маски (значения --method).
@@ -82,6 +83,15 @@ SAUVOLA_R = 128.0
 # крошки от антиалиасинга у краёв букв; они примыкают к сильной маске и остаются
 # независимо от площади.
 MIN_GLYPH_AREA = 34
+
+# Площадь, с которой связная область подтверждается САМА ПО СЕБЕ, без оглядки на
+# отражение. Нужна затем, что «крупная И тёмная» — правило слишком жёсткое: на
+# пересвеченной таблице 1966/01 IMG_0047_2R длинная линейка в 14 731 px бледна
+# (отражение выше порога) и при строгом пороге удалялась целиком, хотя это очевидное
+# содержимое. Крапины просвета столько не набирают: на 1976/01 IMG_0052_1L самая
+# крупная удаляемая — 243 px. Порог 500 лежит между ними, и на призраке он не меняет
+# ничего (те же 40 крупных областей удаляются), а на таблице убирает последние потери.
+SURE_GLYPH_AREA = 500
 
 # Расстояние, на котором подтверждённая область поддерживает мелкую соседку, пикс.
 # По умолчанию берётся равным радиусу защитной дилатации: тогда поддержанная область
@@ -238,38 +248,125 @@ def _local_mean_std(gray: np.ndarray, window: int) -> "tuple[np.ndarray, np.ndar
     return mean, np.sqrt(var)
 
 
+def component_reflectance(refl: np.ndarray, labels: np.ndarray, count: int) -> np.ndarray:
+    """Медиана отражения каждой связной области; индекс совпадает с меткой.
+
+    Векторно, через сортировку меток: цикл ``refl[labels == i]`` на кадре в 21 Мп и
+    тысячах областей означал бы тысячи полных проходов по кадру.
+
+    Индекс 0 (фон) заполняется единицей — «чистая бумага», чтобы он никогда не прошёл
+    проверку на краску.
+    """
+    out = np.ones(count, dtype=np.float32)
+    flat_labels, flat_refl = labels.ravel(), refl.ravel()
+    inside = flat_labels > 0
+    if not inside.any():
+        return out
+    lab_in, refl_in = flat_labels[inside], flat_refl[inside]
+    order = np.lexsort((refl_in, lab_in))
+    lab_sorted, refl_sorted = lab_in[order], refl_in[order]
+    starts = np.searchsorted(lab_sorted, np.arange(1, count))
+    ends = np.searchsorted(lab_sorted, np.arange(2, count + 1))
+    filled = ends > starts
+    middle = starts + (ends - starts) // 2
+    out[1:][filled] = refl_sorted[middle[filled]]
+    return out
+
+
+def auto_ink_level(refl: np.ndarray, block: np.ndarray, fallback: float = INK_LEVEL) -> float:
+    """Порог Оцу В ДОЛЯХ УРОВНЯ БУМАГИ, посчитанный по самой полосе.
+
+    Отвечает на «а нельзя ли вместо фиксированного числа взять меру уверенности самой
+    бинаризации»: можно. Порог считается по отражению, поэтому не зависит ни от цвета
+    бумаги, ни от экспозиции, и только по пикселям маски содержимого — чтобы пустые
+    поля не перетянули гистограмму к бумаге. Тот же приём, что в
+    ``show_through_detection.zones.otsu_level``.
+
+    ``block`` — наборная полоса: краска ВМЕСТЕ с бумагой между строками. По одним
+    пикселям краски Оцу поделил бы пополам саму краску и дал бы 0.37 вместо 0.59.
+    Годится маска, раздутая на радиус защитного припуска: на обеих проверочных полосах
+    она воспроизвела эталон ``zones.otsu_level`` до третьего знака.
+
+    На замерах садится около 0.6 (0.592 на пересвеченной 1966/01 IMG_0047_2R, 0.608 на
+    1976/01 IMG_0052_1L с сильным просветом) — устойчиво, но строже фиксированного 0.65
+    и подтверждает на девять пунктов меньше площади пересвеченного текста. Поэтому
+    умолчанием оставлено фиксированное значение, а это — опция для сравнений.
+
+    Если считать не по чему (маска почти пуста), возвращается ``fallback``.
+    """
+    values = refl[block > 0] if block.dtype != np.bool_ else refl[block]
+    if values.size < 256:
+        return fallback
+    level, _ = cv2.threshold(
+        np.clip(values * 255.0, 0, 255).astype(np.uint8).reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    return float(level) / 255.0
+
+
 def despeckle(
-    mask: np.ndarray, strong: np.ndarray, min_area: int = MIN_GLYPH_AREA, support_px: float = DEFAULT_SUPPORT_PX
+    mask: np.ndarray,
+    strong: np.ndarray,
+    refl: "np.ndarray | None" = None,
+    min_area: int = MIN_GLYPH_AREA,
+    ink_level: "float | None" = INK_LEVEL,
+    sure_area: int = SURE_GLYPH_AREA,
+    support_px: float = DEFAULT_SUPPORT_PX,
+    trust_strong: bool = False,
 ) -> np.ndarray:
-    """Убирает из маски мелкие связные области, которым нечем себя подтвердить.
+    """Убирает из маски связные области, которым нечем себя подтвердить.
 
-    ЗАЧЕМ. На ровной бумаге порог Саволы вырождается в ``m * (1 - k)``, то есть висит
-    на ``k`` ниже уровня бумаги, и в пустое поле проваливаются пылинки, крапины и
-    просвет с оборота. По площади это ничто (0.29% кадра), но каждая крапина после
-    дилатации защитной маски запирает от размытия диск в полсотни пикселей поперёк:
-    на 1972/02 IMG_0101_1L двумя сотнями крапин запиралось 4.1% чистого поля.
+    ЗАЧЕМ. В защитную маску попадает мусор двух сортов, и оба после дилатации запирают
+    от размытия диски в полсотни пикселей поперёк:
 
-    Поднимать ``k`` бесполезно: крапины пропадают только к k = 0.25, а вместе с ними
-    и вся польза локального порога (добавка у букв падает с 0.284% до 0.002%, то есть
-    Савола вырождается в Оцу).
+    * пылинки и крапины, которые ловит вырожденный на ровной бумаге порог Саволы
+      (``m * (1 - k)`` висит на ``k`` ниже уровня бумаги);
+    * ПРОСВЕТ С ОБОРОТА — и вот он проходит даже глобальный порог. Замер на 1976/01
+      IMG_0052_1L: в нижней, пустой части полосы 416 областей запирали 15.6% чистого
+      поля, и 56.6% их пикселей прошли сильный порог Оцу. Понижение ``--threshold-bias``
+      не спасает: 330 областей при 0.5, 186 при чистом Оцу.
 
-    ПРАВИЛО. Область ПОДТВЕРЖДЕНА, если она крупная (``min_area``) либо примыкает к
-    сильной маске ``strong`` — той, что прошла глобальный порог. Остальные остаются,
-    только если лежат в пределах ``support_px`` от подтверждённой.
+    ПРАВИЛО. Область ПОДТВЕРЖДЕНА, если она
 
-    Поддерживать может ТОЛЬКО ПОДТВЕРЖДЁННАЯ область, и это не придирка: просвет с
-    оборота — не одиночные пылинки, а призрак строк, крапины в нём стоят кучно. Если
-    разрешить им поддерживать друг друга, скопление вытягивает себя само — замер по
-    четырём полосам: выживает 34/31/12/206 крапин вместо 12/1/0/28.
+    * либо КРУПНАЯ САМА ПО СЕБЕ (``sure_area``) — размер говорит за себя, и спрашивать
+      про яркость незачем;
+    * либо не мельче ``min_area`` И тёмная относительно бумаги (медианное отражение не
+      выше ``ink_level``).
 
-    Смысл второй половины правила — пересвеченная буква, у которой часть штрихов не
-    прошла бинаризацию, а уцелевшие обломки не связаны ни между собой, ни с соседями.
-    Обломок мелкий и ни к чему не примыкает, но рядом стоит нормальная буква, и она
-    его подтверждает.
+    Остальные остаются, только если лежат в пределах ``support_px`` от подтверждённой.
 
-    Для маски, построенной ОДНИМ глобальным порогом, функция — тождество по
-    построению: там ``strong`` совпадает с самой маской, и каждая область примыкает к
-    ней. То есть ветка Оцу этим отсевом не затрагивается вовсе.
+    Первая половина не роскошь: без неё правило вырождается в «крупная И тёмная», и на
+    пересвеченной таблице 1966/01 IMG_0047_2R при строгом пороге удалялась линейка в
+    14 731 px — бледная, но очевидное содержимое.
+
+    ПОЧЕМУ ОТРАЖЕНИЕ, А НЕ ЯРКОСТЬ. Абсолютная яркость признаком быть не может. На
+    пересвеченной таблице 1966/01 IMG_0047_2R уровень бумаги 255, а «краска» там
+    123-193 — светлее, чем крапины просвета на IMG_0052_1L (медиана 183 при бумаге
+    252). Любой порог по яркости срезал бы настоящий текст ровно там, где защита нужнее
+    всего. По отражению они расходятся надёжно: 0.53 против 0.83, и при ``ink_level``
+    0.65 подтверждается 96.3% площади краски пересвеченной таблицы против 13.5% площади
+    призрака.
+
+    ПОДДЕРЖИВАТЬ МОЖЕТ ТОЛЬКО ПОДТВЕРЖДЁННАЯ ОБЛАСТЬ, и это не придирка: просвет — не
+    одиночные пылинки, а призрак строк, крапины в нём стоят кучно. Разреши им
+    поддерживать друг друга, и скопление вытягивает себя само: выживает 34/31/12/206
+    крапин вместо 12/1/0/28.
+
+    Смысл поддержки — пересвеченная буква, у которой часть штрихов не прошла
+    бинаризацию, а уцелевшие обломки не связаны ни между собой, ни с соседями. Обломок
+    мелкий, но рядом стоит нормальная буква, и она его подтверждает.
+
+    Аргументы:
+        mask: первичная маска (uint8 0/255 или bool);
+        strong: маска глобального порога — нужна только при ``trust_strong``;
+        refl: карта отражения (см. ``ocr_utils.paper.reflectance``); ``None`` —
+            отражение не учитывается, правило вырождается в одну площадь;
+        min_area: площадь, с которой область подтверждается сама по себе;
+        ink_level: доля уровня бумаги, темнее которой область считается краской;
+            ``None`` — не учитывать отражение;
+        support_px: на каком расстоянии подтверждённая область поддерживает соседку;
+        trust_strong: подтверждать всё, что примыкает к ``strong``. Прежнее поведение:
+            при нём для маски, построенной одним глобальным порогом, функция —
+            тождество, и ветка Оцу отсевом не затрагивается вовсе.
 
     Название. Половина «сильное плюс слабое, слабое оставляем при связи с сильным» —
     это гистерезисный порог (двойной порог Кэнни), он же реконструкция по маркеру в
@@ -277,13 +374,17 @@ def despeckle(
     DBSCAN. Отдельного общепринятого имени у связки нет.
     """
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
-    big = stats[:, cv2.CC_STAT_AREA] >= min_area
-    attached = np.bincount(labels[strong > 0].ravel(), minlength=count) > 0
-    confirmed = big | attached
+    area = stats[:, cv2.CC_STAT_AREA]
+    confirmed = area >= min_area
+    if ink_level is not None and refl is not None:
+        confirmed &= component_reflectance(refl, labels, count) <= ink_level
+        confirmed |= area >= sure_area
+    if trust_strong:
+        confirmed |= np.bincount(labels[strong > 0].ravel(), minlength=count) > 0
     confirmed[0] = False  # фон
 
     keep = confirmed
-    if support_px > 0 and not confirmed[1:].all():
+    if support_px > 0 and confirmed[1:].any() and not confirmed[1:].all():
         zone = dilate_disk(confirmed[labels].astype(np.uint8) * 255, support_px) > 0
         keep = confirmed | (np.bincount(labels[zone].ravel(), minlength=count) > 0)
         keep[0] = False
@@ -340,7 +441,12 @@ def primary_mask(
     window: "int | None" = None,
     roi: "np.ndarray | None" = None,
     min_glyph_area: int = MIN_GLYPH_AREA,
+    ink_level: "float | None" = INK_LEVEL,
+    sure_glyph_area: int = SURE_GLYPH_AREA,
+    paper_dilate_px: int = PAPER_DILATE_PX,
+    paper_blur_px: int = PAPER_BLUR_PX,
     support_px: float = DEFAULT_SUPPORT_PX,
+    trust_strong: bool = False,
 ) -> np.ndarray:
     """Первичная маска контента ``M_primary`` (uint8 0/255): напечатанное и подозрение на него.
 
@@ -358,10 +464,13 @@ def primary_mask(
     бумаги — при k = 0.1 это ~25 уровней. Зерно бумаги это перекрывает, а вот пылинки,
     крапины и просвет с оборота в него проваливаются, и на пустом поле появляется
     россыпь одиночных точек. По площади они ничтожны, но каждая после дилатации
-    запирает от размытия диск в полсотни пикселей — поэтому маска чистится
-    :func:`despeckle`. Для ветки Оцу тот отсев — тождество по построению.
+    запирает от размытия диск в полсотни пикселей.
 
-    ``min_glyph_area = 0`` отключает чистку.
+    Поэтому маска — ОБЕИХ веток, не только Саволы — чистится :func:`despeckle`: мусор
+    вредит одинаково, каким бы порогом его ни нашли, а просвет с оборота проходит и
+    глобальный порог тоже. ``min_glyph_area = 0`` отключает чистку целиком,
+    ``trust_strong=True`` возвращает прежнее поведение, при котором ветка Оцу не
+    затрагивалась.
 
     ``roi`` ограничивает область, ПО КОТОРОЙ считается глобальный порог (см.
     :func:`analysis_samples`); сама маска строится по всему кадру. Внутри
@@ -376,13 +485,30 @@ def primary_mask(
 
     mask = gray <= global_threshold(gray, bias, roi)
 
+    strong = mask
     if method == METHOD_SAUVOLA:
         mean, std = _local_mean_std(gray, sauvola_window(gray.shape, window))
         t_local = mean * (1.0 + sauvola_k * (std / SAUVOLA_R - 1.0))
-        strong = mask
         mask = mask | (gray <= t_local)
-        if min_glyph_area:
-            mask = despeckle(mask, strong, min_glyph_area, support_px)
+
+    if min_glyph_area:
+        refl = reflectance(gray, paper_dilate_px, paper_blur_px) if ink_level is not None else None
+        if ink_level == AUTO_INK_LEVEL and refl is not None:
+            # Область счёта — маска, раздутая на радиус поддержки: это краска ВМЕСТЕ с
+            # бумагой между строками, то есть наборная полоса. По одним пикселям краски
+            # Оцу поделил бы саму краску пополам и дал бы 0.37 вместо 0.59.
+            block = dilate_disk((mask > 0).astype(np.uint8) * 255, support_px) > 0
+            ink_level = auto_ink_level(refl, block)
+        mask = despeckle(
+            mask,
+            strong,
+            refl,
+            min_area=min_glyph_area,
+            ink_level=ink_level,
+            sure_area=sure_glyph_area,
+            support_px=support_px,
+            trust_strong=trust_strong,
+        )
 
     return mask.astype(np.uint8) * 255
 
@@ -462,6 +588,11 @@ def smooth_frame(
     sauvola_k: float = DEFAULT_SAUVOLA_K,
     sauvola_window: "int | None" = None,
     min_glyph_area: int = MIN_GLYPH_AREA,
+    ink_level: "float | None" = INK_LEVEL,
+    sure_glyph_area: int = SURE_GLYPH_AREA,
+    paper_dilate_px: int = PAPER_DILATE_PX,
+    paper_blur_px: int = PAPER_BLUR_PX,
+    trust_strong: bool = False,
     dilate_px: "float | None" = None,
     dilate_frac: float = PROTECT_DILATE_FRAC,
     blur_px: "float | None" = None,
@@ -513,7 +644,12 @@ def smooth_frame(
         window=sauvola_window,
         roi=roi,
         min_glyph_area=min_glyph_area,
+        ink_level=ink_level,
+        sure_glyph_area=sure_glyph_area,
+        paper_dilate_px=paper_dilate_px,
+        paper_blur_px=paper_blur_px,
         support_px=radius,
+        trust_strong=trust_strong,
     )
 
     m_dilated = dilate_disk(m_primary, radius)

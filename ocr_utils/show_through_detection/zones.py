@@ -24,15 +24,32 @@ import numpy as np
 
 import cv2
 
-# Высота кадра, для которой названы все размеры ниже: разворот пака «Плановое хозяйство»
-# в 300 dpi. Свой эталон, а не ``scale.REFERENCE_HEIGHT`` (там 2944 — высота JPEG-превью
-# из RAF совсем другого пака): числа ниже замерены именно на этих сканах.
-REFERENCE_HEIGHT = 2800.0
+# Нормировка живёт в общем ``ocr_utils.paper``: ею пользуется ещё и чистка маски в
+# ``background_smoothing``, а тянуть туда зависимость от подсистемы детекции незачем.
+# Здесь имена реэкспортируются, чтобы потребители модуля ничего не заметили.
+from ocr_utils.paper import INK_LEVEL, REFERENCE_HEIGHT, scaled, scaled_float  # noqa: F401  (реэкспорт)
+from ocr_utils.paper import disk as _disk
+from ocr_utils.paper import odd as _odd
+from ocr_utils.paper import paper_level as _paper_level
 
-PAPER_DILATE_PX = 7  # радиус раздутия светлого при оценке уровня бумаги
-PAPER_BLUR_PX = 75  # размытие оценки бумаги: крупнее буквы, мельче неровности света
+# Здесь размеры окон по-прежнему считаются от ВЫСОТЫ полосы: подсистема калибровалась
+# на разворотах «Планового хозяйства», где полоса всегда целая. В обработке пака-1 так
+# нельзя (там встречаются обрезанные страницы), и там те же размеры передаются явно.
+PAPER_DILATE_PX = 7
+PAPER_BLUR_PX = 75
 
-INK_LEVEL = 0.65  # темнее этой доли от бумаги — настоящая краска, а не призрак
+
+def paper_level(gray: np.ndarray) -> np.ndarray:
+    """Уровень бумаги с размерами окон, пересчитанными от высоты полосы."""
+    height = gray.shape[0]
+    return _paper_level(gray, scaled(height, PAPER_DILATE_PX), scaled(height, PAPER_BLUR_PX))
+
+
+def reflectance(gray: np.ndarray) -> np.ndarray:
+    """Отражение относительно бумаги: бумага ≈ 1.0, краска — заметно ниже."""
+    img = gray.astype(np.float32)
+    return np.clip(img / np.maximum(paper_level(gray), 1.0), 0.0, 1.2)
+
 
 DENSITY_BLUR_PX = 75  # окно, в котором считается «сколько тут краски»
 BLOCK_DENSITY = 0.03  # плотность краски, с которой начинается наборная полоса
@@ -61,86 +78,6 @@ MIN_ZONE_FRACTION = 0.004
 NO_TEXT = "нет текста"
 NO_MARGIN = "нет опорных полей"
 NO_GAP = "нет межстрочий"
-
-
-def scaled(height: int, px_at_reference: float) -> int:
-    """Пересчитывает размер, названный для ``REFERENCE_HEIGHT``, под текущую полосу.
-
-    Args:
-        height: Высота обрабатываемой полосы в пикселях.
-        px_at_reference: Размер в пикселях при эталонной высоте.
-
-    Returns:
-        Размер в пикселях текущей полосы, не меньше единицы.
-    """
-    return max(1, int(round(scaled_float(height, px_at_reference))))
-
-
-def scaled_float(height: int, px_at_reference: float) -> float:
-    """То же, что ``scaled``, но без округления — для сигм гауссова размытия.
-
-    Args:
-        height: Высота обрабатываемой полосы в пикселях.
-        px_at_reference: Размер в пикселях при эталонной высоте.
-
-    Returns:
-        Размер в пикселях текущей полосы.
-    """
-    return px_at_reference * height / REFERENCE_HEIGHT
-
-
-def _odd(value: int) -> int:
-    """Ближайшее нечётное число не меньше единицы (ядра OpenCV любят нечётную сторону).
-
-    Args:
-        value: Желаемая сторона ядра.
-
-    Returns:
-        Нечётная сторона.
-    """
-    return value if value % 2 else value + 1
-
-
-def _disk(radius: int) -> np.ndarray:
-    """Круглый структурный элемент заданного радиуса.
-
-    Args:
-        radius: Радиус в пикселях.
-
-    Returns:
-        Ядро для морфологии.
-    """
-    side = _odd(2 * max(1, radius) + 1)
-    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (side, side))
-
-
-def paper_level(gray: np.ndarray) -> np.ndarray:
-    """Гладкая оценка уровня бумаги: «сколько было бы яркости, не будь тут краски».
-
-    Args:
-        gray: Полутоновая полоса.
-
-    Returns:
-        Массив float32 той же формы.
-    """
-    img = gray.astype(np.float32)
-    height = img.shape[0]
-    dilated = cv2.dilate(img, _disk(scaled(height, PAPER_DILATE_PX)))
-    side = _odd(scaled(height, PAPER_BLUR_PX))
-    return cv2.blur(dilated, (side, side))
-
-
-def reflectance(gray: np.ndarray) -> np.ndarray:
-    """Отражение относительно бумаги: бумага ≈ 1.0, краска — заметно ниже.
-
-    Args:
-        gray: Полутоновая полоса.
-
-    Returns:
-        Массив float32 в диапазоне [0, 1.2].
-    """
-    img = gray.astype(np.float32)
-    return np.clip(img / np.maximum(paper_level(gray), 1.0), 0.0, 1.2)
 
 
 def halftone_mask(refl: np.ndarray) -> np.ndarray:

@@ -22,11 +22,33 @@ from ocr_utils.background_smoothing.processing import (
     METHOD_OTSU,
     PROTECT_DILATE_FRAC,
     MIN_GLYPH_AREA,
+    SURE_GLYPH_AREA,
 )
+from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL, PAPER_BLUR_PX, PAPER_DILATE_PX
 from ocr_utils.scan_cropping.image_io import collect_images
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def parse_ink_level(value: str) -> "float | None":
+    """``--ink-level``: число, ``off`` (не учитывать отражение) или ``auto``.
+
+    ``auto`` — порог Оцу в долях уровня бумаги, посчитанный по самой полосе
+    (``show_through_detection.zones.otsu_level``): он не зависит ни от бумаги, ни от
+    экспозиции. На замерах садится около 0.6, то есть строже умолчания 0.65 и
+    подтверждает на девять пунктов меньше площади пересвеченного текста, — поэтому
+    умолчанием взято фиксированное значение, а ``auto`` оставлен для сравнений.
+    """
+    text = value.strip().lower()
+    if text == "off":
+        return None
+    if text == "auto":
+        return AUTO_INK_LEVEL
+    try:
+        return float(text)
+    except ValueError:
+        raise click.BadParameter(f"ожидается число, 'off' или 'auto', получено {value!r}")
 
 
 @click.command()
@@ -118,6 +140,52 @@ logger = logging.getLogger(__name__)
     ),
 )
 @click.option(
+    "--paper-dilate-px",
+    default=PAPER_DILATE_PX,
+    show_default=True,
+    type=int,
+    help=(
+        "Радиус раздутия светлого при оценке уровня бумаги, пикс. Должен перекрывать толщину "
+        "штриха. В пикселях, а не долей кадра: в паке встречаются обрезанные страницы, и доля "
+        "от их высоты дала бы втрое меньшее окно на том же наборе."
+    ),
+)
+@click.option(
+    "--paper-blur-px",
+    default=PAPER_BLUR_PX,
+    show_default=True,
+    type=int,
+    help="Сторона окна размытия при оценке уровня бумаги, пикс.: крупнее буквы, мельче неровности света.",
+)
+@click.option(
+    "--sure-glyph-area",
+    default=SURE_GLYPH_AREA,
+    show_default=True,
+    type=int,
+    help=(
+        "Площадь, с которой область подтверждается САМА ПО СЕБЕ, без оглядки на отражение. "
+        "Без неё правило вырождается в «крупная И тёмная», и бледная линейка таблицы в тысячи "
+        "пикселей удаляется целиком."
+    ),
+)
+@click.option(
+    "--ink-level",
+    default=str(INK_LEVEL),
+    show_default=True,
+    callback=lambda _ctx, _param, value: parse_ink_level(value),
+    help=(
+        "Доля уровня бумаги, темнее которой связная область считается настоящей краской. "
+        "Отражение, а не яркость: на пересвеченной полосе краска бывает светлее, чем просвет "
+        "с оборота на обычной. off — не учитывать, auto — порог Оцу по самой полосе."
+    ),
+)
+@click.option(
+    "--trust-strong/--no-trust-strong",
+    default=False,
+    show_default=True,
+    help="Подтверждать всё, что прошло глобальный порог. Прежнее поведение: ветка Оцу чисткой не затрагивалась.",
+)
+@click.option(
     "--dilate-px",
     default=None,
     type=float,
@@ -199,6 +267,11 @@ def main(
     sauvola_k: float,
     sauvola_window: Optional[int],
     min_glyph_area: int,
+    ink_level,
+    sure_glyph_area,
+    paper_dilate_px,
+    paper_blur_px,
+    trust_strong: bool,
     dilate_px: Optional[float],
     dilate_frac: float,
     blur_px: Optional[float],
@@ -227,6 +300,11 @@ def main(
         sauvola_k=sauvola_k,
         sauvola_window=sauvola_window,
         min_glyph_area=min_glyph_area,
+        ink_level=ink_level,
+        sure_glyph_area=sure_glyph_area,
+        paper_dilate_px=paper_dilate_px,
+        paper_blur_px=paper_blur_px,
+        trust_strong=trust_strong,
         dilate_px=dilate_px,
         dilate_frac=dilate_frac,
         blur_px=blur_px,

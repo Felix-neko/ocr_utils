@@ -44,7 +44,7 @@ def markup_with(*boxes_kinds) -> PageMarkup:
 
 def run(markup, **kw):
     models = StubModels()
-    opts = InpaintOptions(mask_dilate_px=kw.pop("mask_dilate_px", 0), **kw)
+    opts = InpaintOptions(group_min_dilate_px=kw.pop("group_min_dilate_px", 0), **kw)
     out, report = inpaint_page(text_page(), markup, opts, models)
     return out, report, models
 
@@ -106,7 +106,7 @@ def test_page_without_masks_is_returned_as_is():
 
 def test_page_masks_skips_empty_kinds():
     markup = markup_with((MASK_LIBRARY_STAMP, (100, 100, 160, 140)))
-    assert list(page_masks(markup, (MASK_LIBRARY_STAMP, MASK_HANDWRITING), 0)) == [MASK_LIBRARY_STAMP]
+    assert list(page_masks(markup, (MASK_LIBRARY_STAMP, MASK_HANDWRITING))) == [MASK_LIBRARY_STAMP]
 
 
 def test_zone_kinds_sorted_by_area():
@@ -122,3 +122,30 @@ def test_zone_kinds_sorted_by_area():
 def test_default_roi_side_is_1024():
     """512 калибровался на пальцах; на разметке при нём оставались артефакты."""
     assert InpaintOptions().lama_roi_max_side == DEFAULT_LAMA_ROI_MAX_SIDE == 1024
+
+
+def test_network_gets_the_mask_without_any_dilation():
+    """В сеть уходит ровно обведённое: припуск группировки маску не раздувает.
+
+    ``group_min_dilate_px`` участвует ТОЛЬКО в проверке пересечения раздутых рамок
+    (``grouping.expand_box``); маски групп собираются из карты меток исходной,
+    нераздутой маски.
+    """
+    from ocr_utils.scan_cleanup.source import decode_mask_rows
+
+    markup = markup_with(
+        (MASK_LIBRARY_STAMP, (100, 100, 160, 140)),
+        (MASK_HANDWRITING, (200, 100, 260, 140)),  # зазор 40 px — сольются только припуском
+    )
+    drawn = decode_mask_rows(markup.masks, W, H)
+
+    models = StubModels()
+    out, report = inpaint_page(text_page(), markup, InpaintOptions(group_min_dilate_px=40), models)
+
+    assert report.zones == 1, "припуск 40 px должен слить их в одну операцию"
+    for kind, mask in report.masks.items():
+        assert np.array_equal(mask > 0, decode_mask_rows(markup.masks_of(kind), W, H))
+    # Сеть красит ROI целиком, но вклеивается только под маской: вне неё кадр не тронут.
+    assert not ((out[..., 0] == FILL) & ~drawn).any()
+    # И зазор между слитыми областями остался нетронутым.
+    assert (out[110, 180] != FILL).any()

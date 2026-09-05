@@ -25,12 +25,13 @@ import cv2
 import numpy as np
 
 from ocr_utils.background_smoothing.processing import METHOD_SAUVOLA
+from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL
 from ocr_utils.inpainting.backends import BACKEND_SD, SdParams, make_filler
 from ocr_utils.inpainting.grouping import group_masks
 from ocr_utils.scan_cleanup.inpaint import (
     FEATHER_PX,
     GROUP_ROI_SCALE,
-    MASK_DILATE_PX,
+    GROUP_MIN_DILATE_PX,
     ROI_PADDING,
     page_masks,
     zone_kinds,
@@ -65,6 +66,8 @@ class CompareMasksParams:
     sauvola_ks: "tuple[float, ...]" = (0.10,)
     dilate_pxs: "tuple[float, ...]" = (15.0, 25.0, 35.0)
     blur_pxs: "tuple[float, ...]" = (60.0, 120.0, 240.0)
+    ink_levels: "tuple[float | None, ...]" = (INK_LEVEL,)
+    show_removed: bool = False
     crop_side: int = 1200
     crops: int = 3
     montage_cols: int = 4
@@ -88,7 +91,7 @@ class CompareInpaintParams:
     group_dilate_fracs: "tuple[float, ...]" = (1.0 / 3.0,)
     roi_scales: "tuple[float, ...]" = (GROUP_ROI_SCALE,)
     lama_sides: "tuple[int, ...]" = (512,)
-    mask_dilate_px: float = MASK_DILATE_PX
+    group_min_dilate_px: int = GROUP_MIN_DILATE_PX
     montage_cols: int = 4
     sd: SdParams = field(default_factory=SdParams)
     prompts: PromptSet = field(default_factory=PromptSet)
@@ -195,15 +198,40 @@ def select_pages(
 def mask_variants(params: CompareMasksParams) -> "list[tuple[str, SmoothOptions]]":
     """Декартово произведение повторяемых опций: (имя варианта, настройки)."""
     out = []
-    for method, k, dilate, blur in itertools.product(
-        params.methods, params.sauvola_ks, params.dilate_pxs, params.blur_pxs
+    for method, k, dilate, blur, ink in itertools.product(
+        params.methods, params.sauvola_ks, params.dilate_pxs, params.blur_pxs, params.ink_levels
     ):
         # Для Оцу параметр k не значит ничего — не плодим одинаковые варианты.
         if method != METHOD_SAUVOLA and k != params.sauvola_ks[0]:
             continue
-        name = f"{method}" + (f"_k{k:g}" if method == METHOD_SAUVOLA else "") + f"_dil{dilate:g}_blur{blur:g}"
-        out.append((name, SmoothOptions(method=method, sauvola_k=k, dilate_px=dilate, blur_px=blur)))
+        ink_tag = "off" if ink is None else ("auto" if ink == AUTO_INK_LEVEL else f"{ink:g}")
+        name = (
+            f"{method}" + (f"_k{k:g}" if method == METHOD_SAUVOLA else "") + f"_dil{dilate:g}_blur{blur:g}_ink{ink_tag}"
+        )
+        out.append((name, SmoothOptions(method=method, sauvola_k=k, dilate_px=dilate, blur_px=blur, ink_level=ink)))
     return out
+
+
+def diff_tiles(gray: np.ndarray, base: np.ndarray, new: np.ndarray, side: int, count: int) -> "list[np.ndarray]":
+    """Врезки 1:1 вокруг того, что новое правило УБРАЛО из маски.
+
+    Красным обведено убранное поверх исходных пикселей — по такой врезке сразу видно,
+    складки это и пыль или бледные буквы. Тем же приёмом проверялось 1966/01, где
+    убранным оказались волокна бумаги.
+
+    Окна выбираются по маске разницы, а не по маске краски: показывать надо самые
+    плотные места потерь.
+    """
+    removed = ((base > 0) & ~(new > 0)).astype(np.uint8)
+    if not removed.any():
+        return []
+    tiles = []
+    for x, y in pick_crops(removed, side, count):
+        crop = cv2.cvtColor(gray[y : y + side, x : x + side], cv2.COLOR_GRAY2BGR)
+        contours, _ = cv2.findContours(removed[y : y + side, x : x + side], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(crop, contours, -1, (0, 0, 255), 1)
+        tiles.append(crop)
+    return tiles
 
 
 def compare_masks_page(markup: PageMarkup, params: CompareMasksParams) -> str:
@@ -239,6 +267,13 @@ def compare_masks_page(markup: PageMarkup, params: CompareMasksParams) -> str:
         tiles = [label(src[y : y + side, x : x + side], "source")]
         tiles += [label(res.image[y : y + side, x : x + side], name) for name, res in results]
         _write(page_dir / "crops" / f"crop_{i}.jpg", _grid(tiles, params.montage_cols))
+
+    if params.show_removed and len(results) > 1:
+        # Разница считается от ПЕРВОГО варианта: он и есть точка отсчёта в сетке.
+        base = results[0][1].m_primary
+        for name, res in results[1:]:
+            for i, tile in enumerate(diff_tiles(gray, base, res.m_primary, params.crop_side, params.crops)):
+                _write(page_dir / name / f"removed_{i}.jpg", tile)
 
     covered = ", ".join(f"{name} {100 * (res.m_dilated > 0).mean():.0f}%" for name, res in results)
     return f"{markup.rel_path}: вариантов {len(results)}, врезок {len(windows)}; под защитой {covered}"
@@ -347,14 +382,16 @@ def run_compare_inpaint(params: CompareInpaintParams) -> str:
             rgb = cv2.cvtColor(src, cv2.COLOR_BGR2RGB)
             page_dir = params.out_dir / Path(markup.rel_path).with_suffix("")
 
-            masks = page_masks(markup, kinds, params.mask_dilate_px)
+            masks = page_masks(markup, kinds)
             if not masks:
                 continue
             union = np.zeros((markup.height, markup.width), np.uint8)
             for mask in masks.values():
                 union = cv2.bitwise_or(union, mask)
 
-            for i, zone in enumerate(group_masks(union, params.group_dilate_fracs[0])):
+            for i, zone in enumerate(
+                group_masks(union, params.group_dilate_fracs[0], min_dilate_px=params.group_min_dilate_px)
+            ):
                 kinds_here = zone_kinds(zone, masks)
                 zone_label = "+".join(kinds_here) or "zone"
                 main_kind = kinds_here[0] if kinds_here else ""
@@ -376,7 +413,7 @@ def run_compare_inpaint(params: CompareInpaintParams) -> str:
                         rgb,
                         zone,
                         filler,
-                        groups=partial(group_masks, dilate_frac=frac),
+                        groups=partial(group_masks, dilate_frac=frac, min_dilate_px=params.group_min_dilate_px),
                         padding=ROI_PADDING,
                         feather=FEATHER_PX,
                         roi_scale=scale,

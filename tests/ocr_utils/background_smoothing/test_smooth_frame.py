@@ -245,12 +245,27 @@ def test_support_distance_is_respected():
     assert not despeckle(mask, strong, min_area=48, support_px=10.0)[26, 61]
 
 
-def test_despeckle_is_identity_for_a_globally_thresholded_mask():
-    """Ветка Оцу не затрагивается по построению: там strong совпадает с самой маской."""
+def test_trust_strong_restores_the_old_behaviour():
+    """При ``trust_strong`` однопороговая маска проходит чистку без изменений.
+
+    Это прежнее поведение и страховка: раньше ветка Оцу отсевом не затрагивалась вовсе.
+    """
     from ocr_utils.background_smoothing.processing import despeckle
 
     mask, _strong = speckle_case()
-    assert np.array_equal(despeckle(mask, mask, min_area=48, support_px=25.0), mask)
+    assert np.array_equal(despeckle(mask, mask, min_area=48, support_px=25.0, trust_strong=True), mask)
+
+
+def test_strong_mask_is_no_longer_exempt_by_default():
+    """Суть изменения: прошедшее глобальный порог больше не спасается автоматически.
+
+    Крапина просвета проходит и сильный порог тоже — на 1976/01 IMG_0052_1L таких
+    56.6% пикселей мусора, — поэтому поблажка снята.
+    """
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, _strong = speckle_case()
+    assert not despeckle(mask, mask, min_area=48, support_px=25.0)[71, 151]
 
 
 def test_zero_min_area_disables_the_cleanup():
@@ -260,3 +275,160 @@ def test_zero_min_area_disables_the_cleanup():
     img[:60, :] = PAPER
     img[20:24, 300:304] = 210
     assert primary_mask(img, METHOD_SAUVOLA, min_glyph_area=0)[22, 302] > 0
+
+
+# ----------------------------------------------------------------------
+# Отражение вместо яркости
+# ----------------------------------------------------------------------
+
+
+def refl_case():
+    """Тонкий штрих на ПЕРЕСВЕЧЕННОЙ бумаге и крапина просвета на обычной.
+
+    Кадр 600 px высотой не случайно: константы ``paper.paper_level`` масштабируются по
+    высоте, и на кадре в 200 px окно размытия схлопывается до пяти пикселей — уже
+    самого штриха, — после чего оценка бумаги садится на штрих и отражение вырождается.
+    Штрихи по три пикселя шириной по той же причине: на широкой плашке «raise above
+    background» честно считает её саму бумагой.
+
+    Абсолютная яркость их не разделит (180 против 210 при бумаге 255 и 252), отражение
+    разделяет: 0.71 против 0.83.
+    """
+    gray = np.full((600, 400), 252, np.uint8)
+    gray[:, :200] = 255  # пересвеченная половина
+    gray[100:140, 40:43] = 180  # настоящий, но бледный штрих на пересвете
+    gray[100:140, 240:243] = 210  # крапина просвета на обычной бумаге
+    mask = np.zeros(gray.shape, bool)
+    mask[100:140, 40:43] = True
+    mask[100:140, 240:243] = True
+    return gray, mask
+
+
+def test_component_reflectance_matches_the_ratio_to_paper():
+    from ocr_utils.background_smoothing.processing import component_reflectance
+
+    labels = np.zeros((10, 10), np.int32)
+    labels[0:2, 0:2] = 1
+    labels[5:8, 5:9] = 2
+    refl = np.ones((10, 10), np.float32)
+    refl[0:2, 0:2] = 0.4
+    refl[5:8, 5:9] = 0.9
+
+    out = component_reflectance(refl, labels, 3)
+
+    assert out[0] == pytest.approx(1.0), "фон обязан выглядеть чистой бумагой"
+    assert out[1] == pytest.approx(0.4)
+    assert out[2] == pytest.approx(0.9)
+
+
+def test_pale_stroke_on_overexposed_paper_is_confirmed():
+    """Контрпример из пака: пересвеченная таблица 1966/01 IMG_0047_2R.
+
+    Там уровень бумаги 255, а «краска» 123-193 — светлее крапин просвета на другой
+    полосе. Порог по яркости срезал бы её; порог по отражению — нет.
+    """
+    from ocr_utils.background_smoothing.processing import despeckle
+    from ocr_utils.paper import reflectance
+
+    gray, mask = refl_case()
+    kept = despeckle(mask, np.zeros_like(mask), reflectance(gray), min_area=34, ink_level=0.75, support_px=0.0)
+
+    assert kept[120, 41], "бледный штрих на пересвете должен остаться"
+    assert not kept[120, 241], "крапина просвета — нет"
+
+
+def test_ink_level_none_falls_back_to_area_only():
+    from ocr_utils.background_smoothing.processing import despeckle
+    from ocr_utils.paper import reflectance
+
+    gray, mask = refl_case()
+    kept = despeckle(mask, np.zeros_like(mask), reflectance(gray), min_area=34, ink_level=None, support_px=0.0)
+
+    assert kept[120, 41] and kept[120, 241], "без отражения обе области крупные и потому подтверждены"
+
+
+def test_support_works_on_top_of_reflectance():
+    """Мелкий бледный обломок рядом с подтверждённой областью остаётся."""
+    from ocr_utils.background_smoothing.processing import despeckle
+    from ocr_utils.paper import reflectance
+
+    gray, mask = refl_case()
+    gray[150:154, 40:43] = 215  # обломок 12 px в десяти пикселях под штрихом
+    mask[150:154, 40:43] = True
+
+    kept = despeckle(mask, np.zeros_like(mask), reflectance(gray), min_area=34, ink_level=0.75, support_px=25.0)
+
+    assert kept[152, 41]
+
+
+def test_auto_ink_level_is_computed_over_the_text_block():
+    """Порог по Оцу считается по наборной полосе — краске ВМЕСТЕ с бумагой между строк.
+
+    По одним пикселям краски Оцу поделил бы пополам саму краску: на боевых полосах это
+    давало 0.37 вместо 0.59.
+    """
+    from ocr_utils.background_smoothing.processing import auto_ink_level
+    from ocr_utils.paper import reflectance
+    from ocr_utils.scan_cropping.morphology import dilate_disk
+
+    # Зерно и мягкие края обязательны: на двухуровневой картинке Оцу вырожден —
+    # между двумя пиками любой порог даёт одну и ту же дисперсию, и OpenCV возвращает
+    # нижний. У настоящего скана гистограмма непрерывная.
+    rng = np.random.default_rng(0)
+    gray = np.full((600, 400), 250, np.int16)
+    for y in range(100, 500, 40):
+        gray[y : y + 4, 40:360] = 40
+    gray = cv2.GaussianBlur(gray.astype(np.uint8), (5, 5), 1.2)
+    gray = np.clip(gray.astype(np.int16) + rng.integers(-6, 7, size=gray.shape), 0, 255).astype(np.uint8)
+    refl = reflectance(gray)
+    mask = gray <= 128
+
+    only_ink = auto_ink_level(refl, mask)
+    block = dilate_disk(mask.astype(np.uint8) * 255, 25.0) > 0
+    with_paper = auto_ink_level(refl, block)
+
+    assert with_paper > only_ink, "по наборной полосе порог обязан быть выше, чем по одной краске"
+    assert 0.3 < with_paper < 0.95, "порог обязан сесть между краской и бумагой"
+
+
+def test_auto_ink_level_falls_back_on_an_empty_block():
+    from ocr_utils.background_smoothing.processing import auto_ink_level
+
+    refl = np.ones((50, 50), np.float32)
+    assert auto_ink_level(refl, np.zeros((50, 50), bool), fallback=0.65) == 0.65
+
+
+def test_large_pale_structure_is_confirmed_by_size_alone():
+    """Бледная линейка таблицы не должна удаляться за одну лишь бледность.
+
+    Без подтверждения по размеру правило вырождается в «крупная И тёмная», и на
+    пересвеченной таблице 1966/01 IMG_0047_2R при строгом пороге удалялась линейка в
+    14 731 px — очевидное содержимое.
+    """
+    from ocr_utils.background_smoothing.processing import despeckle
+    from ocr_utils.paper import reflectance
+
+    gray = np.full((600, 400), 255, np.uint8)
+    gray[300:303, 20:380] = 200  # длинная бледная линейка, 1080 px
+    mask = gray < 255
+
+    refl = reflectance(gray)
+    strict = dict(min_area=34, ink_level=0.55, support_px=0.0)
+
+    assert not despeckle(mask, np.zeros_like(mask), refl, sure_area=10**9, **strict)[301, 200]
+    assert despeckle(mask, np.zeros_like(mask), refl, sure_area=500, **strict)[301, 200]
+
+
+def test_sure_area_does_not_rescue_ghost_specks():
+    """Крапины просвета столько не набирают: самая крупная удаляемая — 243 px."""
+    from ocr_utils.background_smoothing.processing import despeckle
+    from ocr_utils.paper import reflectance
+
+    gray = np.full((600, 400), 252, np.uint8)
+    gray[300:310, 200:220] = 215  # крапина 200 px, бледная
+    mask = gray < 252
+
+    kept = despeckle(
+        mask, np.zeros_like(mask), reflectance(gray), min_area=34, ink_level=0.65, sure_area=500, support_px=0.0
+    )
+    assert not kept[305, 210]

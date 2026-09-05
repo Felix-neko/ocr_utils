@@ -65,4 +65,8 @@ def test_mask_variants_skip_meaningless_k_for_otsu():
         blur_pxs=(60.0,),
     )
     names = [name for name, _ in mask_variants(params)]
-    assert names == ["otsu_dil15_blur60", "sauvola_k0.06_dil15_blur60", "sauvola_k0.1_dil15_blur60"]
+    assert names == [
+        "otsu_dil15_blur60_ink0.65",
+        "sauvola_k0.06_dil15_blur60_ink0.65",
+        "sauvola_k0.1_dil15_blur60_ink0.65",
+    ]

@@ -26,8 +26,10 @@ from ocr_utils.background_smoothing.processing import (
     METHOD_OTSU,
     PROTECT_DILATE_FRAC,
     MIN_GLYPH_AREA,
+    SURE_GLYPH_AREA,
     smooth_frame,
 )
+from ocr_utils.paper import INK_LEVEL, PAPER_BLUR_PX, PAPER_DILATE_PX
 from ocr_utils.scan_cropping.image_io import imwrite_params, read_dpi, resolve_output_suffix, write_image
 from ocr_utils.timing import log_timing
 
@@ -89,6 +91,11 @@ class SmoothParams:
     sauvola_k: float = DEFAULT_SAUVOLA_K
     sauvola_window: Optional[int] = None
     min_glyph_area: int = MIN_GLYPH_AREA
+    ink_level: Optional[float] = INK_LEVEL
+    sure_glyph_area: int = SURE_GLYPH_AREA
+    paper_dilate_px: int = PAPER_DILATE_PX
+    paper_blur_px: int = PAPER_BLUR_PX
+    trust_strong: bool = False
 
     # Защитный припуск и размытие фона
     dilate_px: Optional[float] = None
@@ -236,6 +243,11 @@ def process_frame(path: Path, params: SmoothParams, detector=None) -> None:
             sauvola_k=params.sauvola_k,
             sauvola_window=params.sauvola_window,
             min_glyph_area=params.min_glyph_area,
+            ink_level=params.ink_level,
+            sure_glyph_area=params.sure_glyph_area,
+            paper_dilate_px=params.paper_dilate_px,
+            paper_blur_px=params.paper_blur_px,
+            trust_strong=params.trust_strong,
             dilate_px=params.dilate_px,
             dilate_frac=params.dilate_frac,
             blur_px=params.blur_px,

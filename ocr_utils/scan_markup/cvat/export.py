@@ -25,6 +25,7 @@ from ocr_utils.scan_markup.cvat.client import CvatSettings, make_cvat_client
 from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, MASK_KIND_BY_LABEL, POINT_KIND_BY_LABEL
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
+    KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
     SOURCE_CVAT,
     Issue,
@@ -62,6 +63,10 @@ class ExportStats:
     regions: int = 0
     color: int = 0
     grayscale: int = 0
+    # Цветной набор считается отдельно от растра: это ручная метка, и её счётчик показывает,
+    # сколько ручной работы вообще сделано. Без него такие области видны только в общей сумме
+    # ``regions``, и слагаемые в скобках с ней не сходятся.
+    color_text: int = 0
     full_page: int = 0
     masks: int = 0
     points: int = 0
@@ -265,6 +270,7 @@ def import_task(
                 stats.regions += 1
                 stats.color += region.kind == KIND_COLOR
                 stats.grayscale += region.kind == KIND_GRAYSCALE
+                stats.color_text += region.kind == KIND_COLOR_TEXT
                 stats.full_page += bool(region.full_page)
             elif shape_type == "mask" and name in MASK_KIND_BY_LABEL:
                 mask = shape_to_mask(shape, page)

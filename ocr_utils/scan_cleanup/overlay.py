@@ -21,12 +21,27 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ocr_utils.scan_markup.db.models import MASK_HANDWRITING, MASK_LIBRARY_STAMP, MASK_OTHER_REMOVAL
+
 logger = logging.getLogger(__name__)
 
 # Заливки масок (BGR) и их прозрачность — как в background_smoothing.
 COLOR_DILATED = (0, 255, 255)  # жёлтый — защитная маска (что НЕ размывается)
 COLOR_PRIMARY = (0, 0, 255)  # красный — найденный контент
-COLOR_INPAINTED = (255, 0, 255)  # пурпурный — закрашенные маски разметки
+# Виды разметки под удаление — КАЖДЫЙ СВОИМ цветом. Одним цветом их заливать нельзя:
+# соседние печать и надпись сливаются в сплошной блок без шва, и человек, глядя на
+# оверлей, видит одну огромную область вместо двух своих (проверено на 1976/01
+# IMG_0004_2R, где маски перекрываются по вертикали).
+#
+# Цвета CVAT повторить не вышло: там надпись жёлтая, а прочее красное, и оба цвета
+# здесь уже заняты защитной и первичной масками. Поэтому взяты три различимых оттенка
+# вне этих двух, а вид назван подписью — по ней видно однозначно, без счёта цветов.
+COLOR_BY_MASK_KIND = {
+    MASK_LIBRARY_STAMP: (255, 0, 255),  # пурпурный, как метка печати в CVAT
+    MASK_HANDWRITING: (0, 165, 255),  # оранжевый
+    MASK_OTHER_REMOVAL: (255, 120, 0),  # синий
+}
+COLOR_INPAINTED = (255, 0, 255)  # запасной, если вид разметки неизвестен
 ALPHA_DILATED = 0.25
 ALPHA_PRIMARY = 0.45
 ALPHA_INPAINTED = 0.45
@@ -71,10 +86,20 @@ def draw_page_overlay(
         _blend(canvas, m_dilated, COLOR_DILATED, ALPHA_DILATED)
     if m_primary is not None:
         _blend(canvas, m_primary, COLOR_PRIMARY, ALPHA_PRIMARY)
-    for mask in (inpaint_masks or {}).values():
-        _blend(canvas, mask, COLOR_INPAINTED, ALPHA_INPAINTED)
-
     thickness = max(1, int(round(OUTLINE_FRAC * max(canvas.shape[:2]))))
+    for kind, mask in (inpaint_masks or {}).items():
+        color = COLOR_BY_MASK_KIND.get(kind, COLOR_INPAINTED)
+        _blend(canvas, mask, color, ALPHA_INPAINTED)
+        # Рамка с подписью вокруг каждой связной области своего вида: по ней видно,
+        # где кончается одна маска и начинается соседняя, даже когда они слиплись.
+        count, _labels, stats, _c = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+        for i in range(1, count):
+            x, y, w, h, _area = stats[i]
+            cv2.rectangle(canvas, (x, y), (x + w, y + h), color, thickness)
+            cv2.putText(
+                canvas, kind, (x + 4, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, thickness * 0.5, color, thickness
+            )
+
     for r in regions:
         cv2.rectangle(canvas, (r.x1, r.y1), (r.x2, r.y2), COLOR_REGION, thickness)
         cv2.putText(

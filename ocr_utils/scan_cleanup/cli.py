@@ -22,10 +22,17 @@ from ocr_utils.background_smoothing.processing import (
     MASK_METHODS,
     METHOD_SAUVOLA,
     MIN_GLYPH_AREA,
+    SURE_GLYPH_AREA,
 )
+from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL, PAPER_BLUR_PX, PAPER_DILATE_PX
 from ocr_utils.inpainting.backends import BACKEND_LAMA, BACKENDS, DEFAULT_SD_MODEL, SdParams
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC
-from ocr_utils.scan_cleanup.inpaint import DEFAULT_LAMA_ROI_MAX_SIDE, GROUP_ROI_SCALE, MASK_DILATE_PX, InpaintOptions
+from ocr_utils.scan_cleanup.inpaint import (
+    DEFAULT_LAMA_ROI_MAX_SIDE,
+    GROUP_MIN_DILATE_PX,
+    GROUP_ROI_SCALE,
+    InpaintOptions,
+)
 from ocr_utils.scan_cleanup.prompts import PROMPT_COLOUR, PROMPT_HALFTONE, PROMPT_OTHER_SUFFIX, PROMPT_PAPER
 from ocr_utils.scan_cleanup.prompts import NEGATIVE_COMMON, PromptSet
 from ocr_utils.scan_cleanup.protect import ProtectOptions
@@ -95,6 +102,25 @@ def _prompt_set(sd_prompt_paper, sd_prompt_colour, sd_prompt_halftone, sd_prompt
     )
 
 
+def parse_ink_level(value: str) -> "float | None":
+    """``--ink-level``: число, ``off`` (не учитывать отражение) или ``auto``.
+
+    ``auto`` — порог Оцу в долях уровня бумаги, посчитанный по самой полосе: он не
+    зависит ни от бумаги, ни от экспозиции. На замерах садится около 0.6, то есть
+    строже умолчания 0.65 и подтверждает на девять пунктов меньше площади
+    пересвеченного текста, — поэтому умолчанием взято фиксированное значение.
+    """
+    text = value.strip().lower()
+    if text == "off":
+        return None
+    if text == "auto":
+        return AUTO_INK_LEVEL
+    try:
+        return float(text)
+    except ValueError:
+        raise click.BadParameter(f"ожидается число, 'off' или 'auto', получено {value!r}")
+
+
 @click.group()
 def main() -> None:
     """Очистка пака сканов по разметке из CVAT: закрас размеченного и размытие фона."""
@@ -113,11 +139,14 @@ def main() -> None:
     "--backend", default=BACKEND_LAMA, show_default=True, type=click.Choice(BACKENDS), help="Чем закрашивать."
 )
 @click.option(
-    "--mask-dilate-px",
-    default=MASK_DILATE_PX,
+    "--group-min-dilate-px",
+    default=GROUP_MIN_DILATE_PX,
     show_default=True,
-    type=float,
-    help="Припуск к маске разметки перед закраской: её край известен лишь с точностью до делителя уменьшения.",
+    type=int,
+    help=(
+        "Нижняя граница припуска ПРИ ГРУППИРОВКЕ, пикс. В сеть маска идёт без припуска: "
+        "закрашивается ровно обведённое."
+    ),
 )
 @click.option(
     "--group-dilate-frac",
@@ -156,6 +185,52 @@ def main() -> None:
         "если примыкает к прошедшему глобальный порог или лежит рядом с подтверждённой "
         "областью (см. despeckle). 0 — не чистить вовсе."
     ),
+)
+@click.option(
+    "--paper-dilate-px",
+    default=PAPER_DILATE_PX,
+    show_default=True,
+    type=int,
+    help=(
+        "Радиус раздутия светлого при оценке уровня бумаги, пикс. Должен перекрывать толщину "
+        "штриха. В пикселях, а не долей кадра: в паке встречаются обрезанные страницы, и доля "
+        "от их высоты дала бы втрое меньшее окно на том же наборе."
+    ),
+)
+@click.option(
+    "--paper-blur-px",
+    default=PAPER_BLUR_PX,
+    show_default=True,
+    type=int,
+    help="Сторона окна размытия при оценке уровня бумаги, пикс.: крупнее буквы, мельче неровности света.",
+)
+@click.option(
+    "--sure-glyph-area",
+    default=SURE_GLYPH_AREA,
+    show_default=True,
+    type=int,
+    help=(
+        "Площадь, с которой область подтверждается САМА ПО СЕБЕ, без оглядки на отражение. "
+        "Без неё правило вырождается в «крупная И тёмная», и бледная линейка таблицы в тысячи "
+        "пикселей удаляется целиком."
+    ),
+)
+@click.option(
+    "--ink-level",
+    default=str(INK_LEVEL),
+    show_default=True,
+    callback=lambda _ctx, _param, value: parse_ink_level(value),
+    help=(
+        "Доля уровня бумаги, темнее которой связная область считается настоящей краской. "
+        "Отражение, а не яркость: на пересвеченной полосе краска бывает светлее, чем просвет "
+        "с оборота на обычной. off — не учитывать, auto — порог Оцу по самой полосе."
+    ),
+)
+@click.option(
+    "--trust-strong/--no-trust-strong",
+    default=False,
+    show_default=True,
+    help="Подтверждать всё, что прошло глобальный порог (прежнее поведение).",
 )
 @click.option(
     "--dilate-px", default=DEFAULT_DILATE_PX, show_default=True, type=float, help="Радиус защитного припуска, пикс."
@@ -199,7 +274,7 @@ def run_command(
     do_inpaint,
     do_smooth,
     backend,
-    mask_dilate_px,
+    group_min_dilate_px,
     group_dilate_frac,
     roi_scale,
     lama_roi_max_side,
@@ -208,6 +283,11 @@ def run_command(
     sauvola_k,
     sauvola_window,
     min_glyph_area,
+    ink_level,
+    sure_glyph_area,
+    paper_dilate_px,
+    paper_blur_px,
+    trust_strong,
     dilate_px,
     blur_px,
     blur_mult,
@@ -241,7 +321,7 @@ def run_command(
         report_csv=report_csv,
         inpaint=InpaintOptions(
             backend=backend,
-            mask_dilate_px=mask_dilate_px,
+            group_min_dilate_px=group_min_dilate_px,
             group_dilate_frac=group_dilate_frac,
             roi_scale=roi_scale,
             lama_roi_max_side=lama_roi_max_side,
@@ -254,6 +334,11 @@ def run_command(
             sauvola_k=sauvola_k,
             sauvola_window=sauvola_window,
             min_glyph_area=min_glyph_area,
+            ink_level=ink_level,
+            sure_glyph_area=sure_glyph_area,
+            paper_dilate_px=paper_dilate_px,
+            paper_blur_px=paper_blur_px,
+            trust_strong=trust_strong,
             dilate_px=dilate_px,
             blur_px=blur_px,
             blur_mult=blur_mult,
@@ -277,6 +362,17 @@ def run_command(
 @click.option("--sauvola-k", "sauvola_ks", multiple=True, type=float, default=(DEFAULT_SAUVOLA_K,), show_default=True)
 @click.option("--dilate-px", "dilate_pxs", multiple=True, type=float, default=(15.0, 25.0, 35.0), show_default=True)
 @click.option("--blur-px", "blur_pxs", multiple=True, type=float, default=(60.0, 120.0, 240.0), show_default=True)
+@click.option(
+    "--ink-level",
+    "ink_levels",
+    multiple=True,
+    default=(str(INK_LEVEL),),
+    show_default=True,
+    help="Порог отражения; можно повторять. off — не учитывать, auto — по самой полосе.",
+)
+@click.option(
+    "--show-removed", is_flag=True, help="Класть врезки 1:1 с тем, что вариант УБРАЛ из маски первого варианта."
+)
 @click.option(
     "--sample", default=0, type=int, help="Взять столько полос случайно (детерминированно), если не задан --page."
 )
@@ -305,6 +401,8 @@ def compare_masks_command(
     sauvola_ks,
     dilate_pxs,
     blur_pxs,
+    ink_levels,
+    show_removed,
     sample,
     crop_side,
     crops,
@@ -330,6 +428,8 @@ def compare_masks_command(
         sauvola_ks=tuple(sauvola_ks),
         dilate_pxs=tuple(dilate_pxs),
         blur_pxs=tuple(blur_pxs),
+        ink_levels=tuple(parse_ink_level(v) for v in ink_levels),
+        show_removed=show_removed,
         crop_side=crop_side,
         crops=crops,
         montage_cols=montage_cols,
@@ -345,6 +445,16 @@ def compare_masks_command(
 @click.option("--backend", "backends", multiple=True, default=BACKENDS, show_default=True)
 @click.option("--kind", "kinds", multiple=True, default=(), help="Виды разметки; по умолчанию все три.")
 @click.option("--sample", default=30, show_default=True, type=int, help="Сколько полос с масками взять.")
+@click.option(
+    "--group-min-dilate-px",
+    default=GROUP_MIN_DILATE_PX,
+    show_default=True,
+    type=int,
+    help=(
+        "Нижняя граница припуска ПРИ ГРУППИРОВКЕ, пикс. В сеть маска идёт без припуска: "
+        "закрашивается ровно обведённое."
+    ),
+)
 @click.option(
     "--group-dilate-frac",
     "group_dilate_fracs",
@@ -363,7 +473,6 @@ def compare_masks_command(
     default=(DEFAULT_LAMA_ROI_MAX_SIDE,),
     show_default=True,
 )
-@click.option("--mask-dilate-px", default=MASK_DILATE_PX, show_default=True, type=float)
 @click.option("--montage-cols", default=4, show_default=True, type=int, help="Столбцов в сетке вариантов.")
 def compare_inpaint_command(
     db_path,
@@ -392,7 +501,7 @@ def compare_inpaint_command(
     group_dilate_fracs,
     roi_scales,
     lama_sides,
-    mask_dilate_px,
+    group_min_dilate_px,
     montage_cols,
 ) -> None:
     """Закрашивает выборку полос всеми бэкендами и вариантами и складывает результаты рядом."""
@@ -415,7 +524,7 @@ def compare_inpaint_command(
         group_dilate_fracs=tuple(group_dilate_fracs),
         roi_scales=tuple(roi_scales),
         lama_sides=tuple(lama_sides),
-        mask_dilate_px=mask_dilate_px,
+        group_min_dilate_px=group_min_dilate_px,
         montage_cols=montage_cols,
         sd=SdParams(model=sd_model, steps=sd_steps, guidance=sd_guidance, size=sd_size, seed=sd_seed),
         prompts=_prompt_set(sd_prompt_paper, sd_prompt_colour, sd_prompt_halftone, sd_prompt_other, sd_negative),

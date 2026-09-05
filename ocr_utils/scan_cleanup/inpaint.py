@@ -12,12 +12,12 @@
    пометка рядом с библиотечной печатью, закрашиваемая отдельной операцией, попадает
    в контекстное поле соседней зоны, и сеть честно затягивает её штрихи в дыру
    печати. Одной операцией обе дыры закрываются разом, и затекать нечему.
-2. Карта дилатируется на ``mask_dilate_px``: маску рисовали на копии 1/divisor, и её
-   край известен лишь с точностью до этого делителя (при 600 dpi — до 8 px), а у
-   оттиска печати вокруг видимой краски остаётся ещё и бледный ореол.
-3. Связные области группируются правилом «раздуть на 1/3, пересеклись — вместе»
-   (см. :mod:`ocr_utils.inpainting.grouping`). Раздутая версия решает ТОЛЬКО, что с
-   чем объединять; закрашивается объединённый набор ИСХОДНЫХ областей.
+2. Связные области группируются правилом «раздуть на 1/3 своего размера, пересеклись —
+   вместе», с нижней границей припуска ``GROUP_MIN_DILATE_PX`` (см.
+   :mod:`ocr_utils.inpainting.grouping`).
+3. Раздутая версия решает ТОЛЬКО, что с чем объединять. В сеть уходит объединённый
+   набор ИСХОДНЫХ областей, БЕЗ всякого припуска: закрашивается ровно то, что обвёл
+   человек, а зазор между слитыми областями остаётся нетронутым.
 4. Каждая группа закрашивается одной операцией в ROI, вдвое большем её рамки.
 
 Заливщик — LaMa: на сравнении по 30 полосам Stable Diffusion выдумывала на месте
@@ -37,15 +37,20 @@ from ocr_utils.inpainting.backends import BACKEND_LAMA, SdParams, make_filler
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC, MIN_ZONE_AREA, group_masks
 from ocr_utils.scan_cleanup.prompts import PromptSet, prompt_chooser
 from ocr_utils.scan_cleanup.source import PageMarkup, decode_mask_rows
-from ocr_utils.scan_cropping.morphology import dilate_disk
 from ocr_utils.scan_markup.db.models import MASK_KINDS
 
 logger = logging.getLogger(__name__)
 
-# Припуск к маске перед закраской, пикс. Примерно два делителя уменьшения: разметку
-# рисовали на копии 1/8, поэтому её край и без того известен с точностью до 8 px, а
-# у оттиска печати вокруг видимой краски остаётся ещё и бледный ореол.
-MASK_DILATE_PX = 16
+# Нижняя граница припуска при ГРУППИРОВКЕ, пикс. Правило «раздуть на 1/3 своего
+# размера» у мелких областей вырождается: треть от пяти пикселей — это полтора, и две
+# соседние крошки не склеятся. Шестнадцать — примерно два делителя уменьшения: разметку
+# рисовали на копии 1/8, и её край и без того известен лишь с точностью до 8 px, так
+# что области, разделённые таким зазором, разумно считать одной.
+#
+# ЭТО ТОЛЬКО ДЛЯ РЕШЕНИЯ О СЛИЯНИИ. В сеть маска идёт БЕЗ припуска: закрашивается ровно
+# то, что обвёл человек. Он и так обводит с запасом (видно по любой маске в CVAT: кисть
+# заходит далеко за края оттиска), а лишний припуск съедал бы соседнее содержимое.
+GROUP_MIN_DILATE_PX = 16
 
 # Во сколько раз ROI больше рамки группы — «примерно 2x по ширине и по высоте».
 GROUP_ROI_SCALE = 2.0
@@ -69,8 +74,8 @@ class InpaintOptions:
 
     backend: str = BACKEND_LAMA
     kinds: "tuple[str, ...]" = field(default=MASK_KINDS)
-    mask_dilate_px: float = MASK_DILATE_PX
     group_dilate_frac: float = DEFAULT_GROUP_DILATE_FRAC
+    group_min_dilate_px: int = GROUP_MIN_DILATE_PX
     min_zone_area: int = MIN_ZONE_AREA
     roi_scale: float = GROUP_ROI_SCALE
     roi_padding: int = ROI_PADDING
@@ -100,20 +105,23 @@ class InpaintReport:
         return out
 
 
-def kind_mask(markup: PageMarkup, kind: str, dilate_px: float) -> np.ndarray:
-    """Маска одного вида разметки на полосе, уже с припуском (uint8 0/255)."""
+def kind_mask(markup: PageMarkup, kind: str) -> np.ndarray:
+    """Маска одного вида разметки на полосе, как её нарисовали (uint8 0/255).
+
+    Без всякого припуска: припуск нужен только для решения о слиянии областей, а
+    закрашивается ровно обведённое.
+    """
     rows = markup.masks_of(kind)
     if not rows:
         return np.zeros((markup.height, markup.width), np.uint8)
-    mask = decode_mask_rows(rows, markup.width, markup.height).astype(np.uint8) * 255
-    return dilate_disk(mask, dilate_px)
+    return decode_mask_rows(rows, markup.width, markup.height).astype(np.uint8) * 255
 
 
-def page_masks(markup: PageMarkup, kinds: "tuple[str, ...]", dilate_px: float) -> "dict[str, np.ndarray]":
+def page_masks(markup: PageMarkup, kinds: "tuple[str, ...]") -> "dict[str, np.ndarray]":
     """Маски полосы по видам разметки; виды без разметки пропускаются."""
     out: "dict[str, np.ndarray]" = {}
     for kind in kinds:
-        mask = kind_mask(markup, kind, dilate_px)
+        mask = kind_mask(markup, kind)
         if mask.any():
             out[kind] = mask
     return out
@@ -152,7 +160,7 @@ def inpaint_page(
     if not markup.masks:
         return bgr, report
 
-    masks = page_masks(markup, opts.kinds, opts.mask_dilate_px)
+    masks = page_masks(markup, opts.kinds)
     if not masks:
         return bgr, report
     report.masks = masks
@@ -162,7 +170,10 @@ def inpaint_page(
         union = cv2.bitwise_or(union, mask)
 
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    for zone in group_masks(union, opts.group_dilate_frac, min_area=opts.min_zone_area):
+    zones = group_masks(
+        union, opts.group_dilate_frac, min_dilate_px=opts.group_min_dilate_px, min_area=opts.min_zone_area
+    )
+    for zone in zones:
         kinds = zone_kinds(zone, masks)
         label = "+".join(kinds) or "?"
         filler = make_filler(
