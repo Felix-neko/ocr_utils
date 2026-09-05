@@ -138,3 +138,125 @@ def test_colour_frame_keeps_shape():
     res = smooth_frame(bgr, gray, method=METHOD_SAUVOLA, dilate_px=6, blur_px=24)
     assert res.image.shape == bgr.shape
     assert np.array_equal(res.image[res.m_dilated > 0], bgr[res.m_dilated > 0])
+
+
+# ----------------------------------------------------------------------
+# Чистка мелких областей (despeckle)
+# ----------------------------------------------------------------------
+
+
+def fine_text(h: int = 300, w: int = 400) -> np.ndarray:
+    """Набор из тонких штрихов — окрестность, похожая на настоящий текст.
+
+    Важно именно так: у сплошной жирной строки локальное среднее в окне проваливается
+    к чернилам, и порог Саволы уходит НИЖЕ бледных пикселей. У настоящего набора
+    краски в окне около десятой части, среднее держится у 230, и локальный порог
+    садится чуть ниже него — там-то Савола и добирает бледное.
+    """
+    img = np.full((h, w), PAPER, np.uint8)
+    for x in range(20, w - 20, 10):
+        img[20 : h - 20, x : x + 1] = INK
+    return img
+
+
+def test_isolated_speck_is_dropped():
+    from ocr_utils.background_smoothing.processing import METHOD_OTSU, primary_mask
+
+    img = text_page()
+    img[:60, :] = PAPER  # чистое поле сверху
+    img[20:24, 300:304] = 210  # пылинка: 16 px, ни к чему не примыкает
+
+    assert primary_mask(img, METHOD_OTSU)[22, 302] == 0, "глобальный порог её не берёт"
+    assert primary_mask(img, METHOD_SAUVOLA, min_glyph_area=0)[22, 302] > 0, "без чистки локальный берёт"
+    assert primary_mask(img, METHOD_SAUVOLA)[22, 302] == 0, "с чисткой — отбрасывается"
+
+
+def test_pale_stroke_touching_ink_survives():
+    """Бледное, примыкающее к найденной краске, остаётся: ради этого локальный порог и нужен."""
+    from ocr_utils.background_smoothing.processing import METHOD_OTSU, primary_mask
+
+    img = fine_text()
+    img[100:140, 100:101] = 212  # бледный участок ШТРИХА, продолжает его сверху и снизу
+
+    assert primary_mask(img, METHOD_OTSU, window=41)[120, 100] == 0
+    assert primary_mask(img, METHOD_SAUVOLA, window=41)[120, 100] > 0
+
+
+# ----------------------------------------------------------------------
+# despeckle — чистая функция, проверяется напрямую
+# ----------------------------------------------------------------------
+
+
+def speckle_case():
+    """Маска: крупная область, мелкая рядом с ней, мелкая одинокая и пара мелких вместе."""
+    mask = np.zeros((200, 400), bool)
+    strong = np.zeros((200, 400), bool)
+
+    mask[20:40, 20:40] = True  # крупная (400 px), она же прошла глобальный порог
+    strong[20:40, 20:40] = True
+
+    mask[25:28, 60:63] = True  # мелкая (9 px) в 20 px от крупной — обломок буквы рядом с буквой
+    mask[150:153, 300:303] = True  # мелкая одинокая — пылинка
+    mask[150:153, 320:323] = True  # и вторая рядом с ней: скопление крапин
+    return mask, strong
+
+
+def test_big_component_is_kept():
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, strong = speckle_case()
+    assert despeckle(mask, strong, min_area=48, support_px=25.0)[30, 30]
+
+
+def test_small_fragment_near_confirmed_is_rescued():
+    """Ваш случай: обломок пересвеченной буквы рядом с нормальной буквой."""
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, strong = speckle_case()
+    assert despeckle(mask, strong, min_area=48, support_px=25.0)[26, 61]
+
+
+def test_lonely_speck_is_removed():
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, strong = speckle_case()
+    assert not despeckle(mask, strong, min_area=48, support_px=25.0)[151, 301]
+
+
+def test_specks_cannot_support_each_other():
+    """Скопление крапин не вытягивает себя само.
+
+    Просвет с оборота — призрак СТРОК, крапины в нём стоят кучно. Разреши им
+    поддерживать друг друга, и на четырёх полосах выживает 34/31/12/206 крапин
+    вместо 12/1/0/28.
+    """
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, strong = speckle_case()
+    kept = despeckle(mask, strong, min_area=48, support_px=25.0)
+    assert not kept[151, 301] and not kept[151, 321], "обе крапины рядом друг с другом, но не с краской"
+
+
+def test_support_distance_is_respected():
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, strong = speckle_case()
+    # 20 px до крупной области: при допуске 10 обломок уже не спасти.
+    assert not despeckle(mask, strong, min_area=48, support_px=10.0)[26, 61]
+
+
+def test_despeckle_is_identity_for_a_globally_thresholded_mask():
+    """Ветка Оцу не затрагивается по построению: там strong совпадает с самой маской."""
+    from ocr_utils.background_smoothing.processing import despeckle
+
+    mask, _strong = speckle_case()
+    assert np.array_equal(despeckle(mask, mask, min_area=48, support_px=25.0), mask)
+
+
+def test_zero_min_area_disables_the_cleanup():
+    from ocr_utils.background_smoothing.processing import METHOD_OTSU, primary_mask
+
+    img = text_page()
+    img[:60, :] = PAPER
+    img[20:24, 300:304] = 210
+    assert primary_mask(img, METHOD_SAUVOLA, min_glyph_area=0)[22, 302] > 0

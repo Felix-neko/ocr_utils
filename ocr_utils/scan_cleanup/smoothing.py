@@ -28,6 +28,7 @@ from ocr_utils.background_smoothing.processing import (
     DEFAULT_THRESHOLD_BIAS,
     METHOD_SAUVOLA,
     PROTECT_DILATE_FRAC,
+    MIN_GLYPH_AREA,
     SmoothResult,
     smooth_frame,
 )
@@ -50,6 +51,7 @@ class SmoothOptions:
     threshold_bias: float = DEFAULT_THRESHOLD_BIAS
     sauvola_k: float = DEFAULT_SAUVOLA_K
     sauvola_window: "int | None" = None
+    min_glyph_area: int = MIN_GLYPH_AREA
     dilate_px: "float | None" = DEFAULT_DILATE_PX
     dilate_frac: float = PROTECT_DILATE_FRAC
     blur_px: "float | None" = None
@@ -77,6 +79,7 @@ def smooth_page(
         bias=opts.threshold_bias,
         sauvola_k=opts.sauvola_k,
         sauvola_window=opts.sauvola_window,
+        min_glyph_area=opts.min_glyph_area,
         dilate_px=opts.dilate_px,
         dilate_frac=opts.dilate_frac,
         blur_px=opts.blur_px,

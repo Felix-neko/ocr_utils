@@ -69,6 +69,20 @@ DEFAULT_SAUVOLA_K = 0.10
 # Динамический диапазон СКО в формуле Саволы (канонические 128 для 8 бит).
 SAUVOLA_R = 128.0
 
+# Площадь связной области, начиная с которой она считается содержимым сама по себе,
+# пикс. Подобрана по шуму пака-1 при 600 dpi: связные области первичной маски,
+# целиком лежащие на пустом поле, имеют площадь до 35 px (медиана 8), а области
+# текста — от 62 px (p10). Порог сидит в этом промежутке. Точка в тексте (~50 px)
+# формально ниже порога, но её спасает поддержка соседней буквы.
+MIN_GLYPH_AREA = 48
+
+# Расстояние, на котором подтверждённая область поддерживает мелкую соседку, пикс.
+# По умолчанию берётся равным радиусу защитной дилатации: тогда поддержанная область
+# лежит ВНУТРИ припуска своей соседки и не запирает от размытия ни одного лишнего
+# пикселя. Замер это подтверждает: при допуске, равном радиусу, запертая доля пустого
+# поля 0.00-0.24%, при вдвое большем — уже 0.19-2.24%.
+DEFAULT_SUPPORT_PX = 25.0
+
 # Окно Саволы как доля длинной стороны кадра: ~101 px при 6100 px (600 dpi),
 # порядка двух-трёх высот строки. Доля, а не константа — чтобы масштабировалось с DPI.
 SAUVOLA_WINDOW_FRAC = 0.0165
@@ -217,6 +231,58 @@ def _local_mean_std(gray: np.ndarray, window: int) -> "tuple[np.ndarray, np.ndar
     return mean, np.sqrt(var)
 
 
+def despeckle(
+    mask: np.ndarray, strong: np.ndarray, min_area: int = MIN_GLYPH_AREA, support_px: float = DEFAULT_SUPPORT_PX
+) -> np.ndarray:
+    """Убирает из маски мелкие связные области, которым нечем себя подтвердить.
+
+    ЗАЧЕМ. На ровной бумаге порог Саволы вырождается в ``m * (1 - k)``, то есть висит
+    на ``k`` ниже уровня бумаги, и в пустое поле проваливаются пылинки, крапины и
+    просвет с оборота. По площади это ничто (0.29% кадра), но каждая крапина после
+    дилатации защитной маски запирает от размытия диск в полсотни пикселей поперёк:
+    на 1972/02 IMG_0101_1L двумя сотнями крапин запиралось 4.1% чистого поля.
+
+    Поднимать ``k`` бесполезно: крапины пропадают только к k = 0.25, а вместе с ними
+    и вся польза локального порога (добавка у букв падает с 0.284% до 0.002%, то есть
+    Савола вырождается в Оцу).
+
+    ПРАВИЛО. Область ПОДТВЕРЖДЕНА, если она крупная (``min_area``) либо примыкает к
+    сильной маске ``strong`` — той, что прошла глобальный порог. Остальные остаются,
+    только если лежат в пределах ``support_px`` от подтверждённой.
+
+    Поддерживать может ТОЛЬКО ПОДТВЕРЖДЁННАЯ область, и это не придирка: просвет с
+    оборота — не одиночные пылинки, а призрак строк, крапины в нём стоят кучно. Если
+    разрешить им поддерживать друг друга, скопление вытягивает себя само — замер по
+    четырём полосам: выживает 34/31/12/206 крапин вместо 12/1/0/28.
+
+    Смысл второй половины правила — пересвеченная буква, у которой часть штрихов не
+    прошла бинаризацию, а уцелевшие обломки не связаны ни между собой, ни с соседями.
+    Обломок мелкий и ни к чему не примыкает, но рядом стоит нормальная буква, и она
+    его подтверждает.
+
+    Для маски, построенной ОДНИМ глобальным порогом, функция — тождество по
+    построению: там ``strong`` совпадает с самой маской, и каждая область примыкает к
+    ней. То есть ветка Оцу этим отсевом не затрагивается вовсе.
+
+    Название. Половина «сильное плюс слабое, слабое оставляем при связи с сильным» —
+    это гистерезисный порог (двойной порог Кэнни), он же реконструкция по маркеру в
+    морфологии. Вторая половина ослабляет связь до близости — так определяется шум в
+    DBSCAN. Отдельного общепринятого имени у связки нет.
+    """
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    big = stats[:, cv2.CC_STAT_AREA] >= min_area
+    attached = np.bincount(labels[strong > 0].ravel(), minlength=count) > 0
+    confirmed = big | attached
+    confirmed[0] = False  # фон
+
+    keep = confirmed
+    if support_px > 0 and not confirmed[1:].all():
+        zone = dilate_disk(confirmed[labels].astype(np.uint8) * 255, support_px) > 0
+        keep = confirmed | (np.bincount(labels[zone].ravel(), minlength=count) > 0)
+        keep[0] = False
+    return keep[labels]
+
+
 def sauvola_window(shape: "tuple[int, ...]", window: "int | None" = None) -> int:
     """Размер окна Саволы: из длинной стороны кадра, если не задан явно."""
     if window is not None:
@@ -266,6 +332,8 @@ def primary_mask(
     sauvola_k: float = DEFAULT_SAUVOLA_K,
     window: "int | None" = None,
     roi: "np.ndarray | None" = None,
+    min_glyph_area: int = MIN_GLYPH_AREA,
+    support_px: float = DEFAULT_SUPPORT_PX,
 ) -> np.ndarray:
     """Первичная маска контента ``M_primary`` (uint8 0/255): напечатанное и подозрение на него.
 
@@ -280,10 +348,13 @@ def primary_mask(
     около нуля, порог Саволы сваливается к ``m * (1 - k)`` и уходит ниже самих чернил).
 
     На ровной бумаге то же вырождение даёт порог примерно на ``k`` ниже уровня
-    бумаги — при k = 0.1 это ~25 уровней, много больше зерна, так что ложных
-    срабатываний на чистом поле нет. Но чем меньше ``sauvola_k``, тем ближе порог к
-    бумаге, и на каком-то значении под защиту начнёт попадать просвет с оборота: он
-    будет не размыт, а лишь не тронут. Это осознанный размен в пользу контента.
+    бумаги — при k = 0.1 это ~25 уровней. Зерно бумаги это перекрывает, а вот пылинки,
+    крапины и просвет с оборота в него проваливаются, и на пустом поле появляется
+    россыпь одиночных точек. По площади они ничтожны, но каждая после дилатации
+    запирает от размытия диск в полсотни пикселей — поэтому маска чистится
+    :func:`despeckle`. Для ветки Оцу тот отсев — тождество по построению.
+
+    ``min_glyph_area = 0`` отключает чистку.
 
     ``roi`` ограничивает область, ПО КОТОРОЙ считается глобальный порог (см.
     :func:`analysis_samples`); сама маска строится по всему кадру. Внутри
@@ -301,7 +372,10 @@ def primary_mask(
     if method == METHOD_SAUVOLA:
         mean, std = _local_mean_std(gray, sauvola_window(gray.shape, window))
         t_local = mean * (1.0 + sauvola_k * (std / SAUVOLA_R - 1.0))
-        mask |= gray <= t_local
+        strong = mask
+        mask = mask | (gray <= t_local)
+        if min_glyph_area:
+            mask = despeckle(mask, strong, min_glyph_area, support_px)
 
     return mask.astype(np.uint8) * 255
 
@@ -380,6 +454,7 @@ def smooth_frame(
     bias: float = DEFAULT_THRESHOLD_BIAS,
     sauvola_k: float = DEFAULT_SAUVOLA_K,
     sauvola_window: "int | None" = None,
+    min_glyph_area: int = MIN_GLYPH_AREA,
     dilate_px: "float | None" = None,
     dilate_frac: float = PROTECT_DILATE_FRAC,
     blur_px: "float | None" = None,
@@ -423,7 +498,16 @@ def smooth_frame(
     if check_halftone and has_halftone(gray, roi=roi):
         return SmoothResult(src, zeros, zeros, radius, blur_r, "крупная растровая область (обложка или вкладка?)")
 
-    m_primary = primary_mask(gray, method=method, bias=bias, sauvola_k=sauvola_k, window=sauvola_window, roi=roi)
+    m_primary = primary_mask(
+        gray,
+        method=method,
+        bias=bias,
+        sauvola_k=sauvola_k,
+        window=sauvola_window,
+        roi=roi,
+        min_glyph_area=min_glyph_area,
+        support_px=radius,
+    )
 
     m_dilated = dilate_disk(m_primary, radius)
     if protect_mask is not None and np.any(protect_mask):

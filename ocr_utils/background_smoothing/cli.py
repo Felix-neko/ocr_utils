@@ -21,6 +21,7 @@ from ocr_utils.background_smoothing.processing import (
     MASK_METHODS,
     METHOD_OTSU,
     PROTECT_DILATE_FRAC,
+    MIN_GLYPH_AREA,
 )
 from ocr_utils.scan_cropping.image_io import collect_images
 
@@ -106,6 +107,17 @@ logger = logging.getLogger(__name__)
     help="Окно Саволы в пикселях (приводится к нечётному). Не задано — из длинной стороны кадра (~101 px при 600 dpi).",
 )
 @click.option(
+    "--min-glyph-area",
+    default=MIN_GLYPH_AREA,
+    show_default=True,
+    type=int,
+    help=(
+        "Минимальная площадь связной области первичной маски, пикс. Мельче — остаётся, только "
+        "если примыкает к прошедшему глобальный порог или лежит рядом с подтверждённой "
+        "областью (см. despeckle). 0 — не чистить вовсе."
+    ),
+)
+@click.option(
     "--dilate-px",
     default=None,
     type=float,
@@ -186,6 +198,7 @@ def main(
     threshold_bias: float,
     sauvola_k: float,
     sauvola_window: Optional[int],
+    min_glyph_area: int,
     dilate_px: Optional[float],
     dilate_frac: float,
     blur_px: Optional[float],
@@ -213,6 +226,7 @@ def main(
         threshold_bias=threshold_bias,
         sauvola_k=sauvola_k,
         sauvola_window=sauvola_window,
+        min_glyph_area=min_glyph_area,
         dilate_px=dilate_px,
         dilate_frac=dilate_frac,
         blur_px=blur_px,

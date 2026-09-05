@@ -25,6 +25,7 @@ from ocr_utils.background_smoothing.processing import (
     DEFAULT_THRESHOLD_BIAS,
     METHOD_OTSU,
     PROTECT_DILATE_FRAC,
+    MIN_GLYPH_AREA,
     smooth_frame,
 )
 from ocr_utils.scan_cropping.image_io import imwrite_params, read_dpi, resolve_output_suffix, write_image
@@ -87,6 +88,7 @@ class SmoothParams:
     threshold_bias: float = DEFAULT_THRESHOLD_BIAS
     sauvola_k: float = DEFAULT_SAUVOLA_K
     sauvola_window: Optional[int] = None
+    min_glyph_area: int = MIN_GLYPH_AREA
 
     # Защитный припуск и размытие фона
     dilate_px: Optional[float] = None
@@ -233,6 +235,7 @@ def process_frame(path: Path, params: SmoothParams, detector=None) -> None:
             bias=params.threshold_bias,
             sauvola_k=params.sauvola_k,
             sauvola_window=params.sauvola_window,
+            min_glyph_area=params.min_glyph_area,
             dilate_px=params.dilate_px,
             dilate_frac=params.dilate_frac,
             blur_px=params.blur_px,

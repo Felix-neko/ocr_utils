@@ -21,6 +21,7 @@ from ocr_utils.background_smoothing.processing import (
     DEFAULT_THRESHOLD_BIAS,
     MASK_METHODS,
     METHOD_SAUVOLA,
+    MIN_GLYPH_AREA,
 )
 from ocr_utils.inpainting.backends import BACKEND_LAMA, BACKENDS, DEFAULT_SD_MODEL, SdParams
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC
@@ -146,6 +147,17 @@ def main() -> None:
 @click.option("--sauvola-k", default=DEFAULT_SAUVOLA_K, show_default=True, type=float)
 @click.option("--sauvola-window", default=None, type=int)
 @click.option(
+    "--min-glyph-area",
+    default=MIN_GLYPH_AREA,
+    show_default=True,
+    type=int,
+    help=(
+        "Минимальная площадь связной области первичной маски, пикс. Мельче — остаётся, только "
+        "если примыкает к прошедшему глобальный порог или лежит рядом с подтверждённой "
+        "областью (см. despeckle). 0 — не чистить вовсе."
+    ),
+)
+@click.option(
     "--dilate-px", default=DEFAULT_DILATE_PX, show_default=True, type=float, help="Радиус защитного припуска, пикс."
 )
 @click.option("--blur-px", default=None, type=float, help="Радиус размытия, пикс. Не задан — dilate-px x blur-mult.")
@@ -195,6 +207,7 @@ def run_command(
     threshold_bias,
     sauvola_k,
     sauvola_window,
+    min_glyph_area,
     dilate_px,
     blur_px,
     blur_mult,
@@ -240,6 +253,7 @@ def run_command(
             threshold_bias=threshold_bias,
             sauvola_k=sauvola_k,
             sauvola_window=sauvola_window,
+            min_glyph_area=min_glyph_area,
             dilate_px=dilate_px,
             blur_px=blur_px,
             blur_mult=blur_mult,
