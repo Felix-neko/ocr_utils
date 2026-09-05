@@ -71,13 +71,20 @@ class SdParams:
 
 @dataclass
 class LamaFiller:
-    """Заливка LaMa. Промпта у неё нет, ``bounds`` не используется."""
+    """Заливка LaMa. Промпта у неё нет, ``bounds`` не используется.
+
+    Уменьшать ROI перед сетью можно двумя способами, и они взаимоисключающие:
+    по длинной стороне ROI (``roi_max_side``, так исторически делалось на пальцах)
+    либо по размеру ДЫРЫ (``hole_max_px``, он и есть настоящая величина — см.
+    ``gpu_models.lama_fill_roi``). Заданный ``hole_max_px`` имеет приоритет.
+    """
 
     models: object
     roi_max_side: int = 512
+    hole_max_px: Optional[int] = None
 
     def __call__(self, roi: np.ndarray, roi_mask: np.ndarray, bounds: "tuple[int, int, int, int]") -> np.ndarray:
-        return self.models.lama_fill_roi(roi, roi_mask, max_side=self.roi_max_side)
+        return self.models.lama_fill_roi(roi, roi_mask, max_side=self.roi_max_side, hole_max_px=self.hole_max_px)
 
 
 @dataclass
@@ -112,6 +119,7 @@ def make_filler(
     models: object,
     *,
     roi_max_side: int = 512,
+    hole_max_px: Optional[int] = None,
     prompts: Optional[Callable[["tuple[int, int, int, int]", np.ndarray], "tuple[str, str]"]] = None,
     sd: Optional[SdParams] = None,
     on_prompt: Optional[Callable[["tuple[int, int, int, int]", str], None]] = None,
@@ -123,7 +131,7 @@ def make_filler(
     сделал бы результат необъяснимым.
     """
     if backend == BACKEND_LAMA:
-        return LamaFiller(models, roi_max_side=roi_max_side)
+        return LamaFiller(models, roi_max_side=roi_max_side, hole_max_px=hole_max_px)
     if backend == BACKEND_SD:
         if prompts is None:
             raise ValueError("для бэкенда 'sd' нужен выбор промпта (аргумент prompts)")

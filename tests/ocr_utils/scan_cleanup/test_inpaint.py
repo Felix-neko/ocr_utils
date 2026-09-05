@@ -7,7 +7,7 @@
 import numpy as np
 
 from ocr_utils.scan_cleanup.inpaint import (
-    DEFAULT_LAMA_ROI_MAX_SIDE,
+    DEFAULT_LAMA_HOLE_MAX_PX,
     InpaintOptions,
     inpaint_page,
     page_masks,
@@ -28,7 +28,7 @@ class StubModels:
     def __init__(self):
         self.masks: "list[np.ndarray]" = []
 
-    def lama_fill_roi(self, roi, roi_mask, max_side=512):
+    def lama_fill_roi(self, roi, roi_mask, max_side=512, hole_max_px=None):
         self.masks.append(roi_mask.copy())
         return np.full_like(roi, FILL)
 
@@ -119,9 +119,24 @@ def test_zone_kinds_sorted_by_area():
     assert zone_kinds(zone, masks) == [MASK_HANDWRITING, MASK_LIBRARY_STAMP]
 
 
-def test_default_roi_side_is_1024():
-    """512 калибровался на пальцах; на разметке при нём оставались артефакты."""
-    assert InpaintOptions().lama_roi_max_side == DEFAULT_LAMA_ROI_MAX_SIDE == 1024
+def test_lama_is_limited_by_the_hole_not_by_the_roi():
+    """Ограничивается дыра: предел по ROI давал на крупных печатях кляксу."""
+    assert InpaintOptions().lama_hole_max_px == DEFAULT_LAMA_HOLE_MAX_PX == 300
+
+
+def test_hole_limit_reaches_the_network(monkeypatch):
+    """Предел дыры доходит до ``lama_fill_roi``, а не теряется по дороге."""
+    seen = {}
+
+    class Models:
+        def lama_fill_roi(self, roi, mroi, max_side=512, hole_max_px=None):
+            seen["hole"] = hole_max_px
+            return roi
+
+    markup = markup_with((MASK_LIBRARY_STAMP, (100, 100, 300, 300)))
+    inpaint_page(text_page(), markup, InpaintOptions(lama_hole_max_px=123), models=Models())
+
+    assert seen["hole"] == 123
 
 
 def test_network_gets_the_mask_without_any_dilation():

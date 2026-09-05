@@ -30,6 +30,8 @@ import cv2
 import numpy as np
 import torch
 
+from ocr_utils.inpainting.roi import mask_bbox
+
 logger = logging.getLogger(__name__)
 
 
@@ -340,6 +342,7 @@ class GpuModels:
         feather: int = 9,
         roi_scale: float = 1.5,
         roi_max_side: int = LAMA_ROI_MAX_SIDE,
+        hole_max_px: "int | None" = None,
     ) -> np.ndarray:
         """Закрашивает область под маской (LaMa) — «зарисовать пальцы».
 
@@ -352,7 +355,9 @@ class GpuModels:
                 см. ``inpainting.roi.blend_roi``);
             roi_scale: во сколько раз растянуть ROI от центра после padding;
             roi_max_side: длинная сторона, до которой ROI уменьшается перед сетью
-                (0 — прогон в нативном разрешении), см. ``LAMA_ROI_MAX_SIDE``.
+                (0 — прогон в нативном разрешении), см. ``LAMA_ROI_MAX_SIDE``;
+            hole_max_px: предел размера ДЫРЫ в масштабе сети, пикс.; если задан,
+                уменьшение считается по нему, а не по ``roi_max_side``.
 
         Возвращает закрашенную картинку RGB uint8 (H, W, 3) того же размера.
         Пиксели ВНЕ маски совпадают с исходными бит-в-бит — заливка (пришедшая
@@ -374,26 +379,55 @@ class GpuModels:
         result, _bounds = inpaint_by_groups(
             rgb,
             mask,
-            LamaFiller(self, roi_max_side=roi_max_side),
+            LamaFiller(self, roi_max_side=roi_max_side, hole_max_px=hole_max_px),
             padding=padding,
             feather=feather,
             roi_scale=roi_scale,
         )
         return result
 
-    def lama_fill_roi(self, roi: np.ndarray, mroi: np.ndarray, max_side: int = LAMA_ROI_MAX_SIDE) -> np.ndarray:
+    def lama_fill_roi(
+        self, roi: np.ndarray, mroi: np.ndarray, max_side: int = LAMA_ROI_MAX_SIDE, hole_max_px: "int | None" = None
+    ) -> np.ndarray:
         """Прогон LaMa по одному ROI; возвращает заполненный ROI (RGB uint8, тот же размер).
 
-        При ``max_side > 0`` и ROI крупнее этого размера сеть работает по уменьшенной
-        копии, а заливка возвращается апскейлом (зачем — см. ``LAMA_ROI_MAX_SIDE``).
+        Уменьшение выбирается по ``hole_max_px``, если он задан, и по ``max_side`` иначе.
+
+        ОГРАНИЧИВАТЬ НАДО ДЫРУ, А НЕ ROI. Качество заливки определяется тем, насколько
+        далеко центр дыры от ближайшего известного пикселя В МАСШТАБЕ СЕТИ, а размер ROI
+        входит в это лишь через размер дыры. Замер на печати 632x464 в ROI 1200x1184
+        (1976/02 IMG_0054_2R), отклонение заливки от окружающей бумаги:
+
+            предел ROI 512  -> дыра 270 px -> отклонение  -2.8
+            предел ROI 1024 -> дыра 539 px -> отклонение -14.5   <- голубая клякса
+            нативно         -> дыра 632 px -> отклонение  -5.8
+            дыра <= 300     -> дыра 300 px -> отклонение  -2.6
+            дыра <= 400     -> дыра 400 px -> отклонение  -2.1
+
+        Видно, что по пределу ROI зависимость даже не монотонна: 1024 хуже нативного.
+        Оно и понятно — один и тот же предел ROI даёт разную дыру на разных зонах.
+        А предел по дыре заодно ограничивает и ROI: он вдвое больше дыры плюс поле,
+        так что в сеть уходит примерно ``2.2 * hole_max_px`` по длинной стороне.
+
+        Мелкую зону такой предел не трогает вовсе (уменьшать нечего) — она идёт в
+        нативном разрешении, где у сети больше всего фактуры бумаги.
         Маска уменьшается ``INTER_AREA`` с порогом «хоть сколько-нибудь задето», т.е.
         уменьшенная дыра слегка НАКРЫВАЕТ исходную: иначе по её краю осталась бы
         полупрозрачная кожа с интерполяции. Вклеивается результат всё равно только
         под полноразмерной маской (``blend_roi``), так что этот запас ничего не портит.
         """
         self._require(self._lama, ("LaMa", "with_lama=True"))
-        if max_side > 0 and max(roi.shape[:2]) > max_side:
-            small_h, small_w = (max(1, round(s * max_side / max(roi.shape[:2]))) for s in roi.shape[:2])
+        scale = 1.0
+        if hole_max_px:
+            box = mask_bbox(mroi)
+            hole = max(box[2] - box[0], box[3] - box[1]) if box else 0
+            if hole > hole_max_px:
+                scale = hole_max_px / hole
+        elif max_side > 0 and max(roi.shape[:2]) > max_side:
+            scale = max_side / max(roi.shape[:2])
+
+        if scale < 1.0:
+            small_h, small_w = (max(1, round(s * scale)) for s in roi.shape[:2])
             small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_AREA)
             msmall = cv2.resize(mroi, (small_w, small_h), interpolation=cv2.INTER_AREA)
             filled = self.lama_fill_roi(small, (msmall > 0).astype(np.uint8) * 255, max_side=0)

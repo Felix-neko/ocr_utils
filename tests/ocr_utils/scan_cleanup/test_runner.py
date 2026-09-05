@@ -22,7 +22,7 @@ class StubModels:
     def __init__(self):
         self.calls = 0
 
-    def lama_fill_roi(self, roi, roi_mask, max_side=512):
+    def lama_fill_roi(self, roi, roi_mask, max_side=512, hole_max_px=None):
         self.calls += 1
         return np.full_like(roi, FILL)
 

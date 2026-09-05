@@ -29,6 +29,7 @@ from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL
 from ocr_utils.inpainting.backends import BACKEND_SD, SdParams, make_filler
 from ocr_utils.inpainting.grouping import group_masks
 from ocr_utils.scan_cleanup.inpaint import (
+    DEFAULT_LAMA_HOLE_MAX_PX,
     FEATHER_PX,
     GROUP_ROI_SCALE,
     GROUP_MIN_DILATE_PX,
@@ -90,7 +91,7 @@ class CompareInpaintParams:
     kinds: "tuple[str, ...]" = ()
     group_dilate_fracs: "tuple[float, ...]" = (1.0 / 3.0,)
     roi_scales: "tuple[float, ...]" = (GROUP_ROI_SCALE,)
-    lama_sides: "tuple[int, ...]" = (512,)
+    lama_holes: "tuple[int, ...]" = (DEFAULT_LAMA_HOLE_MAX_PX,)
     group_min_dilate_px: int = GROUP_MIN_DILATE_PX
     montage_cols: int = 4
     sd: SdParams = field(default_factory=SdParams)
@@ -326,16 +327,16 @@ def _masks_worker(args) -> str:
 
 
 def inpaint_variants(params: CompareInpaintParams) -> "list[tuple[str, str, float, float, int]]":
-    """(имя, бэкенд, доля группировки, масштаб ROI, предел стороны LaMa)."""
+    """(имя, бэкенд, доля группировки, масштаб ROI, предел дыры LaMa)."""
     out = []
-    for backend, frac, scale, side in itertools.product(
-        params.backends, params.group_dilate_fracs, params.roi_scales, params.lama_sides
+    for backend, frac, scale, hole in itertools.product(
+        params.backends, params.group_dilate_fracs, params.roi_scales, params.lama_holes
     ):
-        # Предел стороны — только у LaMa; у SD своя опция размера.
-        if backend != "lama" and side != params.lama_sides[0]:
+        # Предел дыры — только у LaMa; у SD своя опция размера.
+        if backend != "lama" and hole != params.lama_holes[0]:
             continue
-        name = f"{backend}_grp{frac:g}_roi{scale:g}" + (f"_side{side}" if backend == "lama" else "")
-        out.append((name, backend, frac, scale, side))
+        name = f"{backend}_grp{frac:g}_roi{scale:g}" + (f"_hole{hole}" if backend == "lama" else "")
+        out.append((name, backend, frac, scale, hole))
     return out
 
 
@@ -398,11 +399,11 @@ def run_compare_inpaint(params: CompareInpaintParams) -> str:
                 chosen: "list[str]" = []
                 per_variant: "list[tuple[str, np.ndarray]]" = []
 
-                for name, backend, frac, scale, side in variants:
+                for name, backend, frac, scale, hole in variants:
                     filler = make_filler(
                         backend,
                         models,
-                        roi_max_side=side,
+                        hole_max_px=hole,
                         prompts=prompt_chooser(markup, main_kind, params.prompts),
                         sd=params.sd,
                         on_prompt=lambda _box, prompt: chosen.append(prompt),

@@ -61,11 +61,13 @@ ROI_PADDING = 64
 # Ширина растушёвки шва при вклейке, пикс. (уходит внутрь маски).
 FEATHER_PX = 9
 
-# Длинная сторона, до которой ROI уменьшается перед LaMa. Не 512, как у пальцев:
-# ``LAMA_ROI_MAX_SIDE`` калибровался на ROI пальца (~1000x2250), а зоны разметки
-# крупнее и лежат на мелкой фактуре бумаги. На сравнении по 30 полосам при 512
-# оставались артефакты, при 1024 их не видно.
-DEFAULT_LAMA_ROI_MAX_SIDE = 1024
+# Предел размера ДЫРЫ в масштабе сети, пикс. Здесь ограничивается именно дыра, а не
+# длинная сторона ROI (``LAMA_ROI_MAX_SIDE``, как на пальцах): предел по ROI даёт на
+# разных зонах разную дыру, а от неё-то всё и зависит — см. ``gpu_models.lama_fill_roi``.
+# Промежуточное «1024 по ROI» тем и обожглось: на печати 632x464 (1976/02 IMG_0054_2R)
+# оно оставляло дыру 539 px и рисовало голубую кляксу, тогда как та же зона при пределе
+# дыры в 300 px заливается чистой бумагой.
+DEFAULT_LAMA_HOLE_MAX_PX = 300
 
 
 @dataclass
@@ -80,7 +82,7 @@ class InpaintOptions:
     roi_scale: float = GROUP_ROI_SCALE
     roi_padding: int = ROI_PADDING
     feather: int = FEATHER_PX
-    lama_roi_max_side: int = DEFAULT_LAMA_ROI_MAX_SIDE
+    lama_hole_max_px: int = DEFAULT_LAMA_HOLE_MAX_PX
     sd: SdParams = field(default_factory=SdParams)
     prompts: PromptSet = field(default_factory=PromptSet)
 
@@ -179,7 +181,7 @@ def inpaint_page(
         filler = make_filler(
             opts.backend,
             models,
-            roi_max_side=opts.lama_roi_max_side,
+            hole_max_px=opts.lama_hole_max_px,
             prompts=prompt_chooser(markup, kinds[0] if kinds else "", opts.prompts),
             sd=opts.sd,
             on_prompt=lambda _box, prompt, label=label: report.prompts.append((label, prompt)),

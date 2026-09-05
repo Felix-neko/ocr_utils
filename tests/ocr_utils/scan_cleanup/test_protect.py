@@ -77,3 +77,23 @@ def test_rects_mask_clips_to_the_frame():
     assert mask.shape == SHAPE
     assert mask[0, 0] == 255
     assert mask[150, 150] == 0
+
+
+def test_analysis_roi_falls_back_when_regions_cover_the_page():
+    """Полоса под одним сплошным color_text: пороги считаются по всему кадру.
+
+    Защищать color_text нельзя, а вычесть его из области анализа — значит не
+    оставить ничего, и полоса молча уходила в копию как «пустая».
+    """
+    markup = PageMarkup("1976/12/0020_1L.tif", 400, 600, 600, 8, (Rect(0, 0, 400, 600, KIND_COLOR_TEXT, True),), ())
+
+    assert analysis_roi((600, 400), markup) is None
+
+
+def test_analysis_roi_keeps_the_rest_of_the_page():
+    """Обычная иллюстрация из области анализа по-прежнему вычитается."""
+    markup = PageMarkup("1976/12/0021_2R.tif", 400, 600, 600, 8, (Rect(0, 0, 400, 200, KIND_GRAYSCALE, False),), ())
+    roi = analysis_roi((600, 400), markup)
+
+    assert roi is not None
+    assert not roi[:200].any() and roi[200:].all()

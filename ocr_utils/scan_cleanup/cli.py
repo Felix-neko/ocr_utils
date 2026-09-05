@@ -28,7 +28,7 @@ from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL, PAPER_BLUR_PX, PAPER_DILA
 from ocr_utils.inpainting.backends import BACKEND_LAMA, BACKENDS, DEFAULT_SD_MODEL, SdParams
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC
 from ocr_utils.scan_cleanup.inpaint import (
-    DEFAULT_LAMA_ROI_MAX_SIDE,
+    DEFAULT_LAMA_HOLE_MAX_PX,
     GROUP_MIN_DILATE_PX,
     GROUP_ROI_SCALE,
     InpaintOptions,
@@ -163,11 +163,11 @@ def main() -> None:
     help="Во сколько раз ROI больше рамки группы.",
 )
 @click.option(
-    "--lama-roi-max-side",
-    default=DEFAULT_LAMA_ROI_MAX_SIDE,
+    "--lama-hole-max-px",
+    default=DEFAULT_LAMA_HOLE_MAX_PX,
     show_default=True,
     type=int,
-    help="Длинная сторона ROI перед LaMa. При 512 (значение, калиброванное на пальцах) на разметке остаются артефакты.",
+    help="До какого размера ужимается ДЫРА перед LaMa. Крупнее — сеть заливает кляксой; 0 — не ужимать.",
 )
 @click.option(
     "--method", default=METHOD_SAUVOLA, show_default=True, type=click.Choice(MASK_METHODS, case_sensitive=False)
@@ -233,6 +233,13 @@ def main() -> None:
     help="Подтверждать всё, что прошло глобальный порог (прежнее поведение).",
 )
 @click.option(
+    "--halftone-guard/--no-halftone-guard",
+    default=False,
+    show_default=True,
+    help="Отбрасывать полосу целиком, если на ней НАЙДЕН растр помимо размеченного. "
+    "Здесь растр размечен руками, и предохранитель даёт только ложные срабатывания.",
+)
+@click.option(
     "--dilate-px", default=DEFAULT_DILATE_PX, show_default=True, type=float, help="Радиус защитного припуска, пикс."
 )
 @click.option("--blur-px", default=None, type=float, help="Радиус размытия, пикс. Не задан — dilate-px x blur-mult.")
@@ -277,7 +284,7 @@ def run_command(
     group_min_dilate_px,
     group_dilate_frac,
     roi_scale,
-    lama_roi_max_side,
+    lama_hole_max_px,
     method,
     threshold_bias,
     sauvola_k,
@@ -288,6 +295,7 @@ def run_command(
     paper_dilate_px,
     paper_blur_px,
     trust_strong,
+    halftone_guard,
     dilate_px,
     blur_px,
     blur_mult,
@@ -324,7 +332,7 @@ def run_command(
             group_min_dilate_px=group_min_dilate_px,
             group_dilate_frac=group_dilate_frac,
             roi_scale=roi_scale,
-            lama_roi_max_side=lama_roi_max_side,
+            lama_hole_max_px=lama_hole_max_px,
             sd=SdParams(model=sd_model, steps=sd_steps, guidance=sd_guidance, size=sd_size, seed=sd_seed),
             prompts=_prompt_set(sd_prompt_paper, sd_prompt_colour, sd_prompt_halftone, sd_prompt_other, sd_negative),
         ),
@@ -339,6 +347,7 @@ def run_command(
             paper_dilate_px=paper_dilate_px,
             paper_blur_px=paper_blur_px,
             trust_strong=trust_strong,
+            halftone_guard=halftone_guard,
             dilate_px=dilate_px,
             blur_px=blur_px,
             blur_mult=blur_mult,
@@ -466,12 +475,7 @@ def compare_masks_command(
 )
 @click.option("--roi-scale", "roi_scales", multiple=True, type=float, default=(GROUP_ROI_SCALE,), show_default=True)
 @click.option(
-    "--lama-roi-max-side",
-    "lama_sides",
-    multiple=True,
-    type=int,
-    default=(DEFAULT_LAMA_ROI_MAX_SIDE,),
-    show_default=True,
+    "--lama-hole-max-px", "lama_holes", multiple=True, type=int, default=(DEFAULT_LAMA_HOLE_MAX_PX,), show_default=True
 )
 @click.option("--montage-cols", default=4, show_default=True, type=int, help="Столбцов в сетке вариантов.")
 def compare_inpaint_command(
@@ -500,7 +504,7 @@ def compare_inpaint_command(
     sample,
     group_dilate_fracs,
     roi_scales,
-    lama_sides,
+    lama_holes,
     group_min_dilate_px,
     montage_cols,
 ) -> None:
@@ -523,7 +527,7 @@ def compare_inpaint_command(
         kinds=tuple(kinds),
         group_dilate_fracs=tuple(group_dilate_fracs),
         roi_scales=tuple(roi_scales),
-        lama_sides=tuple(lama_sides),
+        lama_holes=tuple(lama_holes),
         group_min_dilate_px=group_min_dilate_px,
         montage_cols=montage_cols,
         sd=SdParams(model=sd_model, steps=sd_steps, guidance=sd_guidance, size=sd_size, seed=sd_seed),
