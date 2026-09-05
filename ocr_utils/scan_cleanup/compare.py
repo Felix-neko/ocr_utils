@@ -27,7 +27,14 @@ import numpy as np
 from ocr_utils.background_smoothing.processing import METHOD_SAUVOLA
 from ocr_utils.inpainting.backends import BACKEND_SD, SdParams, make_filler
 from ocr_utils.inpainting.grouping import group_masks
-from ocr_utils.scan_cleanup.inpaint import FEATHER_PX, GROUP_ROI_SCALE, MASK_DILATE_PX, ROI_PADDING, kind_mask
+from ocr_utils.scan_cleanup.inpaint import (
+    FEATHER_PX,
+    GROUP_ROI_SCALE,
+    MASK_DILATE_PX,
+    ROI_PADDING,
+    page_masks,
+    zone_kinds,
+)
 from ocr_utils.scan_cleanup.overlay import downscale, draw_page_overlay, label
 from ocr_utils.scan_cleanup.prompts import PromptSet, prompt_chooser
 from ocr_utils.scan_cleanup.protect import analysis_roi, build_protect
@@ -82,6 +89,7 @@ class CompareInpaintParams:
     roi_scales: "tuple[float, ...]" = (GROUP_ROI_SCALE,)
     lama_sides: "tuple[int, ...]" = (512,)
     mask_dilate_px: float = MASK_DILATE_PX
+    montage_cols: int = 4
     sd: SdParams = field(default_factory=SdParams)
     prompts: PromptSet = field(default_factory=PromptSet)
 
@@ -297,12 +305,18 @@ def inpaint_variants(params: CompareInpaintParams) -> "list[tuple[str, str, floa
 
 
 def run_compare_inpaint(params: CompareInpaintParams) -> str:
-    """Закрашивает выборку всеми вариантами. Последовательно: работа идёт на GPU."""
+    """Закрашивает выборку всеми вариантами. Последовательно: работа идёт на GPU.
+
+    Зоны строятся ровно как в боевом прогоне — по всем видам разметки сразу.
+    Инструмент сравнения, воспроизводящий не то, что делает прогон, хуже, чем
+    никакой: по нему выбирают параметры.
+    """
     from functools import partial
 
     from tqdm import tqdm
 
     from ocr_utils.inpainting.apply import inpaint_by_groups
+    from ocr_utils.inpainting.roi import roi_bounds
     from ocr_utils.scan_cropping.gpu_models import GpuModels
 
     pages = select_pages(
@@ -333,45 +347,56 @@ def run_compare_inpaint(params: CompareInpaintParams) -> str:
             rgb = cv2.cvtColor(src, cv2.COLOR_BGR2RGB)
             page_dir = params.out_dir / Path(markup.rel_path).with_suffix("")
 
-            for kind in kinds:
-                mask = kind_mask(markup, kind, params.mask_dilate_px)
-                if not mask.any():
-                    continue
+            masks = page_masks(markup, kinds, params.mask_dilate_px)
+            if not masks:
+                continue
+            union = np.zeros((markup.height, markup.width), np.uint8)
+            for mask in masks.values():
+                union = cv2.bitwise_or(union, mask)
+
+            for i, zone in enumerate(group_masks(union, params.group_dilate_fracs[0])):
+                kinds_here = zone_kinds(zone, masks)
+                zone_label = "+".join(kinds_here) or "zone"
+                main_kind = kinds_here[0] if kinds_here else ""
                 chosen: "list[str]" = []
-                per_variant: "list[tuple[str, np.ndarray, list]]" = []
+                per_variant: "list[tuple[str, np.ndarray]]" = []
+
                 for name, backend, frac, scale, side in variants:
                     filler = make_filler(
                         backend,
                         models,
                         roi_max_side=side,
-                        prompts=prompt_chooser(markup, kind, params.prompts),
+                        prompts=prompt_chooser(markup, main_kind, params.prompts),
                         sd=params.sd,
-                        on_prompt=lambda box, prompt: chosen.append(prompt),
+                        on_prompt=lambda _box, prompt: chosen.append(prompt),
                     )
-                    out_rgb, rois = inpaint_by_groups(
+                    # Доля группировки остаётся осью сравнения: при 0 зона распадается
+                    # обратно на отдельные связные области, и видно, что даёт объединение.
+                    out_rgb, _rois = inpaint_by_groups(
                         rgb,
-                        mask,
+                        zone,
                         filler,
                         groups=partial(group_masks, dilate_frac=frac),
                         padding=ROI_PADDING,
                         feather=FEATHER_PX,
                         roi_scale=scale,
                     )
-                    per_variant.append((name, cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR), rois))
+                    per_variant.append((name, cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)))
 
-                # Врезки — по ROI ПЕРВОГО варианта: их надо сравнивать в одном месте.
-                base_rois = per_variant[0][2]
-                for i, (x1, y1, x2, y2) in enumerate(base_rois):
-                    row = [label(src[y1:y2, x1:x2], f"before {kind}")]
-                    row += [label(img[y1:y2, x1:x2], name) for name, img, _ in per_variant]
-                    _write(page_dir / kind / f"zone_{i}.jpg", _row(row))
+                # Врезка режется по ОБЩЕМУ ROI зоны, а не по ROI варианта: у вариантов
+                # с разной группировкой ROI разные, а сравнивать надо одно и то же место.
+                x1, y1, x2, y2 = roi_bounds(zone, ROI_PADDING, params.roi_scales[0], src.shape[:2])
+                tiles = [label(src[y1:y2, x1:x2], f"before {zone_label}")]
+                tiles += [label(img[y1:y2, x1:x2], name) for name, img in per_variant]
+                _write(page_dir / f"zone_{i}_{zone_label}.jpg", _grid(tiles, params.montage_cols))
+
                 if chosen:
-                    prompt_file = page_dir / kind / "prompt.txt"
+                    prompt_file = page_dir / f"zone_{i}_{zone_label}.prompt.txt"
                     prompt_file.parent.mkdir(parents=True, exist_ok=True)
                     # dict.fromkeys — уникальные с сохранением порядка; перевод строки в
                     # конце обязателен, иначе несколько файлов, слитых `cat`, дают одну строку.
                     prompt_file.write_text("\n".join(dict.fromkeys(chosen)) + "\n", encoding="utf-8")
-                lines.append(f"{markup.rel_path} [{kind}]: зон {len(base_rois)}")
+                lines.append(f"{markup.rel_path} [{zone_label}]: вариантов {len(per_variant)}")
 
     lines.append(f"Готово: {params.out_dir}")
     return "\n".join(lines)

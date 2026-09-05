@@ -7,34 +7,36 @@
 
 ПОРЯДОК РАБОТЫ на полосе:
 
-1. Виды разметки обходятся ПО ОТДЕЛЬНОСТИ и в фиксированном порядке ``MASK_KINDS``.
-   По отдельности — потому что группировать печать с рукописной надписью не за чем:
-   это разные объекты, у них разная цена ошибки, и подавать их одной операцией
-   значило бы раздувать ROI без пользы. В фиксированном порядке — потому что каждый
-   следующий вид видит результат предыдущего, и без него прогон не воспроизводился бы.
-2. Строки одного вида сливаются в одну карту (их бывает несколько на полосу).
-3. Карта дилатируется на ``mask_dilate_px``: маску рисовали на копии 1/divisor, и её
-   край известен лишь с точностью до этого делителя (при 600 dpi — до 8 px).
-   Дилатация идёт ДО группировки, чтобы области, которые и так сливает эта
-   погрешность, группировались естественно.
-4. Связные области группируются правилом «раздуть на 1/3, пересеклись — вместе»
-   (см. :mod:`ocr_utils.inpainting.grouping`).
-5. Каждая группа закрашивается одной операцией в ROI, вдвое большем её рамки.
+1. Маски ВСЕХ видов сливаются в одну карту. Именно всех вместе, а не по видам:
+   заливщику всё равно, почему объект убирают, а вот соседство важно. Рукописная
+   пометка рядом с библиотечной печатью, закрашиваемая отдельной операцией, попадает
+   в контекстное поле соседней зоны, и сеть честно затягивает её штрихи в дыру
+   печати. Одной операцией обе дыры закрываются разом, и затекать нечему.
+2. Карта дилатируется на ``mask_dilate_px``: маску рисовали на копии 1/divisor, и её
+   край известен лишь с точностью до этого делителя (при 600 dpi — до 8 px), а у
+   оттиска печати вокруг видимой краски остаётся ещё и бледный ореол.
+3. Связные области группируются правилом «раздуть на 1/3, пересеклись — вместе»
+   (см. :mod:`ocr_utils.inpainting.grouping`). Раздутая версия решает ТОЛЬКО, что с
+   чем объединять; закрашивается объединённый набор ИСХОДНЫХ областей.
+4. Каждая группа закрашивается одной операцией в ROI, вдвое большем её рамки.
+
+Заливщик — LaMa: на сравнении по 30 полосам Stable Diffusion выдумывала на месте
+удалённого объекта псевдотекст и цветные фигуры, а LaMa клала чистую бумагу и ровный
+цвет плашки. SD оставлена доступной опцией ради сравнений, но в этой обработке не
+используется.
 """
 
 import logging
 from dataclasses import dataclass, field
-from functools import partial
 
 import cv2
 import numpy as np
 
-from ocr_utils.inpainting.apply import inpaint_by_groups
+from ocr_utils.inpainting.apply import inpaint_by_groups, single_group
 from ocr_utils.inpainting.backends import BACKEND_LAMA, SdParams, make_filler
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC, MIN_ZONE_AREA, group_masks
 from ocr_utils.scan_cleanup.prompts import PromptSet, prompt_chooser
 from ocr_utils.scan_cleanup.source import PageMarkup, decode_mask_rows
-from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE
 from ocr_utils.scan_cropping.morphology import dilate_disk
 from ocr_utils.scan_markup.db.models import MASK_KINDS
 
@@ -54,6 +56,12 @@ ROI_PADDING = 64
 # Ширина растушёвки шва при вклейке, пикс. (уходит внутрь маски).
 FEATHER_PX = 9
 
+# Длинная сторона, до которой ROI уменьшается перед LaMa. Не 512, как у пальцев:
+# ``LAMA_ROI_MAX_SIDE`` калибровался на ROI пальца (~1000x2250), а зоны разметки
+# крупнее и лежат на мелкой фактуре бумаги. На сравнении по 30 полосам при 512
+# оставались артефакты, при 1024 их не видно.
+DEFAULT_LAMA_ROI_MAX_SIDE = 1024
+
 
 @dataclass
 class InpaintOptions:
@@ -67,7 +75,7 @@ class InpaintOptions:
     roi_scale: float = GROUP_ROI_SCALE
     roi_padding: int = ROI_PADDING
     feather: int = FEATHER_PX
-    lama_roi_max_side: int = LAMA_ROI_MAX_SIDE
+    lama_roi_max_side: int = DEFAULT_LAMA_ROI_MAX_SIDE
     sd: SdParams = field(default_factory=SdParams)
     prompts: PromptSet = field(default_factory=PromptSet)
 
@@ -101,6 +109,28 @@ def kind_mask(markup: PageMarkup, kind: str, dilate_px: float) -> np.ndarray:
     return dilate_disk(mask, dilate_px)
 
 
+def page_masks(markup: PageMarkup, kinds: "tuple[str, ...]", dilate_px: float) -> "dict[str, np.ndarray]":
+    """Маски полосы по видам разметки; виды без разметки пропускаются."""
+    out: "dict[str, np.ndarray]" = {}
+    for kind in kinds:
+        mask = kind_mask(markup, kind, dilate_px)
+        if mask.any():
+            out[kind] = mask
+    return out
+
+
+def zone_kinds(zone: np.ndarray, masks: "dict[str, np.ndarray]") -> "list[str]":
+    """Виды разметки, попавшие в зону, по убыванию занятой площади.
+
+    Зона теперь строится по всем видам сразу, поэтому в одну могут войти и печать, и
+    надпись рядом с ней. Порядок по площади нужен, чтобы у отчёта и промпта был
+    определённый «главный» вид, а не какой придётся.
+    """
+    inside = zone > 0
+    hit = [(int(np.count_nonzero(inside & (mask > 0))), kind) for kind, mask in masks.items()]
+    return [kind for area, kind in sorted(hit, reverse=True) if area]
+
+
 def inpaint_page(
     bgr: np.ndarray, markup: PageMarkup, opts: "InpaintOptions | None" = None, models=None
 ) -> "tuple[np.ndarray, InpaintReport]":
@@ -108,6 +138,11 @@ def inpaint_page(
 
     ``models`` — ``scan_cropping.gpu_models.GpuModels``; для бэкенда ``sd`` он
     должен быть создан с ``sd_model=...``.
+
+    Виды разметки НЕ разделяются: связные области всех видов группируются вместе, и
+    соседние печать с надписью уходят в закрас одной операцией (зачем — см. докстринг
+    модуля). Каждая зона закрашивается отдельным вызовом, а не одним общим: так у
+    неё свой ROI и свой промпт, а следующая зона видит уже закрашенные предыдущие.
 
     Работа идёт в RGB (сети ждут именно его), на входе и выходе — BGR, как во всём
     остальном пайплайне.
@@ -117,32 +152,37 @@ def inpaint_page(
     if not markup.masks:
         return bgr, report
 
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    for kind in opts.kinds:
-        mask = kind_mask(markup, kind, opts.mask_dilate_px)
-        if not mask.any():
-            continue
+    masks = page_masks(markup, opts.kinds, opts.mask_dilate_px)
+    if not masks:
+        return bgr, report
+    report.masks = masks
 
-        chooser = prompt_chooser(markup, kind, opts.prompts)
+    union = np.zeros((markup.height, markup.width), np.uint8)
+    for mask in masks.values():
+        union = cv2.bitwise_or(union, mask)
+
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    for zone in group_masks(union, opts.group_dilate_frac, min_area=opts.min_zone_area):
+        kinds = zone_kinds(zone, masks)
+        label = "+".join(kinds) or "?"
         filler = make_filler(
             opts.backend,
             models,
             roi_max_side=opts.lama_roi_max_side,
-            prompts=chooser,
+            prompts=prompt_chooser(markup, kinds[0] if kinds else "", opts.prompts),
             sd=opts.sd,
-            on_prompt=lambda _box, prompt, kind=kind: report.prompts.append((kind, prompt)),
+            on_prompt=lambda _box, prompt, label=label: report.prompts.append((label, prompt)),
         )
         rgb, rois = inpaint_by_groups(
             rgb,
-            mask,
+            zone,
             filler,
-            groups=partial(group_masks, dilate_frac=opts.group_dilate_frac, min_area=opts.min_zone_area),
+            groups=single_group,
             padding=opts.roi_padding,
             feather=opts.feather,
             roi_scale=opts.roi_scale,
         )
-        report.masks[kind] = mask
-        report.rois.extend((kind, roi) for roi in rois)
-        logger.debug("%s: %s — зон %d", markup.rel_path, kind, len(rois))
+        report.rois.extend((label, roi) for roi in rois)
 
+    logger.debug("%s: зон закраса %d по видам %s", markup.rel_path, report.zones, sorted(masks))
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), report

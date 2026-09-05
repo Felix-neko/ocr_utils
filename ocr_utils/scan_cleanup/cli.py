@@ -24,13 +24,12 @@ from ocr_utils.background_smoothing.processing import (
 )
 from ocr_utils.inpainting.backends import BACKEND_LAMA, BACKENDS, DEFAULT_SD_MODEL, SdParams
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC
-from ocr_utils.scan_cleanup.inpaint import GROUP_ROI_SCALE, MASK_DILATE_PX, InpaintOptions
+from ocr_utils.scan_cleanup.inpaint import DEFAULT_LAMA_ROI_MAX_SIDE, GROUP_ROI_SCALE, MASK_DILATE_PX, InpaintOptions
 from ocr_utils.scan_cleanup.prompts import PROMPT_COLOUR, PROMPT_HALFTONE, PROMPT_OTHER_SUFFIX, PROMPT_PAPER
 from ocr_utils.scan_cleanup.prompts import NEGATIVE_COMMON, PromptSet
 from ocr_utils.scan_cleanup.protect import ProtectOptions
 from ocr_utils.scan_cleanup.runner import CleanupParams, run_cleanup, summary
 from ocr_utils.scan_cleanup.smoothing import DEFAULT_DILATE_PX, SmoothOptions
-from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +132,13 @@ def main() -> None:
     type=float,
     help="Во сколько раз ROI больше рамки группы.",
 )
-@click.option("--lama-roi-max-side", default=LAMA_ROI_MAX_SIDE, show_default=True, type=int)
+@click.option(
+    "--lama-roi-max-side",
+    default=DEFAULT_LAMA_ROI_MAX_SIDE,
+    show_default=True,
+    type=int,
+    help="Длинная сторона ROI перед LaMa. При 512 (значение, калиброванное на пальцах) на разметке остаются артефакты.",
+)
 @click.option(
     "--method", default=METHOD_SAUVOLA, show_default=True, type=click.Choice(MASK_METHODS, case_sensitive=False)
 )
@@ -337,9 +342,15 @@ def compare_masks_command(
 )
 @click.option("--roi-scale", "roi_scales", multiple=True, type=float, default=(GROUP_ROI_SCALE,), show_default=True)
 @click.option(
-    "--lama-roi-max-side", "lama_sides", multiple=True, type=int, default=(LAMA_ROI_MAX_SIDE,), show_default=True
+    "--lama-roi-max-side",
+    "lama_sides",
+    multiple=True,
+    type=int,
+    default=(DEFAULT_LAMA_ROI_MAX_SIDE,),
+    show_default=True,
 )
 @click.option("--mask-dilate-px", default=MASK_DILATE_PX, show_default=True, type=float)
+@click.option("--montage-cols", default=4, show_default=True, type=int, help="Столбцов в сетке вариантов.")
 def compare_inpaint_command(
     db_path,
     pack_dir,
@@ -368,6 +379,7 @@ def compare_inpaint_command(
     roi_scales,
     lama_sides,
     mask_dilate_px,
+    montage_cols,
 ) -> None:
     """Закрашивает выборку полос всеми бэкендами и вариантами и складывает результаты рядом."""
     from ocr_utils.scan_cleanup.compare import CompareInpaintParams, run_compare_inpaint
@@ -390,6 +402,7 @@ def compare_inpaint_command(
         roi_scales=tuple(roi_scales),
         lama_sides=tuple(lama_sides),
         mask_dilate_px=mask_dilate_px,
+        montage_cols=montage_cols,
         sd=SdParams(model=sd_model, steps=sd_steps, guidance=sd_guidance, size=sd_size, seed=sd_seed),
         prompts=_prompt_set(sd_prompt_paper, sd_prompt_colour, sd_prompt_halftone, sd_prompt_other, sd_negative),
     )

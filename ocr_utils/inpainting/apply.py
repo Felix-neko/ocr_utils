@@ -14,6 +14,15 @@ import numpy as np
 from ocr_utils.inpainting.roi import DEFAULT_ROI_SCALE, blend_roi, mask_components, roi_bounds
 
 
+def single_group(mask: np.ndarray) -> "list[np.ndarray]":
+    """Стратегия «не делить»: вся маска — одна операция.
+
+    Нужна тому, кто уже сам разложил маску по группам и хочет закрасить одну из них,
+    ничего больше не деля (см. ``scan_cleanup.inpaint``).
+    """
+    return [mask] if np.any(mask) else []
+
+
 def inpaint_by_groups(
     rgb: np.ndarray,
     mask: np.ndarray,
