@@ -73,8 +73,8 @@ def test_detect_writes_pages_and_regions(pack_dir: Path, tmp_path: Path) -> None
     _run(pack_dir, db)
 
     with open_db(db)() as session:
-        pages = session.scalars(select(Page).order_by(Page.file_name)).all()
-        assert [page.file_name for page in pages] == ["a.tif", "b.tif"]
+        pages = session.scalars(select(Page).order_by(Page.source_file_name)).all()
+        assert [page.source_file_name for page in pages] == ["a.tif", "b.tif"]
         assert pages[0].dpi == DPI
         assert (pages[0].width, pages[0].height) == (SIZE[1], SIZE[0])
         assert pages[0].detected_at is not None
@@ -105,7 +105,7 @@ def test_text_only_page_has_no_regions(pack_dir: Path, tmp_path: Path) -> None:
     _run(pack_dir, db)
 
     with open_db(db)() as session:
-        page = session.scalars(select(Page).where(Page.file_name == "b.tif")).one()
+        page = session.scalars(select(Page).where(Page.source_file_name == "b.tif")).one()
         assert page.raster_regions == []
         assert page.detected_at is not None
 
@@ -177,7 +177,7 @@ def test_detect_records_file_hash(pack_dir: Path, tmp_path: Path) -> None:
     _run(pack_dir, db)
 
     with open_db(db)() as session:
-        page = session.scalars(select(Page).where(Page.file_name == "a.tif")).one()
+        page = session.scalars(select(Page).where(Page.source_file_name == "a.tif")).one()
         expected = hashlib.sha256((pack_dir / "1974" / "01" / "a.tif").read_bytes()).hexdigest()
         assert page.file_hash == expected
         assert page.hash_algo == "sha256"
@@ -212,7 +212,7 @@ def test_skip_detected_still_reprocesses_a_replaced_file(pack_dir: Path, tmp_pat
     assert "изменилось с прошлого прогона: 1" in result.output
 
     with open_db(db)() as session:
-        page = session.scalars(select(Page).where(Page.file_name == "b.tif")).one()
+        page = session.scalars(select(Page).where(Page.source_file_name == "b.tif")).one()
         assert page.raster_regions, "у подменённой полосы должна появиться найденная область"
 
 
@@ -242,7 +242,7 @@ def test_first_page_is_cover_marks_the_whole_frame(pack_dir: Path, tmp_path: Pat
     assert result.exit_code == 0, result.output
 
     with open_db(db)() as session:
-        first = session.scalars(select(Page).where(Page.file_name == "a.tif")).one()
+        first = session.scalars(select(Page).where(Page.source_file_name == "a.tif")).one()
         assert len(first.raster_regions) == 1
         region = first.raster_regions[0]
         assert region.kind == KIND_COLOR
@@ -251,7 +251,7 @@ def test_first_page_is_cover_marks_the_whole_frame(pack_dir: Path, tmp_path: Pat
         # Пиксели для такой полосы не смотрели, поэтому и измерений быть не должно.
         assert region.chroma_frac is None
 
-        second = session.scalars(select(Page).where(Page.file_name == "b.tif")).one()
+        second = session.scalars(select(Page).where(Page.source_file_name == "b.tif")).one()
         assert second.raster_regions == []
 
 
@@ -323,7 +323,7 @@ def test_mark_covers_needs_no_pixels(pack_dir: Path, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
 
     with open_db(db)() as session:
-        first = session.scalars(select(Page).where(Page.file_name == "a.tif")).one()
+        first = session.scalars(select(Page).where(Page.source_file_name == "a.tif")).one()
         assert len(first.raster_regions) == 1
         assert first.raster_regions[0].full_page
         assert first.raster_regions[0].kind == KIND_COLOR

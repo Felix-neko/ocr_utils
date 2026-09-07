@@ -89,7 +89,7 @@ def pack(tmp_path):
     db_path = tmp_path / "markup.sqlite"
     with open_db(db_path)() as session:
         pack_row = upsert_pack(session, PACK_NAME, pack_dir, tree)
-        pages = {p.file_name: p for p in pack_row.year_packages[0].issues[0].pages}
+        pages = {p.source_file_name: p for p in pack_row.year_packages[0].issues[0].pages}
         for page in pages.values():
             page.width, page.height, page.dpi, page.divisor = W, H, 600, 8
 

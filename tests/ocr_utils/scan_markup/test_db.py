@@ -107,32 +107,41 @@ def test_iter_pages_filters_and_orders(pack_dir: Path, session_factory) -> None:
     """Обход идёт год -> выпуск -> номер полосы и умеет сузиться до одного выпуска."""
     with session_factory() as session:
         pack = upsert_pack(session, "пак-1", pack_dir, scan_pack(pack_dir))
-        assert [page.file_name for _y, _i, page in iter_pages(pack)] == ["a.tif", "b.tif", "c.tif"]
-        assert [page.file_name for _y, _i, page in iter_pages(pack, only_issue="02")] == ["c.tif"]
+        assert [page.source_file_name for _y, _i, page in iter_pages(pack)] == ["a.tif", "b.tif", "c.tif"]
+        assert [page.source_file_name for _y, _i, page in iter_pages(pack, only_issue="02")] == ["c.tif"]
         assert list(iter_pages(pack, only_year="1999")) == []
 
 
-def test_new_columns_are_added_to_an_old_database(tmp_path):
-    """База, заведённая прошлой схемой, открывается и дополняется, а не падает.
-
-    Сценарий дорогой: detect по паку-1 — четыре часа GPU. Потерять его из-за добавленной
-    колонки нельзя, поэтому недостающие колонки дописываются при открытии.
-    """
+def _old_schema_db(tmp_path):
+    """База «прошлой версии»: старые имена колонок и без колонок отпечатка."""
     import sqlite3
 
-    from sqlalchemy import create_engine, inspect
-
-    from ocr_utils.scan_markup.db.session import add_missing_columns, open_db
-
     db = tmp_path / "old.sqlite"
-    # Строим базу "прошлой версии": та же таблица pages, но без колонок отпечатка.
     with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE packs (id INTEGER PRIMARY KEY, name VARCHAR(255), root_path TEXT, created_at DATETIME)"
+        )
+        connection.execute("INSERT INTO packs VALUES (1, 'пак-1', '/mnt/пак-1', '2026-01-01 00:00:00')")
         connection.execute(
             "CREATE TABLE pages ("
             "id INTEGER PRIMARY KEY, issue_id INTEGER, file_name VARCHAR(255), "
             "rel_path TEXT, order_index INTEGER, width INTEGER)"
         )
         connection.execute("INSERT INTO pages VALUES (1, 1, 'a.tif', '1974/01/a.tif', 0, 3492)")
+    return db
+
+
+def test_new_columns_are_added_to_an_old_database(tmp_path):
+    """База, заведённая прошлой схемой, дополняется, а не падает.
+
+    Сценарий дорогой: detect по паку-1 — четыре часа GPU. Потерять его из-за добавленной
+    колонки нельзя, поэтому недостающие колонки дописываются при открытии.
+    """
+    from sqlalchemy import create_engine, inspect
+
+    from ocr_utils.scan_markup.db.session import add_missing_columns
+
+    db = _old_schema_db(tmp_path)
 
     added = add_missing_columns(create_engine(f"sqlite:///{db}"))
     assert "pages.file_hash" in added
@@ -141,11 +150,47 @@ def test_new_columns_are_added_to_an_old_database(tmp_path):
     columns = {c["name"] for c in inspect(create_engine(f"sqlite:///{db}")).get_columns("pages")}
     assert {"file_size", "file_mtime", "file_hash", "hash_algo", "cvat_file_hash"} <= columns
 
-    # Старая строка на месте и читается через ORM.
+
+def test_old_database_is_not_opened_without_migration(tmp_path):
+    """Базу с прежними именами колонок ``open_db`` не открывает, а называет миграцию.
+
+    Молча открыть её было бы хуже всего: ``add_missing_columns`` завёл бы пустую
+    ``source_file_name`` рядом со старой ``file_name``, и прогон увидел бы пак без имён
+    файлов — а упал бы много позже и по другому поводу.
+    """
+    import pytest
+
+    from ocr_utils.scan_markup.db.session import open_db
+
+    db = _old_schema_db(tmp_path)
+    with pytest.raises(RuntimeError, match="migrate"):
+        open_db(db)
+
+
+def test_migration_renames_columns_and_keeps_data(tmp_path):
+    """Миграция переименовывает колонки, сохраняет строки и повторяется вхолостую."""
+    from ocr_utils.scan_markup.db.migrate import migrate_db
+    from ocr_utils.scan_markup.db.session import open_db
+
+    db = _old_schema_db(tmp_path)
+
+    report = migrate_db(db)
+    assert "pages.file_name -> source_file_name" in report.renamed
+    assert "packs.root_path -> source_pics_root" in report.renamed
+    assert "pages.sharpened_text_pic_rel_path" in report.added
+    assert report.backup is not None and report.backup.exists()
+
     with open_db(db)() as session:
         page = session.get(Page, 1)
-        assert page.file_name == "a.tif"
+        assert page.source_file_name == "a.tif"
+        assert page.source_rel_path == "1974/01/a.tif"
         assert page.file_hash is None
+        assert page.sharpened_text_pic_rel_path is None
+        assert page.full_pdf_page_idx is None
+
+    again = migrate_db(db, backup=False)
+    assert again.renamed == []
+    assert again.added == []
 
 
 def test_add_missing_columns_is_idempotent(tmp_path):

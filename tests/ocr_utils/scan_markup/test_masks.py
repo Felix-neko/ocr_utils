@@ -28,8 +28,8 @@ class _Shape:
 def _page() -> Page:
     page = Page(
         issue_id=1,
-        file_name="IMG_0004.tif",
-        rel_path="1974/01/IMG_0004.tif",
+        source_file_name="IMG_0004.tif",
+        source_rel_path="1974/01/IMG_0004.tif",
         order_index=0,
         width=W,
         height=H,

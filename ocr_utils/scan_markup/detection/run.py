@@ -203,7 +203,7 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
     """Кладёт результат по полосе в базу и обновляет счётчики."""
     if result.stamp is not None and page.file_hash is not None and page.file_hash != result.stamp.digest:
         stats.changed += 1
-        tqdm.write(f"ФАЙЛ ИЗМЕНИЛСЯ {page.rel_path}: разметка в CVAT к нему больше не относится")
+        tqdm.write(f"ФАЙЛ ИЗМЕНИЛСЯ {page.source_rel_path}: разметка в CVAT к нему больше не относится")
 
     # Делитель и размеры уменьшенной копии здесь НЕ считаются: их выбирает to-cvat по
     # своему --cvat-dpi. Отсюда уходит только то, что прочитано из файла.
@@ -260,12 +260,12 @@ def _collect_jobs(
     jobs: list[_Job] = []
     by_rel: dict[str, Page] = {}
     for _year, _issue, page in pages:
-        path = params.pack_dir / page.rel_path
+        path = params.pack_dir / page.source_rel_path
         try:
             stamp = stat_stamp(path)
         except OSError as exc:
             stats.failed += 1
-            tqdm.write(f"ОШИБКА {page.rel_path}: {exc}")
+            tqdm.write(f"ОШИБКА {page.source_rel_path}: {exc}")
             continue
 
         # Дешёвая проверка идёт первой: совпали версия детектора, размер и время правки —
@@ -274,7 +274,7 @@ def _collect_jobs(
             stats.skipped += 1
             continue
 
-        by_rel[page.rel_path] = page
+        by_rel[page.source_rel_path] = page
         # Хеш из базы отдаём воркеру, только если полосу пересчитывают из-за разъехавшегося
         # ``stat``: совпал хеш — файл просто переписали тем же содержимым, и декодировать его
         # незачем. Два условия, и оба обязательны. Без ``--skip-detected`` короткого замыкания
@@ -286,7 +286,9 @@ def _collect_jobs(
             and page.file_hash is not None
             and page.detector_version == DETECTOR_VERSION
         )
-        jobs.append(_Job(path, page.rel_path, page.order_index, options, page.file_hash if stale_stat_only else None))
+        jobs.append(
+            _Job(path, page.source_rel_path, page.order_index, options, page.file_hash if stale_stat_only else None)
+        )
     return jobs, by_rel
 
 

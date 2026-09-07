@@ -583,7 +583,13 @@ def _pil_fill_value(mode: str, color_bgr: tuple[int, int, int]) -> int | tuple[i
 
 
 def _build_canvas(
-    data: bytes, layout: dict, padding: int, color_bgr: tuple[int, int, int], content_width: int, content_height: int
+    data: bytes,
+    layout: dict,
+    padding_x: int,
+    padding_y: int,
+    color_bgr: tuple[int, int, int],
+    content_width: int,
+    content_height: int,
 ) -> bytes:
     """Собрать JPEG-«подложку» — сплошную заливку с полями, совместимую с исходником.
 
@@ -593,7 +599,8 @@ def _build_canvas(
     Args:
         data: Байты исходного JPEG
         layout: Результат :func:`read_jpeg_layout` для исходника
-        padding: Ширина поля в пикселях (уже выровненная)
+        padding_x: Ширина поля слева и справа в пикселях (уже выровненная)
+        padding_y: Ширина поля сверху и снизу в пикселях (уже выровненная)
         color_bgr: Цвет заливки (B, G, R)
         content_width: Ширина области под исходник (дополненная до целого числа MCU)
         content_height: Высота области под исходник (дополненная до целого числа MCU)
@@ -615,7 +622,7 @@ def _build_canvas(
         save_kwargs["subsampling"] = subsampling
 
     fitted = _compensate_fill_color(color_bgr, mode, save_kwargs)
-    size = (content_width + 2 * padding, content_height + 2 * padding)
+    size = (content_width + 2 * padding_x, content_height + 2 * padding_y)
     canvas = Image.new(mode, size, _pil_fill_value(mode, fitted))
 
     buffer = BytesIO()
@@ -640,37 +647,39 @@ def _build_canvas(
     return canvas_bytes
 
 
-def pad_jpeg_lossless(
-    data: bytes, padding: int, color_bgr: tuple[int, int, int], dpi: int | None = None
-) -> tuple[bytes, int]:
-    """Добавить к JPEG поля, не перекодируя исходное изображение.
+def pad_jpeg_lossless_xy(
+    data: bytes, padding_x: int, padding_y: int, color_bgr: tuple[int, int, int], dpi: int | None = None
+) -> tuple[bytes, int, int]:
+    """Добавить к JPEG поля разной ширины по горизонтали и по вертикали, не перекодируя его.
 
     Работает так: собирается JPEG-подложка нужного размера, залитая цветом бумаги и
     использующая те же таблицы квантования и ту же субдискретизацию, что и исходник.
     Затем ``jpegtran -drop`` переносит в неё DCT-блоки исходника — без декодирования
     и без повторного сжатия, поэтому новых артефактов сжатия не появляется.
 
-    Ширина поля округляется вверх до кратной размеру MCU: вставка возможна только по
-    границам MCU. Фактически использованная ширина возвращается вторым элементом.
+    Поля округляются вверх до кратных размеру MCU КАЖДОЕ ПО СВОЕЙ ОСИ: ``-drop`` умеет
+    вставлять только по границам MCU, а MCU не обязан быть квадратным (при субдискретизации
+    4:2:0 это 16x16, при 4:2:2 — 16x8). Фактически использованные ширины возвращаются.
 
     Отдельная тонкость — краевые MCU. ``jpegtran -drop`` переносит только целые MCU,
     поэтому у картинки, размеры которой не кратны MCU, последний неполный ряд/столбец
     просто не переносился бы: правый и нижний край потерялись бы. Чтобы этого не было,
     исходнику временно проставляется размер, дополненный до целого числа MCU (эти
     пиксели физически уже лежат в файле — кодировщик дописал их повтором крайнего ряда),
-    а результату затем проставляется точный размер W+2*padding на H+2*padding. Исходная
+    а результату затем проставляется точный размер W+2*padding_x на H+2*padding_y. Исходная
     картинка при этом сохраняется целиком и побитово; побочный эффект — первые несколько
     пикселей правого и нижнего поля показывают не заливку, а этот дописанный кодировщиком
     повтор края (не более размера MCU минус один пиксель).
 
     Args:
         data: Байты исходного JPEG
-        padding: Запрошенная ширина поля в пикселях
+        padding_x: Запрошенная ширина поля слева и справа в пикселях
+        padding_y: Запрошенная ширина поля сверху и снизу в пикселях
         color_bgr: Цвет заливки полей (B, G, R)
         dpi: Разрешение, которое проставить результату. None — не трогать разрешение
 
     Returns:
-        Пара (байты результата, фактическая ширина поля)
+        Тройка (байты результата, фактическое поле по X, фактическое поле по Y)
 
     Raises:
         LosslessPaddingError: Если беспотерьная вставка невозможна
@@ -686,7 +695,8 @@ def pad_jpeg_lossless(
 
     width, height = layout["width"], layout["height"]
     mcu_width, mcu_height = jpeg_mcu_size(layout["sampling"])
-    aligned = align_padding_up(padding, math.lcm(mcu_width, mcu_height))
+    aligned_x = align_padding_up(padding_x, mcu_width)
+    aligned_y = align_padding_up(padding_y, mcu_height)
 
     # Размеры, дополненные до целого числа MCU: столько пикселей на самом деле лежит в файле.
     full_width = align_padding_up(width, mcu_width)
@@ -695,7 +705,7 @@ def pad_jpeg_lossless(
     source_bytes = (
         data if (full_width, full_height) == (width, height) else _patch_sof_dimensions(data, full_width, full_height)
     )
-    canvas_bytes = _build_canvas(data, layout, aligned, color_bgr, full_width, full_height)
+    canvas_bytes = _build_canvas(data, layout, aligned_x, aligned_y, color_bgr, full_width, full_height)
 
     with tempfile.TemporaryDirectory(prefix="pdf_padding_") as tmp_dir:
         tmp = Path(tmp_dir)
@@ -714,7 +724,7 @@ def pad_jpeg_lossless(
                 "-outfile",
                 str(output_path),
                 "-drop",
-                f"+{aligned}+{aligned}",
+                f"+{aligned_x}+{aligned_y}",
                 str(source_path),
                 str(canvas_path),
             ],
@@ -726,14 +736,14 @@ def pad_jpeg_lossless(
         padded = output_path.read_bytes()
 
     padded_layout = read_jpeg_layout(padded)
-    expected = (full_width + 2 * aligned, full_height + 2 * aligned)
+    expected = (full_width + 2 * aligned_x, full_height + 2 * aligned_y)
     if (padded_layout["width"], padded_layout["height"]) != expected:
         raise LosslessPaddingError(
             f"размер результата {padded_layout['width']}x{padded_layout['height']} "
             f"не совпадает с ожидаемым {expected[0]}x{expected[1]}"
         )
 
-    padded = _patch_sof_dimensions(padded, width + 2 * aligned, height + 2 * aligned)
+    padded = _patch_sof_dimensions(padded, width + 2 * aligned_x, height + 2 * aligned_y)
 
     if dpi is None:
         # jpegtran -copy none выбрасывает заголовки исходника — переносим хотя бы
@@ -741,9 +751,35 @@ def pad_jpeg_lossless(
         source_density = read_jfif_density(data)
         if source_density is not None:
             padded = write_jfif_density(padded, *source_density)
-        return padded, aligned
+        return padded, aligned_x, aligned_y
 
-    return set_jpeg_dpi(padded, dpi), aligned
+    return set_jpeg_dpi(padded, dpi), aligned_x, aligned_y
+
+
+def pad_jpeg_lossless(
+    data: bytes, padding: int, color_bgr: tuple[int, int, int], dpi: int | None = None
+) -> tuple[bytes, int]:
+    """То же, что :func:`pad_jpeg_lossless_xy`, но одним полем со всех четырёх сторон.
+
+    Ширина выравнивается вверх до кратной НОК сторон MCU — иначе поле, кратное ширине
+    MCU, могло бы оказаться некратным его высоте, и одно число не подошло бы обеим осям.
+
+    Args:
+        data: Байты исходного JPEG
+        padding: Запрошенная ширина поля в пикселях
+        color_bgr: Цвет заливки полей (B, G, R)
+        dpi: Разрешение, которое проставить результату. None — не трогать разрешение
+
+    Returns:
+        Пара (байты результата, фактическая ширина поля)
+
+    Raises:
+        LosslessPaddingError: Если беспотерьная вставка невозможна
+    """
+    layout = read_jpeg_layout(data)
+    aligned = align_padding_up(padding, math.lcm(*jpeg_mcu_size(layout["sampling"])))
+    padded, used_x, _ = pad_jpeg_lossless_xy(data, aligned, aligned, color_bgr, dpi)
+    return padded, used_x
 
 
 # --- Поля на растре -----------------------------------------------------------------

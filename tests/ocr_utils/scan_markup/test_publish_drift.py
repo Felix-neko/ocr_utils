@@ -14,7 +14,7 @@ from ocr_utils.scan_markup.db.models import Issue, Page
 
 
 def make_page(name: str, file_hash: str | None, cvat_hash: str | None) -> Page:
-    page = Page(file_name=name, rel_path=f"1974/01/{name}", order_index=0)
+    page = Page(source_file_name=name, source_rel_path=f"1974/01/{name}", order_index=0)
     page.file_hash = file_hash
     page.cvat_file_hash = cvat_hash
     page.cvat_rel_path = f"пак-1/1974/01/{name}"
@@ -35,8 +35,8 @@ def test_issue_drift_splits_changed_and_added():
     added = make_page("c.tif", "h3", None)
 
     got_changed, got_added = publish.issue_drift(make_issue([same, changed, added]))
-    assert [p.file_name for p in got_changed] == ["b.tif"]
-    assert [p.file_name for p in got_added] == ["c.tif"]
+    assert [p.source_file_name for p in got_changed] == ["b.tif"]
+    assert [p.source_file_name for p in got_added] == ["c.tif"]
 
 
 def test_issue_without_drift_is_dropped():
@@ -279,7 +279,7 @@ def pack_db(tmp_path):
                     page.width, page.height, page.dpi = 3492, 6051, 600
                     page.divisor, page.crop_width, page.crop_height = 8, 3488, 6048
                     page.cvat_width, page.cvat_height = 436, 756
-                    page.file_hash = f"hash-{issue.name}-{page.file_name}"
+                    page.file_hash = f"hash-{issue.name}-{page.source_file_name}"
                     page.file_size, page.file_mtime = 100, 1.0
         session.commit()
     return db, factory, tmp_path

@@ -253,6 +253,12 @@ def main() -> None:
 )
 @click.option("--only-with-masks", is_flag=True, help="Только полосы, где есть что закрашивать.")
 @click.option("--skip-if-exists/--no-skip-if-exists", default=True, show_default=True)
+@click.option(
+    "--write-db/--no-write-db",
+    default=True,
+    show_default=True,
+    help="Записать в базу, куда легла каждая полоса: имя выходного файла содержит отпечаток.",
+)
 @click.option("--output-format", default=None, type=click.Choice(["tif", "tiff", "png", "jpg", "jpeg"]))
 @click.option("--jobs", default=8, show_default=True, type=int, help="Воркеров на размытие (закрас всегда в родителе).")
 @click.option("--report-csv", default=None, type=click.Path(dir_okay=False, path_type=Path))
@@ -303,6 +309,7 @@ def run_command(
     protect_stamp_suspect,
     only_with_masks,
     skip_if_exists,
+    write_db,
     output_format,
     jobs,
     report_csv,
@@ -324,6 +331,7 @@ def run_command(
         explicit_pages=tuple(pages),
         limit=limit,
         skip_if_exists=skip_if_exists,
+        write_db=write_db,
         output_format=output_format,
         jobs=jobs,
         report_csv=report_csv,

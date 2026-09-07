@@ -30,9 +30,30 @@ VALIDATE_DIR="$MARKUP_ROOT/validate"
 # на /mnt/dump3: выход весит примерно столько же, сколько вход (~300 ГиБ), и писать его
 # на шпиндельный NTFS-3G значило бы упереться в диск на всём прогоне. Плюс корень
 # /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы поверх исходных.
-CLEAN_ROOT="/mnt/system/raw/mts/pack1_background_blurred_v2"
+# Регистр в /mnt/SYSTEM ЗНАЧИМ: /mnt — это ext4, и /mnt/system там отдельный пустой
+# каталог, а том с данными смонтирован именно как /mnt/SYSTEM. Путь со строчными буквами
+# не падает, а тихо уводит вывод на системный диск — заметить это можно очень нескоро.
+CLEAN_ROOT="/mnt/SYSTEM/raw/mts/pack1_background_blurred_v2"
 BLURRED_DIR="$CLEAN_ROOT/blurred"
 CLEAN_DEBUG_DIR="$CLEAN_ROOT/debug"
+
+# Заострённые копии: Capture One выгружает их в подпапки blurred/{год}/{выпуск}/sharpened,
+# а run_collect_sharpened переносит сюда, в привычную раскладку {год}/{выпуск}/полоса.
+SHARPENED_DIR="$CLEAN_ROOT/sharpened"
+
+# Промежуточные PDF под FineReader: по паку, а не по годам — распознание идёт пакетом по
+# папке, и раскладка по годам означала бы одиннадцать отдельных заданий вместо одного.
+PDF_ROOT="/mnt/SYSTEM/raw/mts/pack1_pdf"
+FULL_PDF_DIR="$PDF_ROOT/full_intermediate_pdfs"
+PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
+
+# Куда FineReader кладёт распознанное. Полные — с бинаризацией И распрямлением строк,
+# PAGES_WITH_PICS_ONLY — с бинаризацией, но БЕЗ распрямления: геометрия страницы там
+# должна остаться прежней, иначе иллюстрации некуда возвращать.
+FULL_RECOGNIZED_DIR="$PDF_ROOT/full_recognized"
+PICS_ONLY_RECOGNIZED_DIR="$PDF_ROOT/pages_with_pics_only_recognized"
+
+FINAL_PDF_DIR="$PDF_ROOT/final_pdfs"
 
 # Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
 # невелики и живут ровно до выбора параметров.

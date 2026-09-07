@@ -84,6 +84,11 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
     Если пак в целевой базе уже есть, он ПЕРЕСОЗДАЁТСЯ: ``from-cvat`` — это снимок
     состояния разметки на данный момент, и подмешивать в него остатки прошлого снимка
     (области, которые разметчик с тех пор удалил) было бы прямой ошибкой.
+
+    ВНИМАНИЕ ПРИ ДОБАВЛЕНИИ КОЛОНОК. Поля пака, выпуска и полосы перечисляются здесь
+    ПОИМЁННО, и колонка, забытая в этом списке, потеряется при следующем же ``from-cvat``
+    молча: пак-то пересоздаётся с нуля. Поэтому корни путей пака, имена собранных PDF и
+    номера страниц в них копируются наравне с разметкой, хотя к CVAT отношения не имеют.
     """
     source = require_pack(src_session, pack_name)
 
@@ -92,7 +97,16 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
         dst_session.delete(existing)
         dst_session.flush()
 
-    pack = Pack(name=source.name, root_path=source.root_path, cvat_project_id=source.cvat_project_id)
+    pack = Pack(
+        name=source.name,
+        source_pics_root=source.source_pics_root,
+        cvat_project_id=source.cvat_project_id,
+        cleaned_pics_root=source.cleaned_pics_root,
+        sharpened_text_pics_root=source.sharpened_text_pics_root,
+        full_intermediate_pdf_root=source.full_intermediate_pdf_root,
+        pages_with_pics_only_intermediate_pdf_root=source.pages_with_pics_only_intermediate_pdf_root,
+        final_pdfs_root=source.final_pdfs_root,
+    )
     dst_session.add(pack)
     dst_session.flush()
 
@@ -113,6 +127,9 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                 number=src_issue.number,
                 rel_path=src_issue.rel_path,
                 cvat_job_id=src_issue.cvat_job_id,
+                full_intermediate_pdf_name=src_issue.full_intermediate_pdf_name,
+                pages_with_pics_only_intermediate_pdf_name=src_issue.pages_with_pics_only_intermediate_pdf_name,
+                final_pdf_name=src_issue.final_pdf_name,
             )
             dst_session.add(issue)
             dst_session.flush()
@@ -120,8 +137,8 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                 dst_session.add(
                     Page(
                         issue_id=issue.id,
-                        file_name=src_page.file_name,
-                        rel_path=src_page.rel_path,
+                        source_file_name=src_page.source_file_name,
+                        source_rel_path=src_page.source_rel_path,
                         order_index=src_page.order_index,
                         width=src_page.width,
                         height=src_page.height,
@@ -138,6 +155,13 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         cvat_width=src_page.cvat_width,
                         cvat_height=src_page.cvat_height,
                         cvat_frame=src_page.cvat_frame,
+                        cleaned_file_name=src_page.cleaned_file_name,
+                        cleaned_rel_path=src_page.cleaned_rel_path,
+                        cleaned_grayscale=src_page.cleaned_grayscale,
+                        sharpened_text_pic_file_name=src_page.sharpened_text_pic_file_name,
+                        sharpened_text_pic_rel_path=src_page.sharpened_text_pic_rel_path,
+                        full_pdf_page_idx=src_page.full_pdf_page_idx,
+                        pages_with_pics_only_pdf_page_idx=src_page.pages_with_pics_only_pdf_page_idx,
                         detected_at=src_page.detected_at,
                     )
                 )

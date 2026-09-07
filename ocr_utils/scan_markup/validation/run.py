@@ -131,7 +131,7 @@ def _order_index_by_rel(params: ValidateParams, rel_paths: set[str]) -> dict[str
     with open_db(params.db_path)() as session:
         pack = require_pack(session, params.pack_name)
         rows = session.execute(
-            select(Page.rel_path, Page.order_index)
+            select(Page.source_rel_path, Page.order_index)
             .join(Issue, Issue.id == Page.issue_id)
             .join(YearPackage, YearPackage.id == Issue.year_package_id)
             .where(YearPackage.pack_id == pack.id)
@@ -161,7 +161,7 @@ def _control_jobs(params: ValidateParams, skip: set[str]) -> tuple[list[_Job], d
             .where(Page.raster_regions.any())
             .order_by(Page.id)
         ).all()
-        rows = [(page.rel_path, page.order_index, len(page.raster_regions)) for page in pages]
+        rows = [(page.source_rel_path, page.order_index, len(page.raster_regions)) for page in pages]
 
     rows = [row for row in rows if row[0] not in skip]
     random.Random(20260831).shuffle(rows)

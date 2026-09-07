@@ -47,7 +47,7 @@ def test_stat_stamp_does_not_hash(sample):
 
 def test_apply_stamp_without_digest_keeps_old_hash(sample):
     """Обновление одного лишь ``stat`` не должно затирать посчитанный раньше хеш."""
-    page = Page(file_name="a.tif", rel_path="1974/01/a.tif", order_index=0)
+    page = Page(source_file_name="a.tif", source_rel_path="1974/01/a.tif", order_index=0)
     apply_stamp(page, full_stamp(sample))
     original = page.file_hash
 
@@ -58,7 +58,7 @@ def test_apply_stamp_without_digest_keeps_old_hash(sample):
 
 
 def test_stat_matches_only_on_full_coincidence(sample):
-    page = Page(file_name="a.tif", rel_path="1974/01/a.tif", order_index=0)
+    page = Page(source_file_name="a.tif", source_rel_path="1974/01/a.tif", order_index=0)
     apply_stamp(page, full_stamp(sample))
     assert stat_matches(page, stat_stamp(sample))
 
@@ -68,7 +68,7 @@ def test_stat_matches_only_on_full_coincidence(sample):
 
 def test_page_without_stamp_never_matches():
     """Полоса из базы, заведённой до появления хешей, должна перечитываться."""
-    page = Page(file_name="a.tif", rel_path="1974/01/a.tif", order_index=0)
+    page = Page(source_file_name="a.tif", source_rel_path="1974/01/a.tif", order_index=0)
     assert not stat_matches(page, stat_stamp(Path(__file__)))
 
 
@@ -82,6 +82,6 @@ def test_page_without_stamp_never_matches():
     ],
 )
 def test_is_stale_in_cvat(file_hash, cvat_hash, stale):
-    page = Page(file_name="a.tif", rel_path="1974/01/a.tif", order_index=0)
+    page = Page(source_file_name="a.tif", source_rel_path="1974/01/a.tif", order_index=0)
     page.file_hash, page.cvat_file_hash = file_hash, cvat_hash
     assert is_stale_in_cvat(page) is stale

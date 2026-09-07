@@ -13,6 +13,12 @@
 объявляются здесь ДОПУСКАЮЩИМИ NULL, а дописывает их в существующие таблицы
 ``db.session.add_missing_columns`` при каждом открытии базы. Колонка NOT NULL и любое
 переименование — это уже настоящая миграция с заполнением, автоматически они не проедут.
+
+ПЕРЕИМЕНОВАНИЯ делает отдельный скрипт ``db.migrate``, запускаемый руками, а не открытие
+базы. Разница принципиальная: дописать пустую колонку безопасно при любом исходе, а
+переименование либо прошло, либо нет, и делать его украдкой посреди чужого прогона нельзя.
+``db.session.open_db`` старую схему только РАСПОЗНАЁТ и отказывается открывать, называя
+команду миграции.
 """
 
 from datetime import datetime, timezone
@@ -87,15 +93,37 @@ class Base(DeclarativeBase):
 
 
 class Pack(Base):
-    """Пак сканов — папка вида ``.../Готовое/пак-1``, в CVAT ей отвечает проект."""
+    """Пак сканов — папка вида ``.../Готовое/пак-1``, в CVAT ей отвечает проект.
+
+    Корней у пака несколько, потому что один и тот же комплект полос живёт на диске в
+    нескольких видах, и путь к каждому нужен разным шагам конвейера::
+
+        source_pics_root    нарезанные сканы до разметки (бывший root_path)
+        cleaned_pics_root   после scan_cleanup: печати закрашены, фон размыт
+        sharpened_text_pics_root   после Capture One: усилены детали текста
+        full_intermediate_pdf_root                  промежуточные PDF, все полосы
+        pages_with_pics_only_intermediate_pdf_root  промежуточные PDF, только с растром
+        final_pdfs_root     собранные PDF с текстовым слоем
+
+    Обязателен только первый: остальные появляются по мере прохождения конвейера, и до
+    своего шага честно пусты. Хранятся они здесь, а не в аргументах запуска, ровно затем,
+    зачем в базе лежит всё остальное: следующий шаг должен уметь узнать, откуда брать
+    вход, не полагаясь на память запускающего.
+    """
 
     __tablename__ = "packs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    root_path: Mapped[str] = mapped_column(Text)
+    source_pics_root: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     cvat_project_id: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    cleaned_pics_root: Mapped[str | None] = mapped_column(Text, default=None)
+    sharpened_text_pics_root: Mapped[str | None] = mapped_column(Text, default=None)
+    full_intermediate_pdf_root: Mapped[str | None] = mapped_column(Text, default=None)
+    pages_with_pics_only_intermediate_pdf_root: Mapped[str | None] = mapped_column(Text, default=None)
+    final_pdfs_root: Mapped[str | None] = mapped_column(Text, default=None)
 
     year_packages: Mapped[list["YearPackage"]] = relationship(
         back_populates="pack", cascade="all, delete-orphan", order_by="YearPackage.name"
@@ -139,6 +167,36 @@ class Issue(Base):
     rel_path: Mapped[str] = mapped_column(Text)
     cvat_job_id: Mapped[int | None] = mapped_column(Integer, default=None)
 
+    # Имена собранных по выпуску PDF — без директории: где лежит каждый вид, знает пак
+    # (см. его корни). Пусто, пока соответствующий шаг не отработал.
+    #
+    # ``pages_with_pics_only_intermediate_pdf_name`` остаётся пустым НАВСЕГДА у выпуска,
+    # в котором не размечено ни одной картинки: такой PDF ему просто не из чего собрать.
+    # Отличить «ещё не собирали» от «нечего собирать» по одной этой колонке нельзя —
+    # для этого есть ``full_intermediate_pdf_name``, который заполняется всегда.
+    full_intermediate_pdf_name: Mapped[str | None] = mapped_column(String(255), default=None)
+    pages_with_pics_only_intermediate_pdf_name: Mapped[str | None] = mapped_column(String(255), default=None)
+    final_pdf_name: Mapped[str | None] = mapped_column(String(255), default=None)
+
+    # Поля, добавленные полосам при сборке ПОЛНОЙ промежуточной PDF, в миллиметрах.
+    # Они нужны затем, что распрямление строк в FineReader увеличивает кадр и обрезает
+    # всё, что вылезло за MediaBox; поле даёт ему куда расти. Пишутся по факту, уже с
+    # округлением до размера MCU, — а не то, что просили ключами командной строки.
+    #
+    # Хранятся не как одно число, а по всем четырём сторонам: поля заведомо разные по
+    # горизонтали и вертикали (вылет вверх у FineReader почти постоянный, вправо — зависит
+    # от перекоса полосы), и однажды может понадобиться и несимметричное поле.
+    #
+    # ЭТО ПРО ПОЛНУЮ PDF. В PAGES_WITH_PICS_ONLY полей нет: её распознают без распрямления,
+    # геометрия там должна остаться ровно такой, в какой размечались иллюстрации.
+    #
+    # None означает «выпуск этим прогоном не собирался» — в том числе пропущен как уже
+    # готовый. Ноль означает «собирался без полей».
+    full_intermediate_pdf_margin_left_mm: Mapped[float | None] = mapped_column(Float, default=None)
+    full_intermediate_pdf_margin_right_mm: Mapped[float | None] = mapped_column(Float, default=None)
+    full_intermediate_pdf_margin_top_mm: Mapped[float | None] = mapped_column(Float, default=None)
+    full_intermediate_pdf_margin_bottom_mm: Mapped[float | None] = mapped_column(Float, default=None)
+
     year_package: Mapped[YearPackage] = relationship(back_populates="issues")
     pages: Mapped[list["Page"]] = relationship(
         back_populates="issue", cascade="all, delete-orphan", order_by="Page.order_index"
@@ -172,12 +230,12 @@ class Page(Base):
     """
 
     __tablename__ = "pages"
-    __table_args__ = (UniqueConstraint("issue_id", "file_name", name="uq_page_in_issue"),)
+    __table_args__ = (UniqueConstraint("issue_id", "source_file_name", name="uq_page_in_issue"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     issue_id: Mapped[int] = mapped_column(ForeignKey("issues.id", ondelete="CASCADE"), index=True)
-    file_name: Mapped[str] = mapped_column(String(255))
-    rel_path: Mapped[str] = mapped_column(Text)
+    source_file_name: Mapped[str] = mapped_column(String(255))
+    source_rel_path: Mapped[str] = mapped_column(Text)
     order_index: Mapped[int] = mapped_column(Integer)
 
     width: Mapped[int | None] = mapped_column(Integer, default=None)
@@ -198,6 +256,32 @@ class Page(Base):
     cvat_width: Mapped[int | None] = mapped_column(Integer, default=None)
     cvat_height: Mapped[int | None] = mapped_column(Integer, default=None)
     cvat_frame: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    # Очищенная полоса (после ``scan_cleanup``: печати закрашены, фон размыт). Имя
+    # отличается от исходного отпечатком — ``IMG_0034_1L.a1b2c3d4.tif``, см.
+    # ``scan_cleanup.naming``, — и хранится, а не выводится: расширение зависит от
+    # ``--output-format`` прогона, и вывести его задним числом уже неоткуда.
+    cleaned_file_name: Mapped[str | None] = mapped_column(String(255), default=None)
+    cleaned_rel_path: Mapped[str | None] = mapped_column(Text, default=None)
+    # Сохранена ли очищенная полоса одним серым каналом. Цвет остаётся только там, где он
+    # размечен (``COLOR_PICTURE_KINDS``), и потребителю полезно знать это заранее, не
+    # открывая файл.
+    cleaned_grayscale: Mapped[bool | None] = mapped_column(Boolean, default=None)
+
+    # Заострённая копия полосы (Capture One усилил детали текста). Имя отличается от
+    # ``source_file_name`` расширением — .jpg против .tif, — поэтому хранится, а не
+    # выводится подстановкой суффикса: следующий пак может выгружаться иначе.
+    sharpened_text_pic_file_name: Mapped[str | None] = mapped_column(String(255), default=None)
+    sharpened_text_pic_rel_path: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # Номера страниц полосы в промежуточных PDF, с нуля. Нужны на обратном ходе: после
+    # FineReader из распознанных PDF собирается финальная, и единственный способ понять,
+    # какая её страница отвечает какой полосе, — это записанный при сборке номер.
+    #
+    # ``pages_with_pics_only_pdf_page_idx`` пуст у полосы, которой в PDF типа
+    # PAGES_WITH_PICS_ONLY нет, то есть у полосы без размеченных картинок.
+    full_pdf_page_idx: Mapped[int | None] = mapped_column(Integer, default=None)
+    pages_with_pics_only_pdf_page_idx: Mapped[int | None] = mapped_column(Integer, default=None)
 
     detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     # Версия алгоритма детекции (``detection.DETECTOR_VERSION``), которой получена разметка

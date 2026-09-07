@@ -166,3 +166,86 @@ def test_summary_mentions_every_status(pack, params):
     text = summary(run_cleanup(params))
     assert "Полос обработано: 2" in text
     assert "скопировано без изменений" in text
+
+
+def _with_hashes(db_path, pack_name):
+    """Проставляет полосам отпечатки, как это делает шаг ``detect``."""
+    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
+    from ocr_utils.scan_markup.db.session import open_db
+
+    digests = {}
+    with open_db(db_path)() as session:
+        pack = require_pack(session, pack_name)
+        for index, (_y, _i, page) in enumerate(iter_pages(pack)):
+            # Различающиеся знаки должны стоять В НАЧАЛЕ: в имя уходит префикс дайджеста,
+            # и дополнение нулями слева сделало бы все отпечатки одинаковыми.
+            page.file_hash = f"{index:08x}" + "0" * 56
+            page.hash_algo = "sha256"
+            digests[page.source_rel_path] = page.file_hash
+        session.commit()
+    return digests
+
+
+def test_output_name_carries_the_source_fingerprint(pack, params):
+    """Имена полос в паке повторяются, и отпечаток в имени — то, что их различает."""
+    db_path, _pack_dir, pack_name = pack
+    _with_hashes(db_path, pack_name)
+
+    run_cleanup(params)
+
+    written = sorted(p.name for p in (params.out_dir / "1970" / "01").glob("*.tif"))
+    assert written == ["0010.00000000.tif", "0020.00000001.tif"]
+
+
+def test_skip_if_exists_still_works_with_fingerprints(pack, params):
+    """Имя выводится из ИСХОДНИКА, поэтому второй прогон видит готовые файлы."""
+    db_path, _pack_dir, pack_name = pack
+    _with_hashes(db_path, pack_name)
+
+    run_cleanup(params)
+    reports = run_cleanup(params)
+    assert {r.status for r in reports} == {"skipped"}
+
+
+def test_cleaned_paths_land_in_the_database(pack, params):
+    """Без этой записи следующий шаг не найдёт файл: его имени в базе больше неоткуда взять."""
+    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
+    from ocr_utils.scan_markup.db.session import open_db
+
+    db_path, _pack_dir, pack_name = pack
+    _with_hashes(db_path, pack_name)
+    run_cleanup(params)
+
+    with open_db(db_path)() as session:
+        pages = {p.source_file_name: p for _y, _i, p in iter_pages(require_pack(session, pack_name))}
+    assert pages["0010.tif"].cleaned_rel_path == "1970/01/0010.00000000.tif"
+    assert pages["0010.tif"].cleaned_file_name == "0010.00000000.tif"
+
+
+def test_page_without_colour_markup_is_stored_as_one_grey_channel(pack, params):
+    """Чёрная краска на бумаге не нуждается в трёх одинаковых каналах.
+
+    По паку-1 это разница между 285 и примерно 100 ГиБ, и цена решения — только то, что
+    оно необратимо, поэтому принимается оно по разметке, а не по замеру пикселей.
+    """
+    run_cleanup(params)
+    # 0010 — обычная полоса с СЕРОЙ иллюстрацией: цвет ей не нужен.
+    with Image.open(params.out_dir / "1970" / "01" / "0010.tif") as im:
+        assert im.mode == "L"
+    # 0020 — обложка с областью `color`: цвет обязан остаться.
+    with Image.open(params.out_dir / "1970" / "01" / "0020.tif") as im:
+        assert im.mode == "RGB"
+
+
+def test_grayscale_decision_is_recorded(pack, params):
+    reports = {r.rel_path: r for r in run_cleanup(params)}
+    assert reports["1970/01/0010.tif"].grayscale is True
+    assert reports["1970/01/0020.tif"].grayscale is False
+
+
+def test_jpeg_output_is_not_forced_to_grey(pack, params):
+    """Решение «серый» принимается только для TIFF: у JPEG цена та же, а выгода мнимая."""
+    params.output_format = "jpg"
+    run_cleanup(params)
+    with Image.open(params.out_dir / "1970" / "01" / "0010.jpg") as im:
+        assert im.mode == "RGB"

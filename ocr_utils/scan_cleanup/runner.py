@@ -31,6 +31,7 @@ import cv2
 from tqdm import tqdm
 
 from ocr_utils.scan_cleanup.inpaint import InpaintOptions, inpaint_page
+from ocr_utils.scan_cleanup.naming import cleaned_rel_path
 from ocr_utils.scan_cleanup.overlay import write_overlays
 from ocr_utils.scan_cleanup.protect import ProtectOptions, analysis_roi, build_protect, is_full_page
 from ocr_utils.scan_cleanup.smoothing import SmoothOptions, smooth_page
@@ -38,6 +39,10 @@ from ocr_utils.scan_cleanup.source import PageMarkup, load_markup
 from ocr_utils.scan_cropping.image_io import imwrite_params, read_dpi, resolve_output_suffix, write_image
 
 logger = logging.getLogger(__name__)
+
+# Форматы, для которых имеет смысл решение «хранить без цвета». Только TIFF: он хранит
+# каналы как есть, и лишний цвет стоит ровно втрое дороже.
+GRAYSCALE_SUFFIXES = (".tif", ".tiff")
 
 # Размер куска для пула. Полоса считается секундами, и мелкий кусок лучше ровняет
 # хвост: при крупном последний воркер доделывал бы свою пачку в одиночку.
@@ -65,6 +70,9 @@ class CleanupParams:
     limit: "int | None" = None
 
     skip_if_exists: bool = True
+    # Записать ли в базу, куда легла каждая полоса. По умолчанию да: без этой записи
+    # следующий шаг конвейера не найдёт очищенные файлы — их имена содержат отпечаток.
+    write_db: bool = True
     output_format: "str | None" = None
     jobs: int = 8
     report_csv: "Path | None" = None
@@ -81,6 +89,13 @@ class PageReport:
     rel_path: str
     status: str = "ok"  # ok | skipped | copied | missing | error
     reason: str = ""
+    # Куда легла полоса, относительно --out-dir. Имя отличается от исходного отпечатком
+    # (см. ``scan_cleanup.naming``), и без записи связь «полоса -> файл» пришлось бы
+    # каждому потребителю выводить заново.
+    out_rel_path: str = ""
+    # Сохранена ли полоса одним серым каналом. В отчёте затем, что решение принимается по
+    # разметке, и проверить его глазами можно только по списку.
+    grayscale: bool = False
     zones: int = 0
     zones_by_kind: "dict[str, int]" = field(default_factory=dict)
     dilate_px: float = 0.0
@@ -105,7 +120,9 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
     report = PageReport(markup.rel_path)
     src_path = markup.source_path(params.pack_dir)
     out_suffix = resolve_output_suffix(src_path.suffix, params.output_format)
-    out_path = (params.out_dir / markup.rel_path).with_suffix(out_suffix)
+    out_rel = cleaned_rel_path(markup.rel_path, markup.file_hash, out_suffix)
+    out_path = params.out_dir / out_rel
+    report.out_rel_path = out_rel
 
     # Проверяем ДО imread: чтение 25-45 МБ TIFF заметно дороже, чем stat файла.
     if params.skip_if_exists and out_path.exists():
@@ -147,9 +164,20 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
             report.status = "copied"
             report.reason = res.skip_reason
 
+    # Цвет хранится только там, где он есть по разметке: цветной растр и цветной набор.
+    # Остальные полосы — чёрная краска на бумаге, и три одинаковых канала у них означают
+    # лишь трёхкратный расход места (по паку-1 это разница между 285 и примерно 100 ГиБ).
+    #
+    # Только для TIFF: JPEG и так ужимает почти нейтральные каналы почти в ничто, а вот
+    # решение «серый» для него необратимо и цену имеет ту же.
+    to_write = result
+    if out_suffix.lower() in GRAYSCALE_SUFFIXES and not markup.has_colour and result.ndim == 3:
+        to_write = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        report.grayscale = True
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_name(f".{out_path.stem}.part{out_path.suffix}")
-    write_image(tmp_path, result, imwrite_params(out_suffix), dpi)
+    write_image(tmp_path, to_write, imwrite_params(out_suffix), dpi)
     os.replace(tmp_path, out_path)
 
     if params.debug_dir is not None:
@@ -252,9 +280,44 @@ def run_cleanup(params: CleanupParams) -> "list[PageReport]":
                 ):
                     reports.append(report)
 
+    if params.write_db:
+        save_cleaned_paths(params, reports)
     if params.report_csv is not None:
         write_report(reports, params.report_csv)
     return reports
+
+
+def save_cleaned_paths(params: CleanupParams, reports: "list[PageReport]") -> int:
+    """Записывает в базу, куда легла каждая полоса и сохранена ли она без цвета.
+
+    Пишется в РОДИТЕЛЕ и одной транзакцией: воркеры базы не видят вовсе (см. докстринг
+    ``scan_cleanup.source``), а открывать её из восьми процессов на запись — верный способ
+    получить ``database is locked`` на середине четырёхчасового прогона.
+
+    Полосы, упавшие с ошибкой или не найденные на диске, пропускаются: записанный путь
+    означает «файл есть», и врать тут нельзя — на нём стоит вся дальнейшая сборка PDF.
+    """
+    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
+    from ocr_utils.scan_markup.db.session import open_db
+
+    by_rel = {r.rel_path: r for r in reports if r.status not in ("error", "missing") and r.out_rel_path}
+    if not by_rel:
+        return 0
+
+    written = 0
+    with open_db(params.db_path)() as session:
+        pack = require_pack(session, params.pack_name)
+        for _year, _issue, page in iter_pages(pack):
+            report = by_rel.get(page.source_rel_path)
+            if report is None:
+                continue
+            page.cleaned_rel_path = report.out_rel_path
+            page.cleaned_file_name = report.out_rel_path.rpartition("/")[2]
+            page.cleaned_grayscale = report.grayscale
+            written += 1
+        session.commit()
+    logger.info("В базу записаны пути очищенных полос: %d", written)
+    return written
 
 
 def write_report(reports: "list[PageReport]", path: Path) -> None:

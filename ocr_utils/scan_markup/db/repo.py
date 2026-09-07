@@ -47,11 +47,11 @@ def upsert_pack(session: Session, name: str, root: Path, years: list[ScannedYear
     """
     pack = get_pack(session, name)
     if pack is None:
-        pack = Pack(name=name, root_path=str(root))
+        pack = Pack(name=name, source_pics_root=str(root))
         session.add(pack)
         session.flush()
     else:
-        pack.root_path = str(root)
+        pack.source_pics_root = str(root)
 
     existing_years = {year.name: year for year in pack.year_packages}
     for scanned_year in years:
@@ -71,21 +71,21 @@ def upsert_pack(session: Session, name: str, root: Path, years: list[ScannedYear
                 existing_issues[issue.name] = issue
                 session.flush()
 
-            existing_pages = {page.file_name: page for page in issue.pages}
+            existing_pages = {page.source_file_name: page for page in issue.pages}
             for scanned_page in scanned_issue.pages:
                 page = existing_pages.get(scanned_page.file_name)
                 if page is None:
                     issue.pages.append(
                         Page(
-                            file_name=scanned_page.file_name,
-                            rel_path=scanned_page.rel_path,
+                            source_file_name=scanned_page.file_name,
+                            source_rel_path=scanned_page.rel_path,
                             order_index=scanned_page.order_index,
                         )
                     )
                 else:
                     # Порядок мог поехать, если в выпуск досыпали пересканов.
                     page.order_index = scanned_page.order_index
-                    page.rel_path = scanned_page.rel_path
+                    page.source_rel_path = scanned_page.rel_path
             session.flush()
 
     session.commit()

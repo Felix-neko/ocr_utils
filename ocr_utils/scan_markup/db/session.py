@@ -45,10 +45,46 @@ def open_db(path: Path, create: bool = True) -> sessionmaker[Session]:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{path}")
+    check_schema_is_current(engine, path)
     if create:
         Base.metadata.create_all(engine)
         add_missing_columns(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+# Колонки, ПЕРЕИМЕНОВАННЫЕ в схеме: таблица -> (старое имя, новое имя). Держатся здесь, а
+# не импортируются из ``db.migrate``, чтобы зависимость шла в одну сторону: миграция знает
+# про открытие базы, открытие про миграцию — только по имени команды в тексте ошибки.
+RENAMED_COLUMNS: "tuple[tuple[str, str, str], ...]" = (
+    ("packs", "root_path", "source_pics_root"),
+    ("pages", "file_name", "source_file_name"),
+    ("pages", "rel_path", "source_rel_path"),
+)
+
+
+def check_schema_is_current(engine: Engine, path: Path) -> None:
+    """Отказывается открывать базу прошлой схемы, называя команду миграции.
+
+    Без этой проверки старая база открылась бы как ни в чём не бывало:
+    :func:`add_missing_columns` дописал бы пустую ``source_file_name`` РЯДОМ со старой
+    ``file_name``, все прогоны увидели бы пустые имена файлов, а падение случилось бы
+    где-то далеко и по другому поводу. Ловим ровно тот признак, который отличает старую
+    базу от новой, — старое имя есть, нового нет.
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    stale: "list[str]" = []
+    for table, old, new in RENAMED_COLUMNS:
+        if table not in tables:
+            continue
+        present = {column["name"] for column in inspector.get_columns(table)}
+        if old in present and new not in present:
+            stale.append(f"{table}.{old} (должна быть {new})")
+    if stale:
+        raise RuntimeError(
+            f"база {path} — прошлой схемы: {', '.join(stale)}. "
+            f"Выполните: uv run python -m ocr_utils.scan_markup.db.migrate {path}"
+        )
 
 
 def add_missing_columns(engine: Engine) -> list[str]:

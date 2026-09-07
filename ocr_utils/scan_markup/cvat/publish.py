@@ -160,7 +160,7 @@ def report_drift(year_name: str, drift: list[tuple[object, list, list]]) -> None
             parts.append(f"добавилось полос {len(added)}")
         logger.warning("  выпуск %s (job id=%s): %s", issue.name, issue.cvat_job_id, ", ".join(parts))
         for page in changed[:5]:
-            logger.warning("    изменилась: %s", page.rel_path)
+            logger.warning("    изменилась: %s", page.source_rel_path)
         if len(changed) > 5:
             logger.warning("    ... и ещё %d", len(changed) - 5)
 
@@ -245,7 +245,7 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
     масштабе, и новый делитель сдвинул бы готовые рамки и маски. Такие полосы остаются со
     своим коэффициентом, о чём прогон предупреждает.
     """
-    pack_dir = params.pack_dir or Path(pack.root_path)
+    pack_dir = params.pack_dir or Path(pack.source_pics_root)
     # Путь, который уйдёт в server_files, отсчитывается от IMAGES_DIR, а не от --share-root:
     # именно его сервер ищет внутри /home/django/share. Он же становится именем кадра,
     # поэтому хранится в базе как есть и служит ключом при обратном сопоставлении.
@@ -258,7 +258,7 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
         for issue in year.issues:
             for page in issue.pages:
                 if page.dpi is None:
-                    logger.warning("Полоса %s без DPI (не прошла detect), пропускаю", page.rel_path)
+                    logger.warning("Полоса %s без DPI (не прошла detect), пропускаю", page.source_rel_path)
                     continue
                 divisor = divisor_for_dpi(page.dpi, params.cvat_dpi)
                 rescaled = divisor != page.divisor
@@ -269,12 +269,12 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
                     page.divisor = divisor
                     page.crop_width, page.crop_height = crop_size(page.width, page.height, divisor)
                     page.cvat_width, page.cvat_height = cvat_size(page.width, page.height, divisor)
-                rel = cvat_rel_path(pack.name, page.rel_path)
+                rel = cvat_rel_path(pack.name, page.source_rel_path)
                 page.cvat_rel_path = (prefix / rel).as_posix()
                 pages_by_id[page.id] = page
                 jobs.append(
                     ImageJob(
-                        src=pack_dir / page.rel_path,
+                        src=pack_dir / page.source_rel_path,
                         dst=params.share_root / rel,
                         divisor=divisor,
                         page_id=page.id,

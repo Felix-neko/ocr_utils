@@ -125,7 +125,7 @@ def run_recolor(params: RecolorParams, session_factory) -> RecolorStats:
     stats = RecolorStats()
     with session_factory() as session:  # type: Session
         pack = require_pack(session, params.pack_name)
-        root = params.pack_dir or Path(pack.root_path)
+        root = params.pack_dir or Path(pack.source_pics_root)
 
         jobs: list[_Job] = []
         regions_by_page: dict[int, list[RasterRegion]] = {}
@@ -143,7 +143,7 @@ def run_recolor(params: RecolorParams, session_factory) -> RecolorStats:
             if not regions:
                 continue
             regions_by_page[page.id] = regions
-            jobs.append(_Job(root / page.rel_path, page.id, [(r.x1, r.y1, r.x2, r.y2) for r in regions], params))
+            jobs.append(_Job(root / page.source_rel_path, page.id, [(r.x1, r.y1, r.x2, r.y2) for r in regions], params))
 
         for result in _iter_recolor(jobs, params.jobs):
             if result.error:
@@ -205,7 +205,7 @@ def run_mark_covers(params: RecolorParams, session_factory) -> RecolorStats:
                 if page is None:
                     continue
                 if page.width is None or page.height is None:
-                    tqdm.write(f"ПРОПУСК {page.rel_path}: нет размеров, сначала нужен detect")
+                    tqdm.write(f"ПРОПУСК {page.source_rel_path}: нет размеров, сначала нужен detect")
                     stats.failed += 1
                     continue
                 if any(region.source != SOURCE_AUTO for region in page.raster_regions):
