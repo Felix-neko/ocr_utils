@@ -36,13 +36,20 @@ EXIT_LOST = 2
 
 
 def count_task_shapes(task) -> dict[str, int]:
-    """``{имя кадра: сколько на нём шейпов}`` по одной задаче.
+    """``{имя кадра: сколько на нём объектов}`` по одной задаче.
 
     По ИМЕНАМ, а не по номерам кадров: пересозданная задача нумерует кадры заново, и номер
     старой задачи в новой означает уже другую полосу.
+
+    Считаются И ШЕЙПЫ, И ТЕГИ. Иначе контроль потерь слеп ровно к тому, что теряется легче
+    всего: тег не виден на холсте, и его исчезновение при пересоздании задачи заметить
+    нечем. Одним числом, а не двумя, потому что сверка отвечает на вопрос «убыло ли», а не
+    «чего именно убыло» — на второй отвечает JSON-бэкап.
     """
     names = {index: name for name, index in frame_index_by_name(task).items()}
-    counted = Counter(names[shape.frame] for shape in task.get_annotations().shapes if shape.frame in names)
+    annotations = task.get_annotations()
+    counted = Counter(names[shape.frame] for shape in annotations.shapes if shape.frame in names)
+    counted.update(names[tag.frame] for tag in annotations.tags if tag.frame in names)
     return dict(counted)
 
 

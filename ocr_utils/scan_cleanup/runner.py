@@ -32,6 +32,7 @@ from tqdm import tqdm
 
 from ocr_utils.scan_cleanup.inpaint import InpaintOptions, inpaint_page
 from ocr_utils.scan_cleanup.naming import cleaned_rel_path
+from ocr_utils.scan_markup.rotation import rotate_cw
 from ocr_utils.scan_cleanup.overlay import write_overlays
 from ocr_utils.scan_cleanup.protect import ProtectOptions, analysis_roi, build_protect, is_full_page
 from ocr_utils.scan_cleanup.smoothing import SmoothOptions, smooth_page
@@ -96,6 +97,10 @@ class PageReport:
     # Сохранена ли полоса одним серым каналом. В отчёте затем, что решение принимается по
     # разметке, и проверить его глазами можно только по списку.
     grayscale: bool = False
+    # Угол, с которым полоса РЕАЛЬНО записана. Отсюда он попадает в базу: потребителю
+    # ниже по конвейеру надо знать, что width/height из базы описывают оригинал, а файл
+    # на диске повёрнут.
+    rotate_cw: int = 0
     zones: int = 0
     zones_by_kind: "dict[str, int]" = field(default_factory=dict)
     dilate_px: float = 0.0
@@ -120,7 +125,7 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
     report = PageReport(markup.rel_path)
     src_path = markup.source_path(params.pack_dir)
     out_suffix = resolve_output_suffix(src_path.suffix, params.output_format)
-    out_rel = cleaned_rel_path(markup.rel_path, markup.file_hash, out_suffix)
+    out_rel = cleaned_rel_path(markup.rel_path, markup.file_hash, out_suffix, markup.rotate_cw)
     out_path = params.out_dir / out_rel
     report.out_rel_path = out_rel
 
@@ -174,6 +179,20 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
     if out_suffix.lower() in GRAYSCALE_SUFFIXES and not markup.has_colour and result.ndim == 3:
         to_write = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         report.grayscale = True
+
+    # Полоса, у которой боком напечатано содержимое, записывается уже развёрнутой.
+    #
+    # МЕСТО ВЫБРАНО ЕДИНСТВЕННОЕ ВОЗМОЖНОЕ: здесь вся геометрия разметки уже применена к
+    # пикселям. Маски закраса разворачиваются из RLE в кадр (markup.height, markup.width),
+    # защитные прямоугольники режут массив по координатам ОРИГИНАЛА — поверни раньше, и
+    # каждая из этих координат стала бы указывать не туда.
+    #
+    # Крутится ``to_write``, а не ``result``: оверлеи ниже собираются из ``before`` и
+    # ``result`` вместе с рамками в координатах оригинала, и повёрнутый результат склеился
+    # бы с неповёрнутым «до».
+    if markup.rotate_cw % 360:
+        to_write = rotate_cw(to_write, markup.rotate_cw)
+        report.rotate_cw = markup.rotate_cw
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_name(f".{out_path.stem}.part{out_path.suffix}")
@@ -314,6 +333,7 @@ def save_cleaned_paths(params: CleanupParams, reports: "list[PageReport]") -> in
             page.cleaned_rel_path = report.out_rel_path
             page.cleaned_file_name = report.out_rel_path.rpartition("/")[2]
             page.cleaned_grayscale = report.grayscale
+            page.cleaned_rotate_cw = report.rotate_cw
             written += 1
         session.commit()
     logger.info("В базу записаны пути очищенных полос: %d", written)

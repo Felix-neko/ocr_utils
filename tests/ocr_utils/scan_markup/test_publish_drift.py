@@ -65,8 +65,12 @@ class _Shape:
 
 
 class _Annotations:
-    def __init__(self, shapes):
+    """Двойник ответа CVAT. Теги есть ВСЕГДА, пусть и пустые: у настоящего ответа поле
+    ``tags`` есть всегда, и двойник без него прятал бы работу с ориентацией от тестов."""
+
+    def __init__(self, shapes, tags=()) -> None:
         self.shapes = shapes
+        self.tags = list(tags)
 
 
 class _Task:
@@ -142,7 +146,10 @@ def test_rebuild_deletes_old_task_only_after_new_one_is_filled(monkeypatch, tmp_
         title="1974 · выпусков 1 · полос 1",
         old_task=old,
         job_files=[["пак-1/1974/01/a.tif"]],
-        carry=lambda frames: [models.LabeledShapeRequest(type="rectangle", frame=0, label_id=11, points=[1, 2, 3, 4])],
+        carry=lambda frames: (
+            [models.LabeledShapeRequest(type="rectangle", frame=0, label_id=11, points=[1, 2, 3, 4])],
+            [models.LabeledImageRequest(frame=0, label_id=12)],
+        ),
     )
 
     assert result is new
@@ -159,8 +166,9 @@ def test_backup_is_written_before_anything_is_removed(tmp_path):
     """Бэкап — единственное, что остаётся, если перенос окажется неполным."""
     task = _Task(7, "1974", ["пак-1/1974/01/a.tif"], [], [])
     by_frame = {"пак-1/1974/01/a.tif": [_Shape(0, [1, 2, 3, 4])]}
+    tags_by_frame = {"пак-1/1974/01/a.tif": [_Tag(0, 12)]}
 
-    path = publish._backup_annotations(tmp_path, "пак-1", "1974", task, by_frame)
+    path = publish._backup_annotations(tmp_path, "пак-1", "1974", task, by_frame, tags_by_frame)
     assert path.exists()
 
     import json
@@ -168,6 +176,18 @@ def test_backup_is_written_before_anything_is_removed(tmp_path):
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["task_id"] == 7
     assert saved["frames"]["пак-1/1974/01/a.tif"][0]["points"] == [1, 2, 3, 4]
+    # Теги — в бэкапе тоже: на холсте их не видно, и потерю заметить было бы нечем.
+    assert saved["tags"]["пак-1/1974/01/a.tif"][0]["label_id"] == 12
+
+
+class _Tag:
+    """Тег кадра: у настоящего есть ``to_dict``, им и пользуется бэкап."""
+
+    def __init__(self, frame, label_id, group=0):
+        self.frame, self.label_id, self.group = frame, label_id, group
+
+    def to_dict(self):
+        return {"frame": self.frame, "label_id": self.label_id, "group": self.group}
 
 
 class _Job:

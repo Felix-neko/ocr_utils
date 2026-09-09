@@ -115,3 +115,33 @@ def _encode_for_gpu(rgb: np.ndarray, side: int) -> bytes:
 def decode_gpu_jpeg(payload: bytes) -> Image.Image:
     """Обратная операция к :func:`_encode_for_gpu` — уже в родителе."""
     return Image.open(io.BytesIO(payload)).convert("RGB")
+
+
+def frame_from_gray(
+    full_gray: np.ndarray, dpi: int, rel_path: str, path: Path, allowed: tuple[int, ...] = ROTATIONS
+) -> Frame:
+    """Кадр из УЖЕ РАЗЖАТОГО полного серого — без повторного чтения файла.
+
+    Нужен там, где полосу уже прочитал кто-то другой: шаг ``detect`` разжимает её ради
+    растровой детекции, и читать те же 40 МБ второй раз ради ориентации значило бы удвоить
+    самую дорогую часть прогона по паку — полтерабайта с медленного NTFS-3G.
+
+    Размеры исходника берутся из самого массива: он и есть исходник в полном разрешении.
+    """
+    height, width = full_gray.shape[:2]
+    scale = WORK_DPI_FINE / max(1, dpi)
+    if scale < 1.0:
+        fine = cv2.resize(full_gray, (max(1, round(width * scale)), max(1, round(height * scale))), cv2.INTER_AREA)
+    else:
+        fine = full_gray
+    coarse = cv2.resize(fine, (max(1, fine.shape[1] // 2), max(1, fine.shape[0] // 2)), interpolation=cv2.INTER_AREA)
+    return Frame(
+        rel_path=rel_path,
+        path=path,
+        width=width,
+        height=height,
+        dpi=dpi,
+        gray150=np.ascontiguousarray(coarse),
+        gray300=np.ascontiguousarray(fine),
+        allowed=allowed,
+    )

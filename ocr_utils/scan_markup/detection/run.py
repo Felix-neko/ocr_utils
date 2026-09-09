@@ -19,6 +19,7 @@ SURYA ЖИВЁТ В РОДИТЕЛЕ, И ПУЛ ЭТОМУ НЕ МЕШАЕТ. В
 """
 
 import logging
+import dataclasses
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,9 +28,11 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import SOURCE_AUTO, Page, RasterRegion
+from ocr_utils.scan_markup.db.models import SOURCE_AUTO, SOURCE_CVAT, Page, RasterRegion
 from ocr_utils.scan_markup.db.repo import iter_pages, replace_raster_regions, upsert_pack
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
+from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
+from ocr_utils.scan_markup.rotation import format_allowed
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
 from ocr_utils.scan_markup.detection.color_kind import (
     CHROMA_SELF_FRAC_THR,
@@ -56,6 +59,7 @@ from ocr_utils.scan_markup.detection.regions import (
     SURYA_LINEART_P99_PX,
 )
 from ocr_utils.scan_markup.detection.page import (
+    orientation_image,
     PageAnalysis,
     PageOptions,
     PageResult,
@@ -114,6 +118,15 @@ class DetectParams:
     lineart_max_dot_frac: float = LINEART_MAX_DOT_FRAC
     debug_dir: Path | None = None
 
+    # --- Ориентация полосы ---------------------------------------------------
+    # Считается тем же прогоном, что и растр: пак читается ОДИН раз, а не два.
+    orientation: bool = True
+    # Через запятую, как в CLI. GPU-детектор (surya_lines) идёт в родителе, остальные —
+    # в воркерах; арбитр (ocr_vote) вызывается вторым проходом только по кандидатам.
+    orientation_detectors: str = "ink_axis,osd,surya_lines,ocr_vote"
+    # Набор допустимых поворотов; пустая строка — взять из базы (пак/выпуск) или умолчание.
+    angles: str = ""
+
     def page_options(self) -> PageOptions:
         """Часть параметров, которая уезжает в воркер. Обязана переживать pickle."""
         return PageOptions(
@@ -142,7 +155,49 @@ class DetectParams:
             lineart_screen_peak=self.lineart_screen_peak,
             stamp_ink_contrast=self.stamp_ink_contrast,
             lineart_max_dot_frac=self.lineart_max_dot_frac,
+            orientation=self.orientation,
+            orientation_detectors=self.cpu_orientation_detectors(),
+            allowed_rotations=self.allowed_rotations(),
         )
+
+    def detector_names(self) -> tuple[str, ...]:
+        return tuple(part.strip() for part in self.orientation_detectors.split(",") if part.strip())
+
+    def cpu_orientation_detectors(self) -> tuple[str, ...]:
+        """Только те, что считаются в воркере: не GPU и не арбитр."""
+        from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+
+        return tuple(
+            name
+            for name in self.detector_names()
+            if (d := DETECTORS.get(name)) is not None and d.stage == "cpu" and not d.arbiter
+        )
+
+    def gpu_orientation_detectors(self) -> tuple[str, ...]:
+        from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+
+        return tuple(
+            name for name in self.detector_names() if (d := DETECTORS.get(name)) is not None and d.stage == "gpu"
+        )
+
+    def arbiter_orientation_detectors(self) -> tuple[str, ...]:
+        from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+
+        return tuple(name for name in self.detector_names() if (d := DETECTORS.get(name)) is not None and d.arbiter)
+
+    def allowed_rotations(self, pack_value: "str | None" = None, issue_value: "str | None" = None):
+        """Набор допустимых поворотов: ключ прогона важнее выпуска, выпуск важнее пака.
+
+        Ключ ставит человек здесь и сейчас, значение выпуска — переопределение пакового, а
+        паковое — общее условие. Порядок именно такой: явно указанное на запуске не должно
+        молча перебиваться тем, что лежит в базе.
+        """
+        from ocr_utils.scan_markup.rotation import DEFAULT_ALLOWED, parse_allowed
+
+        for raw in (self.angles, issue_value, pack_value):
+            if raw:
+                return parse_allowed(raw)
+        return DEFAULT_ALLOWED
 
     def worker_count(self) -> int:
         """Сколько процессов заводить на пиксельный этап. GPU их не ограничивает."""
@@ -156,6 +211,8 @@ class DetectStats:
     pages: int = 0
     skipped: int = 0
     changed: int = 0
+    # Полос, которым сводный вердикт назначил поворот.
+    rotated: int = 0
     failed: int = 0
     regions: int = 0
     color: int = 0
@@ -199,6 +256,58 @@ def _needs_detection(page: Page, params: DetectParams, stamp) -> bool:
     return not stat_matches(page, stamp)
 
 
+def _orientation_stale(page: Page, params: DetectParams) -> bool:
+    """Устарела ли ориентация САМА ПО СЕБЕ — без оглядки на ``stat`` файла.
+
+    Отделено от :func:`_needs_orientation` затем, что вопросы разные. Здесь: «поменялся ли
+    алгоритм или полосу вовсе не считали». Там: «надо ли её пересчитывать в этом прогоне»,
+    куда входит ещё и то, менялся ли файл.
+    """
+    if page.orientation_source == SOURCE_CVAT:
+        return False
+    if page.orientation_detected_at is None or page.rotate_cw is None:
+        return True
+    return page.orientation_version != ORIENTATION_VERSION
+
+
+def _needs_orientation(page: Page, params: DetectParams, stamp) -> bool:
+    """То же для ОРИЕНТАЦИИ, и версия у неё СВОЯ.
+
+    Слить обе версии в одну нельзя: тогда правка порога ориентации заставила бы перечитать
+    весь пак вместе со всей растровой детекцией — полтерабайта с медленного NTFS-3G и часы.
+    И наоборот: правка детектора растра не должна отменять уже посчитанную ориентацию.
+
+    Ручную правку из CVAT прогон не трогает: у неё ``orientation_source`` равен ``cvat``, и
+    пересчитывать её значило бы затирать решение человека автоматическим.
+    """
+    if not params.orientation:
+        return False
+    if page.orientation_source == SOURCE_CVAT:
+        return False
+    if _orientation_stale(page, params):
+        return True
+    if params.rehash_all:
+        return True
+    return not stat_matches(page, stamp)
+
+
+def _apply_orientation(page: Page, result: PageResult, stats: DetectStats) -> None:
+    """Пишет ориентацию — и ТОЛЬКО когда её действительно считали.
+
+    ``combo is None`` значит «не считали»: полосу пропустили по свежей версии ориентации или
+    ориентацию не просили вовсе. Проставить в этом случае версию и время значило бы соврать —
+    следующий прогон решил бы, что полоса посчитана, и больше к ней не вернулся.
+    """
+    if result.combo is None:
+        return
+    page.rotate_cw = result.combo.rotate_cw
+    page.orientation_confidence = float(result.combo.confidence)
+    page.orientation_version = ORIENTATION_VERSION
+    page.orientation_detected_at = _utcnow()
+    page.orientation_source = SOURCE_AUTO
+    stats.rotated += bool(result.combo.rotate_cw)
+
+
 def _apply_result(session: Session, page: Page, result: PageResult, stats: DetectStats) -> None:
     """Кладёт результат по полосе в базу и обновляет счётчики."""
     if result.stamp is not None and page.file_hash is not None and page.file_hash != result.stamp.digest:
@@ -210,6 +319,7 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
     page.width, page.height, page.dpi = result.width, result.height, result.dpi
     page.detected_at = _utcnow()
     page.detector_version = DETECTOR_VERSION
+    _apply_orientation(page, result, stats)
     # Отпечаток пишется ПОСЛЕ успешной детекции: полоса, на которой детекция упала, не
     # должна выглядеть обработанной для следующего прогона.
     if result.stamp is not None:
@@ -252,6 +362,16 @@ def _collect_jobs(
 ) -> tuple[list[_Job], dict[str, Page]]:
     """Отбирает полосы, которые надо считать, и попутно пропускает неизменившиеся."""
     pack = upsert_pack(session, params.pack_name, params.pack_dir, years)
+
+    # Набор допустимых поворотов ЗАКРЕПЛЯЕТСЯ ЗА ПАКОМ. Указан ключом — записывается в базу,
+    # не указан — берётся оттуда. Так следующий шаг конвейера узнаёт условие, не полагаясь
+    # на память запускающего: ровно затем же в паке лежат и корни путей.
+    resolved = params.allowed_rotations(pack.allowed_rotations)
+    params.angles = format_allowed(resolved)
+    if pack.allowed_rotations != params.angles:
+        logger.info("Допустимые повороты пака: %s", params.angles)
+        pack.allowed_rotations = params.angles
+
     pages = list(iter_pages(pack, params.only_year, params.only_issue))
     if params.limit is not None:
         pages = pages[: params.limit]
@@ -270,7 +390,9 @@ def _collect_jobs(
 
         # Дешёвая проверка идёт первой: совпали версия детектора, размер и время правки —
         # файл не читается вовсе. Именно ради этого пропуска ``stat`` и лежит в базе.
-        if params.skip_detected and not _needs_detection(page, params, stamp):
+        need_regions = not params.skip_detected or _needs_detection(page, params, stamp)
+        need_orientation = _needs_orientation(page, params, stamp) if params.skip_detected else params.orientation
+        if not need_regions and not need_orientation:
             stats.skipped += 1
             continue
 
@@ -286,9 +408,19 @@ def _collect_jobs(
             and page.file_hash is not None
             and page.detector_version == DETECTOR_VERSION
         )
-        jobs.append(
-            _Job(path, page.source_rel_path, page.order_index, options, page.file_hash if stale_stat_only else None)
-        )
+        # Полосе, которой нужна только ориентация, растровый этап всё равно считается: он
+        # идёт по тому же разжатому кадру и почти ничего не добавляет к стоимости чтения.
+        # А вот НАОБОРОТ — считать ориентацию там, где она уже свежая, — заметная трата:
+        # tesseract OSD стоит две с половиной секунды на полосу.
+        job_options = options if need_orientation else dataclasses.replace(options, orientation=False)
+
+        # Короткое замыкание по хешу действует и на ориентацию: совпал хеш — содержимое
+        # прежнее, а значит прежний вердикт о повороте по-прежнему верен, и декодировать
+        # полосу незачем. Но только пока версия ориентации та же: при её смене совпадение
+        # хеша не значит ничего — файл прежний, алгоритм новый.
+        orientation_current = not params.orientation or not _orientation_stale(page, params)
+        known_digest = page.file_hash if stale_stat_only and orientation_current else None
+        jobs.append(_Job(path, page.source_rel_path, page.order_index, job_options, known_digest))
     return jobs, by_rel
 
 
@@ -335,7 +467,59 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
                     params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, result.regions
                 )
 
+        _run_arbiter(session, params, by_rel, stats)
+
     return stats
+
+
+def _run_arbiter(session: Session, params: DetectParams, by_rel: "dict[str, Page]", stats: DetectStats) -> None:
+    """Второй проход: арбитр по кандидатам, которых отметили быстрые детекторы.
+
+    Отдельным проходом, а не в общем цикле, потому что он ДОРОГ: распознавание на каждом
+    допустимом повороте — секунды на полосу против долей секунды у остальных. По паку-1 в
+    кандидаты попадает около сотни полос из двенадцати тысяч, и повторное чтение сотни файлов
+    несущественно рядом с полтерабайтом первого прохода.
+
+    Арбитр решает сам: он единственный проверяет гипотезы напрямую, читая полосу на каждом
+    повороте, тогда как остальные судят об ориентации косвенно.
+    """
+    names = params.arbiter_orientation_detectors()
+    if not params.orientation or not names:
+        return
+
+    from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+    from ocr_utils.scan_markup.orientation.image_io import read_frame
+
+    candidates = [page for page in by_rel.values() if page.rotate_cw and page.orientation_source == SOURCE_AUTO]
+    if not candidates:
+        return
+    logger.info("Кандидатов арбитру: %d", len(candidates))
+    allowed = params.allowed_rotations()
+
+    for page in tqdm(candidates, desc="арбитр", unit="полоса"):
+        path = params.pack_dir / page.source_rel_path
+        try:
+            frame, _ = read_frame(path, page.source_rel_path, default_dpi=page.dpi or 600, allowed=allowed)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("%s: арбитр не прочитал файл (%s)", page.source_rel_path, error)
+            continue
+        verdict = None
+        for name in names:
+            try:
+                verdict = DETECTORS[name].run(frame)
+            except Exception as error:  # noqa: BLE001
+                logger.warning("%s: арбитр %s упал (%s)", page.source_rel_path, name, error)
+                continue
+            if verdict.confidence > 0.0:
+                break
+        if verdict is None or verdict.confidence <= 0.0:
+            continue
+        if verdict.rotate_cw != page.rotate_cw:
+            stats.rotated -= bool(page.rotate_cw)
+            stats.rotated += bool(verdict.rotate_cw)
+        page.rotate_cw = verdict.rotate_cw
+        page.orientation_confidence = float(verdict.confidence)
+        session.commit()
 
 
 def _iter_results(jobs: list[_Job], params: DetectParams, detector):
@@ -358,8 +542,48 @@ def _iter_results(jobs: list[_Job], params: DetectParams, detector):
         yield from _finish(analyses, len(jobs), params, detector)
 
 
+def _orientation_gpu(params: DetectParams):
+    """GPU-детекторы ориентации, поднятые по одному разу на прогон.
+
+    Модели грузятся ЛЕНИВО, при первом вызове. Это не украшение: пул процессов создаётся
+    контекстом ``fork``, и форк процесса с уже поднятой CUDA даёт зависшие воркеры. Пока
+    первое обращение случается в родителе ПОСЛЕ форка, всё в порядке.
+    """
+    from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+
+    if not params.orientation:
+        return {}
+    return {name: DETECTORS[name].make_batch() for name in params.gpu_orientation_detectors()}
+
+
 def _finish(analyses, total: int, params: DetectParams, detector):
     """Прогон Surya и сборка областей — строго последовательно, в родителе."""
     options = params.page_options()
+    batches = _orientation_gpu(params)
     for analysis in tqdm(analyses, total=total, desc="детекция", unit="полоса"):
-        yield finish_page(analysis, options, surya_boxes_for(analysis, detector))
+        gpu = _orientation_for(analysis, batches) if batches else None
+        yield finish_page(analysis, options, surya_boxes_for(analysis, detector), gpu)
+
+
+def _orientation_for(analysis, batches) -> "dict | None":
+    """GPU-вердикты ориентации по одной полосе.
+
+    По одной, а не пачкой: цикл ``_finish`` устроен «полоса — коммит», и буферизация ради
+    батча отложила бы запись в базу на всю пачку. Так уже работает Surya layout рядом, и
+    цена та же — доли секунды на полосу.
+    """
+    if not analysis.orientation_done or analysis.work is None:
+        return None
+    image = orientation_image(analysis)
+    if image is None:
+        return None
+    verdicts = {}
+    for name, batch in batches.items():
+        try:
+            result = batch([image])
+        except Exception as error:  # noqa: BLE001 — вердикт не важнее полосы
+            logger.warning("%s: детектор %s упал (%s)", analysis.rel_path, name, error)
+            continue
+        if result:
+            verdicts[name] = result[0]
+    return verdicts

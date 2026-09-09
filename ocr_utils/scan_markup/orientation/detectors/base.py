@@ -13,11 +13,9 @@ from typing import Callable, Protocol, Sequence
 
 import numpy as np
 
-# Допустимые повороты. Именно по часовой: ``rotate_cw=90`` значит «повернуть по часовой на 90».
-ROTATIONS = (0, 90, 180, 270)
-
-# Человеческие имена поворотов — для имён симлинков и таблиц.
-ROTATION_NAMES = {0: "прямо", 90: "cw90", 180: "180", 270: "ccw90"}
+# Обозначения углов — из общего модуля: их делят с базой, CVAT и очисткой, и второй
+# источник истины по соседству рано или поздно разошёлся бы с первым.
+from ocr_utils.scan_markup.rotation import ROTATION_NAMES, ROTATIONS, rotate_cw  # noqa: E402,F401
 
 
 @dataclass(frozen=True)
@@ -46,17 +44,6 @@ class Verdict:
     @property
     def rotated(self) -> bool:
         return self.rotate_cw != 0
-
-
-def rotate_cw(image: np.ndarray, degrees: int) -> np.ndarray:
-    """Поворот по часовой на кратное 90. Через ``np.rot90``, без интерполяции.
-
-    Именно без интерполяции: детекторы меряют толщину штриха и правильность строк, и поворот
-    с пересемплированием сам по себе сдвинул бы их оценку — синтетическая проверка измеряла бы
-    тогда качество ресайза, а не детектор.
-    """
-    # np.rot90 крутит ПРОТИВ часовой, поэтому число четвертей берётся с обратным знаком.
-    return np.ascontiguousarray(np.rot90(image, k=-((degrees // 90) % 4)))
 
 
 def unknown(note: str) -> Verdict:

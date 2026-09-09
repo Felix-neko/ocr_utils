@@ -125,6 +125,15 @@ class Pack(Base):
     pages_with_pics_only_intermediate_pdf_root: Mapped[str | None] = mapped_column(Text, default=None)
     final_pdfs_root: Mapped[str | None] = mapped_column(Text, default=None)
 
+    # Какие повороты вообще рассматривать на этом паке — углы по часовой через запятую,
+    # например «0,90,270». NULL значит «умолчание» (``rotation.DEFAULT_ALLOWED``).
+    #
+    # Набор задаётся паком, а не прогоном, ровно затем же, зачем здесь лежат корни: шаг
+    # конвейера должен уметь узнать условия, не полагаясь на память запускающего. Сужение
+    # набора — самый дешёвый способ поднять точность: ответ, которого в наборе нет, не может
+    # быть дан в принципе, а арбитру достаётся меньше прогонов распознавания.
+    allowed_rotations: Mapped[str | None] = mapped_column(String(32), default=None)
+
     year_packages: Mapped[list["YearPackage"]] = relationship(
         back_populates="pack", cascade="all, delete-orphan", order_by="YearPackage.name"
     )
@@ -177,6 +186,11 @@ class Issue(Base):
     full_intermediate_pdf_name: Mapped[str | None] = mapped_column(String(255), default=None)
     pages_with_pics_only_intermediate_pdf_name: Mapped[str | None] = mapped_column(String(255), default=None)
     final_pdf_name: Mapped[str | None] = mapped_column(String(255), default=None)
+
+    # Переопределение пакового набора допустимых поворотов для этого выпуска. NULL —
+    # обычный случай: берётся паковый. Нужно на выпуск, где вёрстка отличается от остального
+    # пака (скажем, номер целиком набран альбомными таблицами).
+    allowed_rotations: Mapped[str | None] = mapped_column(String(32), default=None)
 
     # Поля, добавленные полосам при сборке ПОЛНОЙ промежуточной PDF, в миллиметрах.
     # Они нужны затем, что распрямление строк в FineReader увеличивает кадр и обрезает
@@ -282,6 +296,32 @@ class Page(Base):
     # PAGES_WITH_PICS_ONLY нет, то есть у полосы без размеченных картинок.
     full_pdf_page_idx: Mapped[int | None] = mapped_column(Integer, default=None)
     pages_with_pics_only_pdf_page_idx: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    # --- Ориентация полосы ---------------------------------------------------
+    # На сколько повернуть полосу ПО ЧАСОВОЙ, чтобы стало прямо: 0, 90, 180 или 270.
+    #
+    # NULL и 0 — РАЗНОЕ. NULL значит «не считали», 0 — «считали, поворот не нужен». Слить их
+    # в одно нельзя: тогда непосчитанная полоса выдала бы себя за проверенную, и прогон с
+    # ``--skip-detected`` больше никогда бы к ней не вернулся.
+    #
+    # Речь о СОДЕРЖИМОМ, а не о кадре: полоса как страница ориентирована правильно, боком
+    # напечатана сама иллюстрация — генплан, оргсхема, широкая таблица. Пропорции кадра тут
+    # не говорят ничего, обе такие полосы книжные.
+    rotate_cw: Mapped[int | None] = mapped_column(Integer, default=None)
+    orientation_confidence: Mapped[float | None] = mapped_column(Float, default=None)
+    # Версия набора детекторов ориентации (``orientation.ORIENTATION_VERSION``). Отдельная
+    # от ``detector_version`` намеренно: слив их в одну, правка порога ориентации заставила
+    # бы перечитать весь пак вместе со всей растровой детекцией — полтерабайта и часы.
+    orientation_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    orientation_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    # ``auto`` — посчитано детектором, ``cvat`` — поставлено или снято человеком в CVAT.
+    # По этому полю видно, чему верить при расхождении.
+    orientation_source: Mapped[str | None] = mapped_column(String(16), default=None)
+
+    # Угол, с которым полоса РЕАЛЬНО записана очисткой. Отличается от ``rotate_cw``, пока
+    # очистка не прогонялась после смены решения. Нужен потребителям ниже по конвейеру:
+    # ``width``/``height`` описывают ОРИГИНАЛ, а файл на диске может быть повёрнут.
+    cleaned_rotate_cw: Mapped[int | None] = mapped_column(Integer, default=None)
 
     detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     # Версия алгоритма детекции (``detection.DETECTOR_VERSION``), которой получена разметка

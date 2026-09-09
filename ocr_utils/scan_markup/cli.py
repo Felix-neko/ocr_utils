@@ -328,6 +328,26 @@ def main() -> None:
     help="Доля площади, с которой область считается «во всю полосу» (обложка).",
 )
 @click.option(
+    "--orientation/--no-orientation",
+    default=True,
+    show_default=True,
+    help="Считать ли ориентацию полосы тем же прогоном: пак читается ОДИН раз, а не два.",
+)
+@click.option(
+    "--orientation-detectors",
+    default="ink_axis,osd,surya_lines,ocr_vote",
+    show_default=True,
+    help="Детекторы ориентации через запятую. ocr_vote — арбитр, идёт вторым проходом только "
+    "по кандидатам, которых отметили быстрые.",
+)
+@click.option(
+    "--angles",
+    default="",
+    show_default=True,
+    help="Допустимые повороты через запятую, например 0,90,270. Пусто — взять из базы пака "
+    "или умолчание. Указанное здесь ЗАПИСЫВАЕТСЯ в пак.",
+)
+@click.option(
     "--debug-dir",
     default=None,
     type=click.Path(file_okay=False, path_type=Path),
@@ -349,7 +369,8 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
         f"Полос обработано: {stats.pages}, пропущено: {stats.skipped}, ошибок: {stats.failed}.\n"
         f"Файлов изменилось с прошлого прогона: {stats.changed}.\n"
         f"Растровых областей: {stats.regions} (цветных {stats.color}, серых {stats.grayscale}, "
-        f"во всю полосу {stats.full_page})."
+        f"во всю полосу {stats.full_page}).\n"
+        f"Полос под поворот: {stats.rotated}."
     )
 
 
@@ -766,6 +787,9 @@ def from_cvat_command(
         f"(цветных {stats.color}, серых {stats.grayscale}, цветного текста {stats.color_text}, "
         f"во всю полосу {stats.full_page}). "
         f"Масок под удаление: {stats.masks}, точек экслибриса: {stats.points}.\n"
+        f"Полос под поворот: {stats.rotated}"
+        + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")
+        + ".\n"
         f"Шейпов с чужими метками: {stats.unknown_labels}, кадров без полосы: {stats.unmatched_frames}."
     )
 

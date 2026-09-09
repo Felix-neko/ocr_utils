@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from ocr_utils.scan_markup.cvat.client import CvatSettings, make_cvat_client
-from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, MASK_KIND_BY_LABEL, POINT_KIND_BY_LABEL
+from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, MASK_KIND_BY_LABEL, POINT_KIND_BY_LABEL, ROTATION_BY_LABEL
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
@@ -70,6 +70,9 @@ class ExportStats:
     full_page: int = 0
     masks: int = 0
     points: int = 0
+    rotated: int = 0
+    # Кадры, где разметчик оставил сразу несколько взаимоисключающих тегов поворота.
+    conflicting_rotations: int = 0
     unknown_labels: int = 0
     unmatched_frames: int = 0
 
@@ -106,6 +109,7 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
         full_intermediate_pdf_root=source.full_intermediate_pdf_root,
         pages_with_pics_only_intermediate_pdf_root=source.pages_with_pics_only_intermediate_pdf_root,
         final_pdfs_root=source.final_pdfs_root,
+        allowed_rotations=source.allowed_rotations,
     )
     dst_session.add(pack)
     dst_session.flush()
@@ -130,6 +134,7 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                 full_intermediate_pdf_name=src_issue.full_intermediate_pdf_name,
                 pages_with_pics_only_intermediate_pdf_name=src_issue.pages_with_pics_only_intermediate_pdf_name,
                 final_pdf_name=src_issue.final_pdf_name,
+                allowed_rotations=src_issue.allowed_rotations,
             )
             dst_session.add(issue)
             dst_session.flush()
@@ -162,7 +167,14 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         sharpened_text_pic_rel_path=src_page.sharpened_text_pic_rel_path,
                         full_pdf_page_idx=src_page.full_pdf_page_idx,
                         pages_with_pics_only_pdf_page_idx=src_page.pages_with_pics_only_pdf_page_idx,
+                        rotate_cw=src_page.rotate_cw,
+                        orientation_confidence=src_page.orientation_confidence,
+                        orientation_version=src_page.orientation_version,
+                        orientation_detected_at=src_page.orientation_detected_at,
+                        orientation_source=src_page.orientation_source,
+                        cleaned_rotate_cw=src_page.cleaned_rotate_cw,
                         detected_at=src_page.detected_at,
+                        detector_version=src_page.detector_version,
                     )
                 )
             dst_session.flush()
@@ -256,6 +268,24 @@ def _shape_type(shape) -> str:
     return getattr(value, "value", value)
 
 
+def _rotation_from_tags(tags: list, label_names: dict[int, str], stats: "ExportStats") -> int:
+    """Угол поворота по тегам кадра. Нет тегов — 0, «поворот не нужен».
+
+    Несколько взаимоисключающих тегов на одном кадре — это ошибка разметки, а не повод
+    молча выбрать любой: берётся наибольший угол и пишется предупреждение. Наибольший, а не
+    первый попавшийся, чтобы результат хотя бы не зависел от порядка выдачи сервера.
+    """
+    angles = sorted(
+        {ROTATION_BY_LABEL[name] for tag in tags if (name := label_names.get(tag.label_id)) in ROTATION_BY_LABEL}
+    )
+    if not angles:
+        return 0
+    if len(angles) > 1:
+        stats.conflicting_rotations += 1
+        logger.warning("На кадре несколько тегов поворота (%s) — беру %d", angles, angles[-1])
+    return angles[-1]
+
+
 def import_task(
     task,
     label_names: dict[int, str],
@@ -271,12 +301,18 @@ def import_task(
     список и отметку ``reviewed_at``: «здесь растра нет» — осмысленный результат, и
     отличать его от «сюда ещё не смотрели» нужно обязательно.
     """
+    annotations = task.get_annotations()
     shapes_by_frame: dict[int, list] = {}
-    for shape in task.get_annotations().shapes:
+    for shape in annotations.shapes:
         if shape.frame not in pages_by_frame:
             stats.unmatched_frames += 1
             continue
         shapes_by_frame.setdefault(shape.frame, []).append(shape)
+
+    tags_by_frame: dict[int, list] = {}
+    for tag in annotations.tags:
+        if tag.frame in pages_by_frame:
+            tags_by_frame.setdefault(tag.frame, []).append(tag)
 
     for frame, page in pages_by_frame.items():
         regions: list[RasterRegion] = []
@@ -307,6 +343,22 @@ def import_task(
             else:
                 stats.unknown_labels += 1
                 logger.debug("Пропускаю шейп типа %r с меткой %r", shape_type, name)
+
+        # Ориентация — по ТЕГАМ кадра, и отсутствие тега здесь осмысленно.
+        #
+        # Полоса без тега получает rotate_cw = 0, то есть «поворот не нужен», а НЕ NULL. Это
+        # то же правило, по которому полоса без шейпов получает пустой список: выгрузка —
+        # снимок состояния. Благодаря ему снятый разметчиком лишний тег обрабатывается сам
+        # собой, без единой отдельной строчки кода.
+        page.rotate_cw = _rotation_from_tags(tags_by_frame.get(frame, []), label_names, stats)
+        stats.rotated += bool(page.rotate_cw)
+        page.orientation_source = SOURCE_CVAT
+        page.orientation_detected_at = _utcnow()
+        # Уверенность и версия — свойства АВТОМАТИЧЕСКОГО вердикта, и к решению человека
+        # отношения не имеют. Оставить их от прошлого прогона значило бы приписать ручной
+        # правке уверенность детектора.
+        page.orientation_confidence = None
+        page.orientation_version = None
 
         # Через коллекции связей: delete-orphan сам уберёт вытесненные строки, а объекты
         # остаются согласованы с тем, что увидит следующий обход этой же сессии.

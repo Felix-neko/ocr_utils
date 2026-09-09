@@ -71,6 +71,9 @@ class PageMarkup:
     # sha256 исходника с шага ``detect``. Едет сюда затем, что из него собирается имя
     # выходного файла (см. ``scan_cleanup.naming``), а воркер базы не видит.
     file_hash: "str | None" = None
+    # На сколько повернуть полосу ПО ЧАСОВОЙ при записи. Едет сюда по той же причине, что и
+    # отпечаток: решение принято по базе, а воркер базы не видит.
+    rotate_cw: int = 0
 
     def masks_of(self, kind: str) -> "tuple[MaskRow, ...]":
         return tuple(m for m in self.masks if m.kind == kind)
@@ -136,6 +139,7 @@ def load_markup(
                     height=int(page.height),
                     dpi=int(page.dpi) if page.dpi else None,
                     divisor=int(page.divisor) if page.divisor else None,
+                    rotate_cw=int(page.rotate_cw or 0),
                     regions=tuple(
                         Rect(int(r.x1), int(r.y1), int(r.x2), int(r.y2), r.kind, bool(r.full_page))
                         for r in page.raster_regions

@@ -14,8 +14,12 @@ class _Shape:
 
 
 class _Annotations:
-    def __init__(self, shapes) -> None:
+    """Двойник ответа CVAT. Теги есть ВСЕГДА, пусть и пустые: у настоящего ответа поле
+    ``tags`` есть всегда, и двойник без него прятал бы работу с ориентацией от тестов."""
+
+    def __init__(self, shapes, tags=()) -> None:
         self.shapes = shapes
+        self.tags = list(tags)
 
 
 class _Task:

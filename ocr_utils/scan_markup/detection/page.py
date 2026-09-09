@@ -77,6 +77,9 @@ from ocr_utils.scan_markup.detection.regions import (
     find_raster_boxes,
 )
 from ocr_utils.scan_markup.hashing import FileStamp, full_stamp
+from ocr_utils.scan_markup.orientation.analysis import combine, run_cpu_detectors
+from ocr_utils.scan_markup.orientation.detectors.base import ROTATIONS, Verdict
+from ocr_utils.scan_markup.orientation.image_io import frame_from_gray
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +129,17 @@ class PageOptions:
     # Отпечаток файла: считать хеш или ограничиться ``stat``.
     need_digest: bool = True
 
+    # --- Ориентация полосы ---------------------------------------------------
+    # Считается тем же прогоном, что и растр, ради одного: пак весом полтерабайта читается
+    # ОДИН раз. Отдельный прогон ориентации перечитывал бы его целиком второй раз.
+    orientation: bool = False
+    # Имена CPU-детекторов ориентации, которые гоняются прямо в воркере. GPU-детектор
+    # (surya_lines) сюда не входит — он живёт в родителе, как и Surya layout.
+    orientation_detectors: tuple[str, ...] = ()
+    # Какие повороты вообще рассматривать. Сужение набора — самый дешёвый способ поднять
+    # точность: ответ, которого в наборе нет, не может быть дан в принципе.
+    allowed_rotations: tuple[int, ...] = ROTATIONS
+
 
 @dataclass
 class DetectedRegion:
@@ -164,6 +178,11 @@ class PageAnalysis:
     # Полоса, ответ по которой известен заранее (обложка при --first-page-is-cover):
     # пиксели не читались, Surya не нужна.
     ready: list[DetectedRegion] | None = None
+    # Вердикты CPU-детекторов ориентации, посчитанные здесь же, в воркере. Пусто, когда
+    # ориентацию не просили или полоса не читалась.
+    orientation: dict[str, "Verdict"] = field(default_factory=dict)
+    # Уменьшенная копия под GPU-детектор ориентации: её собирает родитель из ``work``.
+    orientation_done: bool = False
 
 
 @dataclass
@@ -180,6 +199,10 @@ class PageResult:
     # Файл читали только потому, что разошёлся ``stat``, а содержимое оказалось прежним:
     # разметку трогать не надо, достаточно обновить отметку.
     unchanged: bool = False
+    # Ориентация: вердикты по детекторам и сводный. ``combo is None`` значит «не считали» —
+    # и это НЕ то же самое, что «поворот не нужен».
+    orientation: dict[str, "Verdict"] = field(default_factory=dict)
+    combo: "Verdict | None" = None
 
 
 def resolve_dpi(path: Path, default_dpi: int | None) -> int:
@@ -221,6 +244,8 @@ def analyse_page(
                 analysis.width, analysis.height = image.size
             box = cover_module.cover_region(analysis.width, analysis.height)
             analysis.ready = [DetectedRegion(box, KIND_COLOR, True)]
+            # Обложка по определению не лежит боком, и читать ради этого 40 МБ незачем.
+            analysis.orientation_done = options.orientation
             return analysis
 
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -245,6 +270,11 @@ def analyse_page(
         full_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         analysis.regions, analysis.stats, analysis.centroids = screen_regions(full_gray, analysis.params)
         analysis.tone = tone_maps(full_gray, analysis.params)
+        if options.orientation and options.orientation_detectors:
+            # По уже разжатому серому, без второго чтения файла с диска.
+            frame = frame_from_gray(full_gray, dpi, rel_path, path, options.allowed_rotations)
+            analysis.orientation = run_cpu_detectors(frame, options.orientation_detectors)
+            analysis.orientation_done = True
         return analysis
     except Exception as exc:  # noqa: BLE001 — одна битая полоса не должна валить прогон
         return PageAnalysis(rel_path, order_index, error=str(exc))
@@ -263,15 +293,53 @@ def surya_boxes_for(analysis: PageAnalysis, detector) -> list[tuple[int, int, in
     return [upscale_box(box, HALFTONE_DOWNSCALE) for box in polygons_to_boxes(polygons)]
 
 
+def orientation_image(analysis: PageAnalysis):
+    """Картинка под GPU-детектор ориентации из копии 1/4, которая и так едет в родителя."""
+    from PIL import Image as PILImage
+
+    if analysis.work is None:
+        return None
+    return PILImage.fromarray(cv2.cvtColor(analysis.work, cv2.COLOR_BGR2RGB))
+
+
+def combine_orientation(
+    analysis: PageAnalysis, options: PageOptions, gpu: "dict[str, Verdict] | None" = None
+) -> "tuple[dict[str, Verdict], Verdict | None]":
+    """Сводит вердикты ориентации. Работает в родителе, файлов не трогает.
+
+    Обложке (``ready``) поворот не нужен по определению — ей выдаётся готовый нулевой
+    вердикт, а не отсутствие вердикта: «не считали» и «поворот не нужен» различаются.
+    """
+    if not options.orientation or not analysis.orientation_done:
+        return {}, None
+    verdicts = dict(analysis.orientation)
+    verdicts.update(gpu or {})
+    if analysis.ready is not None and not verdicts:
+        return {}, Verdict(0, 1.0, note="обложка")
+    combo, _source, _disputed = combine(verdicts, options.allowed_rotations)
+    return verdicts, combo
+
+
 def finish_page(
-    analysis: PageAnalysis, options: PageOptions, surya_boxes: list[tuple[int, int, int, int]] | None
+    analysis: PageAnalysis,
+    options: PageOptions,
+    surya_boxes: list[tuple[int, int, int, int]] | None,
+    orientation_gpu: "dict[str, Verdict] | None" = None,
 ) -> PageResult:
     """Сборка областей по готовому разбору и блокам Surya. Работает в родителе."""
+    verdicts, combo = combine_orientation(analysis, options, orientation_gpu)
     if analysis.error:
         return PageResult(analysis.rel_path, error=analysis.error)
     if analysis.ready is not None:
         return PageResult(
-            analysis.rel_path, analysis.width, analysis.height, analysis.dpi, analysis.ready, analysis.stamp
+            analysis.rel_path,
+            analysis.width,
+            analysis.height,
+            analysis.dpi,
+            analysis.ready,
+            analysis.stamp,
+            orientation=verdicts,
+            combo=combo,
         )
     if analysis.work is None:  # содержимое не изменилось, пиксели не читались
         return PageResult(analysis.rel_path, stamp=analysis.stamp, unchanged=True)
@@ -316,7 +384,16 @@ def finish_page(
         lineart_max_dot_frac=options.lineart_max_dot_frac,
     )
     regions = _classify_regions(analysis, findings, options, paper)
-    return PageResult(analysis.rel_path, analysis.width, analysis.height, analysis.dpi, regions, analysis.stamp)
+    return PageResult(
+        analysis.rel_path,
+        analysis.width,
+        analysis.height,
+        analysis.dpi,
+        regions,
+        analysis.stamp,
+        orientation=verdicts,
+        combo=combo,
+    )
 
 
 def detect_page(

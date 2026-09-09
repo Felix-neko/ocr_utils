@@ -416,3 +416,21 @@ def rotation_counts(results: Sequence[PageResult], name: str) -> dict[int, int]:
         if verdict is not None and verdict.confidence > 0.0:
             counts[verdict.rotate_cw] += 1
     return counts
+
+
+def run_cpu_detectors(frame: Frame, names: "tuple[str, ...]") -> dict[str, Verdict]:
+    """Прогон CPU-детекторов по готовому кадру. Не бросает: сбой одного не валит остальных.
+
+    Отдельная функция нужна встраиванию в шаг ``detect``: там пул и чтение файлов свои, и
+    из всего :func:`analyse` требуется только эта середина.
+    """
+    verdicts: dict[str, Verdict] = {}
+    for name in names:
+        detector = DETECTORS.get(name)
+        if detector is None or detector.stage != "cpu" or detector.arbiter:
+            continue
+        try:
+            verdicts[name] = detector.run(frame)
+        except Exception as error:  # noqa: BLE001 — вердикт одного детектора не важнее полосы
+            logger.warning("%s: детектор %s упал (%s)", frame.rel_path, name, error)
+    return verdicts

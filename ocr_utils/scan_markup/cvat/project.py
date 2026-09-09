@@ -81,6 +81,18 @@ LABEL_COLOR_TEXT = "Цветной текст или штрих"
 # красным. Путаницы не будет: различать надо ПРЯМОУГОЛЬНИКИ между собой, а их всего четыре
 # (зелёный, голубой, оранжевый, тёмно-розовый), маски же рисуются заливкой и с рамкой не
 # сливаются.
+# Ориентация полосы — ТЕГИ, а не фигуры. Тег в CVAT относится ко всему кадру, геометрии не
+# имеет вовсе и потому рисованию не мешает: он живёт в панели объектов, ставится с
+# клавиатуры и в выгрузке лежит отдельно от шейпов. Нарисовать вместо него точку в углу было
+# бы дешевле на вид, но дорого по сути — это полноценная фигура, её можно случайно сдвинуть
+# или удалить, и её пришлось бы отфильтровывать во всех потребителях разметки.
+#
+# Три метки, а не одна с атрибутом: у тега значение ставится одним нажатием, а атрибут
+# требует ещё и выбрать значение из списка. Разметчику это делать на тысячах кадров.
+LABEL_ROTATE_CW90 = "Повернуть 90 по часовой"
+LABEL_ROTATE_180 = "Повернуть на 180"
+LABEL_ROTATE_CCW90 = "Повернуть 90 против часовой"
+
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
     {"name": LABEL_RASTER_GRAY, "type": "rectangle", "color": "#00B0FF"},  # голубой
@@ -90,6 +102,11 @@ LABELS = [
     {"name": LABEL_OTHER_REMOVAL, "type": "mask", "color": "#FF1744"},  # красный
     {"name": LABEL_EXLIBRIS, "type": "points", "color": "#651FFF"},  # сине-фиолетовый
     {"name": LABEL_COLOR_TEXT, "type": "rectangle", "color": "#C51162"},  # тёмно-розовый
+    # Теги на холсте не рисуются, поэтому их цвета ни с чем не конкурируют и взяты просто
+    # различимыми между собой — они видны только в панели объектов.
+    {"name": LABEL_ROTATE_CW90, "type": "tag", "color": "#1DE9B6"},
+    {"name": LABEL_ROTATE_180, "type": "tag", "color": "#FFC400"},
+    {"name": LABEL_ROTATE_CCW90, "type": "tag", "color": "#7C4DFF"},
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
@@ -111,6 +128,12 @@ MASK_KIND_BY_LABEL = {
     LABEL_OTHER_REMOVAL: MASK_OTHER_REMOVAL,
 }
 POINT_KIND_BY_LABEL = {LABEL_EXLIBRIS: POINT_EXLIBRIS}
+
+# Метка-тег -> угол поворота ПО ЧАСОВОЙ и обратно. Нуля здесь нет намеренно: «поворот не
+# нужен» выражается ОТСУТСТВИЕМ тега, а не отдельной меткой. Иначе разметчику пришлось бы
+# проставлять её двенадцати тысячам полос, а снятый тег стал бы неотличим от непроверенного.
+ROTATION_BY_LABEL = {LABEL_ROTATE_CW90: 90, LABEL_ROTATE_180: 180, LABEL_ROTATE_CCW90: 270}
+LABEL_BY_ROTATION = {rotation: label for label, rotation in ROTATION_BY_LABEL.items()}
 
 # Качество JPEG, которым CVAT пережимает кадры уже у себя. Картинки и так уменьшены и
 # сохранены с quality=95, так что это второе пережатие — единственное заметное.
@@ -283,19 +306,48 @@ def raster_shapes(pages_with_regions, frames: dict[str, int], label_ids: dict[st
     return shapes
 
 
-def upload_preannotations(task, shapes: list) -> int:
-    """Заливает предразметку в задачу, ЗАМЕНЯЯ имеющуюся. Возвращает число шейпов.
+def rotation_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Предразметка ориентации: ``page.rotate_cw`` из базы -> теги CVAT.
+
+    Полосы, которым поворот не нужен (``rotate_cw`` равен 0 или NULL), тега НЕ получают:
+    отсутствие тега и есть «поворот не нужен». Иначе тег пришлось бы вешать двенадцати
+    тысячам полос, а снятый разметчиком тег стал бы неотличим от непроверенной полосы.
+    """
+    from cvat_sdk import models
+
+    tags = []
+    for page in pages:
+        label = LABEL_BY_ROTATION.get(page.rotate_cw or 0)
+        if label is None:
+            continue
+        frame = frames.get(page.cvat_rel_path)
+        label_id = label_ids.get(label)
+        if frame is None or label_id is None:
+            continue
+        tags.append(models.LabeledImageRequest(frame=frame, label_id=label_id))
+    return tags
+
+
+def upload_preannotations(task, shapes: list, tags: "list | None" = None) -> int:
+    """Заливает предразметку в задачу, ЗАМЕНЯЯ имеющуюся. Возвращает число объектов.
 
     Замена, а не добавление: повторный прогон ``to-cvat`` по уже размеченной задаче иначе
     удвоил бы каждый прямоугольник. Поэтому команда и требует ``--force-annotations``,
     чтобы перезалить разметку в задачу, которая уже существует.
+
+    ТЕГИ ЗАЛИВАЮТСЯ ТЕМ ЖЕ ЗАПРОСОМ. Это не удобство, а необходимость: ``set_annotations``
+    — это PUT, он заменяет разметку задачи ЦЕЛИКОМ. Залить одни шейпы значило бы стереть
+    все теги, даже если про них в этом прогоне речи не шло.
+
+    Пустой список шейпов больше не значит «нечего делать»: у года могут быть только теги.
     """
     from cvat_sdk import models
 
-    if not shapes:
+    tags = list(tags or [])
+    if not shapes and not tags:
         return 0
-    task.set_annotations(models.LabeledDataRequest(shapes=shapes))
-    return len(shapes)
+    task.set_annotations(models.LabeledDataRequest(shapes=shapes, tags=tags))
+    return len(shapes) + len(tags)
 
 
 def assign_jobs_to_issues(task, issues) -> int:
@@ -347,6 +399,60 @@ def fetch_shapes_by_frame(task) -> dict[str, list]:
     return by_frame
 
 
+def fetch_tags_by_frame(task) -> dict[str, list]:
+    """Теги задачи, разложенные по ИМЕНАМ кадров — как :func:`fetch_shapes_by_frame`.
+
+    Отдельная функция, а не расширение той: у неё уже есть потребители, ждущие только шейпы,
+    и менять её возвращаемое значение значило бы править их все ради одного нового вызова.
+    """
+    names = {index: frame.name for index, frame in enumerate(task.get_frames_info())}
+    by_frame: dict[str, list] = {}
+    for tag in task.get_annotations().tags:
+        name = names.get(tag.frame)
+        if name is not None:
+            by_frame.setdefault(name, []).append(tag)
+    return by_frame
+
+
+def _carried_frames(by_frame: dict[str, list], frames: dict[str, int], skip_names: set[str]):
+    """Пары «объекты старой задачи -> номер кадра новой», с поиском переехавших полос.
+
+    Вынесено из :func:`shapes_to_requests`, потому что теги переносятся ровно по тем же
+    правилам: пропустить изменившиеся кадры, найти переехавшую полосу по basename и только
+    если он в новой задаче единственный.
+    """
+    by_basename: dict[str, list[str]] = {}
+    for name in frames:
+        by_basename.setdefault(name.rsplit("/", 1)[-1], []).append(name)
+
+    for name, items in by_frame.items():
+        if name in skip_names:
+            continue
+        frame = frames.get(name)
+        if frame is None:
+            candidates = by_basename.get(name.rsplit("/", 1)[-1], [])
+            if len(candidates) != 1:
+                continue
+            frame = frames[candidates[0]]
+            logger.warning("Полоса переехала: разметка с %r перенесена на %r", name, candidates[0])
+        yield items, frame
+
+
+def tags_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_names: set[str]) -> list:
+    """Сохранённые теги -> запросы на заливку в НОВУЮ задачу.
+
+    Без этого ``--recreate-stale`` терял бы ручную разметку ориентации молча: пересоздание
+    задачи переносит шейпы, а теги остались бы в удалённой задаче.
+    """
+    from cvat_sdk import models
+
+    return [
+        models.LabeledImageRequest(frame=frame, label_id=tag.label_id, group=tag.group)
+        for tags, frame in _carried_frames(by_frame, frames, skip_names)
+        for tag in tags
+    ]
+
+
 def shapes_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_names: set[str]) -> list:
     """Сохранённые шейпы -> запросы на заливку в НОВУЮ задачу.
 
@@ -368,21 +474,8 @@ def shapes_to_requests(by_frame: dict[str, list], frames: dict[str, int], skip_n
     """
     from cvat_sdk import models
 
-    by_basename: dict[str, list[str]] = {}
-    for name in frames:
-        by_basename.setdefault(name.rsplit("/", 1)[-1], []).append(name)
-
     requests = []
-    for name, shapes in by_frame.items():
-        if name in skip_names:
-            continue
-        frame = frames.get(name)
-        if frame is None:
-            candidates = by_basename.get(name.rsplit("/", 1)[-1], [])
-            if len(candidates) != 1:
-                continue
-            frame = frames[candidates[0]]
-            logger.warning("Полоса переехала: разметка с %r перенесена на %r", name, candidates[0])
+    for shapes, frame in _carried_frames(by_frame, frames, skip_names):
         for shape in shapes:
             requests.append(
                 models.LabeledShapeRequest(

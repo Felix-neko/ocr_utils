@@ -27,11 +27,17 @@ sha256), и по нему имя собирается мгновенно.
 
 import re
 
+from ocr_utils.scan_markup.rotation import ROTATION_NAMES
+
 # Сколько знаков дайджеста уходит в имя.
 HASH_PREFIX_LEN = 8
 
 # Имя вида ``IMG_0034_1L.a1b2c3d4.tif``: основа, отпечаток, расширение.
 _CLEANED_RE = re.compile(r"^(?P<stem>.+)\.(?P<hash>[0-9a-f]{%d})$" % HASH_PREFIX_LEN)
+
+#: суффикс поворота в имени -> угол. Ноль сюда не входит: полоса без поворота суффикса
+#: не получает вовсе, и её имя не меняется.
+_ROTATION_BY_NAME = {name: angle for angle, name in ROTATION_NAMES.items() if angle}
 
 
 def hash_suffix(file_hash: "str | None") -> str:
@@ -41,21 +47,32 @@ def hash_suffix(file_hash: "str | None") -> str:
     return file_hash[:HASH_PREFIX_LEN].lower()
 
 
-def cleaned_file_name(source_file_name: str, file_hash: "str | None", suffix: str) -> str:
-    """Имя очищенной полосы: ``IMG_0034_1L.a1b2c3d4.tif``.
+def cleaned_file_name(source_file_name: str, file_hash: "str | None", suffix: str, rotate_cw: int = 0) -> str:
+    """Имя очищенной полосы: ``IMG_0034_1L.a1b2c3d4.tif``, у повёрнутой — ``...cw90.tif``.
 
     Без отпечатка (полоса не проходила ``detect``) имя остаётся прежним: молча выдумывать
     отпечаток нельзя, а ронять прогон из-за отсутствующего — несоразмерно.
+
+    УГОЛ В ИМЕНИ — не украшение. ``--skip-if-exists`` проверяет существование файла с этим
+    именем, а отпечаток берётся у ИСХОДНИКА и от угла не зависит. Без угла в имени полоса,
+    у которой решение о повороте изменилось после прошлого прогона, была бы молча признана
+    готовой, и на диске остался бы неповёрнутый файл. Полосы без поворота имя не меняют:
+    их подавляющее большинство, и переименовывать одиннадцать тысяч файлов ради единообразия
+    значило бы заново перегнать весь пак.
     """
     stem = source_file_name.rsplit(".", 1)[0]
     tag = hash_suffix(file_hash)
-    return f"{stem}.{tag}{suffix}" if tag else f"{stem}{suffix}"
+    if tag:
+        stem = f"{stem}.{tag}"
+    if rotate_cw % 360:
+        stem = f"{stem}.{ROTATION_NAMES[rotate_cw % 360]}"
+    return f"{stem}{suffix}"
 
 
-def cleaned_rel_path(source_rel_path: str, file_hash: "str | None", suffix: str) -> str:
+def cleaned_rel_path(source_rel_path: str, file_hash: "str | None", suffix: str, rotate_cw: int = 0) -> str:
     """То же, но для относительного пути: папка выпуска сохраняется."""
     head, _, name = source_rel_path.rpartition("/")
-    cleaned = cleaned_file_name(name, file_hash, suffix)
+    cleaned = cleaned_file_name(name, file_hash, suffix, rotate_cw)
     return f"{head}/{cleaned}" if head else cleaned
 
 
@@ -65,8 +82,20 @@ def split_cleaned_stem(stem: str) -> "tuple[str, str | None]":
     Нужен потребителям, которые получают файл СНАРУЖИ и должны понять, какой полосе он
     отвечает: выгрузка Capture One приходит без папок пака, и отпечаток в имени —
     единственное, что связывает её с базой надёжно.
+
+    Суффикс поворота, если он есть, снимается первым: у повёрнутой полосы отпечаток стоит
+    не последним (``IMG_0034_1L.a1b2c3d4.cw90``), и без этого шага такое имя не разобралось
+    бы вовсе — то есть повёрнутая полоса молча потеряла бы связь с базой.
     """
+    stem, _ = split_rotation_suffix(stem)
     match = _CLEANED_RE.match(stem)
     if match is None:
         return stem, None
     return match.group("stem"), match.group("hash")
+
+
+def split_rotation_suffix(stem: str) -> "tuple[str, int]":
+    """Отделяет суффикс поворота: ``...a1b2c3d4.cw90`` -> ``(...a1b2c3d4, 90)``."""
+    head, _, tail = stem.rpartition(".")
+    rotation = _ROTATION_BY_NAME.get(tail)
+    return (head, rotation) if head and rotation else (stem, 0)

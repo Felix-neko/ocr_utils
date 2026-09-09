@@ -72,6 +72,7 @@ from ocr_utils.pdf_utils.padding import (
     set_jpeg_dpi,
 )
 from ocr_utils.scan_markup.db.models import COLOR_PICTURE_KINDS, PICTURE_KINDS
+from ocr_utils.scan_markup.rotation import rotate_box, rotate_size
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,23 @@ class PagePlan:
     pictures: "tuple[PicturePlan, ...]"
     full_pdf_page_idx: int
     pages_with_pics_only_pdf_page_idx: "int | None"
+    # На сколько ПО ЧАСОВОЙ повёрнуты файлы этой полосы на диске. ``width``/``height`` и
+    # координаты врезок описывают ОРИГИНАЛ, поэтому и то и другое пересчитывается здесь.
+    rotate_cw: int = 0
+
+    @property
+    def file_size(self) -> "tuple[int, int]":
+        """Размер файлов на диске: у повёрнутой полосы стороны поменяны местами."""
+        return rotate_size(self.width, self.height, self.rotate_cw)
+
+    def placed_pictures(self) -> "tuple[PicturePlan, ...]":
+        """Врезки в координатах ФАЙЛА. Без пересчёта легли бы на другое место полосы."""
+        if not self.rotate_cw % 360:
+            return self.pictures
+        return tuple(
+            PicturePlan(*rotate_box((p.x1, p.y1, p.x2, p.y2), self.width, self.height, self.rotate_cw), p.kind)
+            for p in self.pictures
+        )
 
 
 @dataclass(frozen=True)
@@ -340,26 +358,30 @@ def build_issue(plan: IssuePlan, params: BuildParams) -> IssueReport:
             sharpened_path = params.sharpened_dir / page_plan.sharpened_rel_path
             jpeg = sharpened_path.read_bytes()
             info = read_jpeg_info(jpeg)
-            if (info.width, info.height) != (page_plan.width, page_plan.height):
+            expected = page_plan.file_size
+            if (info.width, info.height) != expected:
+                turned = " (полоса помечена под поворот)" if page_plan.rotate_cw else ""
                 raise ValueError(
                     f"{page_plan.sharpened_rel_path}: заострённая копия {info.width}x{info.height} "
-                    f"не совпадает с полосой {page_plan.width}x{page_plan.height}"
+                    f"не совпадает с полосой {expected[0]}x{expected[1]}{turned}"
                 )
 
             overlays: "list[Overlay]" = []
             base = jpeg
             if page_plan.pictures:
                 original = load_image(params.originals_dir / page_plan.original_rel_path)
-                if original.shape[1] != page_plan.width or original.shape[0] != page_plan.height:
+                if (original.shape[1], original.shape[0]) != expected:
                     raise ValueError(
                         f"{page_plan.original_rel_path}: оригинал {original.shape[1]}x{original.shape[0]} "
-                        f"не совпадает с полосой {page_plan.width}x{page_plan.height}"
+                        f"не совпадает с полосой {expected[0]}x{expected[1]}"
                     )
-                covering = next((p for p in page_plan.pictures if p.covers(page_plan.width, page_plan.height)), None)
-                rest = page_plan.pictures
+                # Врезки — в координатах ФАЙЛА: у повёрнутой полосы это не то же, что в базе.
+                placed = page_plan.placed_pictures()
+                covering = next((p for p in placed if p.covers(*expected)), None)
+                rest = placed
                 if covering is not None:
                     base = encode_jpeg(original, covering.gray, params.picture_quality)
-                    rest = tuple(p for p in page_plan.pictures if p is not covering)
+                    rest = tuple(p for p in placed if p is not covering)
                 overlays = [
                     Overlay(encode_jpeg(crop(original, p.rect), p.gray, params.picture_quality), p.rect)
                     for p in rest
@@ -381,7 +403,7 @@ def build_issue(plan: IssuePlan, params: BuildParams) -> IssueReport:
                 params.allow_jpeg_recode,
                 page_plan.sharpened_rel_path,
             )
-            full_page_px = (page_plan.width + 2 * used_x, page_plan.height + 2 * used_y)
+            full_page_px = (expected[0] + 2 * used_x, expected[1] + 2 * used_y)
             # По выпуску пишем самое широкое поле из применённых. Обычно они у всех полос
             # одинаковы, но округление идёт до размера MCU конкретного JPEG, и полоса с
             # другой субдискретизацией цветности могла бы получить поле на несколько пикселей
@@ -397,9 +419,7 @@ def build_issue(plan: IssuePlan, params: BuildParams) -> IssueReport:
                 make_page(full_pdf, full_base, page_plan.dpi, shift_overlays(overlays, used_x, used_y), full_page_px)
             )
             if pics_pdf is not None and page_plan.pages_with_pics_only_pdf_page_idx is not None:
-                pics_pdf.pages.append(
-                    make_page(pics_pdf, base, page_plan.dpi, tuple(overlays), (page_plan.width, page_plan.height))
-                )
+                pics_pdf.pages.append(make_page(pics_pdf, base, page_plan.dpi, tuple(overlays), expected))
 
             report.pages += 1
             if page_plan.pictures:
@@ -477,6 +497,7 @@ def load_plans(
                             pictures=pictures,
                             full_pdf_page_idx=full_index,
                             pages_with_pics_only_pdf_page_idx=pics_index if pictures else None,
+                            rotate_cw=int(page.rotate_cw or 0),
                         )
                     )
                     if pictures:

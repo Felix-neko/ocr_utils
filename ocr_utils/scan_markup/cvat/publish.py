@@ -59,6 +59,7 @@ from ocr_utils.scan_markup.cvat.project import (
     create_year_task,
     ensure_project,
     fetch_shapes_by_frame,
+    fetch_tags_by_frame,
     find_task,
     find_year_task,
     frame_index_by_name,
@@ -66,7 +67,9 @@ from ocr_utils.scan_markup.cvat.project import (
     project_label_ids,
     raster_shapes,
     rename_task,
+    rotation_tags,
     shapes_to_requests,
+    tags_to_requests,
     upload_preannotations,
     year_task_name,
 )
@@ -111,6 +114,8 @@ class PublishStats:
     pages_unpublished: int = 0
     shapes: int = 0
     shapes_carried: int = 0
+    tags: int = 0
+    tags_carried: int = 0
     stale_years: list[str] = field(default_factory=list)
 
 
@@ -165,7 +170,9 @@ def report_drift(year_name: str, drift: list[tuple[object, list, list]]) -> None
             logger.warning("    ... и ещё %d", len(changed) - 5)
 
 
-def _backup_annotations(backup_dir: Path, pack_name: str, year_name: str, task, by_frame: dict) -> Path:
+def _backup_annotations(
+    backup_dir: Path, pack_name: str, year_name: str, task, by_frame: dict, tags_by_frame: dict
+) -> Path:
     """Складывает разметку задачи в JSON перед тем, как задачу удалят.
 
     Страховка на случай, если перенос разметки окажется неполным: восстановить из этого
@@ -181,6 +188,9 @@ def _backup_annotations(backup_dir: Path, pack_name: str, year_name: str, task, 
         "task_id": task.id,
         "saved_at": stamp,
         "frames": {name: [shape.to_dict() for shape in shapes] for name, shapes in by_frame.items()},
+        # Теги — отдельным разделом: они не шейпы, у них нет геометрии, и складывать их в одну
+        # кучу значило бы усложнить чтение бэкапа руками, ради которого он и делается.
+        "tags": {name: [tag.to_dict() for tag in tags] for name, tags in tags_by_frame.items()},
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
     logger.info("Разметка задачи %r сохранена в %s", year_name, path)
@@ -202,8 +212,9 @@ def rebuild_year_task(
 ) -> object:
     """Пересоздаёт задачу-год, перенося в неё разметку с неизменившихся кадров.
 
-    ``carry`` — функция ``(frames) -> список шейпов``: она получает нумерацию кадров НОВОЙ
-    задачи и возвращает всё, что в неё надо залить. Так вся работа с базой остаётся в
+    ``carry`` — функция ``(frames) -> (шейпы, теги)``: она получает нумерацию кадров НОВОЙ
+    задачи и возвращает всё, что в неё надо залить. Теги отдельно от шейпов, потому что
+    заливаются они одним запросом, но собираются из разных источников. Так вся работа с базой остаётся в
     вызывающем, а здесь — только порядок операций с сервером.
 
     Порядок принципиален: новая задача создаётся и наполняется ДО удаления старой. Сбой на
@@ -217,9 +228,9 @@ def rebuild_year_task(
     new_task = create_year_task(client, project_id, temp_name, job_files)
     frames = frame_index_by_name(new_task)
 
-    shapes = carry(frames)
-    uploaded = upload_preannotations(new_task, shapes)
-    logger.info("Новая задача %r (id=%s): залито шейпов %d", year_name, new_task.id, uploaded)
+    shapes, tags = carry(frames)
+    uploaded = upload_preannotations(new_task, shapes, tags)
+    logger.info("Новая задача %r (id=%s): залито объектов %d (тегов %d)", year_name, new_task.id, uploaded, len(tags))
 
     # Состояния джобов не входят в разметку и при пересоздании обнулились бы: год, размеченный
     # наполовину, выглядел бы нетронутым.
@@ -388,9 +399,10 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 page.cvat_rel_path for _issue, pages_changed, _a in drift for page in pages_changed
                             }
                             by_frame = fetch_shapes_by_frame(task)
-                            _backup_annotations(backup_dir, pack.name, year.name, task, by_frame)
+                            tags_by_frame = fetch_tags_by_frame(task)
+                            _backup_annotations(backup_dir, pack.name, year.name, task, by_frame, tags_by_frame)
 
-                            def carry(frames, _by=by_frame, _skip=changed_names, _pages=pages):
+                            def carry(frames, _by=by_frame, _tags=tags_by_frame, _skip=changed_names, _pages=pages):
                                 # Переносим ручную разметку со всех кадров, кроме
                                 # изменившихся, и добавляем свежую автоматическую на сами
                                 # изменившиеся — их-то detect уже пересчитал.
@@ -401,7 +413,19 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                     frames,
                                     label_ids,
                                 )
-                                return carried + fresh
+                                # Теги переносятся со всех кадров, включая изменившиеся:
+                                # ориентацию разметчик ставит по содержимому полосы, и замена
+                                # файла тем же кадром её обычно не меняет. Изменившимся,
+                                # впрочем, добавляется и свежая автоматическая — на случай,
+                                # если детект пересчитал ориентацию.
+                                carried_tags = tags_to_requests(_tags, frames, set())
+                                stats.tags_carried += len(carried_tags)
+                                fresh_tags = rotation_tags(
+                                    (p for p in _pages if p.cvat_rel_path in _skip), frames, label_ids
+                                )
+                                carried_frames = {tag.frame for tag in carried_tags}
+                                fresh_tags = [tag for tag in fresh_tags if tag.frame not in carried_frames]
+                                return carried + fresh, carried_tags + fresh_tags
 
                             # «Завершённость» снимается только у выпусков, куда полосы
                             # ДОБАВИЛИСЬ: этих кадров разметчик не видел вовсе. Замену полосы
@@ -451,8 +475,11 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
 
                 if upload:
                     shapes = raster_shapes(((page, page.raster_regions) for page in pages), frames, label_ids)
-                    stats.shapes += upload_preannotations(task, shapes)
-                    logger.info("Задача %r: залито шейпов %d", year.name, len(shapes))
+                    tags = rotation_tags(pages, frames, label_ids)
+                    upload_preannotations(task, shapes, tags)
+                    stats.shapes += len(shapes)
+                    stats.tags += len(tags)
+                    logger.info("Задача %r: залито шейпов %d, тегов %d", year.name, len(shapes), len(tags))
                 elif not rebuilt:
                     logger.info(
                         "Задача %r: предразметка НЕ трогается (заливка заменяет разметку "
