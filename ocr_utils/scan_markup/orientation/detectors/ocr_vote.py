@@ -1,0 +1,124 @@
+"""Арбитр: распознавание на каждом ДОПУСТИМОМ повороте, побеждает самый читаемый.
+
+Принцип прямой: правильно повёрнута та сторона, с которой текст читается. Метод не зависит
+ни от какой модели ориентации — только от того, насколько хорошо tesseract разбирает
+кириллицу, а её он разбирает уверенно.
+
+СЧЁТ — ЧИСЛО РАСПОЗНАННЫХ БУКВ КИРИЛЛИЦЫ. Не число слов, не сумма уверенностей, не длина
+строк: просто буквы. Замер на 122 размеченных вручную полосах пака-1 — ноль ошибок, 42 из 42
+боковых и 80 из 80 прямых.
+
+ПОРОГ отвечает за первое правило: если букв нет ни под каким углом, вращать нечего.
+Разрыв в данных чистый — у полос без текста (декоративная заставка, полосный снимок)
+максимум 8 букв на лучшем повороте, у полос, которым поворот нужен, минимум 41. Порог 20
+стоит посередине, и плато нулевой ошибки тянется от 10 до 30.
+
+ДОПУСТИМЫЕ УГЛЫ (``Frame.allowed``) — второй способ поднять точность, и очень дешёвый.
+Ответ, которого нет в наборе, не может быть дан в принципе, а прогонов распознавания
+становится меньше: для пака-1 хватает (0, 90) — все 42 размеченные боковые полосы требуют
+поворота по часовой, что и понятно, широкие рисунки в советских изданиях ставили одинаково.
+Это ровно половина работы арбитра и заметно более уверенные ответы: на бланке
+«Карточка-баланс» отрыв вырос с 0.17 до 0.88.
+
+ИЗВЕСТНАЯ НЕОДНОЗНАЧНОСТЬ. Есть полосы, где текст в части клеток напечатан ПОПЕРЁК
+основного — бланк «Карточка-баланс» (1973/10 IMG_0183_1L) и блок-схема «Показатели качества
+продукции» (1976/07 IMG_0012_2R). На них читаются оба поворота, и счёт по буквам выбирает
+тот, где текста БОЛЬШЕ: 656 букв в шапках граф против 441 в теле таблицы. Формально верны
+оба ответа, так они и размечены. Сузив набор углов до (0, 90), эту неоднозначность убирают
+вовсе — ещё один довод в пользу того, чтобы её сужать.
+
+Дорого: по прогону распознавания на каждый допустимый угол. Поэтому арбитр вызывается вторым
+проходом только по кандидатам — тем, кого отметили быстрые детекторы.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+from ocr_utils.scan_markup.orientation.detectors.base import Detector, Frame, Verdict, rotate_cw
+from ocr_utils.scan_markup.orientation.detectors.osd import TIMEOUT_S, _write_pgm, tesseract_available
+
+# Язык распознавания. Пак — советский отраслевой журнал, латиница на нём встречается только
+# в формулах и марках оборудования.
+LANGUAGE = "rus"
+
+CYRILLIC = re.compile(r"[а-яёА-ЯЁ]")
+
+# Слово идёт в зачёт, если tesseract уверен в нём не меньше этого. На неверном повороте он
+# всё равно выдаёт россыпь мусора, и без порога повороты почти не различаются.
+MIN_WORD_CONFIDENCE = 60.0
+
+# Меньше этого числа букв на лучшем повороте — букв нет ни под каким углом, вращать нечего.
+# См. разрыв в шапке модуля: 8 у полос без текста против 41 у тех, кому поворот нужен.
+MIN_LETTERS = 20
+
+# Считаем по копии 150 dpi: на ней калиброван порог выше, и она вдвое дешевле 300 dpi
+# (6.5 с против 8.7 с на четыре поворота) при том же разделении.
+WORK_DPI = 150
+
+
+def _tsv(gray: np.ndarray) -> list[str]:
+    """Строки TSV-вывода tesseract; пустой список, если он не справился."""
+    with tempfile.TemporaryDirectory(prefix="ocrvote_") as work:
+        image = Path(work) / "page.pgm"
+        _write_pgm(image, gray)
+        # OMP_THREAD_LIMIT=1: без него tesseract разойдётся по всем ядрам ПОВЕРХ пула
+        # процессов, и воркеры начнут отбирать ядра друг у друга.
+        env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
+        try:
+            done = subprocess.run(
+                ["tesseract", str(image), "-", "--psm", "6", "-l", LANGUAGE, "tsv"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=TIMEOUT_S,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+    return done.stdout.splitlines()[1:]
+
+
+def letters(gray: np.ndarray) -> int:
+    """Сколько букв кириллицы удалось прочитать с этой стороны."""
+    total = 0
+    for row in _tsv(gray):
+        columns = row.split("\t")
+        if len(columns) < 12:
+            continue
+        try:
+            confidence = float(columns[10])
+        except ValueError:
+            continue
+        if confidence >= MIN_WORD_CONFIDENCE:
+            total += len(CYRILLIC.findall(columns[11]))
+    return total
+
+
+def detect(frame: Frame) -> Verdict:
+    scores = {rotation: letters(rotate_cw(frame.gray150, rotation)) for rotation in frame.allowed}
+    metrics = {f"letters_{rotation}": float(value) for rotation, value in scores.items()}
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_rotation, best_score = ordered[0]
+    second_score = ordered[1][1] if len(ordered) > 1 else 0
+
+    if best_score < MIN_LETTERS:
+        return Verdict(0, 0.0, metrics=metrics, note="букв не нашлось ни под каким углом")
+    # Уверенность — относительный отрыв от второго места: одинаково читаемые повороты
+    # означают, что решает не текст, и доверять такому вердикту нельзя.
+    return Verdict(best_rotation, min(1.0, (best_score - second_score) / best_score), metrics=metrics)
+
+
+ALGORITHM = Detector(
+    name="ocr_vote",
+    summary="арбитр: tesseract на каждом допустимом повороте, побеждает угол с большим числом букв",
+    stage="cpu",
+    run=detect,
+    arbiter=True,
+    available=tesseract_available,
+)
