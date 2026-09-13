@@ -65,7 +65,7 @@ from ocr_utils.scan_markup.cvat.project import (
     frame_index_by_name,
     job_states,
     project_label_ids,
-    raster_shapes,
+    rect_shapes,
     rename_task,
     rotation_tags,
     shapes_to_requests,
@@ -408,10 +408,8 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 # изменившиеся — их-то detect уже пересчитал.
                                 carried = shapes_to_requests(_by, frames, _skip)
                                 stats.shapes_carried += len(carried)
-                                fresh = raster_shapes(
-                                    ((p, p.raster_regions) for p in _pages if p.cvat_rel_path in _skip),
-                                    frames,
-                                    label_ids,
+                                fresh = rect_shapes(
+                                    ((p, p.rect_regions) for p in _pages if p.cvat_rel_path in _skip), frames, label_ids
                                 )
                                 # Теги переносятся со всех кадров, включая изменившиеся:
                                 # ориентацию разметчик ставит по содержимому полосы, и замена
@@ -474,7 +472,7 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                 assign_jobs_to_issues(task, issues)
 
                 if upload:
-                    shapes = raster_shapes(((page, page.raster_regions) for page in pages), frames, label_ids)
+                    shapes = rect_shapes(((page, page.rect_regions) for page in pages), frames, label_ids)
                     tags = rotation_tags(pages, frames, label_ids)
                     upload_preannotations(task, shapes, tags)
                     stats.shapes += len(shapes)

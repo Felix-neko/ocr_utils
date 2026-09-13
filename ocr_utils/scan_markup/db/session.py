@@ -61,6 +61,12 @@ RENAMED_COLUMNS: "tuple[tuple[str, str, str], ...]" = (
     ("pages", "rel_path", "source_rel_path"),
 )
 
+# ПЕРЕИМЕНОВАННЫЕ ТАБЛИЦЫ: (старое имя, новое имя). Признак старой базы тот же — старая
+# есть, новой нет. Опасность та же, что у колонок, только крупнее: ``create_all`` завёл бы
+# пустую ``rect_regions`` РЯДОМ с заполненной ``raster_regions``, и вся разметка растра
+# пропала бы из виду, оставаясь в файле.
+RENAMED_TABLES: "tuple[tuple[str, str], ...]" = (("raster_regions", "rect_regions"),)
+
 
 def check_schema_is_current(engine: Engine, path: Path) -> None:
     """Отказывается открывать базу прошлой схемы, называя команду миграции.
@@ -74,6 +80,9 @@ def check_schema_is_current(engine: Engine, path: Path) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     stale: "list[str]" = []
+    for old, new in RENAMED_TABLES:
+        if old in tables and new not in tables:
+            stale.append(f"таблица {old} (должна быть {new})")
     for table, old, new in RENAMED_COLUMNS:
         if table not in tables:
             continue

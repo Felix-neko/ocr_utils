@@ -27,13 +27,15 @@ from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
+    KIND_LINE_ART_SCHEMA,
+    KIND_TABLE,
     SOURCE_CVAT,
     Issue,
     MaskAnnotation,
     Pack,
     Page,
     PointAnnotation,
-    RasterRegion,
+    RectRegion,
     YearPackage,
 )
 from ocr_utils.scan_markup.db.repo import get_pack, require_pack
@@ -67,6 +69,10 @@ class ExportStats:
     # сколько ручной работы вообще сделано. Без него такие области видны только в общей сумме
     # ``regions``, и слагаемые в скобках с ней не сходятся.
     color_text: int = 0
+    # Таблицы и схемы — тоже отдельно: это другой детектор, и его счётчики отвечают на свой
+    # вопрос — сколько из автоматических находок разметчик оставил.
+    table: int = 0
+    line_art: int = 0
     full_page: int = 0
     masks: int = 0
     points: int = 0
@@ -175,6 +181,8 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         cleaned_rotate_cw=src_page.cleaned_rotate_cw,
                         detected_at=src_page.detected_at,
                         detector_version=src_page.detector_version,
+                        table_detector_version=src_page.table_detector_version,
+                        tables_detected_at=src_page.tables_detected_at,
                     )
                 )
             dst_session.flush()
@@ -183,11 +191,11 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
     return pack
 
 
-def shape_to_region(shape, page: Page, full_page_frac: float) -> RasterRegion:
-    """Прямоугольный шейп CVAT -> строка ``raster_regions`` в координатах оригинала."""
+def shape_to_region(shape, page: Page, full_page_frac: float) -> RectRegion:
+    """Прямоугольный шейп CVAT -> строка ``rect_regions`` в координатах оригинала."""
     x1, y1, x2, y2 = rect_to_original(*shape.points[:4], page.divisor, page.width, page.height)
     area = max(0, x2 - x1) * max(0, y2 - y1)
-    return RasterRegion(
+    return RectRegion(
         x1=x1,
         y1=y1,
         x2=x2,
@@ -315,7 +323,7 @@ def import_task(
             tags_by_frame.setdefault(tag.frame, []).append(tag)
 
     for frame, page in pages_by_frame.items():
-        regions: list[RasterRegion] = []
+        regions: list[RectRegion] = []
         masks: list[MaskAnnotation] = []
         points: list[PointAnnotation] = []
 
@@ -331,6 +339,8 @@ def import_task(
                 stats.color += region.kind == KIND_COLOR
                 stats.grayscale += region.kind == KIND_GRAYSCALE
                 stats.color_text += region.kind == KIND_COLOR_TEXT
+                stats.table += region.kind == KIND_TABLE
+                stats.line_art += region.kind == KIND_LINE_ART_SCHEMA
                 stats.full_page += bool(region.full_page)
             elif shape_type == "mask" and name in MASK_KIND_BY_LABEL:
                 mask = shape_to_mask(shape, page)
@@ -362,7 +372,7 @@ def import_task(
 
         # Через коллекции связей: delete-orphan сам уберёт вытесненные строки, а объекты
         # остаются согласованы с тем, что увидит следующий обход этой же сессии.
-        page.raster_regions = regions
+        page.rect_regions = regions
         page.masks = masks
         page.points = points
         page.reviewed_at = _utcnow()

@@ -783,9 +783,9 @@ def from_cvat_command(
     )
     stats = run_export(params, open_db(db_path), open_db(out_db_path))
     click.echo(
-        f"Полос: {stats.pages}. Растровых областей: {stats.regions} "
+        f"Полос: {stats.pages}. Прямоугольных областей: {stats.regions} "
         f"(цветных {stats.color}, серых {stats.grayscale}, цветного текста {stats.color_text}, "
-        f"во всю полосу {stats.full_page}). "
+        f"таблиц {stats.table}, схем и line art {stats.line_art}, во всю полосу {stats.full_page}). "
         f"Масок под удаление: {stats.masks}, точек экслибриса: {stats.points}.\n"
         f"Полос под поворот: {stats.rotated}"
         + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")

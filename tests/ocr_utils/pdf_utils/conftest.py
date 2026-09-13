@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_CVAT, RasterRegion
+from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_CVAT, RectRegion
 from ocr_utils.scan_markup.db.repo import upsert_pack
 from ocr_utils.scan_markup.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
@@ -79,8 +79,8 @@ def pack(tmp_path):
             page.width, page.height, page.dpi, page.divisor = W, H, DPI, 8
             page.sharpened_text_pic_file_name = f"{name[:-4]}.jpg"
             page.sharpened_text_pic_rel_path = f"1970/01/{name[:-4]}.jpg"
-            page.raster_regions = [
-                RasterRegion(x1=x1, y1=y1, x2=x2, y2=y2, kind=kind, full_page=False, source=SOURCE_CVAT)
+            page.rect_regions = [
+                RectRegion(x1=x1, y1=y1, x2=x2, y2=y2, kind=kind, full_page=False, source=SOURCE_CVAT)
                 for x1, y1, x2, y2, kind in PAGES[name]
             ]
         session.commit()

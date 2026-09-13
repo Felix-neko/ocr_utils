@@ -158,10 +158,10 @@ def _control_jobs(params: ValidateParams, skip: set[str]) -> tuple[list[_Job], d
             .join(Issue, Issue.id == Page.issue_id)
             .join(YearPackage, YearPackage.id == Issue.year_package_id)
             .where(YearPackage.pack_id == pack.id)
-            .where(Page.raster_regions.any())
+            .where(Page.rect_regions.any())
             .order_by(Page.id)
         ).all()
-        rows = [(page.source_rel_path, page.order_index, len(page.raster_regions)) for page in pages]
+        rows = [(page.source_rel_path, page.order_index, len(page.rect_regions)) for page in pages]
 
     rows = [row for row in rows if row[0] not in skip]
     random.Random(20260831).shuffle(rows)

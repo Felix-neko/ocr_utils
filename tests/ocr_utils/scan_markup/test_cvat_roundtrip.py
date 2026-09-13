@@ -14,21 +14,25 @@ from ocr_utils.scan_markup.cvat.project import (
     LABEL_COLOR_TEXT,
     LABEL_EXLIBRIS,
     LABEL_HANDWRITING,
+    LABEL_LINE_ART,
     LABEL_RASTER_COLOR,
     LABEL_RASTER_GRAY,
     LABEL_STAMP,
+    LABEL_TABLE,
     frame_index_by_name,
-    raster_shapes,
+    rect_shapes,
 )
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
+    KIND_LINE_ART_SCHEMA,
+    KIND_TABLE,
     MASK_HANDWRITING,
     POINT_EXLIBRIS,
     SOURCE_CVAT,
     Page,
-    RasterRegion,
+    RectRegion,
 )
 from ocr_utils.scan_markup.db.repo import upsert_pack
 from ocr_utils.scan_markup.db.session import open_db
@@ -43,6 +47,8 @@ LABEL_IDS = {
     LABEL_HANDWRITING: 14,
     LABEL_EXLIBRIS: 15,
     LABEL_COLOR_TEXT: 16,
+    LABEL_TABLE: 17,
+    LABEL_LINE_ART: 18,
 }
 LABEL_NAMES = {value: key for key, value in LABEL_IDS.items()}
 
@@ -129,9 +135,9 @@ def test_frame_index_by_name_uses_server_numbering() -> None:
 def test_preannotation_shapes_are_scaled_down(page_and_session) -> None:
     """Найденные области уезжают в CVAT поделёнными на делитель и с нужной меткой."""
     page, _session = page_and_session
-    region = RasterRegion(x1=800, y1=1600, x2=3000, y2=5000, kind=KIND_COLOR)
+    region = RectRegion(x1=800, y1=1600, x2=3000, y2=5000, kind=KIND_COLOR)
 
-    shapes = raster_shapes([(page, [region])], {page.cvat_rel_path: 0}, LABEL_IDS)
+    shapes = rect_shapes([(page, [region])], {page.cvat_rel_path: 0}, LABEL_IDS)
     assert len(shapes) == 1
     assert shapes[0].label_id == LABEL_IDS[LABEL_RASTER_COLOR]
     assert shapes[0].points == [100.0, 200.0, 375.0, 625.0]
@@ -140,22 +146,22 @@ def test_preannotation_shapes_are_scaled_down(page_and_session) -> None:
 def test_preannotation_skips_pages_outside_this_task(page_and_session) -> None:
     """Полоса, которой нет среди кадров задачи, шейпов не даёт (прогон по одному году)."""
     page, _session = page_and_session
-    region = RasterRegion(x1=800, y1=1600, x2=3000, y2=5000, kind=KIND_COLOR)
-    assert raster_shapes([(page, [region])], {"чужой/кадр.jpg": 0}, LABEL_IDS) == []
+    region = RectRegion(x1=800, y1=1600, x2=3000, y2=5000, kind=KIND_COLOR)
+    assert rect_shapes([(page, [region])], {"чужой/кадр.jpg": 0}, LABEL_IDS) == []
 
 
 def test_full_round_trip_keeps_geometry(page_and_session) -> None:
     """Область оригинала -> CVAT -> обратно: промах не больше делителя."""
     page, session = page_and_session
-    original = RasterRegion(x1=800, y1=1600, x2=3000, y2=5000, kind=KIND_COLOR)
-    shapes = raster_shapes([(page, [original])], {page.cvat_rel_path: 0}, LABEL_IDS)
+    original = RectRegion(x1=800, y1=1600, x2=3000, y2=5000, kind=KIND_COLOR)
+    shapes = rect_shapes([(page, [original])], {page.cvat_rel_path: 0}, LABEL_IDS)
 
     task = _Task([page.cvat_rel_path], [_Shape("rectangle", 0, LABEL_IDS[LABEL_RASTER_COLOR], list(shapes[0].points))])
     stats = ExportStats()
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
 
     assert stats.regions == 1 and stats.color == 1
-    back = page.raster_regions[0]
+    back = page.rect_regions[0]
     assert back.source == SOURCE_CVAT
     for got, want in zip((back.x1, back.y1, back.x2, back.y2), (800, 1600, 3000, 5000)):
         assert abs(got - want) <= D
@@ -166,7 +172,7 @@ def test_import_reads_kind_from_label(page_and_session) -> None:
     page, session = page_and_session
     task = _Task([page.cvat_rel_path], [_Shape("rectangle", 0, LABEL_IDS[LABEL_RASTER_GRAY], [10, 10, 100, 100])])
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), ExportStats())
-    assert page.raster_regions[0].kind == KIND_GRAYSCALE
+    assert page.rect_regions[0].kind == KIND_GRAYSCALE
 
 
 def test_import_marks_full_page_by_area(page_and_session) -> None:
@@ -175,7 +181,7 @@ def test_import_marks_full_page_by_area(page_and_session) -> None:
     task = _Task([page.cvat_rel_path], [_Shape("rectangle", 0, LABEL_IDS[LABEL_RASTER_COLOR], [0, 0, CVAT_W, CVAT_H])])
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), ExportStats())
 
-    region = page.raster_regions[0]
+    region = page.rect_regions[0]
     assert region.full_page
     assert (region.x2, region.y2) == (W, H)  # растянулось в обрезанную полоску
 
@@ -191,7 +197,7 @@ def test_import_stores_stamp_mask(page_and_session) -> None:
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
 
     assert stats.masks == 1 and stats.regions == 0
-    assert page.raster_regions == []
+    assert page.rect_regions == []
     assert (page.masks[0].left, page.masks[0].top) == (200 * D, 100 * D)
 
 
@@ -208,11 +214,11 @@ def test_import_replaces_previous_markup(page_and_session) -> None:
         ],
     )
     import_task(two, LABEL_NAMES, {0: page}, session, params, stats)
-    assert len(page.raster_regions) == 2
+    assert len(page.rect_regions) == 2
 
     one = _Task([page.cvat_rel_path], [_Shape("rectangle", 0, LABEL_IDS[LABEL_RASTER_COLOR], [10, 10, 100, 100])])
     import_task(one, LABEL_NAMES, {0: page}, session, params, ExportStats())
-    assert len(page.raster_regions) == 1
+    assert len(page.rect_regions) == 1
 
 
 def test_page_without_shapes_is_marked_reviewed(page_and_session) -> None:
@@ -227,7 +233,7 @@ def test_page_without_shapes_is_marked_reviewed(page_and_session) -> None:
         ExportParams(None, None, "пак-1"),
         ExportStats(),
     )
-    assert page.reviewed_at is not None and page.raster_regions == []
+    assert page.reviewed_at is not None and page.rect_regions == []
 
 
 def test_foreign_labels_are_counted_not_imported(page_and_session) -> None:
@@ -236,7 +242,7 @@ def test_foreign_labels_are_counted_not_imported(page_and_session) -> None:
     stats = ExportStats()
     task = _Task([page.cvat_rel_path], [_Shape("polygon", 0, 99, [1, 2, 3, 4])])
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
-    assert stats.unknown_labels == 1 and page.raster_regions == []
+    assert stats.unknown_labels == 1 and page.rect_regions == []
 
 
 def test_import_stores_handwriting_with_its_own_kind(page_and_session) -> None:
@@ -289,6 +295,46 @@ def test_import_stores_colour_text_region(page_and_session) -> None:
     import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
 
     assert stats.regions == 1 and stats.color == 0 and stats.grayscale == 0
-    region = page.raster_regions[0]
+    region = page.rect_regions[0]
     assert region.kind == KIND_COLOR_TEXT
     assert (region.x1, region.y1) == (10 * D, 20 * D)
+
+
+def test_table_and_line_art_round_trip(page_and_session) -> None:
+    """Таблица и схема уезжают своими метками и возвращаются своими видами.
+
+    ``detector_info`` назад не едет: разметчик его не видел и не правил, а ``from-cvat`` —
+    снимок разметки, не слияние с автоматикой.
+    """
+    page, session = page_and_session
+    table = RectRegion(x1=800, y1=1600, x2=3000, y2=3000, kind=KIND_TABLE, detector_info='{"kind_fine": "таблица"}')
+    schema = RectRegion(x1=400, y1=3200, x2=3200, y2=5600, kind=KIND_LINE_ART_SCHEMA)
+    shapes = rect_shapes([(page, [table, schema])], {page.cvat_rel_path: 0}, LABEL_IDS)
+    assert [shape.label_id for shape in shapes] == [LABEL_IDS[LABEL_TABLE], LABEL_IDS[LABEL_LINE_ART]]
+
+    task = _Task(
+        [page.cvat_rel_path],
+        [
+            _Shape("rectangle", 0, shape.label_id, list(shape.points), shape_id=index)
+            for index, shape in enumerate(shapes)
+        ],
+    )
+    stats = ExportStats()
+    import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
+
+    assert (stats.regions, stats.table, stats.line_art, stats.color) == (2, 1, 1, 0)
+    by_kind = {region.kind: region for region in page.rect_regions}
+    assert set(by_kind) == {KIND_TABLE, KIND_LINE_ART_SCHEMA}
+    assert abs(by_kind[KIND_TABLE].x1 - 800) <= D and abs(by_kind[KIND_LINE_ART_SCHEMA].y2 - 5600) <= D
+    assert by_kind[KIND_TABLE].source == SOURCE_CVAT and by_kind[KIND_TABLE].detector_info is None
+
+
+def test_rect_shapes_can_be_limited_to_kinds(page_and_session) -> None:
+    """Дозаливка таблиц берёт только свои виды, растр в PATCH не попадает."""
+    page, _session = page_and_session
+    regions = [
+        RectRegion(x1=800, y1=1600, x2=3000, y2=3000, kind=KIND_COLOR),
+        RectRegion(x1=800, y1=3200, x2=3000, y2=5000, kind=KIND_TABLE),
+    ]
+    shapes = rect_shapes([(page, regions)], {page.cvat_rel_path: 0}, LABEL_IDS, kinds=(KIND_TABLE,))
+    assert [shape.label_id for shape in shapes] == [LABEL_IDS[LABEL_TABLE]]

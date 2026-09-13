@@ -7,8 +7,8 @@ import pytest
 from PIL import Image
 from sqlalchemy import func, select
 
-from ocr_utils.scan_markup.db.models import Issue, Page, RasterRegion, YearPackage
-from ocr_utils.scan_markup.db.repo import iter_pages, replace_raster_regions, upsert_pack
+from ocr_utils.scan_markup.db.models import Issue, Page, RectRegion, YearPackage
+from ocr_utils.scan_markup.db.repo import iter_pages, replace_rect_regions, upsert_pack
 from ocr_utils.scan_markup.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import scan_pack
 
@@ -54,11 +54,11 @@ def test_upsert_keeps_existing_markup(pack_dir: Path, session_factory) -> None:
     with session_factory() as session:
         pack = upsert_pack(session, "пак-1", pack_dir, years)
         page = next(page for _y, _i, page in iter_pages(pack))
-        replace_raster_regions(session, page, [RasterRegion(x1=1, y1=2, x2=3, y2=4, kind="color")])
+        replace_rect_regions(session, page, [RectRegion(x1=1, y1=2, x2=3, y2=4, kind="color")])
         session.commit()
 
         upsert_pack(session, "пак-1", pack_dir, years)
-        assert session.scalar(select(func.count()).select_from(RasterRegion)) == 1
+        assert session.scalar(select(func.count()).select_from(RectRegion)) == 1
 
 
 def test_upsert_adds_new_pages(pack_dir: Path, session_factory) -> None:
@@ -85,12 +85,12 @@ def test_replace_regions_is_replacement_not_addition(pack_dir: Path, session_fac
     with session_factory() as session:
         pack = upsert_pack(session, "пак-1", pack_dir, scan_pack(pack_dir))
         page = next(page for _y, _i, page in iter_pages(pack))
-        replace_raster_regions(session, page, [RasterRegion(x1=1, y1=2, x2=3, y2=4, kind="color")])
+        replace_rect_regions(session, page, [RectRegion(x1=1, y1=2, x2=3, y2=4, kind="color")])
         session.commit()
-        replace_raster_regions(session, page, [RasterRegion(x1=9, y1=9, x2=9, y2=9, kind="grayscale")])
+        replace_rect_regions(session, page, [RectRegion(x1=9, y1=9, x2=9, y2=9, kind="grayscale")])
         session.commit()
 
-        regions = session.scalars(select(RasterRegion)).all()
+        regions = session.scalars(select(RectRegion)).all()
         assert len(regions) == 1 and regions[0].kind == "grayscale"
 
 
@@ -216,3 +216,116 @@ def test_colour_text_is_a_picture_kind_and_is_colour() -> None:
     assert KIND_COLOR_TEXT in PICTURE_KINDS
     assert KIND_COLOR_TEXT in COLOR_PICTURE_KINDS
     assert set(COLOR_PICTURE_KINDS) <= set(PICTURE_KINDS)
+
+
+def _db_with_raster_regions_table(tmp_path):
+    """База прошлой схемы: таблица ещё зовётся ``raster_regions`` и хранит строку растра."""
+    import sqlite3
+
+    db = tmp_path / "raster.sqlite"
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE packs (id INTEGER PRIMARY KEY, name VARCHAR(255), source_pics_root TEXT, created_at DATETIME)"
+        )
+        connection.execute(
+            "CREATE TABLE pages (id INTEGER PRIMARY KEY, issue_id INTEGER, source_file_name VARCHAR(255), "
+            "source_rel_path TEXT, order_index INTEGER)"
+        )
+        connection.execute("INSERT INTO pages VALUES (1, 1, 'a.tif', '1974/01/a.tif', 0)")
+        connection.execute(
+            "CREATE TABLE raster_regions (id INTEGER PRIMARY KEY, page_id INTEGER NOT NULL, "
+            "x1 INTEGER, y1 INTEGER, x2 INTEGER, y2 INTEGER, kind VARCHAR(16), full_page BOOLEAN, "
+            "source VARCHAR(16), FOREIGN KEY(page_id) REFERENCES pages (id) ON DELETE CASCADE)"
+        )
+        connection.execute("CREATE INDEX ix_raster_regions_page_id ON raster_regions (page_id)")
+        connection.execute("INSERT INTO raster_regions VALUES (1, 1, 10, 20, 30, 40, 'grayscale', 0, 'cvat')")
+    return db
+
+
+def test_database_with_raster_regions_is_not_opened_without_migration(tmp_path):
+    """Старое имя таблицы — тот же признак прошлой схемы, что и старое имя колонки.
+
+    Открыть такую базу молча было бы хуже всего: ``create_all`` завёл бы пустую
+    ``rect_regions`` РЯДОМ с заполненной ``raster_regions``, и вся ручная разметка растра
+    пропала бы из виду, оставаясь в файле.
+    """
+    import pytest
+
+    from ocr_utils.scan_markup.db.session import open_db
+
+    with pytest.raises(RuntimeError, match="raster_regions"):
+        open_db(_db_with_raster_regions_table(tmp_path))
+
+
+def test_migration_renames_raster_regions_table_and_keeps_rows(tmp_path):
+    """Таблица переименовывается в ``rect_regions``, строки и индекс на месте, повтор — вхолостую."""
+    from sqlalchemy import create_engine, inspect
+
+    from ocr_utils.scan_markup.db.migrate import migrate_db
+    from ocr_utils.scan_markup.db.session import open_db
+
+    db = _db_with_raster_regions_table(tmp_path)
+    report = migrate_db(db)
+    assert "raster_regions -> rect_regions" in report.renamed
+    assert "rect_regions.detector_info" in report.added
+
+    with open_db(db)() as session:
+        region = session.get(RectRegion, 1)
+        assert (region.x1, region.y1, region.x2, region.y2, region.kind, region.source) == (
+            10,
+            20,
+            30,
+            40,
+            "grayscale",
+            "cvat",
+        )
+        assert region.detector_info is None
+        assert session.get(Page, 1).rect_regions == [region]
+
+    inspector = inspect(create_engine(f"sqlite:///{db}"))
+    assert "raster_regions" not in inspector.get_table_names()
+    index_names = {index["name"] for index in inspector.get_indexes("rect_regions")}
+    assert "ix_rect_regions_page_id" in index_names and "ix_raster_regions_page_id" not in index_names
+
+    again = migrate_db(db, backup=False)
+    assert again.renamed == [] and again.added == []
+
+
+def test_replace_rect_regions_by_kinds_keeps_other_kinds(pack_dir: Path, session_factory) -> None:
+    """Детектор таблиц заменяет только таблицы и схемы; ручной растр остаётся нетронутым."""
+    from ocr_utils.scan_markup.db.models import (
+        KIND_GRAYSCALE,
+        KIND_LINE_ART_SCHEMA,
+        KIND_TABLE,
+        RASTER_KINDS,
+        SOURCE_CVAT,
+        TABLE_KINDS,
+    )
+
+    with session_factory() as session:
+        pack = upsert_pack(session, "пак-1", pack_dir, scan_pack(pack_dir))
+        page = pack.year_packages[0].issues[0].pages[0]
+        replace_rect_regions(
+            session,
+            page,
+            [
+                RectRegion(x1=1, y1=1, x2=2, y2=2, kind=KIND_GRAYSCALE, source=SOURCE_CVAT),
+                RectRegion(x1=3, y1=3, x2=4, y2=4, kind=KIND_TABLE),
+            ],
+        )
+        replace_rect_regions(
+            session, page, [RectRegion(x1=5, y1=5, x2=6, y2=6, kind=KIND_LINE_ART_SCHEMA)], kinds=TABLE_KINDS
+        )
+        session.commit()
+        kinds = sorted((r.kind, r.x1) for r in page.rect_regions)
+        assert kinds == [(KIND_GRAYSCALE, 1), (KIND_LINE_ART_SCHEMA, 5)]
+
+        # Область чужого вида среди заменяемых — ошибка вызывающего, а не тихая подмена.
+        with pytest.raises(ValueError, match="не входят"):
+            replace_rect_regions(
+                session, page, [RectRegion(x1=7, y1=7, x2=8, y2=8, kind=KIND_TABLE)], kinds=RASTER_KINDS
+            )
+        # Пустая замена по видам вычищает только своё семейство.
+        replace_rect_regions(session, page, [], kinds=TABLE_KINDS)
+        session.commit()
+        assert [r.kind for r in page.rect_regions] == [KIND_GRAYSCALE]

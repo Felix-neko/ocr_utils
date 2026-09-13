@@ -473,7 +473,7 @@ def load_plans(
                         raise ValueError(f"{page.source_rel_path}: нет размеров кадра, сначала нужен detect")
                     pictures = tuple(
                         PicturePlan(int(r.x1), int(r.y1), int(r.x2), int(r.y2), r.kind)
-                        for r in page.raster_regions
+                        for r in page.rect_regions
                         if r.kind in PICTURE_KINDS
                     )
                     sharpened = page.sharpened_text_pic_rel_path

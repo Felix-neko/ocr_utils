@@ -31,7 +31,7 @@ from ocr_utils.scan_markup.db.models import (
     SOURCE_AUTO,
     Issue,
     Page,
-    RasterRegion,
+    RectRegion,
     YearPackage,
 )
 from ocr_utils.scan_markup.db.repo import require_pack
@@ -128,7 +128,7 @@ def run_recolor(params: RecolorParams, session_factory) -> RecolorStats:
         root = params.pack_dir or Path(pack.source_pics_root)
 
         jobs: list[_Job] = []
-        regions_by_page: dict[int, list[RasterRegion]] = {}
+        regions_by_page: dict[int, list[RectRegion]] = {}
         for page in _pages_with_regions(session, pack.id):
             # Ровно два вида, и они перечислены прямо здесь, а не взяты из ``PICTURE_KINDS``:
             # перекраска умеет решать только «цветная или серая», и всё, что означает не цвет,
@@ -137,7 +137,7 @@ def run_recolor(params: RecolorParams, session_factory) -> RecolorStats:
             # разметчика, и перезаписывать его измерением тем более нельзя.
             regions = [
                 region
-                for region in page.raster_regions
+                for region in page.rect_regions
                 if region.source == SOURCE_AUTO and region.kind in (KIND_COLOR, KIND_GRAYSCALE)
             ]
             if not regions:
@@ -184,7 +184,7 @@ def _pages_with_regions(session: Session, pack_id: int):
         .join(Issue, Issue.id == Page.issue_id)
         .join(YearPackage, YearPackage.id == Issue.year_package_id)
         .where(YearPackage.pack_id == pack_id)
-        .where(Page.raster_regions.any())
+        .where(Page.rect_regions.any())
         .order_by(Page.id)
     ).all()
 
@@ -208,7 +208,7 @@ def run_mark_covers(params: RecolorParams, session_factory) -> RecolorStats:
                     tqdm.write(f"ПРОПУСК {page.source_rel_path}: нет размеров, сначала нужен detect")
                     stats.failed += 1
                     continue
-                if any(region.source != SOURCE_AUTO for region in page.raster_regions):
+                if any(region.source != SOURCE_AUTO for region in page.rect_regions):
                     continue  # полосу уже правили руками — не трогаем
                 stats.pages += 1
                 if _already_cover(page):
@@ -217,8 +217,8 @@ def run_mark_covers(params: RecolorParams, session_factory) -> RecolorStats:
                 if params.dry_run:
                     continue
                 x1, y1, x2, y2 = cover_region(page.width, page.height)
-                page.raster_regions = [
-                    RasterRegion(x1=x1, y1=y1, x2=x2, y2=y2, kind=KIND_COLOR, full_page=True, source=SOURCE_AUTO)
+                page.rect_regions = [
+                    RectRegion(x1=x1, y1=y1, x2=x2, y2=y2, kind=KIND_COLOR, full_page=True, source=SOURCE_AUTO)
                 ]
         if not params.dry_run:
             session.commit()
@@ -228,9 +228,9 @@ def run_mark_covers(params: RecolorParams, session_factory) -> RecolorStats:
 
 def _already_cover(page: Page) -> bool:
     """Помечена ли полоса ровно одной цветной областью во весь кадр."""
-    if len(page.raster_regions) != 1:
+    if len(page.rect_regions) != 1:
         return False
-    region = page.raster_regions[0]
+    region = page.rect_regions[0]
     return (
         region.full_page
         and region.kind == KIND_COLOR

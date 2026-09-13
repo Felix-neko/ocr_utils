@@ -33,7 +33,9 @@ from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
+    KIND_LINE_ART_SCHEMA,
     KIND_STAMP_SUSPECT,
+    KIND_TABLE,
     MASK_HANDWRITING,
     MASK_LIBRARY_STAMP,
     MASK_OTHER_REMOVAL,
@@ -72,6 +74,14 @@ LABEL_EXLIBRIS = "Экслибрис"
 # Прямоугольник, потому что это область страницы, а не объект со сложным контуром.
 LABEL_COLOR_TEXT = "Цветной текст или штрих"
 
+# Таблица с линейками и блок-схема / штриховой рисунок (line art). Ставит детектор таблиц
+# (``scan_markup.table_detection``), разметчик уточняет рамку: границы должны обходить
+# буквы и не захватывать чужой текст. Две метки, а не атрибут, по той же причине, что и у
+# растра: вид виден по цвету рамки с одного взгляда. Схема и рисунок (график, чертёж) —
+# одна метка: обходятся с ними одинаково, а различать их глазами разметчику незачем.
+LABEL_TABLE = "Таблица"
+LABEL_LINE_ART = "Схема или line art"
+
 # Цвета разнесены по кругу и все насыщенные: сканы жёлто-бежевые, и бледное на них теряется.
 # Занятые тона — зелёный 150°, голубой 200°, пурпур 290°, оранжевый 25°, жёлтый 55°,
 # красный 350°; точке достался единственный свободный участок, сине-фиолетовый 250°. Белый
@@ -102,6 +112,12 @@ LABELS = [
     {"name": LABEL_OTHER_REMOVAL, "type": "mask", "color": "#FF1744"},  # красный
     {"name": LABEL_EXLIBRIS, "type": "points", "color": "#651FFF"},  # сине-фиолетовый
     {"name": LABEL_COLOR_TEXT, "type": "rectangle", "color": "#C51162"},  # тёмно-розовый
+    # Таблицы и схемы — шестой и седьмой прямоугольник; свободных тонов на круге уже нет,
+    # поэтому взяты те, что отличаются от занятых по СВЕТЛОТЕ: тёмно-синий 230° против
+    # голубого 200° и коричневый 15° против оранжевого 25°. На жёлто-бежевой бумаге оба
+    # тёмных тона читаются как рамка, а не как пятно.
+    {"name": LABEL_TABLE, "type": "rectangle", "color": "#304FFE"},  # тёмно-синий
+    {"name": LABEL_LINE_ART, "type": "rectangle", "color": "#6D4C41"},  # коричневый
     # Теги на холсте не рисуются, поэтому их цвета ни с чем не конкурируют и взяты просто
     # различимыми между собой — они видны только в панели объектов.
     {"name": LABEL_ROTATE_CW90, "type": "tag", "color": "#1DE9B6"},
@@ -115,13 +131,10 @@ LABEL_BY_KIND = {
     KIND_GRAYSCALE: LABEL_RASTER_GRAY,
     KIND_STAMP_SUSPECT: LABEL_STAMP_SUSPECT,
     KIND_COLOR_TEXT: LABEL_COLOR_TEXT,
+    KIND_TABLE: LABEL_TABLE,
+    KIND_LINE_ART_SCHEMA: LABEL_LINE_ART,
 }
-KIND_BY_LABEL = {
-    LABEL_RASTER_COLOR: KIND_COLOR,
-    LABEL_RASTER_GRAY: KIND_GRAYSCALE,
-    LABEL_STAMP_SUSPECT: KIND_STAMP_SUSPECT,
-    LABEL_COLOR_TEXT: KIND_COLOR_TEXT,
-}
+KIND_BY_LABEL = {label: kind for kind, label in LABEL_BY_KIND.items()}
 MASK_KIND_BY_LABEL = {
     LABEL_STAMP: MASK_LIBRARY_STAMP,
     LABEL_HANDWRITING: MASK_HANDWRITING,
@@ -275,12 +288,15 @@ def frame_index_by_name(task) -> dict[str, int]:
     return {frame.name: index for index, frame in enumerate(task.get_frames_info())}
 
 
-def raster_shapes(pages_with_regions, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+def rect_shapes(
+    pages_with_regions, frames: dict[str, int], label_ids: dict[str, int], kinds: "tuple[str, ...] | None" = None
+) -> list:
     """Предразметка: прямоугольники из базы -> шейпы CVAT.
 
-    ``pages_with_regions`` — последовательность ``(page, [RasterRegion, ...])``. Полосы,
+    ``pages_with_regions`` — последовательность ``(page, [RectRegion, ...])``. Полосы,
     которых нет среди кадров задачи, пропускаются: так прогон по подмножеству лет не
-    падает на чужих полосах.
+    падает на чужих полосах. ``kinds`` оставляет только области этих видов — так
+    дозаливка таблиц (``--append-kinds``) не тащит за собой растр.
 
     Маски печатей не предзаливаются — автодетектора печатей нет, разметчик рисует их с нуля.
     """
@@ -292,6 +308,8 @@ def raster_shapes(pages_with_regions, frames: dict[str, int], label_ids: dict[st
         if frame is None:
             continue
         for region in regions:
+            if kinds is not None and region.kind not in kinds:
+                continue
             label_id = label_ids.get(LABEL_BY_KIND[region.kind])
             if label_id is None:
                 continue

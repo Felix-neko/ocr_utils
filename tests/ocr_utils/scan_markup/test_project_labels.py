@@ -170,3 +170,20 @@ def test_tasks_of_other_projects_are_ignored() -> None:
 
     client = _TaskClient([_NamedTask(7, "1974", project_id=2)])
     assert find_year_task(client, 1, "1974") is None
+
+
+def test_every_rect_kind_has_a_rectangle_label_and_back() -> None:
+    """Каждый вид прямоугольника в базе имеет метку-rectangle в CVAT, и обратно — без дыр.
+
+    Вид без метки терялся бы на ``to-cvat`` (KeyError), метка без вида — на ``from-cvat``
+    (шейп ушёл бы в «чужие метки»). Проверяется по спискам, а не по паре примеров.
+    """
+    from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, LABEL_BY_KIND
+    from ocr_utils.scan_markup.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE, RECT_KINDS
+
+    by_name = {label["name"]: label for label in LABELS}
+    assert set(LABEL_BY_KIND) == set(RECT_KINDS)
+    for kind, name in LABEL_BY_KIND.items():
+        assert by_name[name]["type"] == "rectangle", kind
+        assert KIND_BY_LABEL[name] == kind
+    assert LABEL_BY_KIND[KIND_TABLE] != LABEL_BY_KIND[KIND_LINE_ART_SCHEMA]

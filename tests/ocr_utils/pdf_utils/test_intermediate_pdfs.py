@@ -58,7 +58,7 @@ def test_issue_without_pictures_gets_no_pics_only_pdf(pack, tmp_path):
     db_path, originals, sharpened, name = pack
     with open_db(db_path)() as session:
         for page in require_pack(session, name).year_packages[0].issues[0].pages:
-            page.raster_regions = []
+            page.rect_regions = []
         session.commit()
 
     (plan,) = load_plans(db_path, name)

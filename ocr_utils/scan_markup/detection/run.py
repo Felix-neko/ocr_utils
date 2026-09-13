@@ -28,8 +28,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import SOURCE_AUTO, SOURCE_CVAT, Page, RasterRegion
-from ocr_utils.scan_markup.db.repo import iter_pages, replace_raster_regions, upsert_pack
+from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_AUTO, SOURCE_CVAT, Page, RectRegion
+from ocr_utils.scan_markup.db.repo import iter_pages, replace_rect_regions, upsert_pack
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
 from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
 from ocr_utils.scan_markup.rotation import format_allowed
@@ -325,11 +325,11 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
     if result.stamp is not None:
         apply_stamp(page, result.stamp)
 
-    replace_raster_regions(
+    replace_rect_regions(
         session,
         page,
         [
-            RasterRegion(
+            RectRegion(
                 x1=region.box[0],
                 y1=region.box[1],
                 x2=region.box[2],
@@ -352,8 +352,8 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
 
     stats.pages += 1
     stats.regions += len(result.regions)
-    stats.color += sum(1 for region in result.regions if region.kind == "color")
-    stats.grayscale += sum(1 for region in result.regions if region.kind == "grayscale")
+    stats.color += sum(1 for region in result.regions if region.kind == KIND_COLOR)
+    stats.grayscale += sum(1 for region in result.regions if region.kind == KIND_GRAYSCALE)
     stats.full_page += sum(1 for region in result.regions if region.full_page)
 
 

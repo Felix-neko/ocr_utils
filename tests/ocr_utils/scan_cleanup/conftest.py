@@ -16,7 +16,7 @@ from ocr_utils.scan_markup.db.models import (
     MASK_LIBRARY_STAMP,
     SOURCE_CVAT,
     MaskAnnotation,
-    RasterRegion,
+    RectRegion,
 )
 from ocr_utils.scan_markup.db.repo import upsert_pack
 from ocr_utils.scan_markup.db.session import open_db
@@ -94,12 +94,12 @@ def pack(tmp_path):
             page.width, page.height, page.dpi, page.divisor = W, H, 600, 8
 
         # Первая полоса: обычная, с иллюстрацией в углу.
-        pages["0010.tif"].raster_regions = [
-            RasterRegion(x1=250, y1=50, x2=380, y2=200, kind=KIND_GRAYSCALE, full_page=False, source=SOURCE_CVAT)
+        pages["0010.tif"].rect_regions = [
+            RectRegion(x1=250, y1=50, x2=380, y2=200, kind=KIND_GRAYSCALE, full_page=False, source=SOURCE_CVAT)
         ]
         # Вторая: обложка (картинка во всю полосу) с библиотечной печатью.
-        pages["0020.tif"].raster_regions = [
-            RasterRegion(x1=0, y1=0, x2=W, y2=H, kind=KIND_COLOR, full_page=True, source=SOURCE_CVAT)
+        pages["0020.tif"].rect_regions = [
+            RectRegion(x1=0, y1=0, x2=W, y2=H, kind=KIND_COLOR, full_page=True, source=SOURCE_CVAT)
         ]
         pages["0020.tif"].masks = [
             MaskAnnotation(

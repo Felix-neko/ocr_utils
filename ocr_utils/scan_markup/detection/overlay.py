@@ -12,7 +12,14 @@ from pathlib import Path
 
 import cv2
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_COLOR_TEXT, KIND_GRAYSCALE, KIND_STAMP_SUSPECT
+from ocr_utils.scan_markup.db.models import (
+    KIND_COLOR,
+    KIND_COLOR_TEXT,
+    KIND_GRAYSCALE,
+    KIND_LINE_ART_SCHEMA,
+    KIND_STAMP_SUSPECT,
+    KIND_TABLE,
+)
 
 # Длинная сторона оверлея. 1000 px хватает, чтобы глазами отличить фотографию от штрихового
 # рисунка и увидеть, куда легла рамка; больше — только место на диске.
@@ -30,6 +37,8 @@ BOX_COLORS = {
     KIND_GRAYSCALE: (255, 176, 0),  # #00B0FF
     KIND_STAMP_SUSPECT: (0, 109, 255),  # #FF6D00
     KIND_COLOR_TEXT: (98, 17, 197),  # #C51162
+    KIND_TABLE: (254, 79, 48),  # #304FFE
+    KIND_LINE_ART_SCHEMA: (65, 76, 109),  # #6D4C41
 }
 UNKNOWN_KIND_COLOR = (255, 255, 255)
 

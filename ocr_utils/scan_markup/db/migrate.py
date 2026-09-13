@@ -1,4 +1,4 @@
-"""Переименование колонок в уже заполненных базах разметки.
+"""Переименование колонок и таблиц в уже заполненных базах разметки.
 
 Зачем отдельный скрипт. ``db.session.add_missing_columns`` умеет только ДОПИСЫВАТЬ
 колонки, и это правильно: дописать пустую колонку безопасно при любом исходе, поэтому
@@ -12,8 +12,14 @@
 дописало бы пустую ``source_file_name`` РЯДОМ со старой ``file_name``, данные остались бы
 в старой колонке, а на вид база выглядела бы мигрированной.
 
-Скрипт идемпотентен: колонка переименовывается, только если старое имя в файле есть, а
-нового ещё нет. Повторный прогон по мигрированной базе ничего не делает и ничего не портит.
+Скрипт идемпотентен: колонка (и таблица) переименовывается, только если старое имя в файле
+есть, а нового ещё нет. Повторный прогон по мигрированной базе ничего не делает и ничего
+не портит.
+
+Таблицы переименовываются раньше колонок: список колонок назван новыми именами таблиц.
+Индексы SQLite при ``ALTER TABLE ... RENAME TO`` сохраняют старые имена
+(``ix_raster_regions_page_id``); такой индекс удаляется, а нужный заводит ``open_db`` через
+``add_missing_columns``/``create_all`` под именем из моделей.
 
 Запуск::
 
@@ -35,6 +41,11 @@ logger = logging.getLogger(__name__)
 # run_scripts/scan_markup/pack1/common.sh перед каждым шагом: тот перезаписывается на
 # следующем же запуске, а эта копия должна пережить всю миграцию.
 BACKUP_SUFFIX = ".bak-до-переименования"
+
+# Переименованные таблицы: (старое имя, новое имя, индексы старой таблицы под снос).
+TABLE_RENAMES: "tuple[tuple[str, str, tuple[str, ...]], ...]" = (
+    ("raster_regions", "rect_regions", ("ix_raster_regions_page_id",)),
+)
 
 # Что во что переименовывается: таблица -> (старое имя, новое имя).
 RENAMES: "tuple[tuple[str, str, str], ...]" = (
@@ -76,15 +87,33 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> "set[str] | No
     return {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
 
 
+def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+    return _table_columns(connection, table) is not None
+
+
 def rename_columns(db_path: Path, dry_run: bool = False) -> MigrationReport:
-    """Переименовывает колонки по :data:`RENAMES`; НЕ дописывает новых.
+    """Переименовывает таблицы по :data:`TABLE_RENAMES` и колонки по :data:`RENAMES`; НЕ дописывает новых.
 
     Работает сырым ``sqlite3`` и ``ALTER TABLE ... RENAME COLUMN`` (SQLite 3.25+): он же
     сам переписывает и UNIQUE-констрейнт ``uq_page_in_issue``, который назван колонкой
-    ``file_name`` по имени.
+    ``file_name`` по имени. ``ALTER TABLE ... RENAME TO`` заодно правит внешние ключи,
+    ссылающиеся на таблицу (``PRAGMA legacy_alter_table`` выключена по умолчанию).
     """
     report = MigrationReport(path=db_path)
     with sqlite3.connect(db_path) as connection:
+        for old, new, indexes in TABLE_RENAMES:
+            if _has_table(connection, new):
+                report.already.append(f"{old} -> {new}")
+                continue
+            if not _has_table(connection, old):
+                if old not in report.missing_tables:
+                    report.missing_tables.append(old)
+                continue
+            if not dry_run:
+                connection.execute(f'ALTER TABLE "{old}" RENAME TO "{new}"')
+                for index in indexes:
+                    connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+            report.renamed.append(f"{old} -> {new}")
         for table, old, new in RENAMES:
             columns = _table_columns(connection, table)
             if columns is None:
@@ -144,7 +173,7 @@ def migrate_db(db_path: Path, backup: bool = True, dry_run: bool = False) -> Mig
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
 )
 def main(databases: "tuple[Path, ...]", backup: bool, dry_run: bool, log_level: str) -> None:
-    """Мигрирует БАЗЫ на схему с раздельными корнями пака и промежуточными PDF."""
+    """Мигрирует БАЗЫ на текущую схему: переименованные колонки и таблицы, новые колонки."""
     logging.basicConfig(level=log_level.upper(), format="%(levelname)s: %(message)s")
     for db_path in databases:
         if not db_path.exists():

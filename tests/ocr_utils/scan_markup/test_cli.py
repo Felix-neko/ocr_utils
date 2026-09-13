@@ -9,7 +9,7 @@ from PIL import Image
 from sqlalchemy import select
 
 from ocr_utils.scan_markup.cli import main
-from ocr_utils.scan_markup.db.models import KIND_COLOR, Page, RasterRegion
+from ocr_utils.scan_markup.db.models import KIND_COLOR, Page, RectRegion
 from ocr_utils.scan_markup.db.session import open_db
 from tests.ocr_utils.scan_markup import synthetic
 
@@ -79,7 +79,7 @@ def test_detect_writes_pages_and_regions(pack_dir: Path, tmp_path: Path) -> None
         assert (pages[0].width, pages[0].height) == (SIZE[1], SIZE[0])
         assert pages[0].detected_at is not None
 
-        regions = session.scalars(select(RasterRegion)).all()
+        regions = session.scalars(select(RectRegion)).all()
         assert len(regions) == 1
         assert regions[0].page_id == pages[0].id
         assert regions[0].chroma_frac is not None
@@ -106,7 +106,7 @@ def test_text_only_page_has_no_regions(pack_dir: Path, tmp_path: Path) -> None:
 
     with open_db(db)() as session:
         page = session.scalars(select(Page).where(Page.source_file_name == "b.tif")).one()
-        assert page.raster_regions == []
+        assert page.rect_regions == []
         assert page.detected_at is not None
 
 
@@ -118,7 +118,7 @@ def test_rerun_does_not_duplicate(pack_dir: Path, tmp_path: Path) -> None:
 
     with open_db(db)() as session:
         assert len(session.scalars(select(Page)).all()) == 2
-        assert len(session.scalars(select(RasterRegion)).all()) == 1
+        assert len(session.scalars(select(RectRegion)).all()) == 1
 
 
 def test_skip_detected_leaves_pages_alone(pack_dir: Path, tmp_path: Path) -> None:
@@ -165,7 +165,7 @@ def test_limit_and_debug_dir(pack_dir: Path, tmp_path: Path) -> None:
     _run(pack_dir, db, "--limit", "1", "--debug-dir", str(debug))
 
     with open_db(db)() as session:
-        assert len(session.scalars(select(RasterRegion)).all()) == 1
+        assert len(session.scalars(select(RectRegion)).all()) == 1
     assert list(debug.glob("*.jpg"))
 
 
@@ -213,7 +213,7 @@ def test_skip_detected_still_reprocesses_a_replaced_file(pack_dir: Path, tmp_pat
 
     with open_db(db)() as session:
         page = session.scalars(select(Page).where(Page.source_file_name == "b.tif")).one()
-        assert page.raster_regions, "у подменённой полосы должна появиться найденная область"
+        assert page.rect_regions, "у подменённой полосы должна появиться найденная область"
 
 
 def test_recopied_file_with_same_content_is_not_re_detected(pack_dir: Path, tmp_path: Path) -> None:
@@ -243,8 +243,8 @@ def test_first_page_is_cover_marks_the_whole_frame(pack_dir: Path, tmp_path: Pat
 
     with open_db(db)() as session:
         first = session.scalars(select(Page).where(Page.source_file_name == "a.tif")).one()
-        assert len(first.raster_regions) == 1
-        region = first.raster_regions[0]
+        assert len(first.rect_regions) == 1
+        region = first.rect_regions[0]
         assert region.kind == KIND_COLOR
         assert region.full_page
         assert (region.x1, region.y1, region.x2, region.y2) == (0, 0, first.width, first.height)
@@ -252,7 +252,7 @@ def test_first_page_is_cover_marks_the_whole_frame(pack_dir: Path, tmp_path: Pat
         assert region.chroma_frac is None
 
         second = session.scalars(select(Page).where(Page.source_file_name == "b.tif")).one()
-        assert second.raster_regions == []
+        assert second.rect_regions == []
 
 
 def test_jobs_do_not_change_the_result(pack_dir: Path, tmp_path: Path) -> None:
@@ -264,7 +264,7 @@ def test_jobs_do_not_change_the_result(pack_dir: Path, tmp_path: Path) -> None:
     def boxes(db: Path):
         with open_db(db)() as session:
             return sorted(
-                (r.x1, r.y1, r.x2, r.y2, r.kind, r.full_page) for r in session.scalars(select(RasterRegion)).all()
+                (r.x1, r.y1, r.x2, r.y2, r.kind, r.full_page) for r in session.scalars(select(RectRegion)).all()
             )
 
     assert boxes(single) == boxes(parallel)
@@ -295,7 +295,7 @@ def test_recolor_changes_kind_without_touching_boxes(pack_dir: Path, tmp_path: P
     _run(pack_dir, db)
 
     with open_db(db)() as session:
-        before = [(r.x1, r.y1, r.x2, r.y2) for r in session.scalars(select(RasterRegion)).all()]
+        before = [(r.x1, r.y1, r.x2, r.y2) for r in session.scalars(select(RectRegion)).all()]
     assert before
 
     # Порог разброса ниже нуля объявляет цветным что угодно — этого и ждём от перекраски.
@@ -305,7 +305,7 @@ def test_recolor_changes_kind_without_touching_boxes(pack_dir: Path, tmp_path: P
     assert result.exit_code == 0, result.output
 
     with open_db(db)() as session:
-        regions = session.scalars(select(RasterRegion)).all()
+        regions = session.scalars(select(RectRegion)).all()
         assert [(r.x1, r.y1, r.x2, r.y2) for r in regions] == before
         assert {r.kind for r in regions} == {KIND_COLOR}
 
@@ -324,9 +324,9 @@ def test_mark_covers_needs_no_pixels(pack_dir: Path, tmp_path: Path) -> None:
 
     with open_db(db)() as session:
         first = session.scalars(select(Page).where(Page.source_file_name == "a.tif")).one()
-        assert len(first.raster_regions) == 1
-        assert first.raster_regions[0].full_page
-        assert first.raster_regions[0].kind == KIND_COLOR
+        assert len(first.rect_regions) == 1
+        assert first.rect_regions[0].full_page
+        assert first.rect_regions[0].kind == KIND_COLOR
 
 
 def test_rerun_without_skip_detected_recomputes_everything(pack_dir: Path, tmp_path: Path) -> None:

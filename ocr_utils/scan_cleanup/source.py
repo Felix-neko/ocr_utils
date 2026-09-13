@@ -142,7 +142,7 @@ def load_markup(
                     rotate_cw=int(page.rotate_cw or 0),
                     regions=tuple(
                         Rect(int(r.x1), int(r.y1), int(r.x2), int(r.y2), r.kind, bool(r.full_page))
-                        for r in page.raster_regions
+                        for r in page.rect_regions
                     ),
                     masks=tuple(
                         MaskRow(m.kind, int(m.left), int(m.top), int(m.width), int(m.height), m.rle)

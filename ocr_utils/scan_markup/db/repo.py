@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ocr_utils.scan_markup.db.models import Issue, MaskAnnotation, Pack, Page, RasterRegion, YearPackage
+from ocr_utils.scan_markup.db.models import Issue, MaskAnnotation, Pack, Page, RectRegion, YearPackage
 from ocr_utils.scan_markup.scan_tree import ScannedYear
 
 logger = logging.getLogger(__name__)
@@ -92,24 +92,37 @@ def upsert_pack(session: Session, name: str, root: Path, years: list[ScannedYear
     return pack
 
 
-def replace_raster_regions(session: Session, page: Page, regions: list[RasterRegion]) -> None:
-    """Заменяет растровые области полосы целиком.
+def replace_rect_regions(
+    session: Session, page: Page, regions: list[RectRegion], kinds: "tuple[str, ...] | None" = None
+) -> None:
+    """Заменяет прямоугольные области полосы: все либо только заданных видов.
 
     Именно замена, а не дополнение: повторная детекция — это новый ответ на тот же
     вопрос, а не добавка к старому, и накапливать оба варианта означало бы отдать
     разметчику вдвое больше прямоугольников.
 
+    ``kinds`` ограничивает замену семейством видов: растровый детектор заменяет только
+    растр (``RASTER_KINDS``), детектор таблиц — только таблицы и схемы (``TABLE_KINDS``).
+    Так таблицы можно дописать в базу, где растр уже уточнён человеком, не тронув его.
+    Область другого вида среди ``regions`` — ошибка вызывающего, а не тихая потеря.
+
     Работаем через КОЛЛЕКЦИЮ связи: ``cascade="all, delete-orphan"`` удалит выпавшие из
     неё строки сам. Через ``session.delete`` + ``session.add`` с ручным ``page_id`` было бы
-    хуже — коллекция ``page.raster_regions`` осталась бы со старым содержимым, и следующий
+    хуже — коллекция ``page.rect_regions`` осталась бы со старым содержимым, и следующий
     вызов удалил бы не то, что нужно.
     """
-    page.raster_regions = regions
+    if kinds is None:
+        page.rect_regions = regions
+    else:
+        foreign = [region.kind for region in regions if region.kind not in kinds]
+        if foreign:
+            raise ValueError(f"области видов {sorted(set(foreign))} не входят в заменяемые {kinds}")
+        page.rect_regions = [region for region in page.rect_regions if region.kind not in kinds] + list(regions)
     session.flush()
 
 
 def replace_masks(session: Session, page: Page, masks: list[MaskAnnotation]) -> None:
-    """Заменяет маски полосы целиком; мотивировка та же, что у :func:`replace_raster_regions`."""
+    """Заменяет маски полосы целиком; мотивировка та же, что у :func:`replace_rect_regions`."""
     page.masks = masks
     session.flush()
 

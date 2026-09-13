@@ -1,4 +1,4 @@
-"""Схема SQLite: пак -> год -> выпуск -> полоса -> (растровые области | печати).
+"""Схема SQLite: пак -> год -> выпуск -> полоса -> (прямоугольные области | маски | точки).
 
 Одна и та же схема обслуживает обе базы — предварительную (результат ``detect``) и
 уточнённую (результат ``from-cvat``). Различает их только колонка ``source`` у разметки,
@@ -54,7 +54,27 @@ KIND_STAMP_SUSPECT = "stamp_suspect"
 # Автодетектора у него нет: ставится только руками, меткой «Цветной текст или штрих».
 KIND_COLOR_TEXT = "color_text"
 
+# Виды, которые ставит РАСТРОВЫЙ детектор (``detection``) и которые означают «здесь не
+# набор, а картинка или оттиск»: только их он и заменяет при пересчёте полосы.
 RASTER_KINDS = (KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT, KIND_COLOR_TEXT)
+
+# Таблица с линейками и блок-схема / штриховой рисунок (line art). Ставит детектор таблиц
+# ``table_detection`` (тот же этап ``detect``, но своя версия и свои колонки у полосы —
+# см. ``Page.table_detector_version``). В PDF картинкой не вырезаются: это набор, его
+# распознают, а рамка нужна, чтобы обойтись с таблицей и схемой иначе, чем со сплошным
+# текстом (не распрямлять строки, не расширять графы схемы). Оба вида — прямоугольники в
+# ``rect_regions`` рядом с растром, потому что структура у них та же, а в CVAT это те же
+# rectangle-метки, которые разметчик уточняет тем же инструментом.
+#
+# «Схема» и «рисунок» детектора (блок-схема с текстом в коробках против сетки графика или
+# чертежа) в базе — один вид: лечат их одинаково, а тонкий вид лежит в ``detector_info``.
+KIND_TABLE = "table"
+KIND_LINE_ART_SCHEMA = "line_art_schema"
+
+TABLE_KINDS = (KIND_TABLE, KIND_LINE_ART_SCHEMA)
+
+# Все виды прямоугольников, которые вообще бывают в ``rect_regions``.
+RECT_KINDS = RASTER_KINDS + TABLE_KINDS
 
 # Типы, которые действительно означают ИЛЛЮСТРАЦИЮ: их вырезают из оригинала и вклеивают
 # в PDF. ``KIND_STAMP_SUSPECT`` сюда не входит намеренно.
@@ -330,16 +350,30 @@ class Page(Base):
     detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
+    # --- Таблицы и блок-схемы -------------------------------------------------
+    # Своя версия и своё время, как у ориентации, и по той же причине: детектор таблиц
+    # правится отдельно от растрового, и его правка не должна заставлять перечитывать пак
+    # ради растра — и наоборот. NULL значит «таблицы на этой полосе не искали».
+    table_detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    tables_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+
     issue: Mapped[Issue] = relationship(back_populates="pages")
-    raster_regions: Mapped[list["RasterRegion"]] = relationship(back_populates="page", cascade="all, delete-orphan")
+    rect_regions: Mapped[list["RectRegion"]] = relationship(back_populates="page", cascade="all, delete-orphan")
     masks: Mapped[list["MaskAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")
     points: Mapped[list["PointAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")
 
 
-class RasterRegion(Base):
-    """Прямоугольник растрового изображения на полосе, координаты — ОРИГИНАЛА.
+class RectRegion(Base):
+    """Прямоугольная область на полосе, координаты — ОРИГИНАЛА.
 
-    Измерения пишутся всегда, даже когда ``kind`` уже проставлен: перекалибровать порог по
+    Вид области — колонка ``kind``: растр (``RASTER_KINDS``: цветная или серая картинка,
+    подозрение на печать, цветной текст) либо таблица и блок-схема (``TABLE_KINDS``). Одна
+    таблица на все виды, потому что структура одна — четыре координаты, источник, шейп
+    CVAT, — а разные семейства различаются только тем, кто их ставит и как ими пользуются
+    ниже по конвейеру. Раньше таблица звалась ``raster_regions``; переименована, когда в
+    ней появились таблицы, — ``db.migrate`` переименовывает её в старых базах.
+
+    Измерения растра пишутся всегда, даже когда ``kind`` уже проставлен: перекалибровать порог по
     12 тысячам полос иначе значило бы второй проход по полутерабайту оригиналов с
     медленного диска. Их три, и они не заменяют друг друга:
 
@@ -362,9 +396,14 @@ class RasterRegion(Base):
 
     ``ink_contrast`` — «бумага минус краска» внутри области. В решении растр/штрих не
     участвует: по нему бледный оттиск библиотечной печати отличается от чёрной виньетки.
+
+    У таблиц и схем растровые измерения пусты, зато заполнен ``detector_info`` — JSON с
+    тем, что знает о находке детектор таблиц: тонкий вид (``схема``/``рисунок``), балл,
+    наклон линеек, признаки решётки и проверки. Тоже «измерения пишутся всегда»: по ним
+    пороги детектора перекалибровываются без чтения оригиналов.
     """
 
-    __tablename__ = "raster_regions"
+    __tablename__ = "rect_regions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), index=True)
@@ -385,10 +424,13 @@ class RasterRegion(Base):
     screen_peak: Mapped[float | None] = mapped_column(Float, default=None)
     ink_contrast: Mapped[float | None] = mapped_column(Float, default=None)
 
+    # JSON детектора таблиц; у растровых областей пуст.
+    detector_info: Mapped[str | None] = mapped_column(Text, default=None)
+
     source: Mapped[str] = mapped_column(String(16), default=SOURCE_AUTO)
     cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)
 
-    page: Mapped[Page] = relationship(back_populates="raster_regions")
+    page: Mapped[Page] = relationship(back_populates="rect_regions")
 
     @property
     def width(self) -> int:
@@ -439,7 +481,7 @@ class MaskAnnotation(Base):
 class PointAnnotation(Base):
     """Точка на полосе, координаты — ОРИГИНАЛА. Пока единственный вид — место экслибриса.
 
-    Отдельная таблица, а не вырожденный прямоугольник в ``raster_regions`` и не маска из
+    Отдельная таблица, а не вырожденный прямоугольник в ``rect_regions`` и не маска из
     одного пикселя: точка отвечает на другой вопрос. Прямоугольник и маска говорят «вот
     объект, вот его границы», а точка — «вот МЕСТО, куда положить свой знак». Границ у неё
     нет вовсе, и хранить их нулями значило бы врать потребителю.
