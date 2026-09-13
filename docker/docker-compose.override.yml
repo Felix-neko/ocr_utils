@@ -34,6 +34,10 @@ services:
     container_name: cvat_mts_server
     environment:
       CVAT_ANALYTICS: 0
+      # Порог заполнения диска, выше которого health-check объявляет сервер нездоровым и
+      # UI встречает «Required services are not healthy». Умолчание 90% нам мало: корневой
+      # раздел (там же /var/lib/docker) постоянно держится около него. См. base.py:838.
+      CVAT_HEALTH_DISK_USAGE_MAX: 95
       # Модуль настроек с доверенными origin'ами для раздачи через туннель — см. сам файл.
       # В образе DJANGO_SETTINGS_MODULE зашит на этапе сборки, поэтому переопределяем прямо
       # переменной, а не через CVAT_CONFIGURATION.
