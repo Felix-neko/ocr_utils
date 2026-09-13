@@ -489,6 +489,24 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 "перенося ручную разметку со всех неизменившихся полос.",
                                 year.name,
                             )
+                            if params.append_kinds:
+                                # Дозаливка в разошедшийся год идёт, но мимо изменившихся полос:
+                                # их кадр показывает старый файл, а находки посчитаны по новому.
+                                # Остальное (номера кадров, отметка о заливке) не трогается —
+                                # иначе расхождение перестало бы быть видно.
+                                changed_names = {
+                                    page.cvat_rel_path for _issue, pages_changed, _a in drift for page in pages_changed
+                                }
+                                fresh_pages = [page for page in pages if page.cvat_rel_path not in changed_names]
+                                _append_kinds(
+                                    task,
+                                    year.name,
+                                    fresh_pages,
+                                    frame_index_by_name(task),
+                                    label_ids,
+                                    params.append_kinds,
+                                    stats,
+                                )
                             continue
 
                 year.cvat_task_id = task.id

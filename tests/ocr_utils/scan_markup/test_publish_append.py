@@ -167,3 +167,24 @@ def test_copy_regions_moves_only_wanted_kinds_and_keeps_manual_raster(tmp_path, 
         main, ["copy-regions", "--db", str(src_db), "--out-db", str(src_db), "--pack-name", "x"]
     )
     assert result.exit_code != 0 and "совпадает" in result.output
+
+
+def test_append_goes_into_a_drifted_year_but_skips_changed_pages(monkeypatch, pack_db):
+    """Год с изменившимся файлом без --recreate-stale: дозаливка идёт мимо изменившейся полосы,
+    отметка о заливке у неё не трогается — расхождение остаётся видно."""
+    db, factory, tmp_path, task, _tasks = _published_pack(monkeypatch, pack_db)
+    with factory() as session:
+        pack = require_pack(session, "пак-1")
+        pages = [p for issue in pack.year_packages[0].issues for p in issue.pages]
+        pages[0].file_hash = "новый-файл"  # первая полоса разошлась с CVAT; на ней же таблица
+        session.commit()
+
+    stats = publish.run_publish(_params(db, tmp_path, append_kinds=(KIND_TABLE, KIND_LINE_ART_SCHEMA)), factory)
+
+    assert stats.stale_years == ["1974"] and stats.tasks_rebuilt == 0
+    added = task.appended[0][1]
+    assert [(s.frame, s.label_id) for s in added] == [(1, 18)], "таблица изменившейся полосы не дозаливается"
+    with factory() as session:
+        pack = require_pack(session, "пак-1")
+        first = pack.year_packages[0].issues[0].pages[0]
+        assert first.cvat_file_hash != first.file_hash, "расхождение не замазано"

@@ -150,3 +150,32 @@ def test_cover_page_gets_an_empty_table_set(tmp_path: Path) -> None:
     page = _page(db)
     assert page.tables_detected_at is not None
     assert [r.kind for r in page.rect_regions if r.kind in TABLE_KINDS] == []
+
+
+def test_tables_only_rerun_does_not_wake_the_arbiter(tmp_path: Path, monkeypatch) -> None:
+    """Полоса, которой нужны одни таблицы, к арбитру ориентации не идёт: её ответ уже принят."""
+    from ocr_utils.scan_markup.detection import run as run_module
+
+    seen: list[dict] = []
+    original = run_module._run_arbiter
+
+    def spy(session, params, by_rel, stats):
+        seen.append(dict(by_rel))
+        return original(session, params, by_rel, stats)
+
+    monkeypatch.setattr(run_module, "_run_arbiter", spy)
+    pack = tmp_path / "пак-1"
+    _table_page(pack / "1974" / "01" / "a.tif")
+    db = tmp_path / "m.sqlite"
+    common = ["detect", "--pack-dir", str(pack), "--db", str(db), "--no-use-surya-layout", "--no-first-page-is-cover"]
+    result = CliRunner().invoke(main, [*common, "--orientation-detectors", "ink_axis,ocr_vote"])
+    assert result.exit_code == 0, result.output + str(result.exception)
+    assert len(seen) == 1 and len(seen[0]) == 1, "первый прогон считал ориентацию — полоса у арбитра"
+
+    with open_db(db)() as session:
+        page = session.scalars(select(Page)).one()
+        page.table_detector_version = TABLE_DETECTOR_VERSION - 1
+        session.commit()
+    result = CliRunner().invoke(main, [*common, "--orientation-detectors", "ink_axis,ocr_vote", "--skip-detected"])
+    assert result.exit_code == 0, result.output + str(result.exception)
+    assert len(seen) == 2 and seen[1] == {}, "пересчитывались одни таблицы — арбитру смотреть нечего"

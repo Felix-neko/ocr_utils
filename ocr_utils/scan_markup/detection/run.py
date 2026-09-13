@@ -527,6 +527,10 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
         jobs, by_rel = _collect_jobs(session, params, stats, years)
         session.commit()
 
+        # Полосы, чью ориентацию считали ЭТИМ прогоном: только их смотрит арбитр. Полоса,
+        # которой нужны были одни таблицы, к арбитру не идёт — иначе он перечитывал бы
+        # сотню кандидатов пака при каждом прогоне и мог переиначить уже принятый ответ.
+        oriented: set[str] = set()
         for result in _iter_results(jobs, params, detector):
             page = by_rel[result.rel_path]
             if result.error:
@@ -540,6 +544,8 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
                 stats.skipped += 1
                 continue
             _apply_result(session, page, result, stats)
+            if result.combo is not None:
+                oriented.add(result.rel_path)
             session.commit()
             drawn = list(result.regions) + [
                 DetectedRegion((t.x1, t.y1, t.x2, t.y2), t.kind, False) for t in result.tables or []
@@ -547,7 +553,7 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
             if params.debug_dir is not None and drawn:
                 write_debug_overlay(params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, drawn)
 
-        _run_arbiter(session, params, by_rel, stats)
+        _run_arbiter(session, params, {rel: by_rel[rel] for rel in oriented}, stats)
 
     return stats
 
