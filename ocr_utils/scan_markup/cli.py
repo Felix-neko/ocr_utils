@@ -2,7 +2,7 @@
 
 Три команды по трём шагам конвейера::
 
-    detect     оригиналы          -> SQLite (предварительная разметка)
+    detect     оригиналы          -> SQLite (предварительная разметка: растр, таблицы, ориентация)
     to-cvat    SQLite             -> уменьшенные копии + проект CVAT с предразметкой
     from-cvat  CVAT               -> SQLite той же схемы (уточнённая разметка)
 """
@@ -129,6 +129,31 @@ def main() -> None:
     "границу, отличают растр от штриха и решают про цвет. Нужен GPU. Без флага работают одни "
     "пиксели — прогон дешевле, но на полосах содержания появляются ложные срабатывания "
     "(строка отточий даёт ту же статистику, что растровая сетка).",
+)
+@click.option(
+    "--layout-cache",
+    "layout_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Каталог кэша разметки surya layout: pickle на полосу с той же раскладкой папок, что "
+    "у пака. Разбор полосы уже есть — берётся с диска, модель не зовётся; файла нет, он битый "
+    "или чужой — полоса разбирается заново и файл перезаписывается. Разметка общая для растра "
+    "и таблиц; при попадании таблицы считаются прямо в воркерах.",
+)
+@click.option(
+    "--raster/--no-raster",
+    default=True,
+    show_default=True,
+    help="Искать растровые области (фотографии, печати). Выключить — когда нужны одни таблицы: "
+    "растр в базе тогда не трогается вовсе.",
+)
+@click.option(
+    "--tables/--no-tables",
+    default=True,
+    show_default=True,
+    help="Искать таблицы и блок-схемы (scan_markup.table_detection) по копии 1/4 тем же чтением "
+    "полосы. Своя версия детектора: при --skip-detected пересчитываются только полосы, где "
+    "таблиц ещё не искали или искали прежней версией.",
 )
 @click.option(
     "--first-page-is-cover/--no-first-page-is-cover",
@@ -355,7 +380,7 @@ def main() -> None:
 )
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_level: str, **kwargs) -> None:
-    """Предварительная детекция растровых областей по оригиналам."""
+    """Предварительная детекция растровых областей, таблиц, схем и ориентации по оригиналам."""
     _set_log_level(log_level)
     debug_dir = kwargs.pop("debug_dir")
     if debug_dir is not None:
@@ -370,6 +395,7 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
         f"Файлов изменилось с прошлого прогона: {stats.changed}.\n"
         f"Растровых областей: {stats.regions} (цветных {stats.color}, серых {stats.grayscale}, "
         f"во всю полосу {stats.full_page}).\n"
+        f"Таблиц: {stats.tables}, схем и line art: {stats.line_art}.\n"
         f"Полос под поворот: {stats.rotated}."
     )
 

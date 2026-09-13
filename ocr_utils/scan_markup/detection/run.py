@@ -16,6 +16,13 @@ SURYA ЖИВЁТ В РОДИТЕЛЕ, И ПУЛ ЭТОМУ НЕ МЕШАЕТ. В
 ними едет разбор на несколько мегабайт, а не 21-мегапиксельный кадр. Сериализуется таким
 образом только инференс, а чтение с медленного диска и счёт по полному кадру идут в
 шестнадцать процессов, и прогон по-прежнему упирается в диск.
+
+ТРИ ДЕТЕКТОРА, ТРИ ВЕРСИИ. Растр (``DETECTOR_VERSION``), ориентация (``ORIENTATION_VERSION``)
+и таблицы со схемами (``TABLE_DETECTOR_VERSION``) считаются одним чтением полосы, но помнят
+себя порознь: при ``--skip-detected`` пересчитывается только то, чья версия устарела или
+чего ещё не считали, а полоса, которой нужны одни таблицы, растр и ориентацию не трогает.
+Разметка surya у растра и таблиц общая и берётся из кэша ``--layout-cache``: попадание —
+воркер считает таблицы сам, промах — родитель зовёт модель и пишет в кэш.
 """
 
 import logging
@@ -28,9 +35,21 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_AUTO, SOURCE_CVAT, Page, RectRegion
+from ocr_utils.scan_markup.db.models import (
+    KIND_COLOR,
+    KIND_GRAYSCALE,
+    KIND_LINE_ART_SCHEMA,
+    KIND_TABLE,
+    RASTER_KINDS,
+    SOURCE_AUTO,
+    SOURCE_CVAT,
+    TABLE_KINDS,
+    Page,
+    RectRegion,
+)
 from ocr_utils.scan_markup.db.repo import iter_pages, replace_rect_regions, upsert_pack
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
+from ocr_utils.scan_markup.table_detection import TABLE_DETECTOR_VERSION
 from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
 from ocr_utils.scan_markup.rotation import format_allowed
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
@@ -59,13 +78,15 @@ from ocr_utils.scan_markup.detection.regions import (
     SURYA_LINEART_P99_PX,
 )
 from ocr_utils.scan_markup.detection.page import (
+    DetectedRegion,
     orientation_image,
     PageAnalysis,
     PageOptions,
     PageResult,
     analyse_page,
     finish_page,
-    surya_boxes_for,
+    page_layout_for,
+    surya_boxes_from,
 )
 from ocr_utils.scan_markup.hashing import apply_stamp, stat_matches, stat_stamp
 from ocr_utils.scan_markup.scan_tree import count_pages, scan_pack
@@ -91,6 +112,11 @@ class DetectParams:
     skip_detected: bool = False
     rehash_all: bool = False
     use_surya_layout: bool = True
+    # Кэш разметки surya (см. ``detection.layout_cache``); None — считать каждый раз.
+    layout_cache_dir: Path | None = None
+    # Что считать: растр, таблицы со схемами. Ориентация — ниже, у неё свой набор ключей.
+    raster: bool = True
+    tables: bool = True
     first_page_is_cover: bool = False
     jobs: int = 8
     chroma_thr: float = CHROMA_THR
@@ -158,6 +184,10 @@ class DetectParams:
             orientation=self.orientation,
             orientation_detectors=self.cpu_orientation_detectors(),
             allowed_rotations=self.allowed_rotations(),
+            raster=self.raster,
+            tables=self.tables,
+            use_surya_layout=self.use_surya_layout,
+            layout_cache_dir=self.layout_cache_dir,
         )
 
     def detector_names(self) -> tuple[str, ...]:
@@ -218,6 +248,9 @@ class DetectStats:
     color: int = 0
     grayscale: int = 0
     full_page: int = 0
+    # Таблицы и схемы — своим счётом: их считает другой детектор.
+    tables: int = 0
+    line_art: int = 0
 
 
 @dataclass(frozen=True)
@@ -252,6 +285,20 @@ def _needs_detection(page: Page, params: DetectParams, stamp) -> bool:
     if page.detector_version != DETECTOR_VERSION:
         return True
     if params.rehash_all:
+        return True
+    return not stat_matches(page, stamp)
+
+
+def _tables_stale(page: Page) -> bool:
+    """Устарели ли таблицы сами по себе: не считали или считали прежней версией детектора."""
+    return page.tables_detected_at is None or page.table_detector_version != TABLE_DETECTOR_VERSION
+
+
+def _needs_tables(page: Page, params: DetectParams, stamp) -> bool:
+    """То же для ТАБЛИЦ, и версия у них своя — по той же причине, что у ориентации."""
+    if not params.tables:
+        return False
+    if _tables_stale(page) or params.rehash_all:
         return True
     return not stat_matches(page, stamp)
 
@@ -317,44 +364,73 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
     # Делитель и размеры уменьшенной копии здесь НЕ считаются: их выбирает to-cvat по
     # своему --cvat-dpi. Отсюда уходит только то, что прочитано из файла.
     page.width, page.height, page.dpi = result.width, result.height, result.dpi
-    page.detected_at = _utcnow()
-    page.detector_version = DETECTOR_VERSION
     _apply_orientation(page, result, stats)
     # Отпечаток пишется ПОСЛЕ успешной детекции: полоса, на которой детекция упала, не
     # должна выглядеть обработанной для следующего прогона.
     if result.stamp is not None:
         apply_stamp(page, result.stamp)
-
-    replace_rect_regions(
-        session,
-        page,
-        [
-            RectRegion(
-                x1=region.box[0],
-                y1=region.box[1],
-                x2=region.box[2],
-                y2=region.box[3],
-                kind=region.kind,
-                full_page=region.full_page,
-                chroma_frac=region.chroma_frac,
-                chroma_spread=region.chroma_spread,
-                chroma_self_frac=region.chroma_self_frac,
-                dot_frac=region.dot_frac,
-                mid_frac=region.mid_frac,
-                tone_entropy=region.tone_entropy,
-                screen_peak=region.screen_peak,
-                ink_contrast=region.ink_contrast,
-                source=SOURCE_AUTO,
-            )
-            for region in result.regions
-        ],
-    )
-
     stats.pages += 1
-    stats.regions += len(result.regions)
-    stats.color += sum(1 for region in result.regions if region.kind == KIND_COLOR)
-    stats.grayscale += sum(1 for region in result.regions if region.kind == KIND_GRAYSCALE)
-    stats.full_page += sum(1 for region in result.regions if region.full_page)
+
+    # Растр: версия, время и области — только когда растр действительно считали. Иначе
+    # полоса, которой нужны были одни таблицы, выглядела бы пересчитанной растром.
+    if result.raster:
+        page.detected_at = _utcnow()
+        page.detector_version = DETECTOR_VERSION
+        replace_rect_regions(
+            session,
+            page,
+            [
+                RectRegion(
+                    x1=region.box[0],
+                    y1=region.box[1],
+                    x2=region.box[2],
+                    y2=region.box[3],
+                    kind=region.kind,
+                    full_page=region.full_page,
+                    chroma_frac=region.chroma_frac,
+                    chroma_spread=region.chroma_spread,
+                    chroma_self_frac=region.chroma_self_frac,
+                    dot_frac=region.dot_frac,
+                    mid_frac=region.mid_frac,
+                    tone_entropy=region.tone_entropy,
+                    screen_peak=region.screen_peak,
+                    ink_contrast=region.ink_contrast,
+                    source=SOURCE_AUTO,
+                )
+                for region in result.regions
+            ],
+            kinds=RASTER_KINDS,
+        )
+        stats.regions += len(result.regions)
+        stats.color += sum(1 for region in result.regions if region.kind == KIND_COLOR)
+        stats.grayscale += sum(1 for region in result.regions if region.kind == KIND_GRAYSCALE)
+        stats.full_page += sum(1 for region in result.regions if region.full_page)
+
+    # Таблицы и схемы — то же правило: ``None`` значит «не считали», и колонки не трогаются.
+    # Заменяются только их виды: растр, в том числе уточнённый человеком, остаётся.
+    if result.tables is not None:
+        page.tables_detected_at = _utcnow()
+        page.table_detector_version = TABLE_DETECTOR_VERSION
+        replace_rect_regions(
+            session,
+            page,
+            [
+                RectRegion(
+                    x1=region.x1,
+                    y1=region.y1,
+                    x2=region.x2,
+                    y2=region.y2,
+                    kind=region.kind,
+                    full_page=False,
+                    detector_info=region.detector_info,
+                    source=SOURCE_AUTO,
+                )
+                for region in result.tables
+            ],
+            kinds=TABLE_KINDS,
+        )
+        stats.tables += sum(1 for region in result.tables if region.kind == KIND_TABLE)
+        stats.line_art += sum(1 for region in result.tables if region.kind == KIND_LINE_ART_SCHEMA)
 
 
 def _collect_jobs(
@@ -390,9 +466,10 @@ def _collect_jobs(
 
         # Дешёвая проверка идёт первой: совпали версия детектора, размер и время правки —
         # файл не читается вовсе. Именно ради этого пропуска ``stat`` и лежит в базе.
-        need_regions = not params.skip_detected or _needs_detection(page, params, stamp)
+        need_regions = params.raster and (not params.skip_detected or _needs_detection(page, params, stamp))
         need_orientation = _needs_orientation(page, params, stamp) if params.skip_detected else params.orientation
-        if not need_regions and not need_orientation:
+        need_tables = params.tables and (not params.skip_detected or _needs_tables(page, params, stamp))
+        if not need_regions and not need_orientation and not need_tables:
             stats.skipped += 1
             continue
 
@@ -401,25 +478,27 @@ def _collect_jobs(
         # ``stat``: совпал хеш — файл просто переписали тем же содержимым, и декодировать его
         # незачем. Два условия, и оба обязательны. Без ``--skip-detected`` короткого замыкания
         # быть не должно вовсе: прогон без флага — это требование пересчитать всё. А при смене
-        # версии детектора совпадение хеша ничего не значит: файл прежний, алгоритм новый.
+        # версии ЛЮБОГО из детекторов совпадение хеша ничего не значит: файл прежний,
+        # алгоритм новый.
+        regions_current = not params.raster or (
+            page.detected_at is not None and page.detector_version == DETECTOR_VERSION
+        )
+        tables_current = not params.tables or not _tables_stale(page)
+        orientation_current = not params.orientation or not _orientation_stale(page, params)
         stale_stat_only = (
             params.skip_detected
-            and page.detected_at is not None
             and page.file_hash is not None
-            and page.detector_version == DETECTOR_VERSION
+            and regions_current
+            and tables_current
+            and orientation_current
         )
-        # Полосе, которой нужна только ориентация, растровый этап всё равно считается: он
-        # идёт по тому же разжатому кадру и почти ничего не добавляет к стоимости чтения.
-        # А вот НАОБОРОТ — считать ориентацию там, где она уже свежая, — заметная трата:
-        # tesseract OSD стоит две с половиной секунды на полосу.
-        job_options = options if need_orientation else dataclasses.replace(options, orientation=False)
-
-        # Короткое замыкание по хешу действует и на ориентацию: совпал хеш — содержимое
-        # прежнее, а значит прежний вердикт о повороте по-прежнему верен, и декодировать
-        # полосу незачем. Но только пока версия ориентации та же: при её смене совпадение
-        # хеша не значит ничего — файл прежний, алгоритм новый.
-        orientation_current = not params.orientation or not _orientation_stale(page, params)
-        known_digest = page.file_hash if stale_stat_only and orientation_current else None
+        # Считается только то, что нужно этой полосе. Растр там, где он свежий, не
+        # пересчитывается: это не только CPU по полному кадру, но и замена областей в базе,
+        # а ориентация — заметная трата: tesseract OSD стоит две с половиной секунды на полосу.
+        job_options = dataclasses.replace(
+            options, orientation=need_orientation, raster=need_regions, tables=need_tables
+        )
+        known_digest = page.file_hash if stale_stat_only else None
         jobs.append(_Job(path, page.source_rel_path, page.order_index, job_options, known_digest))
     return jobs, by_rel
 
@@ -462,10 +541,11 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
                 continue
             _apply_result(session, page, result, stats)
             session.commit()
-            if params.debug_dir is not None and result.regions:
-                write_debug_overlay(
-                    params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, result.regions
-                )
+            drawn = list(result.regions) + [
+                DetectedRegion((t.x1, t.y1, t.x2, t.y2), t.kind, False) for t in result.tables or []
+            ]
+            if params.debug_dir is not None and drawn:
+                write_debug_overlay(params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, drawn)
 
         _run_arbiter(session, params, by_rel, stats)
 
@@ -562,7 +642,8 @@ def _finish(analyses, total: int, params: DetectParams, detector):
     batches = _orientation_gpu(params)
     for analysis in tqdm(analyses, total=total, desc="детекция", unit="полоса"):
         gpu = _orientation_for(analysis, batches) if batches else None
-        yield finish_page(analysis, options, surya_boxes_for(analysis, detector), gpu)
+        layout = page_layout_for(analysis, detector, options)
+        yield finish_page(analysis, options, surya_boxes_from(layout, analysis), gpu, layout)
 
 
 def _orientation_for(analysis, batches) -> "dict | None":

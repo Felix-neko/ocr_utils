@@ -21,6 +21,13 @@ DB="$MARKUP_ROOT/pack1.sqlite"
 DB_REVIEWED="$MARKUP_ROOT/pack1_reviewed.sqlite"
 DEBUG_DIR="$MARKUP_ROOT/debug"
 
+# Кэш разметки surya layout по сырым TIFF «Готовое»: pickle на полосу с той же раскладкой
+# папок, что у пака. Набит исследованием детектора таблиц (research/legacy/table_processing,
+# run_scripts/table_processing/run_layout_pack_source.sh) и полон на все 12 135 полос;
+# detect берёт разметку отсюда и модель не зовёт, а полосу без файла (или с битым файлом)
+# разбирает заново и дописывает сюда же.
+LAYOUT_CACHE_DIR="/mnt/SYSTEM/raw/mts/pack1_table_research/layout_surya_готовое"
+
 # Валидационная выборка: папки с примерами неправильной разметки, надёрганными из DEBUG_DIR
 # глазами. Имя папки называет тип дефекта, имена файлов внутри — имена оверлеев.
 CASES_DIR="$MARKUP_ROOT/некоторые проблемные картинки"

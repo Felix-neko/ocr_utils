@@ -120,21 +120,36 @@ class LayoutDetector:
 
         ``gray`` — серая версия кадра, если она уже посчитана вызывающим.
         """
-        from PIL import Image as PILImage
-
-        h, w = bgr.shape[:2]
-        scale = min(1.0, LAYOUT_WORK_SIDE / max(h, w))
-        small = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
-        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
-        blocks = self._load()([PILImage.fromarray(rgb)])[0].bboxes
-        candidates = [np.asarray(b.polygon, dtype=np.float32) / scale for b in blocks if b.label in self._labels]
+        result, scale = self.predict(bgr)
+        candidates = self.polygons_of(result, scale, self._labels)
         if not candidates or not filter_raster:
             return candidates
 
         if gray is None:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         return [poly for poly in candidates if is_raster_block(gray, poly)]
+
+    def predict(self, bgr: np.ndarray) -> "tuple[object, float]":
+        """Сырой ответ surya (``LayoutResult``) по кадру и масштаб, в котором он ему подавался.
+
+        Отдельно от :meth:`picture_polygons`, потому что у ответа два потребителя:
+        блоки Picture нужны растру, а Table/Figure/Form/Text — детектору таблиц
+        (``scan_markup.table_detection``), и модель ради них зовётся один раз. Координаты в
+        ответе — в пикселях УМЕНЬШЕННОГО кадра: делить на ``scale``.
+        """
+        from PIL import Image as PILImage
+
+        h, w = bgr.shape[:2]
+        scale = min(1.0, LAYOUT_WORK_SIDE / max(h, w))
+        small = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        return self._load()([PILImage.fromarray(rgb)])[0], scale
+
+    @staticmethod
+    def polygons_of(result: object, scale: float, labels: "tuple[str, ...]") -> "list[np.ndarray]":
+        """Полигоны блоков нужных меток из сырого ответа, пересчитанные в пиксели поданного кадра."""
+        blocks = getattr(result, "bboxes", ())
+        return [np.asarray(b.polygon, dtype=np.float32) / scale for b in blocks if b.label in labels]
 
 
 def is_raster_block(gray: np.ndarray, polygon: np.ndarray) -> bool:

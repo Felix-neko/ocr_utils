@@ -23,6 +23,13 @@
 
 Здесь же снимается отпечаток файла: файл всё равно читается целиком, и хеш на прогретом
 кеше стоит доли секунды (см. ``scan_markup.hashing``).
+
+ТАБЛИЦЫ И БЛОК-СХЕМЫ (``scan_markup.table_detection``) считаются тем же прогоном по той же
+копии 1/4. Детектору нужна разметка surya той же копии; если она нашлась в кэше на диске
+(``layout_cache``), таблицы считаются прямо в воркере — GPU для этого не нужен, а счёт по
+линейкам стоит десятки миллисекунд и параллелится вместе с чтением. Если разметки в кэше
+нет, её считает родитель, и таблицы досчитываются там же, после модели. Без surya вовсе
+(``--no-use-surya-layout``) таблицы считаются в воркере по одним линейкам.
 """
 
 import logging
@@ -37,6 +44,8 @@ from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.scan_cropping.image_io import read_dpi
 from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_STAMP_SUSPECT
 from ocr_utils.scan_markup.detection import cover as cover_module
+from ocr_utils.scan_markup.detection import layout_cache
+from ocr_utils.scan_markup.detection.layout_cache import CachedLayout
 from ocr_utils.scan_markup.detection.boxes import (
     FULL_PAGE_FRAC,
     MIN_REGION_FRAC,
@@ -80,6 +89,9 @@ from ocr_utils.scan_markup.hashing import FileStamp, full_stamp
 from ocr_utils.scan_markup.orientation.analysis import combine, run_cpu_detectors
 from ocr_utils.scan_markup.orientation.detectors.base import ROTATIONS, Verdict
 from ocr_utils.scan_markup.orientation.image_io import frame_from_gray
+from ocr_utils.scan_markup.table_detection import Region, detect_regions
+from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.scan_markup.table_detection.layout import Block, PageLayout, from_surya_result
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +140,17 @@ class PageOptions:
     min_cells: int | None = None
     # Отпечаток файла: считать хеш или ограничиться ``stat``.
     need_digest: bool = True
+
+    # --- Что считать на полосе ---------------------------------------------------
+    # Растровые области (``detection.regions``) — дорогая часть: точки по полному кадру.
+    raster: bool = True
+    # Таблицы и блок-схемы (``table_detection``) по копии 1/4.
+    tables: bool = False
+    # Зовёт ли родитель surya вовсе. Воркеру это знать нужно: при промахе кэша таблицы ждут
+    # разметку от родителя, а без surya ждать нечего — считаются здесь по одним линейкам.
+    use_surya_layout: bool = True
+    # Каталог кэша разметки surya (см. ``layout_cache``); ``None`` — без кэша.
+    layout_cache_dir: Path | None = None
 
     # --- Ориентация полосы ---------------------------------------------------
     # Считается тем же прогоном, что и растр, ради одного: пак весом полтерабайта читается
@@ -183,6 +206,16 @@ class PageAnalysis:
     orientation: dict[str, "Verdict"] = field(default_factory=dict)
     # Уменьшенная копия под GPU-детектор ориентации: её собирает родитель из ``work``.
     orientation_done: bool = False
+    # Что просили считать на ЭТОЙ полосе. Родитель собирает результат по общим опциям
+    # прогона, а решение «растр свежий, нужны одни таблицы» принято по полосе — и едет с ней.
+    raster: bool = True
+    tables_wanted: bool = False
+    # Серая копия 1/4: по ней ищутся линейки таблиц и блоки Picture.
+    work_gray: np.ndarray | None = None
+    # Разметка surya из кэша; ``None`` — промах, считает родитель (если surya включена).
+    layout: CachedLayout | None = None
+    # Таблицы и схемы, если их успел посчитать воркер; ``None`` — считать в родителе.
+    tables: list[Region] | None = None
 
 
 @dataclass
@@ -203,6 +236,10 @@ class PageResult:
     # и это НЕ то же самое, что «поворот не нужен».
     orientation: dict[str, "Verdict"] = field(default_factory=dict)
     combo: "Verdict | None" = None
+    # Считали ли растр: без этого пустой ``regions`` неотличим от «не трогали».
+    raster: bool = True
+    # Таблицы и схемы; ``None`` — не считали (то же различие, что у ориентации).
+    tables: list[Region] | None = None
 
 
 def resolve_dpi(path: Path, default_dpi: int | None) -> int:
@@ -233,7 +270,9 @@ def analyse_page(
     try:
         dpi = resolve_dpi(path, options.default_dpi)
         stamp = full_stamp(path) if options.need_digest else None
-        analysis = PageAnalysis(rel_path, order_index, dpi=dpi, stamp=stamp)
+        analysis = PageAnalysis(
+            rel_path, order_index, dpi=dpi, stamp=stamp, raster=options.raster, tables_wanted=options.tables
+        )
         if known_digest is not None and stamp is not None and stamp.digest == known_digest:
             return analysis
 
@@ -246,6 +285,9 @@ def analyse_page(
             analysis.ready = [DetectedRegion(box, KIND_COLOR, True)]
             # Обложка по определению не лежит боком, и читать ради этого 40 МБ незачем.
             analysis.orientation_done = options.orientation
+            # Таблиц на обложке нет по тому же определению: ответ известен, и он пуст.
+            if options.tables:
+                analysis.tables = []
             return analysis
 
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -258,6 +300,7 @@ def analyse_page(
             (max(1, analysis.width // HALFTONE_DOWNSCALE), max(1, analysis.height // HALFTONE_DOWNSCALE)),
             interpolation=cv2.INTER_AREA,
         )
+        analysis.work_gray = cv2.cvtColor(analysis.work, cv2.COLOR_BGR2GRAY)
         analysis.params = params_for_dpi(
             dpi,
             cell_px=options.cell_px,
@@ -268,8 +311,14 @@ def analyse_page(
             min_cells=options.min_cells,
         )
         full_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        analysis.regions, analysis.stats, analysis.centroids = screen_regions(full_gray, analysis.params)
-        analysis.tone = tone_maps(full_gray, analysis.params)
+        if options.raster:
+            analysis.regions, analysis.stats, analysis.centroids = screen_regions(full_gray, analysis.params)
+            analysis.tone = tone_maps(full_gray, analysis.params)
+        if options.layout_cache_dir is not None:
+            analysis.layout = layout_cache.load(options.layout_cache_dir, rel_path)
+        if options.tables and (analysis.layout is not None or not options.use_surya_layout):
+            # Разметка есть (или не будет вовсе) — таблицы считаются здесь, в пуле.
+            analysis.tables = tables_for(analysis, analysis.layout)
         if options.orientation and options.orientation_detectors:
             # По уже разжатому серому, без второго чтения файла с диска.
             frame = frame_from_gray(full_gray, dpi, rel_path, path, options.allowed_rotations)
@@ -280,17 +329,69 @@ def analyse_page(
         return PageAnalysis(rel_path, order_index, error=str(exc))
 
 
-def surya_boxes_for(analysis: PageAnalysis, detector) -> list[tuple[int, int, int, int]] | None:
+def work_dpi(analysis: PageAnalysis) -> int:
+    """Разрешение копии 1/4, по которой ищутся линейки."""
+    return max(1, round(analysis.dpi / HALFTONE_DOWNSCALE))
+
+
+def tables_for(analysis: PageAnalysis, layout: "CachedLayout | None") -> list[Region]:
+    """Таблицы и схемы по серой копии 1/4 в координатах ОРИГИНАЛА."""
+    gray = analysis.work_gray
+    if gray is None:
+        return []
+    height, width = gray.shape[:2]
+    page_layout = layout_cache.scaled_to(layout, width, height) if layout is not None else None
+    scale = analysis.width / max(1, width)
+    return detect_regions(gray, work_dpi(analysis), page_layout, scale, (analysis.width, analysis.height))
+
+
+def page_layout_for(analysis: PageAnalysis, detector, options: PageOptions) -> "CachedLayout | None":
+    """Разметка surya полосы: из кэша, если воркер её нашёл, иначе — моделью, с записью в кэш.
+
+    Работает в родителе: только здесь можно звать GPU. ``None`` — surya не гонялась (нет
+    модели или полоса не читалась).
+    """
+    if analysis.layout is not None:
+        return analysis.layout
+    if detector is None or analysis.work is None:
+        return None
+    height, width = analysis.work.shape[:2]
+    if hasattr(detector, "predict"):
+        result, scale = detector.predict(analysis.work)
+        layout = from_surya_result(result, round(width * scale), round(height * scale)).scaled(1.0 / scale)
+        cached = CachedLayout(layout, work_dpi(analysis), raw=result)
+    else:
+        # Дублёр модели в тестах и оснастке знает только ``picture_polygons``: из его блоков
+        # собирается разметка с одними Picture — растру этого достаточно, таблицам surya не будет.
+        polygons = detector.picture_polygons(analysis.work, analysis.work_gray, filter_raster=False)
+        blocks = tuple(Block("Picture", 1.0, Box(*box).clipped(width, height)) for box in polygons_to_boxes(polygons))
+        cached = CachedLayout(PageLayout(blocks, width, height), work_dpi(analysis))
+    if options.layout_cache_dir is not None:
+        try:
+            layout_cache.save(options.layout_cache_dir, analysis.rel_path, cached)
+        except OSError as error:
+            logger.warning("%s: кэш разметки не записан (%s)", analysis.rel_path, error)
+    return cached
+
+
+def surya_boxes_from(layout: "CachedLayout | None", analysis: PageAnalysis) -> list[tuple[int, int, int, int]] | None:
     """Сырые блоки ``Picture`` в координатах ОРИГИНАЛА; ``None``, если Surya не гонялась.
 
     Блоки берутся БЕЗ фильтра ``is_raster_block``: он меряет полутон по копии 1/4, где штрих
     от растра неотличим. Отличать их будет ``regions.find_raster_boxes`` по статистике пятен.
     """
-    if detector is None or analysis.work is None:
+    if layout is None or analysis.work is None:
         return None
-    work_gray = cv2.cvtColor(analysis.work, cv2.COLOR_BGR2GRAY)
-    polygons = detector.picture_polygons(analysis.work, work_gray, filter_raster=False)
-    return [upscale_box(box, HALFTONE_DOWNSCALE) for box in polygons_to_boxes(polygons)]
+    height, width = analysis.work.shape[:2]
+    boxes = [box.as_tuple() for box in layout_cache.picture_boxes(layout, width, height)]
+    return [upscale_box(box, HALFTONE_DOWNSCALE) for box in boxes]
+
+
+def surya_boxes_for(
+    analysis: PageAnalysis, detector, options: PageOptions = PageOptions()
+) -> list[tuple[int, int, int, int]] | None:
+    """Блоки ``Picture`` через модель или кэш — для вызывающих, которым разметка целиком не нужна."""
+    return surya_boxes_from(page_layout_for(analysis, detector, options), analysis)
 
 
 def orientation_image(analysis: PageAnalysis):
@@ -325,8 +426,13 @@ def finish_page(
     options: PageOptions,
     surya_boxes: list[tuple[int, int, int, int]] | None,
     orientation_gpu: "dict[str, Verdict] | None" = None,
+    layout: "CachedLayout | None" = None,
 ) -> PageResult:
-    """Сборка областей по готовому разбору и блокам Surya. Работает в родителе."""
+    """Сборка областей по готовому разбору и блокам Surya. Работает в родителе.
+
+    ``layout`` — разметка surya полосы (см. :func:`page_layout_for`); нужна таблицам, если
+    воркер их не посчитал (промах кэша).
+    """
     verdicts, combo = combine_orientation(analysis, options, orientation_gpu)
     if analysis.error:
         return PageResult(analysis.rel_path, error=analysis.error)
@@ -336,15 +442,36 @@ def finish_page(
             analysis.width,
             analysis.height,
             analysis.dpi,
-            analysis.ready,
+            analysis.ready if analysis.raster else [],
             analysis.stamp,
             orientation=verdicts,
             combo=combo,
+            raster=analysis.raster,
+            tables=analysis.tables,
         )
     if analysis.work is None:  # содержимое не изменилось, пиксели не читались
         return PageResult(analysis.rel_path, stamp=analysis.stamp, unchanged=True)
 
-    work_gray = cv2.cvtColor(analysis.work, cv2.COLOR_BGR2GRAY)
+    tables = analysis.tables
+    if analysis.tables_wanted and tables is None:
+        tables = tables_for(analysis, layout)
+    if not analysis.raster:
+        return PageResult(
+            analysis.rel_path,
+            analysis.width,
+            analysis.height,
+            analysis.dpi,
+            [],
+            analysis.stamp,
+            orientation=verdicts,
+            combo=combo,
+            raster=False,
+            tables=tables,
+        )
+
+    work_gray = (
+        analysis.work_gray if analysis.work_gray is not None else cv2.cvtColor(analysis.work, cv2.COLOR_BGR2GRAY)
+    )
 
     # Цвет полосы считается ОДИН раз на всю полосу и идёт в два места: по разбросу
     # хроматичности опознаётся цветная полоса целиком (``regions._fill_colour_page``), а по
@@ -393,6 +520,7 @@ def finish_page(
         analysis.stamp,
         orientation=verdicts,
         combo=combo,
+        tables=tables,
     )
 
 
@@ -401,7 +529,8 @@ def detect_page(
 ) -> PageResult:
     """Оба этапа подряд — для однопроцессного прогона, оснастки валидации и тестов."""
     analysis = analyse_page(path, rel_path, order_index, options, known_digest)
-    return finish_page(analysis, options, surya_boxes_for(analysis, detector))
+    layout = page_layout_for(analysis, detector, options)
+    return finish_page(analysis, options, surya_boxes_from(layout, analysis), layout=layout)
 
 
 def _classify_regions(analysis: PageAnalysis, findings, options: PageOptions, paper) -> list[DetectedRegion]:
