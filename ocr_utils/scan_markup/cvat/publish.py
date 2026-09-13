@@ -39,6 +39,15 @@
 
 Геометрию при переносе не пересчитываем: уменьшение делается тем же делителем из базы,
 значит кадр в новой задаче попиксельно совпадает со старым.
+
+Дозаливка находок нового детектора
+----------------------------------
+Таблицы и схемы появились, когда растр уже был размечен руками. Перезаливать предразметку
+(``--force-annotations``) значило бы стереть эту работу, пересоздавать задачу — тоже
+лишнее. ``--append-kinds table,line_art_schema`` ДОБАВЛЯЕТ в существующую задачу шейпы
+только этих видов (PATCH ``action=create``, ручная разметка и теги целы) и только на
+кадры, где шейпов с такими метками ещё нет: повторный прогон ничего не удваивает, а рамку,
+которую разметчик уже поправил или снял, не возвращает.
 """
 
 import json
@@ -52,7 +61,9 @@ from sqlalchemy.orm import Session
 from ocr_utils.scan_markup.cvat.client import CvatSettings, check_share_root, make_cvat_client, share_prefix
 from ocr_utils.scan_markup.cvat.images import ImageJob, cvat_rel_path, prepare_images
 from ocr_utils.scan_markup.cvat.project import (
+    LABEL_BY_KIND,
     TEMP_SUFFIX,
+    append_shapes,
     apply_job_states,
     assign_annotator,
     assign_jobs_to_issues,
@@ -63,6 +74,7 @@ from ocr_utils.scan_markup.cvat.project import (
     find_task,
     find_year_task,
     frame_index_by_name,
+    frames_with_labels,
     job_states,
     project_label_ids,
     rect_shapes,
@@ -98,6 +110,8 @@ class PublishParams:
     backup_dir: Path | None = None  # по умолчанию — рядом с базой
     annotator: str | None = None
     settings: CvatSettings | None = None
+    # Виды прямоугольников, которые ДОБАВЛЯЮТСЯ в уже существующие задачи (см. шапку модуля).
+    append_kinds: tuple[str, ...] = ()
 
 
 @dataclass
@@ -114,6 +128,9 @@ class PublishStats:
     pages_unpublished: int = 0
     shapes: int = 0
     shapes_carried: int = 0
+    # Дозалито в существующие задачи по --append-kinds и на скольких кадрах.
+    shapes_appended: int = 0
+    frames_appended: int = 0
     tags: int = 0
     tags_carried: int = 0
     stale_years: list[str] = field(default_factory=list)
@@ -323,6 +340,29 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
     session.commit()
 
 
+def _append_kinds(task, year_name: str, pages, frames, label_ids, kinds, stats: PublishStats) -> None:
+    """Дозаливка находок заданных видов в существующую задачу — только на кадры, где их ещё нет."""
+    wanted_ids = {label_ids[LABEL_BY_KIND[kind]] for kind in kinds if LABEL_BY_KIND[kind] in label_ids}
+    if len(wanted_ids) != len(kinds):
+        missing = [kind for kind in kinds if LABEL_BY_KIND[kind] not in label_ids]
+        logger.warning("Задача %r: в проекте нет меток для видов %s, дозаливка пропущена", year_name, missing)
+        return
+    occupied = frames_with_labels(fetch_shapes_by_frame(task), wanted_ids)
+    fresh = [page for page in pages if page.cvat_rel_path not in occupied]
+    shapes = rect_shapes(((page, page.rect_regions) for page in fresh), frames, label_ids, kinds=kinds)
+    added = append_shapes(task, shapes)
+    stats.shapes_appended += added
+    stats.frames_appended += len({shape.frame for shape in shapes})
+    logger.info(
+        "Задача %r: дозалито шейпов %d на %d кадров (%s); кадров с такой разметкой уже было %d",
+        year_name,
+        added,
+        len({shape.frame for shape in shapes}),
+        ", ".join(kinds),
+        len(occupied),
+    )
+
+
 def _mark_published(pages) -> None:
     """Фиксирует, какой именно файл сейчас лежит под кадром CVAT.
 
@@ -484,6 +524,8 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                         "целиком и затёрла бы ручную правку); нужна — укажите --force-annotations",
                         year.name,
                     )
+                    if params.append_kinds:
+                        _append_kinds(task, year.name, pages, frames, label_ids, params.append_kinds, stats)
 
                 # Только те, что реально сопоставились с кадром: полоса, не доехавшая до
                 # задачи, не должна считаться залитой — иначе её пропажа больше нигде

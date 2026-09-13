@@ -399,6 +399,32 @@ def assign_annotator(client, task, username: str) -> None:
         job.update(models.PatchedJobWriteRequest(assignee=user_id))
 
 
+def append_shapes(task, shapes: list) -> int:
+    """ДОБАВЛЯЕТ шейпы в задачу, не трогая имеющуюся разметку. Возвращает число добавленных.
+
+    В отличие от :func:`upload_preannotations` это PATCH с ``action=create``, а не PUT:
+    ручная разметка и теги остаются на месте. Так в уже размеченную задачу дозаливаются
+    находки нового детектора — таблицы и схемы. Идемпотентность — забота вызывающего
+    (:func:`frames_with_labels`): сервер добавит те же шейпы второй раз без вопросов.
+    """
+    from cvat_sdk import models
+    from cvat_sdk.core.proxies.annotations import AnnotationUpdateAction
+
+    if not shapes:
+        return 0
+    task.update_annotations(models.PatchedLabeledDataRequest(shapes=shapes), action=AnnotationUpdateAction.CREATE)
+    return len(shapes)
+
+
+def frames_with_labels(by_frame: dict[str, list], label_ids: set[int]) -> set[str]:
+    """Имена кадров, где уже есть хоть один шейп с одной из этих меток.
+
+    Признак «дозаливка сюда уже была»: на такой кадр находки не добавляются второй раз, и
+    правка разметчика (он мог удалить или подвинуть рамку) не перебивается автоматикой.
+    """
+    return {name for name, shapes in by_frame.items() if any(shape.label_id in label_ids for shape in shapes)}
+
+
 def fetch_shapes_by_frame(task) -> dict[str, list]:
     """Разметка задачи, разложенная по ИМЕНАМ кадров: ``{имя кадра: [шейп, ...]}``.
 

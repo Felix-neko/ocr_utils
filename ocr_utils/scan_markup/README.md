@@ -46,6 +46,15 @@ uv run python -m ocr_utils.scan_markup from-cvat \
     --db ~/Projects/mts_markup/pack1.sqlite \
     --out-db ~/Projects/mts_markup/pack1_reviewed.sqlite \
     --pack-name пак-1
+
+# 2а. Дозалить находки нового детектора в уже размеченные задачи (PATCH, ручная разметка цела)
+uv run python -m ocr_utils.scan_markup to-cvat ... --append-kinds table,line_art_schema
+
+# 3а. Те же находки — в уточнённую базу, не дожидаясь разметчика (source=auto, растр не трогается)
+uv run python -m ocr_utils.scan_markup copy-regions \
+    --db ~/Projects/mts_markup/pack1.sqlite \
+    --out-db ~/Projects/mts_markup/pack1_reviewed.sqlite \
+    --pack-name пак-1 --kinds table,line_art_schema
 ```
 
 ## Иерархия
@@ -395,6 +404,15 @@ GPU на полосу; ответ кладётся на диск pickle-файл
 
 `--raster/--no-raster` и `--tables/--no-tables` выключают детекторы целиком; выключенный в
 базе не трогается вовсе.
+
+**В CVAT и обратно.** В новую задачу таблицы уходят обычной предразметкой. В задачу, где
+разметчик уже работал, перезаливка запрещена (она заменяет разметку целиком), поэтому
+`to-cvat --append-kinds table,line_art_schema` ДОБАВЛЯЕТ шейпы этих видов PATCH-ем
+(`action=create`) — и только на кадры, где шейпов с такими метками ещё нет: повторный прогон
+ничего не удваивает, а рамку, которую разметчик подвинул или снял, не возвращает.
+`from-cvat` возвращает их так же, как растр, по имени метки. Пока разметчик не дошёл до
+таблиц, их можно положить в уточнённую базу командой `copy-regions` (по пути полосы, только
+заданные виды, ручной растр в целевой базе цел); следующий `from-cvat` заменит их уточнёнными.
 
 ## Проверка детекции
 

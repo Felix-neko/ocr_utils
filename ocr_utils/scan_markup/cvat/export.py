@@ -381,6 +381,66 @@ def import_task(
     session.commit()
 
 
+@dataclass
+class CopyStats:
+    """Итоги ``copy-regions``."""
+
+    pages: int = 0
+    regions: int = 0
+    missing_pages: int = 0
+
+
+def copy_regions(src_session: Session, dst_session: Session, pack_name: str, kinds: "tuple[str, ...]") -> CopyStats:
+    """Переносит прямоугольники заданных видов из одной базы в другую, по пути полосы.
+
+    ЗАЧЕМ. Уточнённая база (``from-cvat``) — снимок разметки CVAT, и находки нового детектора
+    попадут в неё только после того, как разметчик их отсмотрит. Потребителям ниже по
+    конвейеру они нужны раньше, поэтому автоматические находки копируются сюда как есть,
+    с ``source = auto``: ``from-cvat`` потом заменит их уточнёнными.
+
+    Переносятся ТОЛЬКО заданные виды, и в целевой базе заменяются только они
+    (:func:`replace_rect_regions` с ``kinds``): ручной растр остаётся нетронутым. Полоса
+    ищется по ``source_rel_path``; полосы, которых в целевой базе нет, считаются и
+    пропускаются — пересоздавать дерево не наше дело, это делает ``from-cvat``.
+    """
+    from ocr_utils.scan_markup.db.repo import replace_rect_regions
+
+    source = require_pack(src_session, pack_name)
+    target = require_pack(dst_session, pack_name)
+    by_path = {
+        page.source_rel_path: page for year in target.year_packages for issue in year.issues for page in issue.pages
+    }
+    stats = CopyStats()
+    for year in source.year_packages:
+        for issue in year.issues:
+            for page in issue.pages:
+                twin = by_path.get(page.source_rel_path)
+                if twin is None:
+                    stats.missing_pages += 1
+                    continue
+                regions = [
+                    RectRegion(
+                        x1=region.x1,
+                        y1=region.y1,
+                        x2=region.x2,
+                        y2=region.y2,
+                        kind=region.kind,
+                        full_page=region.full_page,
+                        detector_info=region.detector_info,
+                        source=region.source,
+                    )
+                    for region in page.rect_regions
+                    if region.kind in kinds
+                ]
+                replace_rect_regions(dst_session, twin, regions, kinds=kinds)
+                twin.table_detector_version = page.table_detector_version
+                twin.tables_detected_at = page.tables_detected_at
+                stats.pages += 1
+                stats.regions += len(regions)
+    dst_session.commit()
+    return stats
+
+
 def run_export(params: ExportParams, session_factory, out_session_factory) -> ExportStats:
     """Полный прогон ``from-cvat``: дерево из исходной базы + разметка из CVAT."""
     stats = ExportStats()

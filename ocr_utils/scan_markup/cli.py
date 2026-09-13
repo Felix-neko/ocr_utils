@@ -5,6 +5,7 @@
     detect     оригиналы          -> SQLite (предварительная разметка: растр, таблицы, ориентация)
     to-cvat    SQLite             -> уменьшенные копии + проект CVAT с предразметкой
     from-cvat  CVAT               -> SQLite той же схемы (уточнённая разметка)
+    copy-regions  SQLite          -> SQLite: перенос автоматических находок заданных видов
 """
 
 import logging
@@ -14,8 +15,9 @@ import click
 
 from ocr_utils.scan_markup.cvat import shapes
 from ocr_utils.scan_markup.cvat.client import CvatSettings
-from ocr_utils.scan_markup.cvat.export import ExportParams, run_export
+from ocr_utils.scan_markup.cvat.export import ExportParams, copy_regions, run_export
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
+from ocr_utils.scan_markup.db.models import RECT_KINDS, TABLE_KINDS
 from ocr_utils.scan_markup.db.session import open_db
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
 from ocr_utils.scan_markup.detection.color_kind import (
@@ -57,6 +59,15 @@ LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
 def _set_log_level(level: str) -> None:
     logging.getLogger().setLevel(level.upper())
+
+
+def _parse_kinds(raw: str) -> tuple[str, ...]:
+    """Список видов прямоугольников из строки через запятую; чужой вид — понятная ошибка."""
+    kinds = tuple(part.strip() for part in raw.split(",") if part.strip())
+    unknown = [kind for kind in kinds if kind not in RECT_KINDS]
+    if unknown:
+        raise click.BadParameter(f"неизвестные виды {unknown}; бывают {', '.join(RECT_KINDS)}")
+    return kinds
 
 
 def _cvat_options(func):
@@ -696,19 +707,33 @@ def fix_pen_marks_command(
     help="Куда класть JSON-бэкап разметки перед пересозданием задачи; " "по умолчанию — cvat_backup рядом с базой.",
 )
 @click.option("--annotator", default=None, help="Кому назначить джобы (имя пользователя CVAT).")
+@click.option(
+    "--append-kinds",
+    default="",
+    show_default=True,
+    help="Виды прямоугольников через запятую (например, table,line_art_schema), которые ДОБАВИТЬ "
+    "в уже существующие задачи: PATCH, а не замена — ручная разметка и теги целы. Только на "
+    "кадры, где шейпов с такими метками ещё нет, так что повторный прогон ничего не удваивает.",
+)
 @_cvat_options
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
-def to_cvat_command(db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org, log_level: str, **kwargs) -> None:
+def to_cvat_command(
+    db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org, log_level: str, append_kinds: str, **kwargs
+) -> None:
     """Уменьшенные копии в share + проект/задачи/джобы CVAT с предразметкой."""
     _set_log_level(log_level)
     params = PublishParams(
-        db_path=db_path, settings=CvatSettings(cvat_url, cvat_user, cvat_password, cvat_org), **kwargs
+        db_path=db_path,
+        settings=CvatSettings(cvat_url, cvat_user, cvat_password, cvat_org),
+        append_kinds=_parse_kinds(append_kinds),
+        **kwargs,
     )
     stats = run_publish(params, open_db(db_path))
     click.echo(
         f"Картинки: готово {stats.images_done}, пропущено {stats.images_skipped}, ошибок {stats.images_failed}.\n"
         f"Задачи: создано {stats.tasks_created}, уже было {stats.tasks_existing}, "
-        f"пересоздано {stats.tasks_rebuilt}. Шейпов залито: {stats.shapes}, перенесено: {stats.shapes_carried}."
+        f"пересоздано {stats.tasks_rebuilt}. Шейпов залито: {stats.shapes}, перенесено: {stats.shapes_carried}, "
+        f"дозалито: {stats.shapes_appended} (на {stats.frames_appended} кадрах)."
     )
     if stats.stale_years:
         click.echo(
@@ -817,6 +842,43 @@ def from_cvat_command(
         + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")
         + ".\n"
         f"Шейпов с чужими метками: {stats.unknown_labels}, кадров без полосы: {stats.unmatched_frames}."
+    )
+
+
+@main.command("copy-regions")
+@click.option("--db", "db_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--out-db",
+    "out_db_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Целевая база той же схемы (обычно уточнённая, после from-cvat).",
+)
+@click.option("--pack-name", required=True, help="Имя пака в обеих базах.")
+@click.option(
+    "--kinds",
+    default=",".join(TABLE_KINDS),
+    show_default=True,
+    help="Виды прямоугольников через запятую. В целевой базе заменяются ТОЛЬКО они; остальное не трогается.",
+)
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def copy_regions_command(db_path: Path, out_db_path: Path, pack_name: str, kinds: str, log_level: str) -> None:
+    """Перенести автоматические находки заданных видов из одной базы в другую по пути полосы.
+
+    Нужна, чтобы таблицы и схемы попали в уточнённую базу до того, как разметчик их
+    отсмотрит: from-cvat потом заменит их уточнёнными.
+    """
+    _set_log_level(log_level)
+    if out_db_path.resolve() == db_path.resolve():
+        raise click.ClickException("--out-db совпадает с --db: переносить область саму в себя незачем.")
+    wanted = _parse_kinds(kinds)
+    if not wanted:
+        raise click.BadParameter("укажите хотя бы один вид", param_hint="--kinds")
+    with open_db(db_path)() as src, open_db(out_db_path)() as dst:
+        stats = copy_regions(src, dst, pack_name, wanted)
+    click.echo(
+        f"Полос: {stats.pages}, областей перенесено: {stats.regions} ({', '.join(wanted)}). "
+        f"Полос, которых нет в целевой базе: {stats.missing_pages}."
     )
 
 
