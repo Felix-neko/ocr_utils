@@ -1,0 +1,96 @@
+"""Surya layout для стенда: блоки полосы с видом и их кэш на диске.
+
+ТИПЫ И РАЗБОР ОТВЕТА ПЕРЕЕХАЛИ в ``ocr_utils.scan_markup.table_detection.layout``, кэш — в
+``ocr_utils.scan_markup.detection.layout_cache`` (формат тот же; конвейер читает кэш, набитый
+командой ``layout-pack``). Здесь — реэкспорт, обёртки кэша со старой сигнатурой и ``Predictor``
+для ``layout-pack``.
+
+ЗАЧЕМ. Детектор по линейкам точен в геометрии, но не знает, ЧТО обвёл: кусок блок-схемы
+для него — маленькая таблица. Surya смотрит на полосу целиком и отвечает на другой вопрос —
+где здесь таблица, где рисунок, где текст. Эксперимент на 190 размеченных полосах: все
+двенадцать «кусков блок-схемы» и все диаграммы получили целый Figure/Form-блок, на
+перекошенных таблицах Table-блок шире нашей рамки ровно там, где нам не хватало графы, на
+«тексте рядом» он кончается на 15–60 мм выше. Слабости тоже замерены: 10 из 38 полос «не
+таблицы» помечены Table, бланк целиком бывает одним Form без таблицы внутри, границы ±1–2 мм.
+Поэтому surya — источник ВИДА и подсказки протяжённости, а не точных границ.
+
+ЦЕНА. Около секунды на полосу на GPU в 150 dpi; по паку это три с половиной часа. Отсюда
+кэш: JSON на полосу в ``<каталог>/{год}/{выпуск}/{основа}.json``, и два режима команды
+``layout-pack``: все полосы или только полосы-кандидаты, где детектор по линейкам что-то нашёл.
+
+GPU ТОЛЬКО В РОДИТЕЛЕ. Модель грузится лениво, по первому вызову ``predict``, и в пул процессов
+не заворачивается (правило проекта: видеопамять одна на всех).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+
+from ocr_utils.scan_markup.detection import layout_cache
+from ocr_utils.scan_markup.table_detection.layout import (  # noqa: F401 — реэкспорт для стенда
+    FIGURE_LABELS,
+    FORM_LABELS,
+    TABLE_LABELS,
+    TEXT_LABELS,
+    MIN_CONFIDENCE,
+    BATCH,
+    Block,
+    PageLayout,
+    from_surya_result,
+)
+
+
+def cache_path(cache_dir: Path, scan_rel_path: str) -> Path:
+    """Файл кэша полосы: та же структура подпапок, что у копий полос, расширение ``.pkl``."""
+    return layout_cache.cache_path(cache_dir, scan_rel_path)
+
+
+def load(cache_dir: "Path | None", scan_rel_path: str) -> "PageLayout | None":
+    """Разметка полосы из кэша или ``None``, если её там нет (тогда детектор идёт без неё)."""
+    cached = layout_cache.load(cache_dir, scan_rel_path)
+    return cached.layout if cached is not None else None
+
+
+def save(cache_dir: Path, scan_rel_path: str, layout: PageLayout, raw: object = None, dpi: int = 0) -> Path:
+    """Сохранить разметку полосы: наш разбор и СЫРОЙ ответ surya рядом (для других детекторов)."""
+    return layout_cache.save(cache_dir, scan_rel_path, layout_cache.CachedLayout(layout, dpi, raw))
+
+
+class Predictor:
+    """Ленивая обёртка над ``surya.layout.LayoutPredictor``: модель грузится при первом вызове."""
+
+    def __init__(self) -> None:
+        self._predictor = None
+
+    def _load(self):
+        if self._predictor is None:
+            from surya.foundation import FoundationPredictor
+            from surya.layout import LayoutPredictor
+            from surya.settings import settings
+
+            self._predictor = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
+        return self._predictor
+
+    def predict(self, grays: Sequence[np.ndarray]) -> list[PageLayout]:
+        """Разметка серых полос; координаты — в пикселях поданных картинок."""
+        return [layout for layout, _ in self.predict_raw(grays)]
+
+    def predict_raw(self, grays: Sequence[np.ndarray]) -> list[tuple[PageLayout, object]]:
+        """То же, плюс сырой ответ surya на каждую полосу — для кэша."""
+        from PIL import Image
+
+        predictor = self._load()
+        results: list[tuple[PageLayout, object]] = []
+        for start in range(0, len(grays), BATCH):
+            chunk = grays[start : start + BATCH]
+            images = [Image.fromarray(gray).convert("RGB") for gray in chunk]
+            for gray, result in zip(chunk, predictor(images)):
+                height, width = gray.shape[:2]
+                results.append((from_surya_result(result, width, height), result))
+        return results
+
+
+__all__ = ["Block", "PageLayout", "Predictor", "cache_path", "load", "save"]
