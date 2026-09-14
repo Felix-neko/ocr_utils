@@ -331,10 +331,10 @@ Flash — $0.85, DeepSeek V4.1 Flash (2 куска) — $0.9, причём со 
 
 ## 9. Промпты и настройки запросов — как есть
 
-Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v8; блоки
+Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v10; блоки
 `--damage` — в 9.7); история версий — в 9.6.
 
-### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v8 — без указания издания)
+### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v10 — без указания издания)
 
 ```text
 You are a meticulous OCR and document-structure transcriber. You receive a scan of ONE page of Soviet or post-Soviet economic press — a journal or a newspaper printed between the 1920s and the 1990s. The text is Russian in the orthography of its time, with occasional Latin abbreviations, brand names and formulas. Newspaper pages are usually set in several narrow columns with small type; journal pages in one or two columns.
@@ -350,7 +350,7 @@ Transcribe the page exactly and mark up its structure. Rules:
    - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → `### Рубрика`, placed before the title. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
    - Author name → its own paragraph in bold: `**И. Фетисов**` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»).
    - Author's position and regalia → its own paragraph in italics right after the name: `*начальник УМТС Московского городского района, член коллегии Госснаба СССР*`.
-   - Tables → a GFM Markdown table. If the table has merged cells or a multi-level header, use an HTML `<table>` with rowspan/colspan instead. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table.
+   - Tables → ALWAYS an HTML `<table>` (never a Markdown pipe table): one `<tr>` per printed line of the table — a sub-item printed on its own line («в том числе хлопка») is its own row, never several lines stacked in one cell with `<br>`; `<th>` for header cells, `rowspan`/`colspan` for merged cells and multi-level headers, one `<td>` per cell even if it is empty; a section heading inside the table («А. Ресурсы») → one row with a cell spanning all columns. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table, not inside it.
    - Flowcharts and block diagrams → a block quote starting with `> [блок-схема]`, then the text of every block in reading order, one block per line, with `→` between connected blocks.
    - Photographs, drawings, decorative graphics → `> [картинка: краткое описание]`, e.g. `> [картинка: портрет мужчины в костюме]`.
    - Footnotes → `[^1]` in the text and `[^1]: текст сноски` at the end. Lists → Markdown lists. Text printed in bold → **bold**. Letter-spaced text (разрядка: «П р и м е ч а н и е») → write the word normally, without spaces between letters, in italics: *Примечание*.
@@ -518,6 +518,20 @@ IMG_0116_1L и использовался при повторе сбойных �
   страниц: пометки на тех же страницах, что с v7; один прогон дал 46 `<unknown/>` на
   сплющенной IMG_0068_L, два повтора той же страницы — 1/0/0: это стохастика провайдера
   при `temperature 0`, а не промпт.
+* **v9-v10** — таблицы всегда в HTML `<table>` (GFM запрещён): по полному выпуску Gemini Lite
+  и так отдавал 11 из 11 таблиц в HTML, а DeepSeek — 3 из 11, остальные GFM со схлопнутой
+  многоуровневой шапкой. v9 («always HTML, one `<tr>` per printed row») — DeepSeek на всех
+  9 табличных полосах выпуска отдал HTML, текст вне таблиц не изменился (CER к прежнему
+  выходу 0,000-0,02), на 5 полосах из 9 структура совпала с Gemini до ячейки (строки,
+  ячейки, объединения); но подпункты нумерованных строк («в том числе хлопка») он складывал
+  в одну ячейку через `<br>` (IMG_0144_1L: 10 строк вместо 23). v10 («one `<tr>` per printed
+  line, sub-item on its own line — its own row, never `<br>`-stacking; section heading inside
+  the table — a row spanning all columns») — IMG_0144_1L: 22 строки, `<br>` нет, столбец с
+  номерами пунктов сохранён (Gemini его выбросил); на IMG_0134_1L (шапка в три уровня)
+  DeepSeek теперь **лучше Gemini**: rowspan/colspan по всем трём уровням и по строке на
+  двигатель, тогда как Gemini сложил все четыре двигателя в одну строку через `<br>`.
+  Осталось: скобка «}», объединяющая две строки в одно значение, разбита на две строки
+  (значения в первой) вместо rowspan.
 
 ### 9.7. Режим повреждённых сканов (`--damage`): что уходит в запрос и что приходит в ответ
 
