@@ -63,7 +63,9 @@ from ocr_utils.scan_markup.cvat.images import ImageJob, cvat_rel_path, prepare_i
 from ocr_utils.scan_markup.cvat.project import (
     LABEL_BY_KIND,
     TEMP_SUFFIX,
+    TOC_LABEL_BY_FIELD,
     append_shapes,
+    append_tags,
     apply_job_states,
     assign_annotator,
     assign_jobs_to_issues,
@@ -76,12 +78,13 @@ from ocr_utils.scan_markup.cvat.project import (
     frame_index_by_name,
     frames_with_labels,
     job_states,
+    page_tags,
     project_label_ids,
     rect_shapes,
     rename_task,
-    rotation_tags,
     shapes_to_requests,
     tags_to_requests,
+    toc_tags,
     upload_preannotations,
     year_task_name,
 )
@@ -112,6 +115,9 @@ class PublishParams:
     settings: CvatSettings | None = None
     # Виды прямоугольников, которые ДОБАВЛЯЮТСЯ в уже существующие задачи (см. шапку модуля).
     append_kinds: tuple[str, ...] = ()
+    # Дозалить в существующие задачи теги оглавления (``is_toc`` / ``is_year_index``) — тем же
+    # PATCH-ем и с той же идемпотентностью: только на кадры, где таких тегов ещё нет.
+    append_tags: bool = False
 
 
 @dataclass
@@ -133,6 +139,8 @@ class PublishStats:
     frames_appended: int = 0
     tags: int = 0
     tags_carried: int = 0
+    # Дозалито тегов оглавления в существующие задачи по --append-tags.
+    tags_appended: int = 0
     stale_years: list[str] = field(default_factory=list)
 
 
@@ -340,6 +348,27 @@ def _prepare_year_images(session: Session, pack, params: PublishParams, stats: P
     session.commit()
 
 
+def _append_tags(task, year_name: str, pages, frames, label_ids, stats: PublishStats) -> None:
+    """Дозаливка тегов оглавления в существующую задачу — только на кадры, где их ещё нет."""
+    wanted_ids = {label_ids[label] for label in TOC_LABEL_BY_FIELD.values() if label in label_ids}
+    if len(wanted_ids) != len(TOC_LABEL_BY_FIELD):
+        missing = [label for label in TOC_LABEL_BY_FIELD.values() if label not in label_ids]
+        logger.warning("Задача %r: в проекте нет меток %s, дозаливка тегов пропущена", year_name, missing)
+        return
+    occupied = frames_with_labels(fetch_tags_by_frame(task), wanted_ids)
+    fresh = [page for page in pages if page.cvat_rel_path not in occupied]
+    tags = toc_tags(fresh, frames, label_ids)
+    added = append_tags(task, tags)
+    stats.tags_appended += added
+    logger.info(
+        "Задача %r: дозалито тегов оглавления %d на %d кадров; кадров с такими тегами уже было %d",
+        year_name,
+        added,
+        len({tag.frame for tag in tags}),
+        len(occupied),
+    )
+
+
 def _append_kinds(task, year_name: str, pages, frames, label_ids, kinds, stats: PublishStats) -> None:
     """Дозаливка находок заданных видов в существующую задачу — только на кадры, где их ещё нет."""
     wanted_ids = {label_ids[LABEL_BY_KIND[kind]] for kind in kinds if LABEL_BY_KIND[kind] in label_ids}
@@ -458,7 +487,7 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 # если детект пересчитал ориентацию.
                                 carried_tags = tags_to_requests(_tags, frames, set())
                                 stats.tags_carried += len(carried_tags)
-                                fresh_tags = rotation_tags(
+                                fresh_tags = page_tags(
                                     (p for p in _pages if p.cvat_rel_path in _skip), frames, label_ids
                                 )
                                 carried_frames = {tag.frame for tag in carried_tags}
@@ -507,6 +536,12 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                     params.append_kinds,
                                     stats,
                                 )
+                            if params.append_tags:
+                                changed_names = {
+                                    page.cvat_rel_path for _issue, pages_changed, _a in drift for page in pages_changed
+                                }
+                                fresh_pages = [page for page in pages if page.cvat_rel_path not in changed_names]
+                                _append_tags(task, year.name, fresh_pages, frame_index_by_name(task), label_ids, stats)
                             continue
 
                 year.cvat_task_id = task.id
@@ -531,7 +566,7 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
 
                 if upload:
                     shapes = rect_shapes(((page, page.rect_regions) for page in pages), frames, label_ids)
-                    tags = rotation_tags(pages, frames, label_ids)
+                    tags = page_tags(pages, frames, label_ids)
                     upload_preannotations(task, shapes, tags)
                     stats.shapes += len(shapes)
                     stats.tags += len(tags)
@@ -544,6 +579,8 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                     )
                     if params.append_kinds:
                         _append_kinds(task, year.name, pages, frames, label_ids, params.append_kinds, stats)
+                    if params.append_tags:
+                        _append_tags(task, year.name, pages, frames, label_ids, stats)
 
                 # Только те, что реально сопоставились с кадром: полоса, не доехавшая до
                 # задачи, не должна считаться залитой — иначе её пропажа больше нигде

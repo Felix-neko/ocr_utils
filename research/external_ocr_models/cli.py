@@ -60,12 +60,20 @@ def _setup_logging(out_dir: Path | None, level: str) -> None:
     )
 
 
-def list_pages(in_dir: Path, pages_file: Path | None, limit: int | None) -> list[Path]:
-    """Относительные пути полос: все картинки под in_dir или только из файла-списка."""
+def read_page_list(path: Path) -> list[Path]:
+    """Список относительных путей из файла: по одному на строку, после «#» — комментарий."""
+    wanted = [line.split("#", 1)[0].strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    return [Path(item) for item in wanted if item]
+
+
+def list_pages(in_dir: Path, pages_file: Path | None, limit: int | None, skip_file: Path | None = None) -> list[Path]:
+    """Относительные пути полос: все картинки под in_dir или только из файла-списка.
+
+    ``skip_file`` — такой же список, но ИСКЛЮЧАЕМЫЙ: полосы оглавления уходят в отдельный
+    запрос (см. ``toc-pages`` в ``scan_markup``), и в основной прогон им попадать незачем.
+    """
     if pages_file is not None:
-        # Строка: путь, дальше можно комментарий после «#».
-        wanted = [line.split("#", 1)[0].strip() for line in pages_file.read_text(encoding="utf-8").splitlines()]
-        rels = [Path(item) for item in wanted if item]
+        rels = read_page_list(pages_file)
         missing = [rel for rel in rels if not (in_dir / rel).is_file()]
         if missing:
             raise click.ClickException(f"в {in_dir} нет полос из списка: {', '.join(map(str, missing))}")
@@ -78,6 +86,9 @@ def list_pages(in_dir: Path, pages_file: Path | None, limit: int | None) -> list
             and path.suffix.lower() in IMAGE_SUFFIXES
             and not any(part.startswith("_") for part in path.relative_to(in_dir).parts[:-1])
         )
+    if skip_file is not None:
+        skipped = {rel.with_suffix("") for rel in read_page_list(skip_file)}
+        rels = [rel for rel in rels if rel.with_suffix("") not in skipped]
     if limit is not None:
         rels = rels[:limit]
     return rels
@@ -208,6 +219,13 @@ def main(log_level: str) -> None:
     default=None,
     help="Файл со списком относительных путей полос (по одному на строку).",
 )
+@click.option(
+    "--skip-pages",
+    "skip_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Файл со списком относительных путей полос, которые НЕ брать (оглавление — в отдельный прогон).",
+)
 @click.option("--limit", type=int, default=None, help="Взять только первые N полос.")
 @click.option("--skip-done", is_flag=True, help="Пропускать полосы с готовым .meta.json без ошибки.")
 @click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
@@ -232,6 +250,7 @@ def run(
     attempts: int,
     timeout: float,
     pages_file: Path | None,
+    skip_file: Path | None,
     limit: int | None,
     skip_done: bool,
     api_key: str | None,
@@ -258,7 +277,7 @@ def run(
         write_json=out_format in ("json", "both"),
         write_md=out_format in ("md", "both"),
     )
-    rels = list_pages(in_dir, pages_file, limit)
+    rels = list_pages(in_dir, pages_file, limit, skip_file)
     if skip_done:
         before = len(rels)
         rels = [rel for rel in rels if not is_done(out_dir, rel)]

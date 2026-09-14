@@ -16,6 +16,16 @@ VERSION=$(uv run python -c "from research.external_ocr_models import PROMPT_VERS
 NAME="${1:-deepseek-v41-flash-s2-v$VERSION}"; shift || true
 ISSUE="${1:-1966/03}"; shift || true
 
+# Полосы оглавления (список от run_scripts/scan_markup/pack1/run_toc_pages.sh) в основной
+# прогон не идут: они уходят отдельным запросом извлечения списка статей. Списка нет —
+# прогон идёт по всем полосам, как раньше.
+SKIP_ARGS=()
+TOC_LIST="$TOC_LISTS_DIR/$ISSUE/toc_pages.txt"
+if [ -f "$TOC_LIST" ]; then
+    echo "Без оглавления: $TOC_LIST"
+    SKIP_ARGS=(--skip-pages "$TOC_LIST")
+fi
+
 uv run python -m research.external_ocr_models run \
     --in-dir "$SHARPENED_DIR/$ISSUE" \
     --out-dir "$EXTERNAL_OCR_ROOT/$NAME/$ISSUE" \
@@ -23,5 +33,6 @@ uv run python -m research.external_ocr_models run \
     --strips 2 \
     --jobs "$EXTERNAL_OCR_JOBS" \
     --skip-done \
+    "${SKIP_ARGS[@]}" \
     "$@"
 uv run python -m research.external_ocr_models balance

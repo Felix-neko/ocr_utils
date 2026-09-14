@@ -54,6 +54,12 @@ RENAMES: "tuple[tuple[str, str, str], ...]" = (
     ("pages", "rel_path", "source_rel_path"),
 )
 
+# Колонки, УБРАННЫЕ из схемы: (таблица, колонка). Сиротская колонка базе не мешает —
+# SQLAlchemy её не видит, — но и лежать пустой ей незачем. ``pages.toc_kind`` жил один
+# прогон: вид оглавления строкой заменили двумя признаками ``is_toc`` и ``is_year_index``
+# (в CVAT им отвечают два независимых тега).
+DROPS: "tuple[tuple[str, str], ...]" = (("pages", "toc_kind"),)
+
 
 @dataclass
 class MigrationReport:
@@ -62,6 +68,7 @@ class MigrationReport:
     path: Path
     backup: "Path | None" = None
     renamed: "list[str]" = field(default_factory=list)
+    dropped: "list[str]" = field(default_factory=list)
     already: "list[str]" = field(default_factory=list)
     added: "list[str]" = field(default_factory=list)
     missing_tables: "list[str]" = field(default_factory=list)
@@ -71,6 +78,8 @@ class MigrationReport:
         if self.backup is not None:
             out.append(f"  копия: {self.backup.name}")
         out.append(f"  переименовано: {', '.join(self.renamed) if self.renamed else '(нечего)'}")
+        if self.dropped:
+            out.append(f"  убрано колонок: {', '.join(self.dropped)}")
         if self.already:
             out.append(f"  уже было переименовано: {', '.join(self.already)}")
         if self.missing_tables:
@@ -92,7 +101,8 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
 
 
 def rename_columns(db_path: Path, dry_run: bool = False) -> MigrationReport:
-    """Переименовывает таблицы по :data:`TABLE_RENAMES` и колонки по :data:`RENAMES`; НЕ дописывает новых.
+    """Переименовывает таблицы по :data:`TABLE_RENAMES` и колонки по :data:`RENAMES`, убирает
+    колонки по :data:`DROPS`; НЕ дописывает новых.
 
     Работает сырым ``sqlite3`` и ``ALTER TABLE ... RENAME COLUMN`` (SQLite 3.25+): он же
     сам переписывает и UNIQUE-констрейнт ``uq_page_in_issue``, который назван колонкой
@@ -131,6 +141,13 @@ def rename_columns(db_path: Path, dry_run: bool = False) -> MigrationReport:
             if not dry_run:
                 connection.execute(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}"')
             report.renamed.append(f"{table}.{old} -> {new}")
+        for table, column in DROPS:
+            columns = _table_columns(connection, table)
+            if columns is None or column not in columns:
+                continue
+            if not dry_run:
+                connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')  # SQLite 3.35+
+            report.dropped.append(f"{table}.{column}")
     return report
 
 

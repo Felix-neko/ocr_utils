@@ -22,7 +22,13 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from ocr_utils.scan_markup.cvat.client import CvatSettings, make_cvat_client
-from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, MASK_KIND_BY_LABEL, POINT_KIND_BY_LABEL, ROTATION_BY_LABEL
+from ocr_utils.scan_markup.cvat.project import (
+    FIELD_BY_TOC_LABEL,
+    KIND_BY_LABEL,
+    MASK_KIND_BY_LABEL,
+    POINT_KIND_BY_LABEL,
+    ROTATION_BY_LABEL,
+)
 from ocr_utils.scan_markup.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
@@ -79,6 +85,9 @@ class ExportStats:
     rotated: int = 0
     # Кадры, где разметчик оставил сразу несколько взаимоисключающих тегов поворота.
     conflicting_rotations: int = 0
+    # Полосы с тегами оглавления: «Содержание» выпуска и указатель за год.
+    toc_pages: int = 0
+    year_index_pages: int = 0
     unknown_labels: int = 0
     unmatched_frames: int = 0
 
@@ -183,6 +192,12 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         detector_version=src_page.detector_version,
                         table_detector_version=src_page.table_detector_version,
                         tables_detected_at=src_page.tables_detected_at,
+                        is_toc=src_page.is_toc,
+                        is_year_index=src_page.is_year_index,
+                        toc_score=src_page.toc_score,
+                        toc_source=src_page.toc_source,
+                        toc_version=src_page.toc_version,
+                        toc_detected_at=src_page.toc_detected_at,
                     )
                 )
             dst_session.flush()
@@ -294,6 +309,17 @@ def _rotation_from_tags(tags: list, label_names: dict[int, str], stats: "ExportS
     return angles[-1]
 
 
+def _toc_from_tags(tags: list, label_names: dict[int, str]) -> dict[str, bool]:
+    """Признаки оглавления по тегам кадра: ``{"is_toc": ..., "is_year_index": ...}``.
+    Нет тега — False, «не оглавление»; правило то же, что у поворота."""
+    flags = {field_name: False for field_name in FIELD_BY_TOC_LABEL.values()}
+    for tag in tags:
+        field_name = FIELD_BY_TOC_LABEL.get(label_names.get(tag.label_id, ""))
+        if field_name is not None:
+            flags[field_name] = True
+    return flags
+
+
 def import_task(
     task,
     label_names: dict[int, str],
@@ -369,6 +395,18 @@ def import_task(
         # правке уверенность детектора.
         page.orientation_confidence = None
         page.orientation_version = None
+
+        # Оглавление — те же правила, что у поворота: снимок тегов, нет тега — False, и
+        # свойства автоматического решения (сила, версия) к ручному не относятся.
+        toc_flags = _toc_from_tags(tags_by_frame.get(frame, []), label_names)
+        page.is_toc = toc_flags["is_toc"]
+        page.is_year_index = toc_flags["is_year_index"]
+        stats.toc_pages += page.is_toc
+        stats.year_index_pages += page.is_year_index
+        page.toc_source = SOURCE_CVAT
+        page.toc_detected_at = _utcnow()
+        page.toc_score = None
+        page.toc_version = None
 
         # Через коллекции связей: delete-orphan сам уберёт вытесненные строки, а объекты
         # остаются согласованы с тем, что увидит следующий обход этой же сессии.

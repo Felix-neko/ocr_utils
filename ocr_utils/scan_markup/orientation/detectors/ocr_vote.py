@@ -33,16 +33,13 @@
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-import tempfile
-from pathlib import Path
 
 import numpy as np
 
+from ocr_utils.scan_markup import tesseract
 from ocr_utils.scan_markup.orientation.detectors.base import Detector, Frame, Verdict, rotate_cw
-from ocr_utils.scan_markup.orientation.detectors.osd import TIMEOUT_S, _write_pgm, tesseract_available
+from ocr_utils.scan_markup.tesseract import tesseract_available
 
 # Язык распознавания. Пак — советский отраслевой журнал, латиница на нём встречается только
 # в формулах и марках оборудования.
@@ -65,23 +62,7 @@ WORK_DPI = 150
 
 def _tsv(gray: np.ndarray) -> list[str]:
     """Строки TSV-вывода tesseract; пустой список, если он не справился."""
-    with tempfile.TemporaryDirectory(prefix="ocrvote_") as work:
-        image = Path(work) / "page.pgm"
-        _write_pgm(image, gray)
-        # OMP_THREAD_LIMIT=1: без него tesseract разойдётся по всем ядрам ПОВЕРХ пула
-        # процессов, и воркеры начнут отбирать ядра друг у друга.
-        env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
-        try:
-            done = subprocess.run(
-                ["tesseract", str(image), "-", "--psm", "6", "-l", LANGUAGE, "tsv"],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=TIMEOUT_S,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return []
-    return done.stdout.splitlines()[1:]
+    return tesseract.tsv_lines(gray, psm=6, language=LANGUAGE)
 
 
 def letters(gray: np.ndarray) -> int:

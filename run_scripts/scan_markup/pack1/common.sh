@@ -28,6 +28,12 @@ DEBUG_DIR="$MARKUP_ROOT/debug"
 # разбирает заново и дописывает сюда же.
 LAYOUT_CACHE_DIR="/mnt/SYSTEM/raw/mts/pack1_table_research/layout_surya_готовое"
 
+# Оглавления (шаг 1, команда toc): признаки полос окна, контактные листы для разметки эталона
+# и списки полос оглавления по выпускам для внешнего OCR (--pages / --skip-pages).
+TOC_DIR="$MARKUP_ROOT/toc"
+TOC_LISTS_DIR="$TOC_DIR/lists"
+TOC_LABELS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/toc_labels.csv"
+
 # Валидационная выборка: папки с примерами неправильной разметки, надёрганными из DEBUG_DIR
 # глазами. Имя папки называет тип дефекта, имена файлов внутри — имена оверлеев.
 CASES_DIR="$MARKUP_ROOT/некоторые проблемные картинки"

@@ -102,6 +102,11 @@ LABEL_LINE_ART = "Схема или line art"
 LABEL_ROTATE_CW90 = "Повернуть 90 по часовой"
 LABEL_ROTATE_180 = "Повернуть на 180"
 LABEL_ROTATE_CCW90 = "Повернуть 90 против часовой"
+# Оглавление — тоже теги, по той же причине. Два независимых: «Содержание» выпуска и
+# указатель статей за год (декабрьские номера); в базе им отвечают ``pages.is_toc`` и
+# ``pages.is_year_index``. Ставит детектор ``scan_markup.toc``, правит разметчик.
+LABEL_TOC = "Оглавление"
+LABEL_YEAR_INDEX = "Годовой указатель"
 
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
@@ -123,6 +128,8 @@ LABELS = [
     {"name": LABEL_ROTATE_CW90, "type": "tag", "color": "#1DE9B6"},
     {"name": LABEL_ROTATE_180, "type": "tag", "color": "#FFC400"},
     {"name": LABEL_ROTATE_CCW90, "type": "tag", "color": "#7C4DFF"},
+    {"name": LABEL_TOC, "type": "tag", "color": "#00C853"},
+    {"name": LABEL_YEAR_INDEX, "type": "tag", "color": "#2962FF"},
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
@@ -147,6 +154,11 @@ POINT_KIND_BY_LABEL = {LABEL_EXLIBRIS: POINT_EXLIBRIS}
 # проставлять её двенадцати тысячам полос, а снятый тег стал бы неотличим от непроверенного.
 ROTATION_BY_LABEL = {LABEL_ROTATE_CW90: 90, LABEL_ROTATE_180: 180, LABEL_ROTATE_CCW90: 270}
 LABEL_BY_ROTATION = {rotation: label for label, rotation in ROTATION_BY_LABEL.items()}
+
+# Метка-тег оглавления -> имя булевой колонки полосы. Как и у поворота, «не оглавление»
+# выражается ОТСУТСТВИЕМ тега.
+TOC_LABEL_BY_FIELD = {"is_toc": LABEL_TOC, "is_year_index": LABEL_YEAR_INDEX}
+FIELD_BY_TOC_LABEL = {label: fld for fld, label in TOC_LABEL_BY_FIELD.items()}
 
 # Качество JPEG, которым CVAT пережимает кадры уже у себя. Картинки и так уменьшены и
 # сохранены с quality=95, так что это второе пережатие — единственное заметное.
@@ -346,6 +358,32 @@ def rotation_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> l
     return tags
 
 
+def toc_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Предразметка оглавления: ``page.is_toc`` / ``page.is_year_index`` -> теги CVAT.
+
+    Полоса без признака тега не получает — как и у поворота, отсутствие тега значит «нет».
+    Полосы, где детектор не считал (NULL), тоже без тега: отличить их можно по ``toc_version``.
+    """
+    from cvat_sdk import models
+
+    tags = []
+    for page in pages:
+        frame = frames.get(page.cvat_rel_path)
+        if frame is None:
+            continue
+        for field_name, label in TOC_LABEL_BY_FIELD.items():
+            label_id = label_ids.get(label)
+            if getattr(page, field_name, None) and label_id is not None:
+                tags.append(models.LabeledImageRequest(frame=frame, label_id=label_id))
+    return tags
+
+
+def page_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Все теги полос для заливки: поворот и оглавление."""
+    pages = list(pages)
+    return rotation_tags(pages, frames, label_ids) + toc_tags(pages, frames, label_ids)
+
+
 def upload_preannotations(task, shapes: list, tags: "list | None" = None) -> int:
     """Заливает предразметку в задачу, ЗАМЕНЯЯ имеющуюся. Возвращает число объектов.
 
@@ -414,6 +452,22 @@ def append_shapes(task, shapes: list) -> int:
         return 0
     task.update_annotations(models.PatchedLabeledDataRequest(shapes=shapes), action=AnnotationUpdateAction.CREATE)
     return len(shapes)
+
+
+def append_tags(task, tags: list) -> int:
+    """ДОБАВЛЯЕТ теги в задачу, не трогая имеющуюся разметку — как :func:`append_shapes`.
+
+    Тот же PATCH с ``action=create``; идемпотентность — забота вызывающего
+    (:func:`frames_with_labels` по :func:`fetch_tags_by_frame` работает и на тегах: у них то
+    же поле ``label_id``).
+    """
+    from cvat_sdk import models
+    from cvat_sdk.core.proxies.annotations import AnnotationUpdateAction
+
+    if not tags:
+        return 0
+    task.update_annotations(models.PatchedLabeledDataRequest(tags=tags), action=AnnotationUpdateAction.CREATE)
+    return len(tags)
 
 
 def frames_with_labels(by_frame: dict[str, list], label_ids: set[int]) -> set[str]:

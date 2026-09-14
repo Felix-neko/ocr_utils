@@ -89,3 +89,21 @@ DETECT_ARGS=(
     # --no-use-surya-layout
 )
 uv run python -m ocr_utils.scan_markup detect "${DETECT_ARGS[@]}"
+
+# ОГЛАВЛЕНИЯ (scan_markup.toc) — отдельной командой ПОСЛЕ detect: дерево выпусков она берёт
+# из базы, а меряет только окно (первые 5 и последние 12 полос выпуска) — метка surya из
+# того же кэша плюс tesseract. Полосы читаются из заострённых JPEG на SSD, если они уже
+# есть, иначе из оригиналов. Версия детектора своя: --skip-detected пропускает выпуски,
+# посчитанные текущей версией. Прогон с эталоном, CSV и контактными листами — run_toc.sh.
+TOC_ARGS=(
+    --pack-dir "$PACK_DIR"
+    --db "$DB"
+    --pack-name "$PACK_NAME"
+    --layout-cache "$LAYOUT_CACHE_DIR"
+    --jobs 16
+    --skip-detected
+)
+if [ -d "$SHARPENED_DIR" ]; then
+    TOC_ARGS+=(--image-root "$SHARPENED_DIR")
+fi
+uv run python -m ocr_utils.scan_markup toc "${TOC_ARGS[@]}"

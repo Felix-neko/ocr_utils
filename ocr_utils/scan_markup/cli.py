@@ -48,6 +48,12 @@ from ocr_utils.scan_markup.detection.regions import (
 from ocr_utils.scan_markup.detection.run import DetectParams, run_detect
 from ocr_utils.scan_markup.geometry import CVAT_DPI
 from ocr_utils.scan_markup.pen_marks import DEFAULT_WEIGHTS, PEN_CHROMA_THR, fix_pages
+from ocr_utils.scan_markup.toc import KINDS as TOC_KINDS
+from ocr_utils.scan_markup.toc.decide import Thresholds as TocThresholds
+from ocr_utils.scan_markup.toc.export import export_lists
+from ocr_utils.scan_markup.toc.labels import load_labels as load_toc_labels
+from ocr_utils.scan_markup.toc.report import evaluate as evaluate_toc
+from ocr_utils.scan_markup.toc.run import TocParams, run_toc
 from ocr_utils.scan_markup.validation.report import console_lines, write_csv, write_markdown
 from ocr_utils.scan_markup.validation.run import ValidateParams, run_validate
 
@@ -715,6 +721,14 @@ def fix_pen_marks_command(
     "в уже существующие задачи: PATCH, а не замена — ручная разметка и теги целы. Только на "
     "кадры, где шейпов с такими метками ещё нет, так что повторный прогон ничего не удваивает.",
 )
+@click.option(
+    "--append-tags/--no-append-tags",
+    "append_tags",
+    default=False,
+    show_default=True,
+    help="ДОБАВИТЬ в уже существующие задачи теги оглавления («Оглавление», «Годовой указатель») "
+    "по признакам is_toc / is_year_index из базы: PATCH, только на кадры без таких тегов.",
+)
 @_cvat_options
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def to_cvat_command(
@@ -733,7 +747,8 @@ def to_cvat_command(
         f"Картинки: готово {stats.images_done}, пропущено {stats.images_skipped}, ошибок {stats.images_failed}.\n"
         f"Задачи: создано {stats.tasks_created}, уже было {stats.tasks_existing}, "
         f"пересоздано {stats.tasks_rebuilt}. Шейпов залито: {stats.shapes}, перенесено: {stats.shapes_carried}, "
-        f"дозалито: {stats.shapes_appended} (на {stats.frames_appended} кадрах)."
+        f"дозалито: {stats.shapes_appended} (на {stats.frames_appended} кадрах).\n"
+        f"Тегов залито: {stats.tags}, перенесено: {stats.tags_carried}, дозалито тегов оглавления: {stats.tags_appended}."
     )
     if stats.stale_years:
         click.echo(
@@ -841,6 +856,7 @@ def from_cvat_command(
         f"Полос под поворот: {stats.rotated}"
         + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")
         + ".\n"
+        f"Полос оглавления: {stats.toc_pages}, полос годового указателя: {stats.year_index_pages}.\n"
         f"Шейпов с чужими метками: {stats.unknown_labels}, кадров без полосы: {stats.unmatched_frames}."
     )
 
@@ -880,6 +896,174 @@ def copy_regions_command(db_path: Path, out_db_path: Path, pack_name: str, kinds
         f"Полос: {stats.pages}, областей перенесено: {stats.regions} ({', '.join(wanted)}). "
         f"Полос, которых нет в целевой базе: {stats.missing_pages}."
     )
+
+
+@main.command("toc")
+@click.option(
+    "--pack-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Папка пака сканов (оригиналы).",
+)
+@click.option("--db", "db_path", required=True, type=click.Path(path_type=Path), help="SQLite-база разметки.")
+@click.option("--pack-name", default=None, help="Имя пака в базе; по умолчанию — имя папки.")
+@click.option(
+    "--layout-cache",
+    "layout_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Кэш разметки surya (тот же, что у detect). Без него признак surya равен нулю.",
+)
+@click.option(
+    "--image-root",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Брать полосы отсюда (та же раскладка год/выпуск, любое расширение): заострённые JPEG "
+    "на SSD читаются в разы быстрее оригиналов с медленного NTFS-3G.",
+)
+@click.option("--jobs", default=16, show_default=True, type=int, help="Процессов tesseract.")
+@click.option("--only-year", default=None, help="Обработать только этот годовой комплект.")
+@click.option("--only-issue", default=None, help="Обработать только этот выпуск.")
+@click.option(
+    "--skip-detected",
+    is_flag=True,
+    default=False,
+    help="Пропускать выпуски, уже посчитанные текущей версией детектора.",
+)
+@click.option("--dry-run", is_flag=True, default=False, help="Только отчёт, в базу не писать.")
+@click.option(
+    "--thr",
+    "thresholds",
+    multiple=True,
+    help="Порог решения: имя=число (weak_min_lines, weak_min_ratio, table_min_area, surya_min_conf, "
+    "pair_min_lines, window_start, window_end). Можно повторять или через запятую.",
+)
+@click.option(
+    "--csv", "csv_path", default=None, type=click.Path(dir_okay=False, path_type=Path), help="Признаки полос окна."
+)
+@click.option(
+    "--labels",
+    "labels_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Эталон rel_path,contents|index|none[,заметка]: печатается матрица ошибок.",
+)
+@click.option(
+    "--debug-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Контактные листы окна по выпускам (год/выпуск.jpg) — для разметки эталона и разбора.",
+)
+@click.option(
+    "--found-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Контактные листы НАЙДЕННОГО по выпускам: подпапка «содержание» и отдельно «указатели».",
+)
+@click.option("--default-dpi", default=600, show_default=True, type=int, help="Если у файла нет тега разрешения.")
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def toc_command(
+    pack_dir: Path,
+    db_path: Path,
+    pack_name: str | None,
+    layout_cache_dir: Path | None,
+    image_root: Path | None,
+    jobs: int,
+    only_year: str | None,
+    only_issue: str | None,
+    skip_detected: bool,
+    dry_run: bool,
+    thresholds: tuple[str, ...],
+    csv_path: Path | None,
+    labels_path: Path | None,
+    debug_dir: Path | None,
+    found_dir: Path | None,
+    default_dpi: int,
+    log_level: str,
+) -> None:
+    """Найти полосы оглавления (Содержание выпуска и указатель за год) и записать в базу.
+
+    Дерево выпусков берётся из базы, поэтому идёт ПОСЛЕ detect. Меряются только полосы
+    окна (первые и последние полосы выпуска): метка surya из кэша плюс tesseract.
+    """
+    _set_log_level(log_level)
+    try:
+        parsed = TocThresholds.parse(thresholds)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--thr")
+    labels = load_toc_labels(labels_path) if labels_path is not None else None
+    params = TocParams(
+        db_path=db_path,
+        pack_name=pack_name or pack_dir.name,
+        pack_dir=pack_dir,
+        layout_cache_dir=layout_cache_dir,
+        image_root=image_root,
+        jobs=jobs,
+        thresholds=parsed,
+        only_year=only_year,
+        only_issue=only_issue,
+        skip_detected=skip_detected,
+        dry_run=dry_run,
+        csv_path=csv_path,
+        debug_dir=debug_dir,
+        found_dir=found_dir,
+        default_dpi=default_dpi,
+    )
+    stats, results = run_toc(params, open_db(db_path), labels)
+    click.echo(
+        f"Выпусков: {stats.issues} (пропущено готовых {stats.skipped}), полос в окне измерено: "
+        f"{stats.pages_measured}, ошибок чтения: {stats.failed}.\n"
+        f"Полос «Содержание»: {stats.contents}, полос указателя: {stats.index}."
+    )
+    if stats.issues_without_contents:
+        click.echo("ВЫПУСКИ БЕЗ «СОДЕРЖАНИЯ» (смотреть глазами): " + ", ".join(stats.issues_without_contents))
+    if labels is not None:
+        click.echo("")
+        click.echo(evaluate_toc(results, labels, parsed))
+    if csv_path is not None:
+        click.echo(f"Признаки: {csv_path}")
+    if debug_dir is not None:
+        click.echo(f"Контактные листы окна: {debug_dir}")
+    if found_dir is not None:
+        click.echo(f"Контактные листы найденного: {found_dir}")
+
+
+@main.command("toc-pages")
+@click.option("--db", "db_path", required=True, type=click.Path(exists=True, path_type=Path), help="SQLite-база.")
+@click.option("--pack-name", required=True, help="Имя пака в базе.")
+@click.option(
+    "--out-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Куда класть списки: <out-dir>/<год>/<выпуск>/toc_pages.txt.",
+)
+@click.option("--suffix", default=".jpg", show_default=True, help="Расширение полос в списке.")
+@click.option("--kinds", default=",".join(TOC_KINDS), show_default=True, help="Какие виды выгружать (contents, index).")
+@click.option("--only-year", default=None, help="Только этот годовой комплект.")
+@click.option("--only-issue", default=None, help="Только этот выпуск.")
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def toc_pages_command(
+    db_path: Path,
+    pack_name: str,
+    out_dir: Path,
+    suffix: str,
+    kinds: str,
+    only_year: str | None,
+    only_issue: str | None,
+    log_level: str,
+) -> None:
+    """Выгрузить полосы оглавления по выпускам в списки для внешнего OCR (--pages / --skip-pages)."""
+    _set_log_level(log_level)
+    wanted = tuple(part.strip() for part in kinds.split(",") if part.strip())
+    unknown = [kind for kind in wanted if kind not in TOC_KINDS]
+    if unknown:
+        raise click.BadParameter(f"неизвестные виды {unknown}; бывают {', '.join(TOC_KINDS)}", param_hint="--kinds")
+    stats = export_lists(open_db(db_path), pack_name, out_dir, suffix, wanted, only_year, only_issue)
+    click.echo(f"Выпусков: {stats.issues}, полос в списках: {stats.pages}.")
+    if stats.not_detected:
+        click.echo("Детектор не прогонялся (списков нет): " + ", ".join(stats.not_detected))
+    if stats.empty:
+        click.echo("Без единой полосы оглавления: " + ", ".join(stats.empty))
 
 
 if __name__ == "__main__":

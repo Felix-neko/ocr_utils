@@ -357,6 +357,21 @@ class Page(Base):
     table_detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
     tables_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
+    # --- Оглавление -----------------------------------------------------------
+    # Два признака, а не один «вид»: в CVAT им отвечают два тега («Оглавление» и «Годовой
+    # указатель»), и разметчик ставит их независимо. ``is_toc`` — полоса «Содержания»
+    # выпуска, ``is_year_index`` — полоса указателя статей за год (декабрьские номера).
+    # NULL — не искали (различает ``toc_version``), False — искали и не нашли.
+    # ``toc_score`` — сила решения (1.0 — сильный признак, меньше — по строкам с номерами
+    # страниц), ``toc_source`` — ``auto`` или ``cvat``: ручное решение прогон не затирает.
+    # Версия и время — свои, по той же причине, что у ориентации и таблиц.
+    is_toc: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    is_year_index: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    toc_score: Mapped[float | None] = mapped_column(Float, default=None)
+    toc_source: Mapped[str | None] = mapped_column(String(16), default=None)
+    toc_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    toc_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+
     issue: Mapped[Issue] = relationship(back_populates="pages")
     rect_regions: Mapped[list["RectRegion"]] = relationship(back_populates="page", cascade="all, delete-orphan")
     masks: Mapped[list["MaskAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")

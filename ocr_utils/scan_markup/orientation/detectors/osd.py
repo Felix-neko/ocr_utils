@@ -18,55 +18,27 @@ PGM, а не PNG. Временный файл пишется голым P5: ко
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
-
 import numpy as np
 
+from ocr_utils.scan_markup import tesseract
 from ocr_utils.scan_markup.orientation.detectors.base import Detector, Frame, Verdict, unknown
+from ocr_utils.scan_markup.tesseract import TIMEOUT_S, tesseract_available, write_pgm
 
 # Уверенность OSD, начиная с которой считаем ответ полностью надёжным. Замер по обычным
 # полосам пака-1: 27-37. Всё, что ниже, приводится пропорционально.
 FULL_CONFIDENCE = 30.0
 
-# Сколько ждать tesseract на одну полосу. Штатно уходит 0.5-0.7 с; минута — это уже затык.
-TIMEOUT_S = 60
-
-
-def tesseract_available() -> bool:
-    return shutil.which("tesseract") is not None
-
-
-def _write_pgm(path: Path, gray: np.ndarray) -> None:
-    height, width = gray.shape[:2]
-    with open(path, "wb") as handle:
-        handle.write(b"P5\n%d %d\n255\n" % (width, height))
-        handle.write(np.ascontiguousarray(gray, dtype=np.uint8).tobytes())
+# Имена оставлены для прежних потребителей (``rotated_text.tables.ocr``, legacy-исследования):
+# сам вызов tesseract живёт в ``scan_markup.tesseract``.
+_write_pgm = write_pgm
+_ = TIMEOUT_S
 
 
 def run_osd(gray: np.ndarray) -> dict[str, str]:
     """Разбор вывода ``tesseract --psm 0``. Пустой словарь, если сказать нечего."""
-    with tempfile.TemporaryDirectory(prefix="osd_") as work:
-        image = Path(work) / "page.pgm"
-        _write_pgm(image, gray)
-        # OMP_THREAD_LIMIT=1: без него tesseract разойдётся по всем ядрам ПОВЕРХ пула
-        # процессов, и шестнадцать воркеров начнут отбирать ядра друг у друга.
-        env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
-        try:
-            done = subprocess.run(
-                ["tesseract", str(image), "-", "--psm", "0", "-l", "osd"],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=TIMEOUT_S,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return {}
+    out = tesseract.run(gray, ["--psm", "0", "-l", "osd"], prefix="osd_")
     parsed: dict[str, str] = {}
-    for line in done.stdout.splitlines():
+    for line in out.splitlines():
         if ":" in line:
             key, value = line.split(":", 1)
             parsed[key.strip()] = value.strip()
