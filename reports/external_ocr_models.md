@@ -379,7 +379,8 @@ notes: ""
 <the body of the page in Markdown per the rules>
 ```
 
-С `--restore` после правила 5 добавляется правило 6, а в описание JSON — поле `restored`:
+С `--damage` после правила 5 добавляется правило 6, а в описание JSON — поля повреждений
+(подробно — 9.7; здесь показана первая редакция, `--restore`, из раздела 8):
 
 ```text
 6. Damaged text. Some letters may be physically missing or unreadable: cut off by the binding gutter at the page edge, smeared, faded, torn. Reconstruct such letters from context — this is expected and desirable — but you MUST mark every reconstructed run of characters inline with `<restored>…</restored>`, wrapping only the characters you did not actually see (e.g. `<restored>м</restored>ногоассортиментным`, `снаб<restored>же</restored>ния`). If a fragment cannot be reconstructed with confidence, write `[неразборчиво]`. Never wrap clearly legible text. Also list every reconstructed word in the `restored` field.
@@ -500,6 +501,136 @@ IMG_0116_1L и использовался при повторе сбойных �
   → write the word normally … in italics») по замечанию заказчика; полный выпуск гнался на v3.
 * блок `--restore` (не меняет версию: включается флагом) — правило 6 и поле `restored`;
   первая редакция была подпунктом правила 3 и без подсказки не работала.
+* **v4-v7** — режим `--damage` вместо `--restore`: три тега, поля `damage`/`restored`/`fuzzy`/
+  `unknown`, подсказки по страницам (v4); `damage` первым полем, требование тегов у
+  картинки (v5); `edge_words` (v6); правило про перенос (v7). Формат — 9.7, замеры — раздел 10.
+
+### 9.7. Режим повреждённых сканов (`--damage`): что уходит в запрос и что приходит в ответ
+
+Включается флагом `run --damage`; без него ни правила, ни полей ниже в запросе нет.
+Промпт v7.
+
+**Теги в теле (`content_markdown`)** — размечают только повреждённые места, остальной текст
+остаётся обычным markdown по правилам 1-5:
+
+| тег | что значит | пример |
+|---|---|---|
+| `<restored>…</restored>` | буквы, которых на скане физически нет (ушли под корешок, оторваны, закрыты), достроены по контексту и по видимым остаткам слова; оборачиваются только невидимые символы | `снабже<restored>ния</restored>`, `<restored>м</restored>ногоассортиментным` |
+| `<fuzzy>…</fuzzy>` | буквы видны, но ненадёжны (размыты или сплющены у сгиба, выцвели в пересвете — «е/с», «н/и», «п/л»); прочитаны по форме и контексту | `пр<fuzzy>е</fuzzy>дприятий` |
+| `<unknown/>` | фрагмент, который не удалось ни прочитать, ни достроить; ставится на месте пропавших букв, видимая часть слова остаётся как есть | `предпри<unknown/>`, `<unknown/>ности` |
+
+Правила для модели: чётко читаемое не помечать, теги не вкладывать, текст вне
+повреждённых мест не «улучшать», дефис в конце строки с продолжением на следующей —
+обычный перенос, а не повреждение (склеить молча).
+
+**Правило 6 системного промпта** (добавляется к правилам 1-5 из 9.1, дословно):
+
+```text
+6. Damaged text. This scan is damaged (see the note in the user message): some letters are physically missing or unreliable. Handle them like this and mark EVERY such place inline:
+   - Letters that are NOT visible at all (hidden in the binding gutter, torn off, covered) but can be reconstructed with confidence from context and the visible remains of the word → write them wrapped in `<restored>…</restored>`, wrapping ONLY the invisible characters: `<restored>м</restored>ногоассортиментным`, `снабже<restored>ния</restored>`.
+   - Letters that are visible but unreliable (smeared or squashed near the gutter, washed out by overexposure, so that «е»/«с», «н»/«и», «п»/«л» could be confused) → read them by shape and context and wrap the doubtful characters in `<fuzzy>…</fuzzy>`: `пр<fuzzy>е</fuzzy>дприятий`.
+   - A fragment that can be neither read nor reconstructed with confidence → put `<unknown/>` exactly where the missing letters are and keep the visible part of the word as it is: `предпри<unknown/>`, `<unknown/>ности`.
+   Never wrap clearly legible text; never nest tags; do not «improve» text outside the damaged places. A hyphen at the end of a line with the rest of the word on the next line is ordinary hyphenation, not damage: join the word silently and do not list or tag it.
+   Besides the inline tags, fill `edge_words`: one entry for EVERY line that touches the damaged edge or area, with the affected word exactly as you see it (`seen`), the word as you write it in the text (`full`, with the same tags) and `kind`: "hidden" (letters not visible, reconstructed), "fuzzy" (visible but unreliable) or "unknown" (could not reconstruct). Go through the lines top to bottom; a damaged line with no entry is an error.
+```
+
+**Описание JSON** в системном промпте в этом режиме (поле `damage` намеренно первое —
+модель описывает повреждение до того, как начнёт писать текст, и потом помечает
+последовательнее):
+
+```text
+Return ONLY a JSON object with exactly these keys and nothing else:
+{"damage": string (FIRST: what damage you actually see on this page — which edge or area, of what kind, roughly how many lines are affected; empty string if none),
+ "page_number": string or null (page number as printed, e.g. "12"),
+ "running_header": string or null,
+ "running_footer": string or null,
+ "is_toc": boolean,
+ "content_markdown": string (the body of the page in Markdown per the rules; use \n for line breaks),
+"restored": array of strings (every word containing <restored> characters, as written in content_markdown; empty array if none),
+ "fuzzy": array of strings (every word containing <fuzzy> characters, as written; empty array if none),
+ "unknown": integer (how many <unknown/> markers are in content_markdown),
+ "edge_words": array of objects {"seen": string, "full": string, "kind": "hidden" | "fuzzy" | "unknown"}, one per damaged line in reading order,
+"notes": string (uncertainties such as unreadable areas; empty string if none)}
+```
+
+**Пользовательское сообщение** (перед картинками): общая подсказка `--hint`, строка для этой
+страницы из `--hints` (файл «путь<TAB>текст», для мини-набора — `run_scripts/external_ocr_models/damaged_hints.txt`),
+автоподсказка по стороне при `--damage-side auto` (по суффиксу `_L`/`_R`: правый или левый
+край строк у корешка), затем требование про теги — оно повторено здесь, рядом с картинкой,
+потому что на длинной полосе правило из системного промпта модель теряет. Пример для
+`IMG_0008_L` с двумя кусками:
+
+```text
+The page is given as 2 horizontal strips in order from top to bottom; neighbouring strips overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
+This is the LEFT page of a tightly bound volume. The RIGHT ends of the lines disappear into the binding gutter: the last one to four letters of many lines are completely hidden, not visible at all.
+Transcribe this page.
+ Apply rule 6 strictly: in the damaged zone every letter you did not actually see goes inside <restored>…</restored>, every letter you read by shape or context rather than by clear print goes inside <fuzzy>…</fuzzy>, and a fragment you cannot read or reconstruct becomes <unknown/>. Writing a reconstructed letter without a tag is an error.
+```
+
+Подсказка должна описывать ровно то, что есть на странице (какой край; буквы скрыты или
+только искажены): без подсказки модель достраивает молча, с завышенной — записывает
+переносы строк в «скрытые» буквы.
+
+**Схема ответа** (`response_format: json_schema`, strict; для DeepSeek — `json_object` с тем же
+описанием в промпте). Порядок ключей: `damage, page_number, running_header, running_footer, is_toc, content_markdown, notes, restored, fuzzy, unknown, edge_words`. Новые поля:
+
+* `damage` — что модель видит: край/область, характер, сколько строк задето (заполняет
+  точно на всех проверенных страницах — годится как самопроверка подсказки);
+* `restored`, `fuzzy` — слова с соответствующими тегами, как они записаны в тексте;
+* `unknown` — число маркеров `<unknown/>`;
+* `edge_words` — по одной записи на каждую повреждённую строку: `seen` (слово как
+  видно), `full` (как записано в тексте, с тегами), `kind` (`hidden` | `fuzzy` | `unknown`).
+  Списки модель заполняет надёжнее, чем ставит инлайн-теги, поэтому после разбора
+  `tags_from_edge_words()` доставляет теги в текст там, где их нет: невидимая часть — это
+  `full` минус `seen` с начала или конца слова; записи с дефисом в `seen` (переносы)
+  пропускаются; уже помеченные слова не трогаются.
+
+**Пример ответа** (DeepSeek V4.1 Flash, IMG_0008_L, v7; текст сокращён):
+
+```json
+{
+ "damage": "Правая страница (правая колонка) обрезана у правого края: последние 1–4 буквы многих строк не видны (уходят в корешок). Повреждены примерно 30 строк правой колонки; левая колонка читается полностью.",
+ "page_number": null,
+ "content_markdown": "…ает Россия. Но для того, что<restored>бы</restored> добывать нефть в необходимом коли<restored>честве</restored>, нужно нефтепромысловое обору<restored>дование</restored>. Значительная его ча<restored>сть</restored> изготавливается в Азербайдж<restored>ане</restored>, которому нет нужды наращив<restored>ать</restored> его производство. Чтобы не п<restored>окупать</restored> неф…",
+ "restored": [
+  "оборудование",
+  "часть",
+  "Азербайджане",
+  "наращивать",
+  "…"
+ ],
+ "fuzzy": [],
+ "unknown": 0,
+ "edge_words": [
+  {
+   "seen": "обору",
+   "full": "обору<restored>дование</restored>",
+   "kind": "hidden"
+  },
+  {
+   "seen": "ча",
+   "full": "ча<restored>сть</restored>",
+   "kind": "hidden"
+  },
+  {
+   "seen": "Азербайдж",
+   "full": "Азербайдж<restored>ане</restored>",
+   "kind": "hidden"
+  },
+  "…"
+ ]
+}
+```
+
+**Что пишется на диск.** `.json` — все поля выше (после доставки тегов из `edge_words`),
+`.md` — тело с тегами и YAML-шапкой, `.meta.json` — дополнительно `tags`
+(`{restored, fuzzy, unknown}` — счётчики по тексту), `tags_from_edge_words` (сколько
+пометок вставлено из списка), `damage_seen` (поле `damage`), `tag_warning` при непарных
+тегах. `report` добавляет таблицу «Повреждения: пометки модели» (полоса, счётчики, из
+списка, непарные, что видит модель).
+
+**Остальные настройки** те же, что в 9.3-9.5: `temperature 0`, `max_tokens 16000`,
+`reasoning` выключен, DeepSeek — 2 куска (`--strips 2`), 2200 px, `detail: high`.
 
 ## 10. Повреждённые сканы: `<restored>`, `<fuzzy>`, `<unknown/>` (режим `--damage`)
 
