@@ -112,3 +112,20 @@ def test_tags_from_edge_words():
     assert inserted == 3
     assert "о<restored>борудование</restored>" in out and "Азербайджа<fuzzy>не</fuzzy>" in out
     assert out.count("<restored>ре</restored>сурсов") == 1 and "сло<unknown/>" in out
+
+
+def test_structure_fields_and_tags():
+    from research.external_ocr_models.evaluate import normalize, structure
+
+    text = GOOD.replace(
+        '"is_toc": false,',
+        '"is_toc": false, "rubric": "Опыт работы", "title": "Заголовок", "authors": [{"name": "И. Фетисов", "position": "начальник"}, {"name": " ", "position": null}, {"name": "Наш корр.", "position": null}],',
+    )
+    result = parse_json_text(text)
+    assert result.rubric == "Опыт работы" and result.title == "Заголовок"
+    assert result.authors == [{"name": "И. Фетисов", "position": "начальник"}, {"name": "Наш корр.", "position": None}]
+    assert parse_json_text(GOOD).authors == [] and parse_json_text(GOOD).rubric is None
+    body = "<rubric>*ОПЫТ*</rubric>\n\n# Заголовок\n\n<author>**И. Фетисов,**</author>\n<position>*начальник*</position>\n\n**Просто жирное.**\n\nТекст."
+    counts = structure(body)
+    assert (counts.rubrics, counts.authors, counts.positions, counts.h1, counts.h3) == (1, 1, 1, 1, 0)
+    assert normalize(body) == "опыт заголовок и. фетисов, начальник просто жирное. текст."

@@ -11,7 +11,17 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
-FIELDS = ("page_number", "running_header", "running_footer", "is_toc", "content_markdown", "notes")
+FIELDS = (
+    "page_number",
+    "running_header",
+    "running_footer",
+    "is_toc",
+    "rubric",
+    "title",
+    "authors",
+    "content_markdown",
+    "notes",
+)
 
 
 class ParseError(ValueError):
@@ -26,6 +36,11 @@ class PageResult:
     running_footer: str | None = None
     is_toc: bool = False
     notes: str = ""
+    # Структура статьи: рубрика, заголовок статьи, начинающейся на полосе, авторы с
+    # должностями — дубль того, что в теле стоит в тегах <rubric>/<author>/<position>.
+    rubric: str | None = None
+    title: str | None = None
+    authors: list[dict] = field(default_factory=list)  # [{"name": …, "position": … | None}]
     # Режим damage: слова с достроенными (<restored>) и сомнительными (<fuzzy>) буквами,
     # число <unknown/>, описание повреждения глазами модели.
     restored: list[str] = field(default_factory=list)
@@ -96,6 +111,18 @@ JSON_SCHEMA: dict = {
             "description": "Running footer text printed in the bottom margin; null if none.",
         },
         "is_toc": {"type": "boolean", "description": "True if this page is the issue's table of contents."},
+        "rubric": {"type": ["string", "null"], "description": "Rubric printed above the title, without tags."},
+        "title": {"type": ["string", "null"], "description": "Title of the article starting on this page."},
+        "authors": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "position": {"type": ["string", "null"]}},
+                "required": ["name", "position"],
+                "additionalProperties": False,
+            },
+            "description": "Every author named on the page with position, without tags.",
+        },
         "content_markdown": {"type": "string", "description": "Full body of the page as Markdown, per the rules."},
         "notes": {"type": "string", "description": "Uncertainties: unreadable areas, doubts. Empty string if none."},
     },
@@ -127,6 +154,7 @@ def unspace_letters(text: str) -> str:
 
 
 DAMAGE_TAGS = ("restored", "fuzzy")
+STRUCTURE_TAGS = ("rubric", "author", "position")
 _UNKNOWN = re.compile(r"<unknown\s*/>")
 
 
@@ -170,6 +198,13 @@ def _coerce(payload: dict) -> PageResult:
         running_footer=text_or_none(payload.get("running_footer")),
         is_toc=bool(payload.get("is_toc", False)),
         notes=str(payload.get("notes") or ""),
+        rubric=text_or_none(payload.get("rubric")),
+        title=text_or_none(payload.get("title")),
+        authors=[
+            {"name": str(item.get("name")).strip(), "position": text_or_none(item.get("position"))}
+            for item in (payload.get("authors") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ],
         restored=[str(item) for item in (payload.get("restored") or []) if str(item).strip()],
         fuzzy=[str(item) for item in (payload.get("fuzzy") or []) if str(item).strip()],
         unknown=int(payload.get("unknown") or 0),

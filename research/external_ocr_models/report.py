@@ -59,6 +59,7 @@ MODEL_HEADER = (
     "h1/h2/h3",
     "авторов",
     "должн.",
+    "рубрик",
     "таблиц",
     "повёрн.",
     "схем",
@@ -95,6 +96,7 @@ def model_rows(scores: list[PageScore]) -> list[list[object]]:
                 f"{sum(i.structure.h1 for i in ok)}/{sum(i.structure.h2 for i in ok)}/{sum(i.structure.h3 for i in ok)}",
                 sum(item.structure.authors for item in ok),
                 sum(item.structure.positions for item in ok),
+                sum(item.structure.rubrics for item in ok),
                 sum(item.structure.tables for item in ok),
                 f"{rotated_found}/{rotated_total}" if rotated_total else "—",
                 sum(item.structure.schemas for item in ok),
@@ -170,7 +172,7 @@ def page_rows(scores: list[PageScore]) -> list[list[object]]:
 def write_scores_csv(scores: list[PageScore], path: Path) -> None:
     fields = [
         "page", "model", "ok", "error", "cer_finereader", "agreement", "h1", "h2", "h3", "authors", "positions",
-        "tables", "html_tables", "rotated_found", "rotated_total", "schemas", "pictures", "footnotes", "unreadable", "lists",
+        "rubrics", "tables", "html_tables", "rotated_found", "rotated_total", "schemas", "pictures", "footnotes", "unreadable", "lists",
         "repetition", "page_number", "page_number_expected", "is_toc", "truncated", "cost_usd", "latency_s", "prompt_tokens",
         "completion_tokens", "chars",
     ]  # fmt: skip

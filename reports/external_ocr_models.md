@@ -60,9 +60,10 @@ DeepSeek — не больше 1024 токенов на картинку, у Qwe
 
 **Промпт.** Системный промпт (`research/external_ocr_models/prompts/system.md.j2`) описывает
 документ (советский журнал 1966-76, русский, орфография 1960-х), требует дословную
-транскрипцию без исправлений, задаёт разметку (`#` статья, `##` подзаголовок, `###` рубрика,
-`**автор**`, `*должность*`, таблицы GFM или `<table>` с rowspan/colspan, повёрнутый текст —
-как обычный, `> [блок-схема]`, `> [картинка: …]`, разрядка → курсив без пробелов) и просит
+транскрипцию без исправлений, задаёт разметку (`#` статья, `##` подзаголовок, `<rubric>*…*</rubric>` рубрика,
+`<author>**…**</author>`, `<position>*…*</position>`, таблицы всегда HTML `<table>` с
+rowspan/colspan, повёрнутый текст — как обычный, `> [блок-схема]`, `> [картинка: …]`,
+разрядка → курсив без пробелов; те же рубрика/заголовок/авторы — полями JSON) и просит
 колонтитулы и номер страницы отдельными полями, а не в теле. Инструкции на английском:
 мелкие модели держат их надёжнее. Два урока пробника:
 * *Отточия*: без явного запрета «. . . . .» в оглавлении и таблицах любая модель может
@@ -355,10 +356,10 @@ Flash — $0.85, DeepSeek V4.1 Flash (2 куска) — $0.9, причём со 
 
 ## 9. Промпты и настройки запросов — как есть
 
-Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v12; блоки
+Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v13; блоки
 `--damage` — в 9.7); история версий — в 9.6.
 
-### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v12 — без указания издания)
+### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v13 — без указания издания)
 
 ```text
 You are a meticulous OCR and document-structure transcriber. You receive a scan of ONE page of Soviet or post-Soviet economic press — a journal or a newspaper printed between the 1920s and the 1990s. The text is Russian in the orthography of its time, with occasional Latin abbreviations, brand names and formulas. Newspaper pages are usually set in several narrow columns with small type; journal pages in one or two columns.
@@ -371,9 +372,10 @@ Transcribe the page exactly and mark up its structure. Rules:
 3. Structure (Markdown):
    - Article title → `# Заголовок статьи` (case as printed).
    - Headings inside an article → `## Подзаголовок`.
-   - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → `### Рубрика`, placed before the title. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
-   - Author name → its own paragraph in bold: `**И. Фетисов**` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»).
-   - Author's position and regalia → its own paragraph in italics right after the name: `*начальник УМТС Московского городского района, член коллегии Госснаба СССР*`.
+   - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → its own paragraph before the title, in italics inside a `<rubric>` tag: `<rubric>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric>`. Never use `#`-headings for rubrics: `#` and `##` are only for titles and subheadings. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
+   - Author name → its own paragraph in bold inside an `<author>` tag: `<author>**И. Фетисов**</author>` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»); several authors → one tagged paragraph each.
+   - Author's position and regalia → its own paragraph in italics inside a `<position>` tag right after the name: `<position>*начальник УМТС Московского городского района, член коллегии Госснаба СССР*</position>`.
+   These three tags are the ONLY place where `<rubric>`, `<author>`, `<position>` appear; do not wrap other bold or italic text in them. Also list the same values in the fields `rubric`, `title` and `authors`.
    - Tables → ALWAYS an HTML `<table>` (never a Markdown pipe table): one `<tr>` per printed line of the table — a sub-item printed on its own line («в том числе хлопка») is its own row, never several lines stacked in one cell with `<br>`; `<th>` for header cells, `rowspan`/`colspan` for merged cells and multi-level headers, one `<td>` per cell even if it is empty; a section heading inside the table («А. Ресурсы») → one row with a cell spanning all columns. Several row labels joined by a brace «}» to one shared value → keep each label in its own row and give the shared value cells `rowspan` over those rows. A cell never contains `<br>`. In the HEADER, a column title printed on several lines is ONE `<th>` with the lines joined by a space and a hyphenated word joined WITHOUT the hyphen, as in rule 2 («Тип дви-» / «гателя» → `<th>Тип двигателя</th>`, «зарпла-» / «та» → «зарплата»). In the BODY this does not apply: every printed line stays its own row — a label line without numbers («Остаток на начало периода:») is its own row with empty value cells, and the sub-items under it are the following rows. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table, not inside it.
    - Flowcharts and block diagrams → a block quote starting with `> [блок-схема]`, then the text of every block in reading order, one block per line, with `→` between connected blocks.
    - Photographs, drawings, decorative graphics → `> [картинка: краткое описание]`, e.g. `> [картинка: портрет мужчины в костюме]`.
@@ -382,6 +384,9 @@ Transcribe the page exactly and mark up its structure. Rules:
 5. If the page is the issue's table of contents («СОДЕРЖАНИЕ»), set is_toc to true and transcribe it as a Markdown list of «Автор. Название — страница».
 Return ONLY a JSON object with exactly these keys and nothing else:
 {"page_number": string or null (page number as printed, e.g. "12"),
+ "rubric": string or null (the rubric printed above the title, without tags),
+ "title": string or null (the title of the article that starts on this page; null if no article starts here),
+ "authors": array of objects {"name": string, "position": string or null} (every author named on the page, without tags; empty array if none),
  "running_header": string or null,
  "running_footer": string or null,
  "is_toc": boolean,
@@ -571,6 +576,16 @@ IMG_0116_1L и использовался при повторе сбойных �
   показывают стохастику: один прогон v11 отдал IMG_0144_1L с 10 строками и 28 `<br>`,
   три повтора — 22 строки без `<br>`; на IMG_0122_2R «в том числе вычислительный центр
   25/30/30» внутри ячеек модель то пишет в тех же ячейках, то отдельными строками.
+* **v13** — рубрика, автор и должность помечаются своими тегами вокруг прежней
+  markdown-разметки: `<rubric>*…*</rubric>` (вместо `###`, чтобы не путать с иерархией
+  заголовков), `<author>**И. Фетисов**</author>`, `<position>*начальник …*</position>`; в
+  просмотрщиках это выглядит как раньше (неизвестный инлайн-тег CommonMark пропускает,
+  GitHub вырезает, содержимое остаётся жирным/курсивом), а программно берётся регуляркой
+  или HTML-парсером. Те же значения дублируются полями JSON `rubric`, `title`, `authors:
+  [{name, position}]` — для выборки без разбора markdown. Проверка на DeepSeek (13 полос
+  пробника): теги на всех 5 полосах с авторами (6 авторов, 6 должностей, 1 рубрика), ни
+  одного `###`, поля JSON совпали с тегами до символа; `normalize()`/`structure()` теги
+  учитывают, старые выходы без тегов считаются по-прежнему.
 
 ### 9.7. Режим повреждённых сканов (`--damage`): что уходит в запрос и что приходит в ответ
 

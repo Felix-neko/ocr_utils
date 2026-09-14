@@ -24,7 +24,7 @@ _HYPHEN_BREAK = re.compile(r"(\w)[-­]\s*\n\s*(\w)")
 _SOFT_HYPHEN = "­"
 _SPACES = re.compile(r"\s+")
 _NOTE = re.compile(r"\[(картинка|блок-схема|неразборчиво)[^\]]*\]")
-_DAMAGE_TAG = re.compile(r"</?(restored|fuzzy)>|<unknown\s*/>")
+_DAMAGE_TAG = re.compile(r"</?(restored|fuzzy|rubric|author|position)>|<unknown\s*/>")
 
 
 def normalize(text: str) -> str:
@@ -53,8 +53,9 @@ class Structure:
     h1: int = 0
     h2: int = 0
     h3: int = 0
-    authors: int = 0  # абзацы только из **жирного**
-    positions: int = 0  # абзацы только из *курсива*
+    authors: int = 0  # <author> (или абзацы только из **жирного** в старых выходах)
+    positions: int = 0  # <position> (или абзацы только из *курсива*)
+    rubrics: int = 0  # <rubric>
     tables: int = 0  # GFM + <table>
     html_tables: int = 0
     pictures: int = 0
@@ -74,6 +75,11 @@ _ITALIC_PARA = re.compile(r"^\*[^*\n]+\*[,.;:]?$|^_[^_\n]+_[,.;:]?$")
 def structure(markdown: str) -> Structure:
     body = _FRONT_MATTER.sub("", markdown)
     counts = Structure()
+    # Авторы, должности и рубрики — по тегам (промпт v13+); старые выходы без тегов
+    # считаются по абзацам из одного жирного/курсивного фрагмента.
+    tagged = {
+        name: len(re.findall(rf"<{name}>.*?</{name}>", body, re.DOTALL)) for name in ("rubric", "author", "position")
+    }
     for raw in body.splitlines():
         line = raw.strip()
         if line.startswith("### "):
@@ -82,12 +88,14 @@ def structure(markdown: str) -> Structure:
             counts.h2 += 1
         elif line.startswith("# "):
             counts.h1 += 1
-        elif _BOLD_PARA.match(line):
+        elif not any(tagged.values()) and _BOLD_PARA.match(line):
             counts.authors += 1
-        elif _ITALIC_PARA.match(line):
+        elif not any(tagged.values()) and _ITALIC_PARA.match(line):
             counts.positions += 1
         elif re.match(r"^\s*([-*+]|\d+[.)])\s+", raw):
             counts.lists += 1
+    if any(tagged.values()):
+        counts.authors, counts.positions, counts.rubrics = tagged["author"], tagged["position"], tagged["rubric"]
     counts.html_tables = len(re.findall(r"<table\b", body, re.IGNORECASE))
     counts.tables = counts.html_tables + len(_TABLE_RULE.findall(body))
     counts.pictures = len(re.findall(r"\[картинка", body))

@@ -14,9 +14,10 @@ Transcribe the page exactly and mark up its structure. Rules:
 3. Structure (Markdown):
    - Article title → `# Заголовок статьи` (case as printed).
    - Headings inside an article → `## Подзаголовок`.
-   - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → `### Рубрика`, placed before the title. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
-   - Author name → its own paragraph in bold: `**И. Фетисов**` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»).
-   - Author's position and regalia → its own paragraph in italics right after the name: `*начальник УМТС Московского городского района, член коллегии Госснаба СССР*`.
+   - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → its own paragraph before the title, in italics inside a `<rubric>` tag: `<rubric>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric>`. Never use `#`-headings for rubrics: `#` and `##` are only for titles and subheadings. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
+   - Author name → its own paragraph in bold inside an `<author>` tag: `<author>**И. Фетисов**</author>` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»); several authors → one tagged paragraph each.
+   - Author's position and regalia → its own paragraph in italics inside a `<position>` tag right after the name: `<position>*начальник УМТС Московского городского района, член коллегии Госснаба СССР*</position>`.
+   These three tags are the ONLY place where `<rubric>`, `<author>`, `<position>` appear; do not wrap other bold or italic text in them. Also list the same values in the fields `rubric`, `title` and `authors`.
    - Tables → ALWAYS an HTML `<table>` (never a Markdown pipe table): one `<tr>` per printed line of the table — a sub-item printed on its own line («в том числе хлопка») is its own row, never several lines stacked in one cell with `<br>`; `<th>` for header cells, `rowspan`/`colspan` for merged cells and multi-level headers, one `<td>` per cell even if it is empty; a section heading inside the table («А. Ресурсы») → one row with a cell spanning all columns. Several row labels joined by a brace «}» to one shared value → keep each label in its own row and give the shared value cells `rowspan` over those rows. A cell never contains `<br>`. In the HEADER, a column title printed on several lines is ONE `<th>` with the lines joined by a space and a hyphenated word joined WITHOUT the hyphen, as in rule 2 («Тип дви-» / «гателя» → `<th>Тип двигателя</th>`, «зарпла-» / «та» → «зарплата»). In the BODY this does not apply: every printed line stays its own row — a label line without numbers («Остаток на начало периода:») is its own row with empty value cells, and the sub-items under it are the following rows. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table, not inside it.
    - Flowcharts and block diagrams → a block quote starting with `> [блок-схема]`, then the text of every block in reading order, one block per line, with `→` between connected blocks.
    - Photographs, drawings, decorative graphics → `> [картинка: краткое описание]`, e.g. `> [картинка: портрет мужчины в костюме]`.
@@ -41,6 +42,9 @@ Return ONLY a JSON object with exactly these keys and nothing else:
 {%- else -%}
 {"page_number": string or null (page number as printed, e.g. "12"),
 {%- endif %}
+ "rubric": string or null (the rubric printed above the title, without tags),
+ "title": string or null (the title of the article that starts on this page; null if no article starts here),
+ "authors": array of objects {"name": string, "position": string or null} (every author named on the page, without tags; empty array if none),
  "running_header": string or null,
  "running_footer": string or null,
  "is_toc": boolean,
