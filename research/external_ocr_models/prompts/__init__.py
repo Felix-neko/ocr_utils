@@ -1,0 +1,42 @@
+"""Промпты — Jinja-шаблоны рядом с этим файлом, а не строки в коде.
+
+Формулировки правятся чаще кода, и в отдельных файлах их удобно сравнивать между
+прогонами. ``PROMPT_VERSION`` пакета поднимать при любой правке шаблонов.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+PROMPTS_DIR = Path(__file__).parent
+
+
+@lru_cache(maxsize=1)
+def _environment() -> Environment:
+    return Environment(
+        loader=FileSystemLoader(str(PROMPTS_DIR)),
+        undefined=StrictUndefined,
+        keep_trailing_newline=False,
+        trim_blocks=False,
+        lstrip_blocks=False,
+    )
+
+
+def render(template_name: str, **variables: object) -> str:
+    return _environment().get_template(template_name).render(**variables).strip() + "\n"
+
+
+def system_prompt(output_mode: str, restore: bool = False) -> str:
+    """Системный промпт под режим ответа: ``json`` или ``markdown`` с YAML-шапкой.
+
+    ``restore`` — просить достраивать повреждённые буквы по контексту и помечать их
+    ``<restored>``.
+    """
+    return render("system.md.j2", output_mode=output_mode, restore=restore)
+
+
+def user_prompt(strips: int, hint: str = "") -> str:
+    return render("user.md.j2", strips=strips, hint=hint.strip())

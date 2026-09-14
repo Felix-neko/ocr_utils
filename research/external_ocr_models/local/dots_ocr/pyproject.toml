@@ -1,0 +1,17 @@
+[project]
+name = "external-ocr-dots-ocr"
+version = "0.1.0"
+description = "Отдельное окружение под dots.ocr (rednote-hilab): remote code под transformers 4.5x, в основной venv не ставится"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch>=2.12",
+    "torchvision>=0.27",
+    "transformers>=4.51,<4.54",  # 4.54+ требует video_processor в процессоре, которого у remote code нет
+    "accelerate>=1.0",
+    "qwen-vl-utils>=0.0.11",
+    "pillow>=10",
+    "huggingface-hub>=0.30",
+]
+
+[tool.uv]
+prerelease = "allow"

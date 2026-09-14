@@ -87,3 +87,9 @@ reports/прогон детектора таблиц v.4.2/оверлеи_v3/
 reports/прогон детектора таблиц v.4.2/оверлеи_v4/
 reports/прогон детектора таблиц v.4.2/страницы_finereader/
 reports/прогон детектора таблиц v.4.2/листы/
+
+# Колёса, скачанные руками для локальных окружений (research/external_ocr_models/local/*/wheels)
+wheels/
+research/external_ocr_models/local/*/weights/
+research/external_ocr_models/local/*/sync.log
+research/external_ocr_models/damaged/

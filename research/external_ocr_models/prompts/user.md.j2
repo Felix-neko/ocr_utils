@@ -1,0 +1,9 @@
+{#- Текст пользовательского сообщения рядом с картинкой(ами). Переменные: strips (число полос),
+    hint (подсказка про конкретную полосу, например про срезанный корешком край; может быть пустой). -#}
+{% if strips > 1 -%}
+The page is given as {{ strips }} horizontal strips in order from top to bottom; neighbouring strips overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
+{% endif -%}
+{% if hint -%}
+{{ hint }}
+{% endif -%}
+Transcribe this page.

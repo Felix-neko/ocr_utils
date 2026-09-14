@@ -1,0 +1,22 @@
+[project]
+name = "external-ocr-deepseek-ocr2"
+version = "0.1.0"
+description = "Отдельное окружение под DeepSeek-OCR-2: remote code пришит к transformers 4.46.3"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # Карточка модели требует torch 2.6.0 + flash-attn 2.7.3; torch 2.6 не знает Blackwell
+    # (sm_120), поэтому берём свежий torch и просим модель работать без flash-attn.
+    "torch>=2.12",
+    "torchvision>=0.27",
+    "transformers==4.46.3",
+    "tokenizers==0.20.3",
+    "einops",
+    "addict",
+    "easydict",
+    "pillow>=10",
+    "huggingface-hub>=0.30",
+    "matplotlib>=3.7",
+]
+
+[tool.uv]
+prerelease = "allow"

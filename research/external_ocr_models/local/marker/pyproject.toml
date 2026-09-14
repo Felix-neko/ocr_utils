@@ -1,0 +1,11 @@
+[project]
+name = "external-ocr-marker"
+version = "0.1.0"
+description = "Отдельное окружение под Marker (datalab): тянет свою версию surya-ocr, в основной venv не ставится"
+requires-python = ">=3.11,<3.12"
+# Marker 2.x (surya 2) считает через vllm в docker с nvidia-runtime или через бинарник
+# llama-server — ни того, ни другого на машине нет; 1.x гоняет surya в процессе.
+dependencies = ["marker-pdf>=1.8,<2", "torch>=2.12", "torchvision>=0.27", "pillow>=10"]
+
+[tool.uv]
+prerelease = "allow"

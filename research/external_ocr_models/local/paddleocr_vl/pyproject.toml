@@ -1,0 +1,20 @@
+[project]
+name = "external-ocr-paddleocr-vl"
+version = "0.1.0"
+description = "Отдельное окружение под PaddleOCR-VL 1.6: paddlepaddle-gpu + paddleocr[doc-parser] + transformers 5"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # GPU-сборка под CUDA 13 (Blackwell, sm_120 — cu126-колёса её не знают). Колесо берётся
+    # из локальной папки wheels/ (как скачать — README): официальный индекс
+    # https://www.paddlepaddle.org.cn/packages/stable/cu130/ ссылается на CDN
+    # paddle-whl.cdn.bcebos.com, который с этой машины не отвечает.
+    "paddlepaddle-gpu>=3.3",
+    # Без torch/transformers: VLM считает сам paddle (родной бэкенд), а torch ≥ 2.12 тянет
+    # nvidia-cudnn-cu13 9.20+, тогда как paddlepaddle-gpu пришпилен к 9.13 — не совместимы.
+    "paddleocr[doc-parser]>=3.6",
+    "pillow>=10",
+]
+
+[tool.uv]
+prerelease = "allow"
+find-links = ["wheels"]
