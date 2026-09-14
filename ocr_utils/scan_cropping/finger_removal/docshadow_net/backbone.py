@@ -1,3 +1,5 @@
+"""Сеть DocShadow (снятие теней с документа): базовые слои — LayerNorm2d, блоки внимания. Перенос из апстрима."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

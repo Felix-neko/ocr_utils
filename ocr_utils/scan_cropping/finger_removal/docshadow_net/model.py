@@ -1,3 +1,5 @@
+"""Сеть DocShadow: сборка модели из блоков backbone/blocks. Перенос из апстрима."""
+
 import numbers
 
 import einops

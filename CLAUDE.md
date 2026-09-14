@@ -1,11 +1,74 @@
-# Правила проекта
+# ocr_utils — правила проекта
+
+Обработка сканов книг, журналов и газет: кадрирование, детекторы дефектов, разметка в CVAT,
+очистка, сборка PDF под FineReader, внешний OCR. Один разработчик, только Claude Code.
+
+## Справочники (открывать до grep по репо)
+
+- `docs/modules.md` — карта всех модулей и классов (генерируется, не править руками).
+- `docs/data_layout.md` — где лежат данные, на каких дисках, что там нельзя делать.
+- `docs/pack1_pipeline.md` — сквозной конвейер пака-1: шаги, скрипты, что читают и пишут.
+- `docs/status.md` — состояние направлений, **что пробовали и отвергли**, действующие пороги.
+  Обновлять при завершении направления.
+- `docs/win10_vm.md` — Windows-VM с FineReader: Hot Folder, доступ через vmrun, ограничения.
+- README подпакетов: `ocr_utils/<пакет>/README.md` (есть у 11 из 18).
+
+Навыки: `/run-pack1-step`, `/new-detector`, `/write-report`, `/cvat-roundtrip`.
+Правила по путям (`.claude/rules/`) подгружаются сами при работе с `scan_markup`, `run_scripts`, `tests`.
+
+## Карта пакета
+
+| Подпакет | Что делает | Точка входа |
+|---|---|---|
+| `scan_cropping` | Главный пайплайн кадра: YOLO-World+SAM → разворот, палец (LaMa), поворот, crop-зона | `python -m ocr_utils.scan_cropping` |
+| `scan_markup` | Разметка пака: растр, таблицы, схемы, печати → CVAT → SQLite; внутри `toc`, `orientation`, `curved_lines`, `table_detection` | `python -m ocr_utils.scan_markup <команда>` |
+| `scan_cleanup` | Закрас разметки из CVAT (LaMa) и размытие фона по паку | `python -m ocr_utils.scan_cleanup` |
+| `pdf_utils` | Промежуточные и финальные PDF под FineReader, сбор заострённых копий | `python -m ocr_utils.pdf_utils` |
+| `defocus_detection` | Расфокус по папке RAF-превью: ранжирование, зональный | `python -m ocr_utils.defocus_detection` |
+| `show_through_detection` | Просвечивающая бумага | `python -m ocr_utils.show_through_detection` |
+| `line_art_detection` | Крупный штриховой рисунок и формулы в бинаризованных PDF | `python -m ocr_utils.line_art_detection` |
+| `gutter_loss_detection` / `_restoration` | Текст, ушедший под корешок: детектор / восстановление (исследование) | `python -m ocr_utils.gutter_loss_*` |
+| `dewarp` | Выпрямление кривых строк, несколько движков; годен только `textline` | `python -m ocr_utils.dewarp` |
+| `rotated_text` | Таблицы с боковым текстом: прочитать, набрать прямо | `python -m ocr_utils.rotated_text.tables` |
+| `background_smoothing` | Сглаживание фона под бинаризацию FineReader | `python -m ocr_utils.background_smoothing` |
+| `zonal_deblur` | Зональный смаз: PSF по спектру, Винер | `python -m ocr_utils.zonal_deblur` |
+| `inpainting` | Общие примитивы закраса (ROI, LaMa) для пальцев и разметки | библиотека |
+| `docx_md` | DOCX → Markdown, нарезка под LLM | библиотека |
+| `legacy` | Помойка: не поддерживается, без тестов | — |
+| `research/external_ocr_models` | Полоса → размеченный markdown через VLM (OpenRouter), промпты v1–v13 | `python -m research.external_ocr_models` |
+| `research/legacy/table_processing` | Стенд исследования таблиц; живой код переехал в `scan_markup` | заморожено |
+| `scripts/` | Разовые утилиты; `gen_module_map.py` — генератор карты | — |
+| `run_scripts/<пакет>/` | Готовые прогоны с числами в шапке, `source common.sh` | — |
+| `reports/` | Отчёты по прогонам; оверлеи в подпапках вне git | — |
+| `ai_slop/` | Черновой код от ИИ, вне git | — |
+
+Подпакеты без `__init__.py`-экспортов, все namespace; конфиг только через CLI-опции (click).
+
+## Команды
+
+```bash
+uv sync                                        # окружение (Python 3.11)
+uv run pytest tests/ocr_utils/<пакет> -q       # тесты зеркалят пакет; полный прогон долгий
+uv run black -l 120 -C .                       # хук форматирует .py сам после правки
+uv run python scripts/gen_module_map.py        # карта модулей (хук делает сам)
+```
+
+Железо: 16 физических ядер, RTX 5060 Ti 16 ГБ, 135 ГБ RAM. Видеопамять одна на всех.
+
+## Куда что класть
+
+Новый отчёт — `reports/` (навык `write-report`). Run-скрипт — `run_scripts/<пакет>/`. Черновик —
+`ai_slop/`. Выход прогона — на SSD (`/mnt/SYSTEM/...`, регистр значим, или `~/Projects/mts_markup`),
+не в корень репо и **никогда в `/mnt/dump3/yandex_disk_*`** (Я.Диск затирает исходники).
+Хук блокирует `pgrep -f` без `[x]`-разрыва, запись в корень Я.Диска, путь `/mnt/system` строчными
+и `rm` баз разметки.
 
 ## Ожидание фоновых процессов
 
 Ждать завершения процесса **по сохранённому PID**, а не по шаблону командной строки.
 
 ```bash
-uv run python long_job.py & PID=$!
+setsid uv run python long_job.py > log 2>&1 < /dev/null & PID=$!
 while kill -0 "$PID" 2>/dev/null; do sleep 10; done
 ```
 
@@ -14,16 +77,20 @@ while kill -0 "$PID" 2>/dev/null; do sleep 10; done
 ложным и цикл висит вечно. В этом проекте так уже терялся час машинного времени —
 ожидатель `while pgrep -f "exiftool -q -fast2 -r -ext RAF"` крутился больше часа после
 того, как exiftool давно завершился. Хуже того, проверка «а жив ли он?» тем же `pgrep -f`
-попадает в ту же ловушку и отвечает «жив» про уже мёртвый процесс.
+попадает в ту же ловушку и отвечает «жив» про уже мёртвый процесс. А `pkill -f` тем же
+шаблоном убивает собственный шелл (код 144).
 
 Если PID недоступен и без поиска по имени никак — разрывать самосовпадение классом
 символов: `pgrep -f '[e]xiftool'`. Проверять живость конкретного процесса — через
-`ps -p "$PID"`, а не `pgrep`.
+`ps -p "$PID"`, а не `pgrep`. Запускать в фон через `setsid`, иначе pgid ≠ pid и
+`kill -- -$PID` промахивается; останавливать — всю группу, иначе forkserver и воркеры
+остаются сиротами.
 
 ## Стиль
 
-* Комментарии и докстринги — на русском.
+* Комментарии, докстринги, логи — на русском.
 * Форматирование — `black -l 120 -C`.
+* Каждый модуль и класс — с докстрингом в одну содержательную строку: из них собирается карта.
 
 ## Параллелизм
 
@@ -42,3 +109,10 @@ while kill -0 "$PID" 2>/dev/null; do sleep 10; done
 * Данные на `/mnt/dump3` лежат на медленном NTFS-3G — типичный кандидат на то, чтобы
   упереться в диск.
 * Задачи на GPU (surya, torch) в пул не заворачивать: видеопамять одна на всех.
+* В инициализаторе воркера отключать hugepage и потоки BLAS (см. `.claude/rules/gpu_and_pools.md`).
+
+## Пороги детекторов
+
+Калибровать по распределению метрик всего пака и выборке глазами по поясам score, а не по
+эталону из десятка полос: эталон из 14 полос дал 23% ложных флагов на паке. Размеры,
+привязанные к бумаге, мерить заранее и класть числами в run-скрипт, не долей от кадра.

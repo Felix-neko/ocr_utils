@@ -1,3 +1,5 @@
+"""Сборка PDF из пачки JPEG без перекодирования (img2pdf); старая плоская версия pdf_utils."""
+
 from pathlib import Path
 from typing import Iterable, Optional, List
 import img2pdf
