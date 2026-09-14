@@ -331,30 +331,30 @@ Flash — $0.85, DeepSeek V4.1 Flash (2 куска) — $0.9, причём со 
 
 ## 9. Промпты и настройки запросов — как есть
 
-Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v3 + блок
-`--restore`); история версий — в конце раздела.
+Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v8; блоки
+`--damage` — в 9.7); история версий — в 9.6.
 
-### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`)
+### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v8 — без указания издания)
 
 ```text
-You are a meticulous OCR and document-structure transcriber. You receive a scan of ONE page of the Soviet monthly journal «Материально-техническое снабжение» (Moscow, 1966-1976). The text is Russian in standard 1960s orthography, with occasional Latin abbreviations, brand names and formulas.
+You are a meticulous OCR and document-structure transcriber. You receive a scan of ONE page of Soviet or post-Soviet economic press — a journal or a newspaper printed between the 1920s and the 1990s. The text is Russian in the orthography of its time, with occasional Latin abbreviations, brand names and formulas. Newspaper pages are usually set in several narrow columns with small type; journal pages in one or two columns.
 
 Transcribe the page exactly and mark up its structure. Rules:
 
 1. Verbatim text. Keep the printed spelling, punctuation, numbers and units. Do not correct, modernise, translate, summarise or reorder. Never invent text that is not on the page; write [неразборчиво] for an unreadable fragment.
-2. Lines and paragraphs. Join words hyphenated across a line break («снабже-» + «ния» → «снабжения»), but keep real hyphens in compound words («материально-техническое»). Merge the lines of a paragraph into one line; separate paragraphs with a blank line. On multi-column pages read the left column fully, then the right.
+2. Lines and paragraphs. Join words hyphenated across a line break («снабже-» + «ния» → «снабжения»), but keep real hyphens in compound words («материально-техническое»). Merge the lines of a paragraph into one line; separate paragraphs with a blank line. On multi-column pages read the columns in order, left to right, each column fully before the next; an article that continues in the next column or under a heading spanning several columns is one text — keep its paragraphs together.
    Dot leaders — rows of dots or dashes that fill the space before a number (in tables of contents, in table rows) — are NOT text: never reproduce them; write the entry, then « — », then the number («В. Тычинин. Первые шаги работы по-новому — 1»).
 3. Structure (Markdown):
    - Article title → `# Заголовок статьи` (case as printed).
    - Headings inside an article → `## Подзаголовок`.
-   - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → `### Рубрика`, placed before the title.
-   - Author name → its own paragraph in bold: `**И. Фетисов**`.
+   - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → `### Рубрика`, placed before the title. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
+   - Author name → its own paragraph in bold: `**И. Фетисов**` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»).
    - Author's position and regalia → its own paragraph in italics right after the name: `*начальник УМТС Московского городского района, член коллегии Госснаба СССР*`.
    - Tables → a GFM Markdown table. If the table has merged cells or a multi-level header, use an HTML `<table>` with rowspan/colspan instead. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table.
    - Flowcharts and block diagrams → a block quote starting with `> [блок-схема]`, then the text of every block in reading order, one block per line, with `→` between connected blocks.
    - Photographs, drawings, decorative graphics → `> [картинка: краткое описание]`, e.g. `> [картинка: портрет мужчины в костюме]`.
    - Footnotes → `[^1]` in the text and `[^1]: текст сноски` at the end. Lists → Markdown lists. Text printed in bold → **bold**. Letter-spaced text (разрядка: «П р и м е ч а н и е») → write the word normally, without spaces between letters, in italics: *Примечание*.
-4. Running header and footer (journal name, issue, date, page number printed in the top or bottom margin) are NOT part of the body: put them into the dedicated fields and leave them out of content_markdown.
+4. Running header and footer (publication name, issue number, date, page number printed in the top or bottom margin; on a newspaper front page — the masthead with the name, date, price and founder) are NOT part of the body: put them into the dedicated fields and leave them out of content_markdown. `page_number` is only the page number; an issue number («№ 3») or a year is not a page number.
 5. If the page is the issue's table of contents («СОДЕРЖАНИЕ»), set is_toc to true and transcribe it as a Markdown list of «Автор. Название — страница».
 Return ONLY a JSON object with exactly these keys and nothing else:
 {"page_number": string or null (page number as printed, e.g. "12"),
@@ -504,11 +504,25 @@ IMG_0116_1L и использовался при повторе сбойных �
 * **v4-v7** — режим `--damage` вместо `--restore`: три тега, поля `damage`/`restored`/`fuzzy`/
   `unknown`, подсказки по страницам (v4); `damage` первым полем, требование тегов у
   картинки (v5); `edge_words` (v6); правило про перенос (v7). Формат — 9.7, замеры — раздел 10.
+* **v8** — промпт обобщён с одного журнала на советскую и постсоветскую экономическую
+  прессу 1920-х — 1990-х, журналы и газеты: описание источника стало общим (конкретное
+  издание — опцией `--source "журнал «…», Москва, 1966"`, попадает в первую фразу), добавлены
+  газетные особенности (несколько узких колонок мелким шрифтом, несколько независимых
+  статей на полосе — каждой свой `#`, лид под заголовком → `##`, подпись автора в конце
+  статьи или «Наш корр.», шапка первой полосы газеты с датой и ценой — в колонтитул) и
+  уточнение «номер выпуска и год — не номер страницы».
+  Проверка на DeepSeek V4.1 Flash (2 куска): 13 полос пробника — 9 побайтно те же, что с v2,
+  3 — в пределах 0,4 % знаков, на IMG_0134_1L модель отдала GFM-таблицу со схлопнутой
+  шапкой вместо HTML (содержание то же), на обложке не описала картинку; «№ 3» из шапки
+  попал в `page_number` — исправлено уточнением, повтор дал `null`. Мини-набор повреждённых
+  страниц: пометки на тех же страницах, что с v7; один прогон дал 46 `<unknown/>` на
+  сплющенной IMG_0068_L, два повтора той же страницы — 1/0/0: это стохастика провайдера
+  при `temperature 0`, а не промпт.
 
 ### 9.7. Режим повреждённых сканов (`--damage`): что уходит в запрос и что приходит в ответ
 
 Включается флагом `run --damage`; без него ни правила, ни полей ниже в запросе нет.
-Промпт v7.
+Промпт v8.
 
 **Теги в теле (`content_markdown`)** — размечают только повреждённые места, остальной текст
 остаётся обычным markdown по правилам 1-5:

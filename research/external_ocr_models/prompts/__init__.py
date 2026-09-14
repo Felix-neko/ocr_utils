@@ -29,13 +29,15 @@ def render(template_name: str, **variables: object) -> str:
     return _environment().get_template(template_name).render(**variables).strip() + "\n"
 
 
-def system_prompt(output_mode: str, damage: bool = False) -> str:
+def system_prompt(output_mode: str, damage: bool = False, source: str = "") -> str:
     """Системный промпт под режим ответа: ``json`` или ``markdown`` с YAML-шапкой.
 
     ``damage`` — правило про повреждённые буквы: достраивать и помечать ``<restored>``,
-    сомнительные — ``<fuzzy>``, нечитаемые — ``<unknown/>``.
+    сомнительные — ``<fuzzy>``, нечитаемые — ``<unknown/>``. ``source`` — описание издания,
+    если известно; по умолчанию промпт говорит про советскую и постсоветскую экономическую
+    прессу вообще, журналы и газеты.
     """
-    return render("system.md.j2", output_mode=output_mode, damage=damage)
+    return render("system.md.j2", output_mode=output_mode, damage=damage, source=source.strip())
 
 
 def user_prompt(strips: int, hint: str = "", damage: bool = False) -> str:

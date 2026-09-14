@@ -169,6 +169,12 @@ def main(log_level: str) -> None:
 )
 @click.option("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, show_default=True)
 @click.option(
+    "--source",
+    default="",
+    help="Описание издания для промпта, например «журнал «Материально-техническое снабжение», Москва, 1966»; "
+    "пусто — советская и постсоветская экономическая пресса вообще, журналы и газеты.",
+)
+@click.option(
     "--damage",
     is_flag=True,
     help="Режим повреждённых сканов: достраивать буквы и помечать <restored>, <fuzzy>, <unknown/>.",
@@ -217,6 +223,7 @@ def run(
     quality: int,
     reasoning: str | None,
     max_tokens: int,
+    source: str,
     damage: bool,
     hint: str,
     hints_file: Path | None,
@@ -244,6 +251,7 @@ def run(
         reasoning=reasoning,
         max_tokens=max_tokens,
         damage=damage,
+        source=source,
         hint=hint,
         hints=read_hints(hints_file) if hints_file else {},
         damage_side=damage_side,

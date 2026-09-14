@@ -54,6 +54,7 @@ class RunOptions:
     write_json: bool = True
     write_md: bool = True
     damage: bool = False  # правило про повреждённые буквы: <restored>, <fuzzy>, <unknown/>
+    source: str = ""  # описание издания для промпта («журнал «…», 1966»); пусто — пресса вообще
     hint: str = ""  # подсказка модели про полосу (например, «левый край срезан корешком»)
     hints: dict[str, str] = field(default_factory=dict)  # подсказки по полосам: относительный путь → текст
     damage_side: str = "none"  # auto — по суффиксу _L/_R угадать, какой край у корешка
@@ -111,7 +112,7 @@ def build_payload(
     payload: dict[str, Any] = {
         "model": spec.openrouter_id,
         "messages": [
-            {"role": "system", "content": system_prompt(options.output_mode, options.damage)},
+            {"role": "system", "content": system_prompt(options.output_mode, options.damage, options.source)},
             {"role": "user", "content": content},
         ],
         "temperature": 0,

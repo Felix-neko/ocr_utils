@@ -203,3 +203,10 @@ def test_read_hints(tmp_path):
     path = tmp_path / "hints.txt"
     path.write_text("# комментарий\nа/b.jpg\tсрезан правый край\nпусто\t\n", encoding="utf-8")
     assert cli.read_hints(path) == {"а/b.jpg": "срезан правый край"}
+
+
+def test_source_in_system_prompt():
+    generic = build_payload(resolve("deepseek-v41-flash"), [], RunOptions(), "json_object")["messages"][0]["content"]
+    assert "journal or a newspaper" in generic and "this one:" not in generic
+    specific = build_payload(resolve("deepseek-v41-flash"), [], RunOptions(source="журнал «МТС», 1966"), "json_object")
+    assert "(this one: журнал «МТС», 1966)" in specific["messages"][0]["content"]
