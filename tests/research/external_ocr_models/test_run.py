@@ -173,12 +173,33 @@ def test_request_error_recorded(tmp_path):
     assert "402" in meta["error"] and not ocr.is_done(out_dir, rel)
 
 
-def test_restore_and_hint_in_payload():
+def test_damage_hints_in_payload():
+    options = RunOptions(damage=True, hint="общая", hints={"1966/03/IMG_0104_2R.jpg": "особая"}, damage_side="auto")
     payload = build_payload(
-        resolve("deepseek-v41-flash"), [], RunOptions(restore=True, hint="левый край срезан"), "json_object"
+        resolve("deepseek-v41-flash"), [], options, "json_object", rel=Path("1966/03/IMG_0104_2R.jpg")
     )
     system, user = payload["messages"][0]["content"], payload["messages"][1]["content"][0]["text"]
-    assert "<restored>" in system and '"restored"' in system
-    assert user.startswith("левый край срезан")
+    assert "<restored>" in system and "<fuzzy>" in system and "<unknown/>" in system and '"damage"' in system
+    assert user.startswith("общая особая") and "LEFT page" not in user  # суффикса _L/_R нет
+    right = build_payload(resolve("deepseek-v41-flash"), [], options, "json_object", rel=Path("x/IMG_0006_R.jpg"))
+    assert "RIGHT page" in right["messages"][1]["content"][0]["text"]
     plain = build_payload(resolve("deepseek-v41-flash"), [], RunOptions(), "json_object")
     assert "<restored>" not in plain["messages"][0]["content"]
+
+
+def test_damage_tags_recorded_in_meta(tmp_path):
+    in_dir, out_dir = tmp_path / "in", tmp_path / "out"
+    _make_pages(in_dir)
+    rel = Path("1966/03/IMG_0104_2R.jpg")
+    answer = ANSWER.replace("Текст.", "<restored>Те</restored>кст <fuzzy>и</fuzzy> <unknown/> <fuzzy>хвост")
+    meta = recognise_page(
+        FakeClient([answer]), resolve("gemini-31-flash-lite"), in_dir / rel, rel, out_dir, RunOptions(damage=True)
+    )
+    assert meta["tags"] == {"restored": 1, "fuzzy": 1, "unknown": 1} and "fuzzy" in meta["tag_warning"]
+    assert "<restored>Те</restored>" in (out_dir / "1966/03/IMG_0104_2R.md").read_text(encoding="utf-8")
+
+
+def test_read_hints(tmp_path):
+    path = tmp_path / "hints.txt"
+    path.write_text("# комментарий\nа/b.jpg\tсрезан правый край\nпусто\t\n", encoding="utf-8")
+    assert cli.read_hints(path) == {"а/b.jpg": "срезан правый край"}

@@ -24,6 +24,7 @@ _HYPHEN_BREAK = re.compile(r"(\w)[-­]\s*\n\s*(\w)")
 _SOFT_HYPHEN = "­"
 _SPACES = re.compile(r"\s+")
 _NOTE = re.compile(r"\[(картинка|блок-схема|неразборчиво)[^\]]*\]")
+_DAMAGE_TAG = re.compile(r"</?(restored|fuzzy)>|<unknown\s*/>")
 
 
 def normalize(text: str) -> str:
@@ -32,6 +33,7 @@ def normalize(text: str) -> str:
     text = _TABLE_RULE.sub(" ", text)
     text = _HTML_TAG.sub(" ", text)
     text = _NOTE.sub(" ", text)
+    text = _DAMAGE_TAG.sub("", text)
     text = _HYPHEN_BREAK.sub(r"\1\2", text)
     text = text.replace(_SOFT_HYPHEN, "")
     text = _MD_MARKS.sub(" ", text)
@@ -216,6 +218,9 @@ class PageScore:
     prompt_tokens: int | None
     completion_tokens: int | None
     chars: int
+    tags: dict = field(default_factory=dict)  # режим damage: restored/fuzzy/unknown
+    tags_from_edge_words: int = 0
+    damage_seen: str = ""
 
 
 def score_outputs(
@@ -277,6 +282,9 @@ def score_outputs(
                     prompt_tokens=meta.get("prompt_tokens"),
                     completion_tokens=meta.get("completion_tokens"),
                     chars=len(output.markdown or ""),
+                    tags=meta.get("tags") or {},
+                    tags_from_edge_words=int(meta.get("tags_from_edge_words") or 0),
+                    damage_seen=meta.get("damage_seen") or "",
                 )
             )
     return scores

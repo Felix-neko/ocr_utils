@@ -26,7 +26,13 @@ class PageResult:
     running_footer: str | None = None
     is_toc: bool = False
     notes: str = ""
-    restored: list[str] = field(default_factory=list)  # слова с достроенными буквами (режим restore)
+    # Режим damage: слова с достроенными (<restored>) и сомнительными (<fuzzy>) буквами,
+    # число <unknown/>, описание повреждения глазами модели.
+    restored: list[str] = field(default_factory=list)
+    fuzzy: list[str] = field(default_factory=list)
+    unknown: int = 0
+    damage: str = ""
+    edge_words: list[dict] = field(default_factory=list)  # [{seen, full, kind}] по повреждённым строкам
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=1)
@@ -34,16 +40,43 @@ class PageResult:
 
 # Строгая схема для response_format=json_schema. additionalProperties=false и полный
 # required — требование strict-режима у OpenAI-совместимых провайдеров.
-def json_schema(restore: bool = False) -> dict:
-    """Схема ответа; в режиме restore — с полем restored (strict требует полного required)."""
+def json_schema(damage: bool = False) -> dict:
+    """Схема ответа; в режиме damage — с полями restored/fuzzy/unknown/damage (strict требует полного required)."""
     schema = json.loads(json.dumps(JSON_SCHEMA))
-    if restore:
-        schema["properties"]["restored"] = {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Every word containing reconstructed characters; empty if none.",
-        }
-        schema["required"].append("restored")
+    if damage:
+        properties = {"damage": {"type": "string", "description": "What damage is visible on the page."}}
+        properties.update(schema["properties"])
+        schema["properties"] = properties
+        schema["properties"].update(
+            {
+                "restored": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Words with <restored> characters.",
+                },
+                "fuzzy": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Words with <fuzzy> characters.",
+                },
+                "unknown": {"type": "integer", "description": "Number of <unknown/> markers."},
+                "edge_words": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "seen": {"type": "string"},
+                            "full": {"type": "string"},
+                            "kind": {"type": "string", "enum": ["hidden", "fuzzy", "unknown"]},
+                        },
+                        "required": ["seen", "full", "kind"],
+                        "additionalProperties": False,
+                    },
+                    "description": "One entry per damaged line: the affected word as seen and as written.",
+                },
+            }
+        )
+        schema["required"] = ["damage"] + schema["required"] + ["restored", "fuzzy", "unknown", "edge_words"]
     return schema
 
 
@@ -93,6 +126,22 @@ def unspace_letters(text: str) -> str:
     return _SPACED_WORD.sub(join, text)
 
 
+DAMAGE_TAGS = ("restored", "fuzzy")
+_UNKNOWN = re.compile(r"<unknown\s*/>")
+
+
+def tag_counts(text: str) -> dict[str, int]:
+    """Сколько в тексте пар <restored>, <fuzzy> и маркеров <unknown/>."""
+    counts = {name: len(re.findall(rf"<{name}>.*?</{name}>", text, re.DOTALL)) for name in DAMAGE_TAGS}
+    counts["unknown"] = len(_UNKNOWN.findall(text))
+    return counts
+
+
+def unbalanced_tags(text: str) -> list[str]:
+    """Имена тегов, у которых число открывающих и закрывающих не совпало."""
+    return [name for name in DAMAGE_TAGS if text.count(f"<{name}>") != text.count(f"</{name}>")]
+
+
 _FENCE = re.compile(r"^\s*```[a-zA-Z]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
 
@@ -122,6 +171,10 @@ def _coerce(payload: dict) -> PageResult:
         is_toc=bool(payload.get("is_toc", False)),
         notes=str(payload.get("notes") or ""),
         restored=[str(item) for item in (payload.get("restored") or []) if str(item).strip()],
+        fuzzy=[str(item) for item in (payload.get("fuzzy") or []) if str(item).strip()],
+        unknown=int(payload.get("unknown") or 0),
+        damage=str(payload.get("damage") or ""),
+        edge_words=[item for item in (payload.get("edge_words") or []) if isinstance(item, dict) and item.get("full")],
     )
 
 
@@ -178,3 +231,50 @@ def parse_markdown_text(text: str) -> PageResult:
             fields[pair.group(1)] = _yaml_scalar(pair.group(2))
     fields["content_markdown"] = match.group(2).strip()
     return _coerce(fields)
+
+
+_TAG_STRIP = re.compile(r"</?(restored|fuzzy)>|<unknown\s*/>")
+
+
+def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
+    """Расставить теги по списку ``edge_words`` там, где модель в тексте их не поставила.
+
+    Для записи с ``kind=hidden``: невидимая часть — это ``full`` минус видимый фрагмент
+    ``seen`` (с начала или с конца слова); первое вхождение голого ``full`` в тексте
+    заменяется на слово с ``<restored>``. ``fuzzy`` — то же с ``<fuzzy>`` вокруг
+    несовпадающих букв; ``unknown`` — ``seen`` + ``<unknown/>``. Возвращает текст и число
+    вставленных пометок.
+    """
+    inserted = 0
+    for item in edge_words:
+        full = _TAG_STRIP.sub("", str(item.get("full") or "")).strip()
+        seen = _TAG_STRIP.sub("", str(item.get("seen") or "")).strip()
+        kind = str(item.get("kind") or "hidden")
+        # «адми-» → «административные» — обычный перенос, а не срез: модель, которой сказали
+        # про повреждённый край, охотно записывает переносы в «скрытые» буквы.
+        if not full or full not in body or seen.endswith(("-", "­")):
+            continue
+        tagged = None
+        if kind == "unknown":
+            tagged = (seen + "<unknown/>") if full.startswith(seen) else ("<unknown/>" + seen)
+        elif seen and full.startswith(seen) and len(full) > len(seen):
+            tag = "restored" if kind == "hidden" else "fuzzy"
+            tagged = f"{seen}<{tag}>{full[len(seen):]}</{tag}>"
+        elif seen and full.endswith(seen) and len(full) > len(seen):
+            tag = "restored" if kind == "hidden" else "fuzzy"
+            tagged = f"<{tag}>{full[: len(full) - len(seen)]}</{tag}>{seen}"
+        elif kind == "fuzzy":
+            tagged = f"<fuzzy>{full}</fuzzy>"
+        if not tagged:
+            continue
+        # Не трогать слово, если оно в тексте уже помечено.
+        pattern = re.compile(r"(?<![\w<>/])" + re.escape(full) + r"(?![\w<])")
+        match = pattern.search(body)
+        if match is None:
+            continue
+        before = body[max(0, match.start() - 12) : match.start()]
+        if "<restored>" in before or "<fuzzy>" in before or "<unknown" in before:
+            continue
+        body = body[: match.start()] + tagged + body[match.end() :]
+        inserted += 1
+    return body, inserted

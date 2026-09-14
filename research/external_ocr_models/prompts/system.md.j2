@@ -21,19 +21,33 @@ Transcribe the page exactly and mark up its structure. Rules:
    - Footnotes → `[^1]` in the text and `[^1]: текст сноски` at the end. Lists → Markdown lists. Text printed in bold → **bold**. Letter-spaced text (разрядка: «П р и м е ч а н и е») → write the word normally, without spaces between letters, in italics: *Примечание*.
 4. Running header and footer (journal name, issue, date, page number printed in the top or bottom margin) are NOT part of the body: put them into the dedicated fields and leave them out of content_markdown.
 5. If the page is the issue's table of contents («СОДЕРЖАНИЕ»), set is_toc to true and transcribe it as a Markdown list of «Автор. Название — страница».
-{% if restore -%}
-6. Damaged text. Some letters may be physically missing or unreadable: cut off by the binding gutter at the page edge, smeared, faded, torn. Reconstruct such letters from context — this is expected and desirable — but you MUST mark every reconstructed run of characters inline with `<restored>…</restored>`, wrapping only the characters you did not actually see (e.g. `<restored>м</restored>ногоассортиментным`, `снаб<restored>же</restored>ния`). If a fragment cannot be reconstructed with confidence, write `[неразборчиво]`. Never wrap clearly legible text. Also list every reconstructed word in the `restored` field.
+{% if damage -%}
+6. Damaged text. This scan is damaged (see the note in the user message): some letters are physically missing or unreliable. Handle them like this and mark EVERY such place inline:
+   - Letters that are NOT visible at all (hidden in the binding gutter, torn off, covered) but can be reconstructed with confidence from context and the visible remains of the word → write them wrapped in `<restored>…</restored>`, wrapping ONLY the invisible characters: `<restored>м</restored>ногоассортиментным`, `снабже<restored>ния</restored>`.
+   - Letters that are visible but unreliable (smeared or squashed near the gutter, washed out by overexposure, so that «е»/«с», «н»/«и», «п»/«л» could be confused) → read them by shape and context and wrap the doubtful characters in `<fuzzy>…</fuzzy>`: `пр<fuzzy>е</fuzzy>дприятий`.
+   - A fragment that can be neither read nor reconstructed with confidence → put `<unknown/>` exactly where the missing letters are and keep the visible part of the word as it is: `предпри<unknown/>`, `<unknown/>ности`.
+   Never wrap clearly legible text; never nest tags; do not «improve» text outside the damaged places. A hyphen at the end of a line with the rest of the word on the next line is ordinary hyphenation, not damage: join the word silently and do not list or tag it.
+   Besides the inline tags, fill `edge_words`: one entry for EVERY line that touches the damaged edge or area, with the affected word exactly as you see it (`seen`), the word as you write it in the text (`full`, with the same tags) and `kind`: "hidden" (letters not visible, reconstructed), "fuzzy" (visible but unreliable) or "unknown" (could not reconstruct). Go through the lines top to bottom; a damaged line with no entry is an error.
 {% endif -%}
+
 
 {% if output_mode == "json" -%}
 Return ONLY a JSON object with exactly these keys and nothing else:
+{% if damage -%}
+{"damage": string (FIRST: what damage you actually see on this page — which edge or area, of what kind, roughly how many lines are affected; empty string if none),
+ "page_number": string or null (page number as printed, e.g. "12"),
+{%- else -%}
 {"page_number": string or null (page number as printed, e.g. "12"),
+{%- endif %}
  "running_header": string or null,
  "running_footer": string or null,
  "is_toc": boolean,
  "content_markdown": string (the body of the page in Markdown per the rules; use \n for line breaks),
-{% if restore -%}
- "restored": array of strings (every word containing reconstructed characters, as written in content_markdown; empty array if none),
+{% if damage -%}
+ "restored": array of strings (every word containing <restored> characters, as written in content_markdown; empty array if none),
+ "fuzzy": array of strings (every word containing <fuzzy> characters, as written; empty array if none),
+ "unknown": integer (how many <unknown/> markers are in content_markdown),
+ "edge_words": array of objects {"seen": string, "full": string, "kind": "hidden" | "fuzzy" | "unknown"}, one per damaged line in reading order,
 {% endif -%}
  "notes": string (uncertainties such as unreadable areas; empty string if none)}
 {%- else -%}

@@ -76,10 +76,39 @@ def test_parse_applies_unspace():
     assert parse_json_text(text).content_markdown.endswith("*Примечание*. Текст.")
 
 
-def test_restored_field_and_schema():
-    from research.external_ocr_models.schema import json_schema
+def test_damage_fields_schema_and_tags():
+    from research.external_ocr_models.schema import json_schema, tag_counts, unbalanced_tags
 
-    text = GOOD.replace('"notes": ""', '"restored": ["района", " "], "notes": ""')
-    assert parse_json_text(text).restored == ["района"]
-    assert parse_json_text(GOOD).restored == []
-    assert "restored" not in json_schema()["properties"] and "restored" in json_schema(True)["required"]
+    text = GOOD.replace(
+        '"notes": ""',
+        '"restored": ["<restored>м</restored>ного", " "], "fuzzy": ["пр<fuzzy>е</fuzzy>д"], "unknown": 2, "damage": "правый край срезан", "notes": ""',
+    )
+    result = parse_json_text(text)
+    assert result.restored == ["<restored>м</restored>ного"] and result.fuzzy == ["пр<fuzzy>е</fuzzy>д"]
+    assert result.unknown == 2 and result.damage == "правый край срезан"
+    assert parse_json_text(GOOD).restored == [] and parse_json_text(GOOD).unknown == 0
+    assert "restored" not in json_schema()["properties"]
+    assert {"restored", "fuzzy", "unknown", "damage", "edge_words"} <= set(json_schema(True)["required"])
+    assert list(json_schema(True)["properties"])[0] == "damage"  # модель описывает повреждение до текста
+    body = "<restored>м</restored>ного пр<fuzzy>е</fuzzy>д <unknown/> и <unknown />, а тут <fuzzy>без пары"
+    assert tag_counts(body) == {"restored": 1, "fuzzy": 1, "unknown": 2}
+    assert unbalanced_tags(body) == ["fuzzy"]
+    assert unspace_letters("<restored>м</restored>ного П р и м") == "<restored>м</restored>ного *Прим*"
+
+
+def test_tags_from_edge_words():
+    from research.external_ocr_models.schema import tags_from_edge_words
+
+    body = "нужно нефтепромысловое оборудование. Часть в Азербайджане. Уже <restored>ре</restored>сурсов много; неясно слово."
+    words = [
+        {"seen": "о", "full": "оборудование", "kind": "hidden"},
+        {"seen": "Азербайджа", "full": "Азербайджане", "kind": "fuzzy"},
+        {"seen": "сурсов", "full": "ресурсов", "kind": "hidden"},  # уже помечено — не трогать
+        {"seen": "сло", "full": "слово", "kind": "unknown"},
+        {"seen": "x", "full": "нет такого", "kind": "hidden"},
+        {"seen": "мно-", "full": "много", "kind": "hidden"},  # перенос — не срез
+    ]
+    out, inserted = tags_from_edge_words(body, words)
+    assert inserted == 3
+    assert "о<restored>борудование</restored>" in out and "Азербайджа<fuzzy>не</fuzzy>" in out
+    assert out.count("<restored>ре</restored>сурсов") == 1 and "сло<unknown/>" in out

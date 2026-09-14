@@ -1,5 +1,7 @@
 {#- Текст пользовательского сообщения рядом с картинкой(ами). Переменные: strips (число полос),
-    hint (подсказка про конкретную полосу, например про срезанный корешком край; может быть пустой). -#}
+    hint (подсказка про конкретную полосу, например про срезанный корешком край; может быть пустой),
+    damage (режим повреждений: повторить требование про теги рядом с картинкой — в системном
+    промпте оно теряется на длинных полосах). -#}
 {% if strips > 1 -%}
 The page is given as {{ strips }} horizontal strips in order from top to bottom; neighbouring strips overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
 {% endif -%}
@@ -7,3 +9,6 @@ The page is given as {{ strips }} horizontal strips in order from top to bottom;
 {{ hint }}
 {% endif -%}
 Transcribe this page.
+{%- if damage %}
+ Apply rule 6 strictly: in the damaged zone every letter you did not actually see goes inside <restored>…</restored>, every letter you read by shape or context rather than by clear print goes inside <fuzzy>…</fuzzy>, and a fragment you cannot read or reconstruct becomes <unknown/>. Writing a reconstructed letter without a tag is an error.
+{%- endif %}

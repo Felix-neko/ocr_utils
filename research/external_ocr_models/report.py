@@ -183,8 +183,35 @@ def write_scores_csv(scores: list[PageScore], path: Path) -> None:
             writer.writerow(row)
 
 
+DAMAGE_HEADER = ("полоса", "модель", "restored", "fuzzy", "unknown", "из списка", "непарных", "что видит модель")
+
+
+def damage_rows(scores: list[PageScore]) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for score in sorted(scores, key=lambda item: (item.page, item.model)):
+        if not score.tags:
+            continue
+        tags = score.tags
+        rows.append(
+            [
+                Path(score.page).stem,
+                score.model,
+                tags.get("restored", 0),
+                tags.get("fuzzy", 0),
+                tags.get("unknown", 0),
+                score.tags_from_edge_words,
+                "да" if score.error and "непарные" in score.error else "",
+                score.damage_seen.replace("|", "/")[:160],
+            ]
+        )
+    return rows
+
+
 def build_report(scores: list[PageScore], title: str) -> str:
     parts = [f"# {title}", "", "## По моделям", "", markdown_table(MODEL_HEADER, model_rows(scores)), ""]
+    damage = damage_rows(scores)
+    if damage:
+        parts += ["## Повреждения: пометки модели", "", markdown_table(DAMAGE_HEADER, damage), ""]
     parts += [
         "CER к FR — расстояние Левенштейна от текста модели до текстового слоя FineReader, делённое на длину последнего "
         "(оба нормализованы: без разметки, переносов, регистра); медиана по всем полосам и среднее по полосам, где у "

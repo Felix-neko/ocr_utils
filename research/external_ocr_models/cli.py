@@ -41,6 +41,7 @@ SUMMARY_FIELDS = (
     "page_number",
     "is_toc",
     "content_chars",
+    "tags",
     "parse_error",
     "error",
 )
@@ -69,10 +70,13 @@ def list_pages(in_dir: Path, pages_file: Path | None, limit: int | None) -> list
         if missing:
             raise click.ClickException(f"в {in_dir} нет полос из списка: {', '.join(map(str, missing))}")
     else:
+        # Папки с «_» в начале имени — служебные (контрольные картинки нарезки и т. п.).
         rels = sorted(
             path.relative_to(in_dir)
             for path in in_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+            if path.is_file()
+            and path.suffix.lower() in IMAGE_SUFFIXES
+            and not any(part.startswith("_") for part in path.relative_to(in_dir).parts[:-1])
         )
     if limit is not None:
         rels = rels[:limit]
@@ -89,6 +93,18 @@ def collect_meta(out_dir: Path) -> list[dict]:
         except (OSError, ValueError):
             logger.warning("битый %s", path)
     return rows
+
+
+def read_hints(path: Path) -> dict[str, str]:
+    """Подсказки по полосам: «относительный путь<TAB>текст», # — комментарий."""
+    hints: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        rel, _, text = line.partition("\t")
+        if text.strip():
+            hints[Path(rel.strip()).as_posix()] = text.strip()
+    return hints
 
 
 def write_summary(out_dir: Path, rows: list[dict]) -> Path:
@@ -153,9 +169,27 @@ def main(log_level: str) -> None:
 )
 @click.option("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, show_default=True)
 @click.option(
-    "--restore", is_flag=True, help="Достраивать повреждённые буквы по контексту и помечать их <restored>…</restored>."
+    "--damage",
+    is_flag=True,
+    help="Режим повреждённых сканов: достраивать буквы и помечать <restored>, <fuzzy>, <unknown/>.",
 )
-@click.option("--hint", default="", help="Подсказка модели про полосы, например «левый край срезан корешком».")
+@click.option(
+    "--hint", default="", help="Подсказка модели про все полосы прогона, например «левый край срезан корешком»."
+)
+@click.option(
+    "--hints",
+    "hints_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Файл подсказок по полосам: относительный путь<TAB>текст.",
+)
+@click.option(
+    "--damage-side",
+    type=click.Choice(["none", "auto", "L", "R"]),
+    default="none",
+    show_default=True,
+    help="Автоподсказка про край у корешка: auto — по суффиксу _L/_R в имени.",
+)
 @click.option("--jobs", type=int, default=4, show_default=True, help="Параллельных запросов; это сеть, а не CPU.")
 @click.option(
     "--attempts", type=int, default=DEFAULT_ATTEMPTS, show_default=True, help="Попыток на запрос при 429/5xx."
@@ -183,8 +217,10 @@ def run(
     quality: int,
     reasoning: str | None,
     max_tokens: int,
-    restore: bool,
+    damage: bool,
     hint: str,
+    hints_file: Path | None,
+    damage_side: str,
     jobs: int,
     attempts: int,
     timeout: float,
@@ -207,8 +243,10 @@ def run(
         quality=quality,
         reasoning=reasoning,
         max_tokens=max_tokens,
-        restore=restore,
+        damage=damage,
         hint=hint,
+        hints=read_hints(hints_file) if hints_file else {},
+        damage_side=damage_side,
         write_json=out_format in ("json", "both"),
         write_md=out_format in ("md", "both"),
     )
@@ -376,6 +414,42 @@ def report(
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(text, encoding="utf-8")
         logger.info("отчёт: %s, оценки: %s", report_path, out_root / "scores.csv")
+
+
+@main.command("split-spreads")
+@click.option(
+    "--in-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Папка с разворотами; подпапки — разделы.",
+)
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
+@click.option(
+    "--both-sides-for",
+    multiple=True,
+    default=("часть букв в словах совсем закрыта корешком",),
+    show_default=True,
+    help="Разделы, где сохранять обе страницы; в остальных — только левую.",
+)
+@click.option("--shift", "shifts", multiple=True, help="Ручной сдвиг линии: ИМЯ_ФАЙЛА=ПИКСЕЛИ (плюс — вправо).")
+@click.option("--fold", "folds", multiple=True, help="Линия целиком: ИМЯ_ФАЙЛА=X_СВЕРХУ,X_СНИЗУ в пикселях исходника.")
+def split_spreads(
+    in_dir: Path, out_dir: Path, both_sides_for: tuple[str, ...], shifts: tuple[str, ...], folds: tuple[str, ...]
+) -> None:
+    """Разрезать фото-развороты на страницы по прямой сгиба (контроль — out-dir/_линии)."""
+    from research.external_ocr_models.spreads import split_folder
+
+    parsed_shifts = {}
+    for item in shifts:
+        name, _, value = item.partition("=")
+        parsed_shifts[name] = float(value)
+    parsed_folds = {}
+    for item in folds:
+        name, _, value = item.partition("=")
+        x_top, _, x_bottom = value.partition(",")
+        parsed_folds[name] = (float(x_top), float(x_bottom))
+    written = split_folder(in_dir, out_dir, tuple(both_sides_for), parsed_shifts, parsed_folds)
+    click.echo(f"страниц: {len(written)} → {out_dir}")
 
 
 @main.command("models")
