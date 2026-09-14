@@ -6,7 +6,7 @@
 он поднимает кандидатов наверх, финальное решение — за человеком.
 
 > Исторический контекст и обоснование методов — в корне репозитория:
-> `focus_detection_report.md` (FFT-метод HF/MID) и `defocus_moire_improvement_plan.md`
+> `focus_detection_report.md` (FFT-метод HF/MID) и `reports/defocus_moire_improvement_plan.md`
 > (доработки муара A/B/C/E).
 
 ---
@@ -202,7 +202,7 @@ defocus_detection/
 
 ```bash
 uv run python -m ocr_utils.legacy.defocus_detection.compare_focus_series "/путь/к/дублям" \
-    --md-report focus_series_report.md --figures-dir focus_series_figs/
+    --md-report reports/focus_series_report.md --figures-dir focus_series_figs/
 ```
 
 Ключевой момент: дубли почти никогда не сняты с одного расстояния, масштаб страницы в
@@ -211,4 +211,4 @@ uv run python -m ocr_utils.legacy.defocus_detection.compare_focus_series "/пу�
 Поэтому кадры сперва регистрируются друг к другу (SIFT+RANSAC), а размытие меряется как
 разница квадратов σ по наклону `log(PSD_a/PSD_b)` от `f²` в *страничных* частотах — сперва
 вовсе без ресемплинга, затем после приведения всех кадров к общему масштабу. Пример готового
-отчёта — `focus_series_report.md` в корне репозитория.
+отчёта — `reports/focus_series_report.md` в корне репозитория.

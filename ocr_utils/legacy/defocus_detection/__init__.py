@@ -16,5 +16,5 @@
 CLI: ``uv run python -m ocr_utils.legacy.defocus_detection ПУТЬ`` (см. README.md).
 
 Подробное обоснование методов и история итераций — в README.md этого подпакета и в
-``defocus_moire_improvement_plan.md`` / ``focus_detection_report.md`` в корне репозитория.
+``reports/defocus_moire_improvement_plan.md`` / ``focus_detection_report.md`` в корне репозитория.
 """

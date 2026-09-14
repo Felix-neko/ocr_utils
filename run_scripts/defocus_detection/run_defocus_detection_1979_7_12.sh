@@ -11,7 +11,7 @@
 #
 # Прогон занимает около трёх минут: читаются встроенные в RAF превью 4416x2944,
 # полноразмерный RAW не распаковывается. Подробности метода и оговорки —
-# в ocr_utils/defocus_detection/README.md и defocus_detection_validation_report.md.
+# в ocr_utils/defocus_detection/README.md и reports/defocus_detection_validation_report.md.
 #
 # ЗАПУСКАТЬ ПО ОДНОМУ ВЫПУСКУ: пороги здесь не абсолютные, файлы ранжируются
 # относительно друг друга внутри переданной папки.

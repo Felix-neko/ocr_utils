@@ -61,7 +61,7 @@
 | IMG_0024.jpg | +0.339 | 0.062 | +0.349 | +0.509 |
 | IMG_0025.jpg | +0.418 | 0.057 | +0.425 | +0.499 |
 
-![карты Δσ по тайлам](focus_series_250/tilemap.png)
+![карты Δσ по тайлам](../focus_series_250/tilemap.png)
 
 ## 5. Кросс-проверка независимыми метриками
 
@@ -85,7 +85,7 @@
 | IMG_0024.jpg | 1.7675 | 0.3218 | 0.0970 | 0.0314 | 0.0102 | 0.0037 | 0.0018 |
 | IMG_0025.jpg | 1.7498 | 0.3158 | 0.0887 | 0.0261 | 0.0085 | 0.0031 | 0.0015 |
 
-![спектры](focus_series_250/spectra.png)
+![спектры](../focus_series_250/spectra.png)
 
 ## 6. Визуальное сравнение
 
@@ -93,45 +93,45 @@
 
 **IMG_0021**
 
-![crop_native_IMG_0021](focus_series_250/crop_native_IMG_0021.png)
+![crop_native_IMG_0021](../focus_series_250/crop_native_IMG_0021.png)
 
 **IMG_0022**
 
-![crop_native_IMG_0022](focus_series_250/crop_native_IMG_0022.png)
+![crop_native_IMG_0022](../focus_series_250/crop_native_IMG_0022.png)
 
 **IMG_0023**
 
-![crop_native_IMG_0023](focus_series_250/crop_native_IMG_0023.png)
+![crop_native_IMG_0023](../focus_series_250/crop_native_IMG_0023.png)
 
 **IMG_0024**
 
-![crop_native_IMG_0024](focus_series_250/crop_native_IMG_0024.png)
+![crop_native_IMG_0024](../focus_series_250/crop_native_IMG_0024.png)
 
 **IMG_0025**
 
-![crop_native_IMG_0025](focus_series_250/crop_native_IMG_0025.png)
+![crop_native_IMG_0025](../focus_series_250/crop_native_IMG_0025.png)
 
 Он же после приведения к общему масштабу (честное сравнение оптики):
 
 **IMG_0021**
 
-![crop_common_IMG_0021](focus_series_250/crop_common_IMG_0021.png)
+![crop_common_IMG_0021](../focus_series_250/crop_common_IMG_0021.png)
 
 **IMG_0022**
 
-![crop_common_IMG_0022](focus_series_250/crop_common_IMG_0022.png)
+![crop_common_IMG_0022](../focus_series_250/crop_common_IMG_0022.png)
 
 **IMG_0023**
 
-![crop_common_IMG_0023](focus_series_250/crop_common_IMG_0023.png)
+![crop_common_IMG_0023](../focus_series_250/crop_common_IMG_0023.png)
 
 **IMG_0024**
 
-![crop_common_IMG_0024](focus_series_250/crop_common_IMG_0024.png)
+![crop_common_IMG_0024](../focus_series_250/crop_common_IMG_0024.png)
 
 **IMG_0025**
 
-![crop_common_IMG_0025](focus_series_250/crop_common_IMG_0025.png)
+![crop_common_IMG_0025](../focus_series_250/crop_common_IMG_0025.png)
 
 ## 7. Вывод
 

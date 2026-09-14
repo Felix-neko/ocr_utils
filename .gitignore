@@ -93,3 +93,18 @@ wheels/
 research/external_ocr_models/local/*/weights/
 research/external_ocr_models/local/*/sync.log
 research/external_ocr_models/damaged/
+
+# Выходы прогонов, которые run-скрипты кладут в корень репо (BASE_NAME в шапке скрипта):
+# csv с метриками всех полос, машинные md-сводки, контактные листы, симлинки и оверлеи.
+# Рукописные отчёты живут в reports/, эти файлы — расходный материал прогона.
+/curved_lines_pack1*
+/orientation_pack1*
+/faint_ink_pack1*
+/line_art_pack1*
+/show_through_ph_*
+/defocus_lap_si_*
+/mts_risky_names.*
+/finereader_compare_pack1.md
+/eg_82_1_3.txt
+/*_sheet_*.png
+/*_sheet.png

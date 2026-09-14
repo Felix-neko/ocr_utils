@@ -83,7 +83,7 @@ uv run python -m ocr_utils.defocus_detection "/путь/к/выпуску" --wor
 ```
 
 Подробности, список алгоритмов и результаты валидации — в
-`ocr_utils/defocus_detection/README.md` и `defocus_detection_validation_report.md`.
+`ocr_utils/defocus_detection/README.md` и `reports/defocus_detection_validation_report.md`.
 
 ## Тесты и форматирование
 

@@ -11,7 +11,7 @@
 #
 # Прогон занимает несколько минут: читаются встроенные в RAF превью, полноразмерный
 # RAW не распаковывается. Подробности метода и оговорки — в
-# ocr_utils/defocus_detection/README.md и defocus_detection_validation_report.md.
+# ocr_utils/defocus_detection/README.md и reports/defocus_detection_validation_report.md.
 #
 # ЗАПУСКАТЬ ПО ОДНОМУ ВЫПУСКУ: пороги здесь не абсолютные, файлы ранжируются
 # относительно друг друга внутри переданной папки.
@@ -53,7 +53,7 @@ ARGS=(
     # AUC 1.000 против 0.940 у edge_width, и все 19 явных расфокусов уместились в топ-28,
     # тогда как edge_width требовал смотреть 79 кадров. Материал здесь тот же: тот же
     # аппарат, та же газета, тот же тип бумаги. Замеры — в
-    # defocus_algorithms_comparison_186_fuji.md.
+    # reports/defocus_algorithms_comparison_186_fuji.md.
 #    --algorithm reblur
 
     # ОТЧЁТ 1. Сколько худших по общему фокусу показать. Пятнадцать процентов от 307 —
