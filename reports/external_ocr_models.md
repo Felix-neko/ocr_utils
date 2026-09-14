@@ -331,10 +331,10 @@ Flash — $0.85, DeepSeek V4.1 Flash (2 куска) — $0.9, причём со 
 
 ## 9. Промпты и настройки запросов — как есть
 
-Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v10; блоки
+Всё ниже — актуальное состояние `research/external_ocr_models` (промпт v12; блоки
 `--damage` — в 9.7); история версий — в 9.6.
 
-### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v10 — без указания издания)
+### 9.1. Системный промпт (`prompts/system.md.j2`, режим `json`, v12 — без указания издания)
 
 ```text
 You are a meticulous OCR and document-structure transcriber. You receive a scan of ONE page of Soviet or post-Soviet economic press — a journal or a newspaper printed between the 1920s and the 1990s. The text is Russian in the orthography of its time, with occasional Latin abbreviations, brand names and formulas. Newspaper pages are usually set in several narrow columns with small type; journal pages in one or two columns.
@@ -350,7 +350,7 @@ Transcribe the page exactly and mark up its structure. Rules:
    - Rubric printed above the title («Опыт работы территориальных управлений», «Письма читателей», «Консультация», «Информация») → `### Рубрика`, placed before the title. A page may carry several independent articles or news items (typical for newspapers): give each its own `#` title; a subtitle or lead paragraph set in larger or bold type right under the title → `## Подзаголовок`.
    - Author name → its own paragraph in bold: `**И. Фетисов**` — wherever it is printed (under the title, at the end of the article, or as a signature like «Наш корр.»).
    - Author's position and regalia → its own paragraph in italics right after the name: `*начальник УМТС Московского городского района, член коллегии Госснаба СССР*`.
-   - Tables → ALWAYS an HTML `<table>` (never a Markdown pipe table): one `<tr>` per printed line of the table — a sub-item printed on its own line («в том числе хлопка») is its own row, never several lines stacked in one cell with `<br>`; `<th>` for header cells, `rowspan`/`colspan` for merged cells and multi-level headers, one `<td>` per cell even if it is empty; a section heading inside the table («А. Ресурсы») → one row with a cell spanning all columns. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table, not inside it.
+   - Tables → ALWAYS an HTML `<table>` (never a Markdown pipe table): one `<tr>` per printed line of the table — a sub-item printed on its own line («в том числе хлопка») is its own row, never several lines stacked in one cell with `<br>`; `<th>` for header cells, `rowspan`/`colspan` for merged cells and multi-level headers, one `<td>` per cell even if it is empty; a section heading inside the table («А. Ресурсы») → one row with a cell spanning all columns. Several row labels joined by a brace «}» to one shared value → keep each label in its own row and give the shared value cells `rowspan` over those rows. A cell never contains `<br>`. In the HEADER, a column title printed on several lines is ONE `<th>` with the lines joined by a space and a hyphenated word joined WITHOUT the hyphen, as in rule 2 («Тип дви-» / «гателя» → `<th>Тип двигателя</th>`, «зарпла-» / «та» → «зарплата»). In the BODY this does not apply: every printed line stays its own row — a label line without numbers («Остаток на начало периода:») is its own row with empty value cells, and the sub-items under it are the following rows. Text printed vertically (rotated 90°) inside cells must be read and written as normal horizontal text. Keep the caption («Таблица 3») and the table title as paragraphs before the table, not inside it.
    - Flowcharts and block diagrams → a block quote starting with `> [блок-схема]`, then the text of every block in reading order, one block per line, with `→` between connected blocks.
    - Photographs, drawings, decorative graphics → `> [картинка: краткое описание]`, e.g. `> [картинка: портрет мужчины в костюме]`.
    - Footnotes → `[^1]` in the text and `[^1]: текст сноски` at the end. Lists → Markdown lists. Text printed in bold → **bold**. Letter-spaced text (разрядка: «П р и м е ч а н и е») → write the word normally, without spaces between letters, in italics: *Примечание*.
@@ -532,6 +532,21 @@ IMG_0116_1L и использовался при повторе сбойных �
   двигатель, тогда как Gemini сложил все четыре двигателя в одну строку через `<br>`.
   Осталось: скобка «}», объединяющая две строки в одно значение, разбита на две строки
   (значения в первой) вместо rowspan.
+* **v11-v12** — доводка таблиц по замечаниям: «}» между строками → `rowspan` на общих
+  значениях (сработало: IMG_0134_1L — `rowspan="2"` у ДК-259/ДК-207, на IMG_0145_1L
+  объединений стало 6 вместо 1); `<br>` в ячейках запрещён — многострочная шапка
+  склеивается пробелом (сработало: «Всего годовая экономия», «коллектор на миканите»);
+  перенос внутри шапки склеивать без дефиса — **не сработало** даже с явным
+  отрицательным примером: «Тип дви-гателя», «пласт-массе» модель пишет с дефисом в
+  каждом из четырёх прогонов. Побочный эффект первой редакции v12 («строки ячейки
+  склеивать пробелом») — заголовочная строка тела («Остаток на начало периода:»)
+  сливалась с первым подпунктом (18 строк вместо 22); исправлено оговоркой «только в
+  шапке, в теле каждая печатная строка — своя». Итог по 9 табличным полосам: `<br>` нет
+  нигде, IMG_0144_1L — 22 строки (Gemini 23), IMG_0134_1L — 8 строк с 16 объединениями
+  (Gemini 5 строк, все двигатели в одной ячейке через `<br>`). Повторы одной полосы
+  показывают стохастику: один прогон v11 отдал IMG_0144_1L с 10 строками и 28 `<br>`,
+  три повтора — 22 строки без `<br>`; на IMG_0122_2R «в том числе вычислительный центр
+  25/30/30» внутри ячеек модель то пишет в тех же ячейках, то отдельными строками.
 
 ### 9.7. Режим повреждённых сканов (`--damage`): что уходит в запрос и что приходит в ответ
 
