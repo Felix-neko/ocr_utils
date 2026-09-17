@@ -1,0 +1,12 @@
+{#- Пользовательский промпт: описание раскладки картинки по варианту.
+    variant: overlay | side | two | crop; grid_mm — шаг сетки в мм (для overlay/side/crop). -#}
+{% if variant == "overlay" -%}
+One image: the two versions are superimposed after aligning them by a global affine transform. Ink of version B (raw) is drawn in BLUE, ink of version A (corrected) in RED; where they coincide the ink is dark purple/black. A GREEN grid with {{ grid_mm }} mm spacing is drawn on top as a reference for horizontals and verticals. Blue-and-red fringes show where A moved relative to B; a small uniform fringe everywhere is normal resampling. Look for places where a structure that is straight in blue becomes bent, fanned out or tilted in red, or where red diverges from blue progressively along a long line, a box or a heading.
+{%- elif variant == "side" -%}
+One image with two panels: LEFT panel is version B (raw, "было"), RIGHT panel is version A (corrected, "стало"). A thin RED grid at 1/12 of the page width and height is drawn on both panels as a reference for horizontals and verticals; compare each structure against the grid in both panels.
+{%- elif variant == "two" -%}
+Two images: the FIRST is version B (raw), the SECOND is version A (corrected). A thin RED grid at 1/12 of the page width and height is drawn on both as a reference for horizontals and verticals.
+{%- elif variant == "crop" -%}
+One image with two panels showing the SAME region of the page at full resolution: LEFT is version B (raw), RIGHT is version A (corrected). A thin RED grid with {{ grid_mm }} mm spacing is drawn on both panels as a reference. Judge only this region.
+{%- endif %}
+Decide whether version A is geometrically worse than version B and answer with the JSON object.
