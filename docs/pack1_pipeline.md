@@ -74,8 +74,8 @@
 
 | Скрипт | Команда (`ocr_utils.external_ocr_services`) | Читает | Пишет | Замечания |
 |---|---|---|---|---|
-| `run_issue_sharpened.sh [год/выпуск]` | `run --only-year --only-issue` | `SHARPENED_DIR/<выпуск>`, `DB_REVIEWED` | `EXTERNAL_OCR_SERVICES_ROOT/{out,debug}/<выпуск>` | Два этапа: полосы с тегами «Оглавление»/«Годовой указатель» → `toc.json` → остальные полосы со списком статей в промпте. Интерактивный `--on-missed-toc ask`. ~10 ¢ на выпуск. |
-| `run_pack_sharpened.sh` | `run --skip-done --on-missed-toc skip` | весь `SHARPENED_DIR`, `DB_REVIEWED` | те же `out/`, `debug/`, `out/missed_toc.txt` | Идемпотентен, в фон через `setsid … < /dev/null`. Оглавления вне базы копятся в `missed_toc.txt`: проставить теги в CVAT (в т. ч. вето «Не оглавление»), `run_3_from_cvat.sh`, перегнать выпуск `run_issue_sharpened.sh`. ~$12 на пак. |
+| `run_issue_sharpened.sh [год/выпуск]` | `run --only-year --only-issue` | `SHARPENED_DIR/<выпуск>`, `DB_REVIEWED` | `EXTERNAL_OCR_SERVICES_ROOT/{out,debug}/<выпуск>` | Два этапа: полосы с тегами «Оглавление»/«Годовой указатель» → `toc.json` → остальные полосы со списком статей в промпте. Оглавление вне базы перераспознаётся само (`--on-missed-toc redo` по умолчанию). ~10 ¢ на выпуск. |
+| `run_pack_sharpened.sh` | `run --skip-done` | весь `SHARPENED_DIR`, `DB_REVIEWED` | те же `out/`, `debug/`, `out/missed_toc.txt` | Идемпотентен, в фон через `setsid … < /dev/null`. Оглавления вне базы перераспознаются сами и видны в логе: проставить по ним теги в CVAT (в т. ч. вето «Не оглавление») и `run_3_from_cvat.sh`. ~$12 на пак. |
 | `run_probe_tiles.sh` | `run --pages` + `run` по 1975/12 | разворот `1967/10/IMG_0041`, выпуск 1975/12 | `EXTERNAL_OCR_SERVICES_ROOT/probe` | Проверка сетки тайлов (2×2 у разворота) и слияния двухполосного «Содержания» с указателем за год. |
 
 ### PDF и FineReader (`run_scripts/pdf_utils/`) — после шага 7

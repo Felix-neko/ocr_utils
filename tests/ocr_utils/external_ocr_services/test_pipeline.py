@@ -72,7 +72,9 @@ class FakeClient:
         answer = self.reply(payload)
         if isinstance(answer, Exception):
             raise answer
-        return ChatResponse(answer, "stop", "Fake", "fake/model", "gen-1", 1200, 300, 0, 0.001, 1.5, 1, {})
+        return ChatResponse(
+            answer, "stop", "Fake", "fake/model", "gen-1", 1200, 300, 0, 0.001, 1.5, 1, {}, cached_tokens=900
+        )
 
     def stage_of(self, payload) -> str:
         return "toc" if '"toc": {"kind"' in payload["messages"][0]["content"] else "page"
@@ -126,7 +128,7 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
         base = params.out_dir / ISSUE / name[:-4]
         assert base.with_suffix(".md").is_file() and base.with_suffix(".json").is_file()
         meta = json.loads(base.with_suffix(".meta.json").read_text(encoding="utf-8"))
-        assert meta["tiling"]["nrows"] == 1 and meta["cost_usd"] == 0.001
+        assert meta["tiling"]["nrows"] == 1 and meta["cost_usd"] == 0.001 and meta["cached_tokens"] == 900
     meta = json.loads((params.out_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
     assert meta["stage"] == "page" and meta["articles_in_prompt"] == 2 and len(meta["toc_hash"]) == 12
     # «Заголовок» не из списка [Первые шаги, Второй шаг] — понижен кодом, title_in_list пересчитан.
@@ -135,7 +137,8 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
     assert (tmp_path / "dbg" / ISSUE / "IMG_0002.raw.txt").is_file()
     assert (tmp_path / "dbg" / ISSUE / "IMG_0002.tile_00.jpg").is_file()
     assert "=== user ===" in (tmp_path / "dbg" / ISSUE / "IMG_0002.prompt.txt").read_text(encoding="utf-8")
-    assert (params.out_dir / "summary.csv").read_text(encoding="utf-8").count("\n") == 5
+    summary = (params.out_dir / "summary.csv").read_text(encoding="utf-8")
+    assert summary.count("\n") == 5 and "cached_tokens" in summary.splitlines()[0] and ",900," in summary
     assert not (params.out_dir / "missed_toc.txt").exists()
 
     # Повтор с --skip-done ничего не шлёт, а слитое оглавление читается из готовых .json.

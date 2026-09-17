@@ -63,6 +63,7 @@ SUMMARY_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
     "reasoning_tokens",
+    "cached_tokens",
     "cost_usd",
     "latency_s",
     "attempts",
@@ -86,7 +87,7 @@ class PipelineParams:
     flags: dict[str, PageFlags] | None = None  # из базы или списков; None — база не задана
     jobs: int = 4
     skip_done: bool = False
-    on_missed_toc: str = "ask"
+    on_missed_toc: str = "redo"
     pages_file: Path | None = None
     only_year: str | None = None
     only_issue: str | None = None
@@ -320,7 +321,17 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         stats.issues += 1
         run_issue(client, spec, params, issue_key, pages, stats)
     stats.toc_pages = sum(1 for rel in rels if flags_for(rel, params.flags).toc_kind is not None)
-    summary = write_summary(params.out_dir, collect_meta(params.out_dir))
+    rows = collect_meta(params.out_dir)
+    summary = write_summary(params.out_dir, rows)
+    prompt_total = sum(int(r.get("prompt_tokens") or 0) for r in rows)
+    cached_total = sum(int(r.get("cached_tokens") or 0) for r in rows)
+    if prompt_total:
+        logger.info(
+            "кэш префикса: %d из %d токенов входа (%.0f %%)",
+            cached_total,
+            prompt_total,
+            100 * cached_total / prompt_total,
+        )
     logger.info(
         "готово за %.0f с: выпусков %d, полос %d, запросов %d (готовых пропущено %d), сбоев %d, "
         "стоимость $%.4f, сводка %s",

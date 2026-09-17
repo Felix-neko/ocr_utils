@@ -2,10 +2,9 @@
 #
 # Весь пак заострённых полос через DeepSeek V4.1 Flash по выпускам (см. run_issue_sharpened.sh).
 # Идемпотентен: --skip-done пропускает готовые полосы, прерванный прогон продолжается тем же
-# вызовом. Оглавления, найденные моделью вне базы, НЕ перераспознаются, а копятся в
-# EXTERNAL_OCR_SERVICES_OUT/missed_toc.txt — после прогона проставить теги в CVAT
-# («Оглавление» / «Годовой указатель» / вето «Не оглавление»), забрать from-cvat и прогнать
-# нужные выпуски run_issue_sharpened.sh.
+# вызовом. Оглавления, найденные моделью вне базы, перераспознаются автоматически (умолчание
+# --on-missed-toc redo) и попадают в лог; после прогона проставить по ним теги в CVAT
+# («Оглавление» / «Годовой указатель» / вето «Не оглавление») и забрать from-cvat.
 #
 # ЧИТАЕТ  SHARPENED_DIR (144 ГиБ, SSD), DB_REVIEWED (только чтение).
 # ПИШЕТ   EXTERNAL_OCR_SERVICES_OUT, EXTERNAL_OCR_SERVICES_DEBUG (≈ 7 ГиБ тайлов и ответов).
@@ -25,6 +24,5 @@ uv run python -m ocr_utils.external_ocr_services run \
     --source "$EXTERNAL_OCR_SOURCE" \
     --jobs "$JOBS" \
     --skip-done \
-    --on-missed-toc skip \
     "$@"
 uv run python -m ocr_utils.external_ocr_services balance

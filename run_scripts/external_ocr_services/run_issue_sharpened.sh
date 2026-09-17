@@ -7,8 +7,8 @@
 # ЧИТАЕТ  SHARPENED_DIR/<выпуск>, DB_REVIEWED (только чтение).
 # ПИШЕТ   EXTERNAL_OCR_SERVICES_OUT/<выпуск>/… и EXTERNAL_OCR_SERVICES_DEBUG/<выпуск>/….
 # Тайлы: шаг 4500 px исходника (обычная полоса 1×2, разворот 2×2), 2200 px модели — замер по базе
-# пака-1, см. docstring ocr_utils/external_ocr_services/tiling.py. Интерактивный: при находке
-# оглавления вне базы спросит, перераспознавать ли выпуск (в фоне без терминала — пропустит).
+# пака-1, см. docstring ocr_utils/external_ocr_services/tiling.py. Оглавление, найденное
+# моделью вне базы, перераспознаётся автоматически (--on-missed-toc redo по умолчанию).
 # ОРИЕНТИР (замер 2026-09-17): 1966/03 — 97 полос, $0.10, ~4 мин; 1975/12 — 100 полос (9 полос
 # оглавления и указателя), $0.10, 4 мин. DeepSeek в трети ответов на длинный промпт со списком
 # отвечает эхом response_format — код сам повторяет запрос без него (лишние ~0.03 ¢ на полосу).
@@ -30,6 +30,5 @@ uv run python -m ocr_utils.external_ocr_services run \
     --source "$EXTERNAL_OCR_SOURCE" \
     --jobs "$JOBS" \
     --skip-done \
-    --on-missed-toc ask \
     "$@"
 uv run python -m ocr_utils.external_ocr_services balance

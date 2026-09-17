@@ -48,6 +48,9 @@ class ChatResponse:
     latency_s: float
     attempts: int
     raw_usage: dict = field(default_factory=dict)
+    # Токены входа, взятые провайдером из кэша префикса (``usage.prompt_tokens_details.cached_tokens``);
+    # по ним видно, работает ли кэш и сколько он экономит.
+    cached_tokens: int = 0
 
 
 def api_key_from(option: str | None) -> str:
@@ -131,6 +134,7 @@ class OpenRouterClient:
         choice = choices[0]
         usage = body.get("usage") or {}
         details = usage.get("completion_tokens_details") or {}
+        prompt_details = usage.get("prompt_tokens_details") or {}
         cost = usage.get("cost")
         return ChatResponse(
             text=_content_text(choice.get("message") or {}),
@@ -145,6 +149,7 @@ class OpenRouterClient:
             latency_s=latency,
             attempts=attempts,
             raw_usage=usage,
+            cached_tokens=int(prompt_details.get("cached_tokens") or 0),
         )
 
 

@@ -23,8 +23,7 @@ uv run python -m ocr_utils.external_ocr_services run \
     --pages "$LIST" \
     --source "$EXTERNAL_OCR_SOURCE" \
     --jobs "$JOBS" \
-    --skip-done \
-    --on-missed-toc skip \
+    --skip-done --on-missed-toc skip \
     "$@"
 uv run python -m ocr_utils.external_ocr_services run \
     --in-dir "$SHARPENED_DIR" \
@@ -35,8 +34,7 @@ uv run python -m ocr_utils.external_ocr_services run \
     --only-year 1975 --only-issue 12 \
     --source "$EXTERNAL_OCR_SOURCE" \
     --jobs "$JOBS" \
-    --skip-done \
-    --on-missed-toc skip \
+    --skip-done --on-missed-toc skip \
     "$@"
 uv run python -m ocr_utils.external_ocr_services balance
 echo "Тайлы разворота: $(ls "$PROBE_ROOT/debug/1967/10/" | grep -c 'IMG_0041.tile_')"

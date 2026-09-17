@@ -27,6 +27,7 @@ def _ok_body(text="{}", cost=0.0021):
             "completion_tokens": 700,
             "cost": cost,
             "completion_tokens_details": {"reasoning_tokens": 12},
+            "prompt_tokens_details": {"cached_tokens": 1200},
         },
     }
 
@@ -37,6 +38,7 @@ def test_parses_usage_and_cost():
     assert response.text == "{}"
     assert response.cost_usd == pytest.approx(0.0021)
     assert (response.prompt_tokens, response.completion_tokens, response.reasoning_tokens) == (1500, 700, 12)
+    assert response.cached_tokens == 1200
     assert response.provider == "DeepSeek" and response.finish_reason == "stop" and response.attempts == 1
 
 

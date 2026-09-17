@@ -102,14 +102,6 @@ def main(log_level: str) -> None:
     help="Подсказки по полосам: относительный путь<TAB>текст.",
 )
 @click.option(
-    "--damage-second-pass/--no-damage-second-pass",
-    "second_pass",
-    default=True,
-    show_default=True,
-    help="Полосу, которую первый проход счёл повреждённой (damaged=true, теги или edge_words), распознать ещё раз "
-    "с подсказкой из его же ответа; на чистых полосах не срабатывает (0 из 40 в замере).",
-)
-@click.option(
     "--second-pass-transcript",
     is_flag=True,
     help="Во второй проход передавать и полный текст первого (иначе только описание, строки и счётчики).",
@@ -146,9 +138,9 @@ def main(log_level: str) -> None:
 @click.option(
     "--on-missed-toc",
     type=click.Choice(ON_MISSED_CHOICES),
-    default="ask",
+    default="redo",
     show_default=True,
-    help="Модель нашла оглавление вне базы: спросить, перераспознать выпуск или только записать в missed_toc.txt (ask без терминала = skip).",
+    help="Модель нашла оглавление вне базы: redo — перераспознать выпуск с ним (умолчание), ask — спросить в терминале (без терминала = skip), skip — только записать в missed_toc.txt.",
 )
 @click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
 @click.option("--log-level", default="INFO", show_default=True)
@@ -166,7 +158,6 @@ def run(
     source: str,
     hint: str,
     hints_file: Path | None,
-    second_pass: bool,
     second_pass_transcript: bool,
     reasoning: str | None,
     max_tokens: int,
@@ -211,7 +202,6 @@ def run(
         hint=hint,
         hints=read_hints(hints_file) if hints_file else {},
         debug_dir=debug_dir,
-        second_pass=second_pass,
         second_pass_transcript=second_pass_transcript,
     )
     params = PipelineParams(
@@ -240,8 +230,7 @@ def run(
         f"запросов: {stats.requests}, готовых пропущено: {stats.reused}, сбоев: {stats.failed}, "
         f"стоимость ${stats.cost_usd:.4f}."
     )
-    if second_pass:
-        click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
+    click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
     if stats.missed:
         click.echo("ОГЛАВЛЕНИЯ ВНЕ БАЗЫ: " + "; ".join(stats.missed))
     if stats.redone_issues:

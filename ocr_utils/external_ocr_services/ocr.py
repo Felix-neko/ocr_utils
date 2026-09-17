@@ -82,9 +82,9 @@ class RunOptions:
     hints: dict[str, str] = field(default_factory=dict)
     debug_dir: Path | None = None  # сырые ответы, промпты и отправленные тайлы
     # Второй проход по полосе, которую первый проход счёл повреждённой: подсказка собирается из
-    # его же ответа (описание, затронутые строки, счётчики). ``second_pass_transcript`` — слать
-    # ещё и весь текст первого прохода.
-    second_pass: bool = False
+    # его же ответа (описание, затронутые строки, счётчики). Включён всегда (опции в CLI нет;
+    # False — только в тестах). ``second_pass_transcript`` — слать ещё и весь текст первого прохода.
+    second_pass: bool = True
     second_pass_transcript: bool = False
 
 
@@ -385,6 +385,7 @@ def recognise_page(
         prompt_tokens=response.prompt_tokens,
         completion_tokens=response.completion_tokens,
         reasoning_tokens=response.reasoning_tokens,
+        cached_tokens=response.cached_tokens,
         cost_usd=response.cost_usd,
         latency_s=round(response.latency_s, 2),
         attempts=response.attempts,
