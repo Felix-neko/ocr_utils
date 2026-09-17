@@ -1,6 +1,7 @@
 """Пост-обработка markdown: `#` только из списка, авторы при своей статье, рубрика перед `#`, идемпотентность."""
 
 from ocr_utils.external_ocr_services.structure import (
+    wrap_bare_math,
     drop_leaked_titles,
     place_rubrics,
     StructureReport,
@@ -129,6 +130,7 @@ def test_apply_all_and_report():
         "markers_from_rubrics": [],
         "markers": 0,
         "dropped_headings": [],
+        "wrapped_math": 0,
     }
     assert report.title_in_list is True
 
@@ -227,3 +229,12 @@ def test_leaked_title_on_continuation_page_is_dropped():
     with_h1 = "## Как бороться с рыночной стихией?\n\n# Другая статья\n"
     assert drop_leaked_titles(with_h1, titles, StructureReport()) == with_h1, "на странице есть # — не продолжение"
     assert drop_leaked_titles(body, [], StructureReport()) == body
+
+
+def test_bare_dollar_math_is_wrapped_and_tagged_math_untouched():
+    body = "где $a_i$ — ресурсы; <latex>$b_j$</latex> — потребность.\n\n$$\\sum_i x_i = 1$$\n\nЦена 5 $ за тонну.\n"
+    report = StructureReport()
+    out = wrap_bare_math(body, report)
+    assert out.startswith("где <latex>$a_i$</latex> — ресурсы; <latex>$b_j$</latex> — потребность.")
+    assert "<latex>$$\\sum_i x_i = 1$$</latex>" in out and "Цена 5 $ за тонну." in out
+    assert report.wrapped_math == 2 and wrap_bare_math(out, StructureReport()) == out

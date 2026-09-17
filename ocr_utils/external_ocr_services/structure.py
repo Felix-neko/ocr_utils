@@ -48,6 +48,8 @@ class StructureReport:
     # `##` в начале страницы-продолжения с текстом названия из оглавления: на странице его нет,
     # модель повторила название из списка — убирается.
     dropped_headings: list[str] = field(default_factory=list)
+    # Формулы в долларах без тега <latex>, обёрнутые кодом.
+    wrapped_math: int = 0
     title_in_list: bool | None = None
 
     def as_dict(self) -> dict:
@@ -62,6 +64,7 @@ class StructureReport:
             "markers_from_rubrics": self.markers_from_rubrics,
             "markers": self.markers,
             "dropped_headings": self.dropped_headings,
+            "wrapped_math": self.wrapped_math,
         }
 
 
@@ -342,6 +345,31 @@ def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) ->
     return body
 
 
+_LATEX = re.compile(r"<latex>.*?</latex>", re.S)
+# Голая формула в долларах вне тега: сначала $$…$$, потом $…$ без переносов строк внутри.
+_BARE_MATH = re.compile(r"\$\$[^$]+?\$\$|\$(?!\$)[^$\n]+?\$")
+
+
+def wrap_bare_math(body: str, report: StructureReport) -> str:
+    """Формулы в долларах без тега `<latex>` — обернуть: модель на части полос ставит одни доллары."""
+    pieces: list[str] = []
+    cursor = 0
+    for tagged in _LATEX.finditer(body):
+        pieces.append(_wrap_segment(body[cursor : tagged.start()], report))
+        pieces.append(tagged.group(0))
+        cursor = tagged.end()
+    pieces.append(_wrap_segment(body[cursor:], report))
+    return "".join(pieces)
+
+
+def _wrap_segment(text: str, report: StructureReport) -> str:
+    def wrap(match: re.Match) -> str:
+        report.wrapped_math += 1
+        return f"<latex>{match.group(0)}</latex>"
+
+    return _BARE_MATH.sub(wrap, text)
+
+
 def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) -> tuple[str, StructureReport]:
     """Все правки по порядку: рубрики из `##`, понижение `#`, расстановка авторов, рубрики по оглавлению.
 
@@ -355,5 +383,6 @@ def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) ->
     body = drop_leaked_titles(body, titles, report)
     body = place_authors(body, authors, report)
     body = place_rubrics(body, articles, report, rubrics)
+    body = wrap_bare_math(body, report)
     report.markers = body.count("<marker>")
     return body, report

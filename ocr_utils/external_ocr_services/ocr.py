@@ -423,6 +423,7 @@ def recognise_page(
         content_chars=len(result.content_markdown),
         has_header=result.running_header is not None,
         tags=tag_counts(result.content_markdown),
+        formulas=result.content_markdown.count("<latex>"),
         damaged=result.damaged,
         damage_seen=result.damage,
     )

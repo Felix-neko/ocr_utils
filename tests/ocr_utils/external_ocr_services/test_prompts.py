@@ -24,6 +24,8 @@ def test_page_stage_prompt_with_and_without_lists():
         "starts_here" in with_lists and "running_header" in with_lists and "ONE short sentence in Russian" in with_lists
     )
     assert "directly before a `#` title" in with_lists
+    assert "<latex>$$" in with_lists and "\\frac" in with_lists and "<latex>$V_{потр}$</latex>" in with_lists
+    assert "<latex>" in system_prompt("toc")
     assert '"toc":' not in with_lists and "Check whether this page is itself a table of contents" in with_lists
     plain = system_prompt("page")
     assert "KNOWN STRUCTURE" not in plain and "Article title → `# Заголовок статьи`" in plain
