@@ -66,13 +66,16 @@ def is_format_echo(text: str) -> bool:
 
 @dataclass
 class RunOptions:
-    """Настройки прогона, общие для всех полос."""
+    """Настройки прогона, общие для всех полос: тайлы, модель, второй проход, отладочный выход."""
 
+    # Сетка тайлов: сторона исходника делится на ceil(сторона / max_src_tile) частей с перекрытием,
+    # каждый тайл ужимается до max_model_tile по большей стороне. Обычная полоса пака-1 → 2 тайла,
+    # склеенный разворот → 4. Подробности и умолчания — в tiling.py.
     max_src_tile: int = DEFAULT_MAX_SRC_TILE
     max_model_tile: int = DEFAULT_MAX_MODEL_TILE
-    quality: int = DEFAULT_QUALITY
+    quality: int = DEFAULT_QUALITY  # JPEG-качество тайлов в запросе
     reasoning: str | None = None  # переопределение уровня из реестра
-    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_tokens: int = DEFAULT_MAX_TOKENS  # потолок выходных токенов на запрос
     # Описание издания для промпта; «{year}» подставляется годом выпуска.
     source: str = ""
     debug_dir: Path | None = None  # сырые ответы, промпты и отправленные тайлы
@@ -85,26 +88,33 @@ class RunOptions:
 
 @dataclass(frozen=True)
 class SecondPass:
-    """Что первый проход сказал о повреждениях — подсказка для второго прохода той же полосы."""
+    """Что первый проход сказал о повреждениях — подсказка для второго прохода той же полосы.
 
-    damage: str
-    edge_words: tuple[dict, ...]
+    Всё это подставляется в пользовательский промпт второго прохода (блок ``second_pass`` в
+    ``user.md.j2``): модель знает, где искать, и восстанавливает по контексту увереннее.
+    """
+
+    damage: str  # описание повреждения словами (по-русски), как его дал первый проход
+    edge_words: tuple[dict, ...]  # затронутые строки: {"line", "text", "kind"}; режутся до SECOND_PASS_MAX_LINES
     tags: dict  # {"restored": n, "fuzzy": n, "unknown": n}
     transcript: str | None = None  # полный текст первого прохода, если решено его передавать
 
 
 @dataclass(frozen=True)
 class PageJob:
-    """Что распознать: полоса, этап и известное оглавление выпуска (для этапа ``page``)."""
+    """Что распознать: полоса, этап и известное оглавление выпуска (для этапа ``page``).
 
-    rel: Path
+    Неизменяемый, чтобы безопасно ходить по потокам пула; второй проход делает копию с ``second_pass``.
+    """
+
+    rel: Path  # путь полосы относительно in-dir; тот же путь — под out-dir и debug-dir
     stage: str = "page"  # page | toc
     toc_kind: str = "none"  # для этапа toc: contents | index (что сказала база)
-    year: str = ""
-    rubrics: tuple[str, ...] = ()
-    articles: tuple[dict, ...] = ()
-    toc_hash: str = ""
-    second_pass: SecondPass | None = None
+    year: str = ""  # год выпуска — в пользовательский промпт
+    rubrics: tuple[str, ...] = ()  # рубрики «Содержания» выпуска — в системный промпт этапа page
+    articles: tuple[dict, ...] = ()  # статьи «Содержания»: {"title", "authors", "rubric"}
+    toc_hash: str = ""  # отпечаток списков; пишется в meta, по нему is_done узнаёт устаревшую полосу
+    second_pass: SecondPass | None = None  # подсказка первого прохода; None — это первый проход
 
 
 # Сколько строк ``edge_words`` первого прохода показывать второму: хватает, чтобы указать место,
@@ -113,7 +123,11 @@ SECOND_PASS_MAX_LINES = 60
 
 
 def second_pass_reason(result: PageResult) -> str | None:
-    """Почему полосе нужен второй проход: первый описал повреждение, поставил теги или назвал строки."""
+    """Почему полосе нужен второй проход: первый описал повреждение, поставил теги или назвал строки.
+
+    Главный признак — булево ``damaged`` (по тексту описания срабатывало на 82 % чистых полос);
+    теги и ``edge_words`` — на случай, когда модель разметила повреждение, но флаг не подняла.
+    """
     if result.damaged:
         return "damaged"
     if sum(tag_counts(result.content_markdown).values()) > 0:
@@ -139,7 +153,9 @@ def choose_final(pass1_tags: dict, pass2_tags: dict | None) -> tuple[str, str]:
 
 
 def reasoning_field(spec: ModelSpec, override: str | None) -> dict | None:
+    """Поле ``reasoning`` запроса по уровню из реестра (или ``--reasoning``); ``None`` — не слать."""
     level = override or spec.reasoning
+    # «none» в реестре значит «модель параметра не знает»: слать нельзя даже по просьбе из CLI.
     if level == "none" or spec.reasoning == "none":
         return None
     if level == "off":
@@ -151,7 +167,12 @@ def reasoning_field(spec: ModelSpec, override: str | None) -> dict | None:
 
 
 def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -> tuple[str, str]:
-    """(системный, пользовательский) промпты полосы."""
+    """(системный, пользовательский) промпты полосы.
+
+    Системный зависит от этапа, издания и списков выпуска — он одинаков для всех полос выпуска,
+    и провайдер кэширует его как префикс (поэтому ``--source`` лучше давать без года).
+    Пользовательский — про эту полосу: сетка тайлов, вид полосы, подсказки второго прохода.
+    """
     info = describe(tiles)
     source = options.source.replace("{year}", job.year).strip()
     system = system_prompt(job.stage, source, list(job.rubrics), [dict(a) for a in job.articles])
@@ -175,19 +196,24 @@ def build_payload(
     json_mode: JsonMode,
     skip_reasoning: bool = False,
 ) -> dict:
+    """Тело chat/completions под модель, этап и режим JSON; ``skip_reasoning`` — без поля reasoning."""
     system, user = prompts_for(job, tiles, options)
+    # Сообщение пользователя: сначала текст, затем тайлы в порядке сетки (столбцами) как data-URL.
     content: list[dict[str, Any]] = [{"type": "text", "text": user}]
     for tile in tiles:
         part: dict[str, Any] = {"url": tile.data_url()}
-        if spec.image_detail:
+        if spec.image_detail:  # DeepSeek по «low» ужал бы тайл до 512 px — текст пропадёт
             part["detail"] = spec.image_detail
         content.append({"type": "image_url", "image_url": part})
+    # temperature=0: воспроизводимость важнее «живости», это транскрипция, а не сочинение.
     payload: dict[str, Any] = {
         "model": spec.openrouter_id,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
         "temperature": 0,
         "max_tokens": options.max_tokens,
     }
+    # Маршрутизация OpenRouter: предпочтительные провайдеры по порядку (с откатом на остальных)
+    # и чёрный список — квантованные копии модели читают хуже.
     provider: dict[str, Any] = {}
     if spec.provider_order:
         provider["order"] = list(spec.provider_order)
@@ -195,12 +221,14 @@ def build_payload(
     if spec.provider_ignore:
         provider["ignore"] = list(spec.provider_ignore)
     if json_mode == "json_schema":
+        # Строгая схема; require_parameters отсекает провайдеров, которые её молча игнорируют.
         payload["response_format"] = {
             "type": "json_schema",
             "json_schema": {"name": "page_transcription", "strict": True, "schema": json_schema(job.stage)},
         }
         provider["require_parameters"] = True
     elif json_mode == "json_object":
+        # «Верни валидный JSON»; сама схема описана словами в системном промпте.
         payload["response_format"] = {"type": "json_object"}
     reasoning = reasoning_field(spec, options.reasoning) if not skip_reasoning else None
     if reasoning is not None:
@@ -211,11 +239,13 @@ def build_payload(
 
 
 def _fallback_chain(spec: ModelSpec) -> list[JsonMode]:
+    """Режимы JSON от заявленного в реестре к более простым: json_schema → json_object → none."""
     chain: list[JsonMode] = ["json_schema", "json_object", "none"]
     return chain[chain.index(spec.json_mode) :]
 
 
 def output_paths(out_dir: Path, rel: Path) -> dict[str, Path]:
+    """Файлы полосы под out_dir: разобранный .json, .md для чтения, .meta.json, .raw.txt при сбое разбора."""
     base = out_dir / rel.with_suffix("")
     return {
         "json": base.with_suffix(".json"),
@@ -238,6 +268,7 @@ def debug_paths(debug_dir: Path, rel: Path, suffix: str = "") -> dict[str, Path]
 
 
 def read_meta(out_dir: Path, rel: Path) -> dict | None:
+    """``.meta.json`` полосы; нет файла или он битый — ``None`` (полоса считается не сделанной)."""
     path = output_paths(out_dir, rel)["meta"]
     if not path.is_file():
         return None
@@ -250,12 +281,16 @@ def read_meta(out_dir: Path, rel: Path) -> dict | None:
 def is_done(out_dir: Path, job: PageJob) -> bool:
     """Сделано = .json на месте, .meta.json без ошибки, тот же этап и тот же отпечаток списков."""
     meta = read_meta(out_dir, job.rel)
+    # Сбойная полоса (сеть или разбор) сделанной не считается: --skip-done её догонит.
     if meta is None or meta.get("error") or meta.get("parse_error"):
         return False
     if not output_paths(out_dir, job.rel)["json"].is_file():
         return False
+    # Полоса, распознанная как обычная, а теперь помеченная оглавлением (или наоборот), идёт заново.
     if meta.get("stage") != job.stage:
         return False
+    # Для оглавления важен вид («Содержание»/указатель — разные промпты), для обычной полосы —
+    # что список статей в промпте был тот же: иначе структура (`#`, авторы, рубрики) устарела.
     if job.stage == "toc":
         return meta.get("toc_kind_expected") == job.toc_kind
     return meta.get("toc_hash") == job.toc_hash
@@ -271,10 +306,12 @@ def load_result(out_dir: Path, job: PageJob) -> PageResult | None:
 
 
 def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], payload: dict, raw: str | None) -> None:
+    """В debug-dir: промпты как ушли, отправленные тайлы и сырой ответ; без ``--debug-dir`` ничего."""
     if options.debug_dir is None:
         return
     paths = debug_paths(options.debug_dir, job.rel, ".pass2" if job.second_pass else "")
     paths["prompt"].parent.mkdir(parents=True, exist_ok=True)
+    # Промпт — из готового payload, а не пересобранный: видно ровно то, что получила модель.
     system = payload["messages"][0]["content"]
     user = payload["messages"][1]["content"][0]["text"]
     paths["prompt"].write_text(f"=== system ===\n{system}\n=== user ===\n{user}", encoding="utf-8")
@@ -290,9 +327,17 @@ def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], 
 def recognise_page(
     client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, out_dir: Path, options: RunOptions
 ) -> tuple[dict, PageResult | None]:
-    """Распознать одну полосу и записать выходы. Возвращает (meta, результат или None при сбое)."""
+    """Распознать одну полосу и записать выходы. Возвращает (meta, результат или None при сбое).
+
+    Порядок: тайлы → запрос с цепочкой запасных режимов JSON → разбор → теги из ``edge_words`` →
+    доводка структуры (этап ``page``) → .json/.md → meta. Сбой на любом шаге пишет meta с ``error``
+    или ``parse_error`` и возвращает ``None``; исключение наружу уходит только из клиента при
+    неверном ключе.
+    """
     paths = output_paths(out_dir, job.rel)
     paths["meta"].parent.mkdir(parents=True, exist_ok=True)
+    # Meta заводится до запроса: если что-то упадёт, на диске останется запись с причиной, и
+    # сводка покажет полосу как сбойную, а не как отсутствующую.
     meta: dict[str, Any] = {
         "page": job.rel.as_posix(),
         "stage": job.stage,
@@ -312,15 +357,19 @@ def recognise_page(
         "parse_error": None,
     }
     started = time.monotonic()
+    # Тайлы режутся здесь, в потоке пула: декодирование и JPEG-сжатие — единственная CPU-работа.
     try:
         tiles = prepare_tiles(in_path, options.max_src_tile, options.max_model_tile, options.quality)
     except Exception as error:  # битый файл — не повод ронять прогон
         meta["error"] = f"картинка: {error}"
         _write_meta(paths["meta"], meta)
         return meta, None
-    meta["tiling"] = describe(tiles)
+    meta["tiling"] = describe(tiles)  # сетка, размеры и перекрытие — чтобы сверять с тем, что видела модель
     meta["image_bytes"] = sum(len(tile.data) for tile in tiles)
 
+    # Цепочка запасных ходов. Внешний цикл — режимы JSON от строгого к простому; внутри каждого
+    # ещё две поправки: убрать отвергнутый параметр reasoning и повторить, если ответ — эхо
+    # response_format. Каждый неудачный шаг остаётся в meta["fallbacks"] для разбора после прогона.
     response: ChatResponse | None = None
     skip_reasoning = False
     payload: dict = {}
@@ -328,11 +377,12 @@ def recognise_page(
     for json_mode in chain:
         payload = build_payload(spec, tiles, options, job, json_mode, skip_reasoning)
         try:
-            response = client.chat(payload)
+            response = client.chat(payload)  # внутри — свои повторы по сети и 5xx/429
         except OpenRouterError as error:
             meta.setdefault("fallbacks", []).append(
                 {"json_mode": json_mode, "error": str(error), "body": error.body[:300]}
             )
+            # 4xx с упоминанием reasoning в теле: провайдер параметра не знает — тот же запрос без него.
             if error.status in FALLBACK_STATUSES and "reasoning" in payload and "reasoning" in error.body.lower():
                 logger.warning("%s %s: параметр reasoning отвергнут (%s), повторяю без него", spec.name, job.rel, error)
                 skip_reasoning = True
@@ -345,12 +395,16 @@ def recognise_page(
                 else:
                     meta["json_mode_used"] = json_mode
                     break
+            # Другой 4xx из FALLBACK_STATUSES — скорее всего не принят response_format: режим проще.
             if error.status in FALLBACK_STATUSES and json_mode != "none":
                 logger.warning("%s %s: режим %s отвергнут (%s), пробую проще", spec.name, job.rel, json_mode, error)
                 continue
+            # Всё остальное (лимиты, 5xx после повторов клиента, «none» тоже отвергнут) — сбой полосы.
             meta["error"] = f"{error} {error.body[:300]}".strip()
             break
         meta["json_mode_used"] = json_mode
+        # Ответ пришёл, но это {"type": "json_object"} вместо страницы: деньги за него потрачены
+        # зря (считаем отдельно), запрос уходит ещё раз в следующем, более простом режиме.
         if json_mode != "none" and is_format_echo(response.text):
             meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "эхо response_format"})
             meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
@@ -358,13 +412,15 @@ def recognise_page(
             continue
         break
     meta["reasoning_sent"] = not skip_reasoning
-    meta["seconds"] = round(time.monotonic() - started, 2)
+    meta["seconds"] = round(time.monotonic() - started, 2)  # с тайлами и всеми повторами, в отличие от latency_s
     if response is None:
         meta.setdefault("error", "запрос не удался")
         _write_debug(options, job, tiles, payload, None)
         _write_meta(paths["meta"], meta)
         return meta, None
 
+    # Учёт удачного ответа: кто обслужил, сколько токенов (в том числе из кэша префикса), цена по
+    # usage.cost провайдера, число попыток клиента.
     meta.update(
         provider=response.provider,
         served_model=response.model,
@@ -380,6 +436,8 @@ def recognise_page(
         response_chars=len(response.text),
     )
     _write_debug(options, job, tiles, payload, response.text)
+    # Разбор терпимый (обрезка ```json, лишние ключи, старые поля); не вышло — сырой текст
+    # сохраняется рядом с meta, чтобы не терять оплаченный ответ, полоса — сбойная.
     try:
         result = parse_json_text(response.text, job.stage)
     except ParseError as error:
@@ -393,17 +451,22 @@ def recognise_page(
         meta["tags_from_edge_words"] = inserted
     if job.stage == "page":
         # `#` только из оглавления, авторы при своей статье, рубрика перед `#` — доводится кодом.
+        # Оглавление — источник истины: заголовки не из списка понижаются, утёкшие названия
+        # с полос-продолжений снимаются, рубрики подтягиваются к `#`, чужие — в <marker>.
         titles = [article["title"] for article in job.articles if article.get("title")]
         result.content_markdown, report = structure.apply(
             result.content_markdown, [dict(article) for article in job.articles], list(job.rubrics), result.authors
         )
-        meta["structure"] = report.as_dict()
+        meta["structure"] = report.as_dict()  # что именно доводка переставила — для проверки глазами
+        # title_in_list модель проставляет сама; при непустом списке вердикт кода точнее.
         if titles and report.title_in_list is not None:
             result.title_in_list = report.title_in_list
+    # Два представления одного результата: .json — для сборки выпуска и повторов, .md — глазами.
     paths["json"].write_text(result.to_json(), encoding="utf-8")
     paths["md"].write_text(to_markdown(result), encoding="utf-8")
     if paths["raw"].exists():
         paths["raw"].unlink()  # сырой текст от прошлого сбоя разбора больше не нужен
+    # Показатели содержимого для сводки: теги повреждений, формулы, флаг повреждения, заголовок.
     meta.update(
         page_number=result.page_number,
         toc_kind=result.toc_kind,
@@ -418,6 +481,7 @@ def recognise_page(
     )
     if job.stage == "toc" and result.toc is not None:
         meta["toc_articles"] = sum(len(section.articles) for section in result.toc.sections)
+    # Непарный <restored> или <latex> ломает разметку при нарезке; не ошибка, но в meta должно быть видно.
     broken = unbalanced_tags(result.content_markdown)
     if broken:
         meta["tag_warning"] = "непарные теги: " + ", ".join(broken)
@@ -426,10 +490,12 @@ def recognise_page(
 
 
 def _write_meta(path: Path, meta: dict) -> None:
+    """``.meta.json`` целиком (перезапись); indent=1 — чтобы diff между прогонами читался построчно."""
     path.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def _write_outputs(out_dir: Path, rel: Path, result: PageResult, meta: dict) -> None:
+    """Финальные .json/.md/.meta.json полосы — тем же набором, что пишет :func:`recognise_page`."""
     paths = output_paths(out_dir, rel)
     paths["json"].write_text(result.to_json(), encoding="utf-8")
     paths["md"].write_text(to_markdown(result), encoding="utf-8")
@@ -437,6 +503,7 @@ def _write_outputs(out_dir: Path, rel: Path, result: PageResult, meta: dict) -> 
 
 
 def _write_debug_copy(options: RunOptions, rel: Path, suffix: str, result: PageResult) -> None:
+    """Разобранный результат прохода (``.pass1`` / ``.pass2``) в debug-dir — сравнить оба глазами."""
     if options.debug_dir is None:
         return
     paths = debug_paths(options.debug_dir, rel, suffix)
@@ -454,14 +521,18 @@ def recognise_with_second_pass(
     (``имя.pass1.*`` и ``имя.pass2.*``), в meta финала — ``second_pass`` с причиной, тегами обоих
     проходов и выбором; ``cost_usd`` — сумма обоих запросов.
     """
+    # Первый проход — обычный запрос; его выход уже лежит под out-dir.
     meta1, result1 = recognise_page(client, spec, in_path, job, out_dir, options)
+    # Сбой, этап toc (оглавление не восстанавливаем) или проход выключен тестом — без второго.
     if result1 is None or job.stage != "page" or not options.second_pass:
         return meta1, result1
     reason = second_pass_reason(result1)
-    if reason is None:
+    if reason is None:  # чистая полоса — большинство: второй проход стоит ×2 только повреждённым
         return meta1, result1
 
     tags1 = tag_counts(result1.content_markdown)
+    # Подсказка второму проходу — всё, что первый сказал о повреждениях. Полный текст первого
+    # прохода по умолчанию не шлём: в замерах он не помог, а промпт удваивал.
     hint = SecondPass(
         damage=result1.damage,
         edge_words=tuple(result1.edge_words),
@@ -469,10 +540,13 @@ def recognise_with_second_pass(
         transcript=result1.content_markdown if options.second_pass_transcript else None,
     )
     _write_debug_copy(options, job.rel, ".pass1", result1)
+    # Та же полоса, тот же этап и списки, плюс подсказка; второй проход перезапишет .json/.md/meta.
     job2 = PageJob(job.rel, job.stage, job.toc_kind, job.year, job.rubrics, job.articles, job.toc_hash, hint)
     meta2, result2 = recognise_page(client, spec, in_path, job2, out_dir, options)
     tags2 = tag_counts(result2.content_markdown) if result2 is not None else None
     chosen, why = choose_final(tags1, tags2)
+    # Всё о втором проходе — в meta финала под ключом second_pass; плоские second_pass_reason /
+    # second_pass_chosen — для колонок summary.csv.
     info = {
         "reason": reason,
         "pass1_tags": tags1,
@@ -490,6 +564,7 @@ def recognise_with_second_pass(
         meta, result = meta2, result2
     else:
         meta, result = meta1, result1
+        # Второй проход проиграл, но его результат стоит сохранить в debug: по нему видно, почему.
         if result2 is not None:
             _write_debug_copy(options, job.rel, ".pass2", result2)
     meta = dict(meta)
