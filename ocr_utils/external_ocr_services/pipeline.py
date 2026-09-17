@@ -21,7 +21,7 @@ import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import click
@@ -266,7 +266,6 @@ def run_issue(
     pages: list[Path],
     stats: PipelineStats,
     extra_toc: dict[Path, str] | None = None,
-    allow_redo: bool = True,
 ) -> None:
     """Один выпуск целиком: этап toc, слияние, этап page, fallback.
 
@@ -292,9 +291,9 @@ def run_issue(
         extra_toc: Полосы, которые надо считать оглавлением помимо базы: ``{путь: «contents»
             | «index»}``. Заполняется только при повторном вызове из fallback (то, что модель нашла
             на обычных полосах); тег базы при этом главнее. ``None`` — обычный, первый вызов.
-        allow_redo: Можно ли уходить в повтор при находке оглавления вне базы. Повторный вызов
-            получает ``False``: один круг на выпуск, иначе модель, «увидев» оглавление на очередной
-            полосе, гоняла бы выпуск по кругу за деньги.
+            Повторный вызов идёт с копией ``params``, где ``on_missed_toc="skip"``: один круг на
+            выпуск, иначе модель, «увидев» оглавление на очередной полосе, гоняла бы выпуск по кругу
+            за деньги.
     """
     # Ключ выпуска — «{год}/{выпуск}» относительно in-dir; год уходит в пользовательский промпт
     # («выпуск такого-то года»). Плоская папка без подпапок группируется под ключом «.», года нет.
@@ -366,14 +365,14 @@ def run_issue(
         return
     # В итоговую строку прогона — всегда, независимо от того, будет ли повтор.
     stats.missed.append(f"{issue_key}: " + ", ".join(rel.name for rel, _ in missed))
-    # Повтор — только один круг (allow_redo=False на вложенном вызове), иначе модель, увидев
-    # оглавление на очередной полосе, гоняла бы выпуск по кругу. Решение — по --on-missed-toc:
-    # redo/skip без вопросов, ask — вопрос в терминал (без терминала = skip).
-    if allow_redo and decide_redo(params.on_missed_toc, issue_key, missed):
+    # Решение — по --on-missed-toc: redo/skip без вопросов, ask — вопрос в терминал (без терминала
+    # = skip). Повтор — только один круг: вложенный вызов получает копию params с on_missed_toc="skip",
+    # иначе модель, увидев оглавление на очередной полосе, гоняла бы выпуск по кругу.
+    if decide_redo(params.on_missed_toc, issue_key, missed):
         stats.redone_issues.append(issue_key)
         # Тот же выпуск заново: найденные полосы — как оглавление, список пересобирается, обычные
         # полосы с новым toc_hash не считаются готовыми и распознаются ещё раз.
-        run_issue(client, spec, params, issue_key, pages, stats, extra_toc=dict(missed), allow_redo=False)
+        run_issue(client, spec, replace(params, on_missed_toc="skip"), issue_key, pages, stats, extra_toc=dict(missed))
     else:
         # Без повтора: полосы в missed_toc.txt — человеку на разметку в CVAT; в базу не пишем.
         _append_missed(params.out_dir, issue_key, missed)
