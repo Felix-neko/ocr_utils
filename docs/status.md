@@ -34,6 +34,7 @@
 | external OCR (OpenRouter) | `research/external_ocr_models` | исследование | Gemini 3.1 Flash Lite основной; Qwen3.8 Flash и DeepSeek V4.1 Flash (2 куска) вторым/третьим голосом; промпт v13 | `reports/external_ocr_models.md`, `reports/external_ocr_models_issue_1966_03.md`, `reports/external_ocr_models_probe_1966_03.md` |
 | external OCR: боевой прогон | `ocr_utils/external_ocr_services` | рабочее | два этапа на выпуск: полосы оглавления (теги CVAT + вето `force_is_not_toc`) → рубрики и статьи в промпт остальных полос; `#` строго из оглавления, авторы при своей статье (`structure.py` доводит кодом); тайлы по сетке 4500 px, теги повреждений всегда, второй проход по полосам с `damaged=true` (мини-набор: 111/75 → 216/234 `<restored>`, на чистых 0 из 40 срабатываний); fallback «оглавление вне базы» | `ocr_utils/external_ocr_services/README.md` |
 | external OCR: повреждённые буквы | `research/external_ocr_models` (`--damage`) | исследование | теги `<restored>/<fuzzy>/<unknown/>` + список `edge_words`, промпт v7 | `reports/external_ocr_models.md` (разд. 8, 10) |
+| geometry_regression (FineReader ухудшил геометрию) | `research/geometry_regression` | исследование | попарные метрики «с коррекцией − без»: поле смещений (тайлы без пары в line art), LSD-штрихи (мм отклонения конца, параллельность), строки (наклон, волна), кромки; 7 из 8 эталонных при 0 ложных на 8 | `research/geometry_regression/README.md` |
 | pdf_utils / FineReader | `ocr_utils/pdf_utils` | рабочее | `intermediate_pdfs` (две промежуточные), `final_pdfs`, `collect_sharpened` | `finereader_compare_pack1.md` |
 | MRC-остатки FineReader | — | исследование | буквы, провалившиеся в фоновый слой MRC; поиск по расхождению маски и фона | `reports/mrc_leftovers_report.md` |
 | docx_md | `ocr_utils/docx_md` | рабочее | `docx_to_md` + `split_md_by_articles` (нарезка по статьям под Long Context) | `ocr_utils/docx_md/README.md` |
@@ -70,6 +71,16 @@
 - Ridge-центр-линии (Bukhari) — хребет прыгает между строками, AUC 0.56 (`reports/curved_lines_detection_report.md`).
 - Базовые точки слов (Ulges) — слишком мало точек на строку (`reports/curved_lines_detection_report.md`).
 - Kraken blla — векторизация упрощает линию до двух точек, формы кончика нет; 10–25 с на полосу (`reports/curved_lines_detection_report.md`).
+
+**geometry_regression**
+- Профильный deskew (сдвиг столбцов, `warpAffine` + профиль) на БИНАРНОМ рендере — все углы ровно 0.00°: при нулевом угле нет интерполяции и округления сдвигов, профиль всегда резче; годятся только центр-линии строк, `fitLine`/LSD и блочное сопоставление (`research/geometry_regression/README.md`).
+- Линейки морфологическим открытием длинным ядром — наклонённая на 6° дробная черта (1967/01 с.85) рвётся в пыль; заменено LSD на 300 dpi со склейкой коллинеарных кусков.
+- Наклон линейки в градусах как флаг — хорошая с.2 1967/02 давала 2° на 9-мм вертикалях (0.2 мм, глазу незаметно); мерится отклонение конца в мм.
+- Остаток поля смещений внутри line art как флаг — велик и внутри таблиц на хороших страницах (там FineReader правит законно); решает доля тайлов со слабым пиком корреляции (61 % на погнутой блок-схеме с.80 против ≤ 6 % везде).
+- Клин высоты строки (верх/низ букв по третям) для наклонённых заголовков — 0.056 на 1967/03 с.36 при шуме 0.05–0.25 на обычных строках.
+- Сопоставление строк по перекрытию от короткой — строке, распавшейся в A на куски, доставался короткий кусок с шумным наклоном (1967/01 с.4); перекрытие ≥ 0.75 от длинной.
+- Наклон строки и кромки в градусах как флаг — короткие куски строк дают 1.5° шума (1973/01 с.43); мерится уход конца в мм (длина × sin).
+- Кромки по номеру колонки — сегментация колонок в A и B расходится, кромке всей колонки доставалась кромка нижней трети (1967/04 с.9); сопоставление по стороне и перекрытию по вертикали, кромки считаются по блокам строк.
 
 **таблицы**
 - Тонкая пластина по пересечениям линеек (`rules_tps`) — сработала на 2 из 15: у большинства таблиц пересечений меньше шести (`reports/table_processing_report.md`).
@@ -155,6 +166,7 @@
 | curved_lines: `line_fit` | sagitta_rel_p90 0.11 / max3 0.17 / slope_spread 0.54° / resid 0.18° | там же | `curved_lines_pack1.md` |
 | curved_lines: `surya_lines` | sagitta_rel_p90 0.09 / max3 0.13 / slope_spread 0.54° / resid 0.21° | там же | `curved_lines_pack1.md` |
 | curved_lines: `end_curl` | end_slope 0.8° / edge_angle_diff 0.8° / tensor_edge_diff 1.0° | там же | `reports/curved_lines_detection_report.md` |
+| geometry_regression: пороги (стартовые, по эталону) | vstroke/hstroke_dev_max_delta_mm 0.5 мм, parallel_spread_delta_max 0.6°, field_lineart_weak_frac 0.3, line_dev_max_delta_mm 1.0 мм, line_wobble_delta_max 0.055, edge_dev_max_delta_mm 1.5 мм | `research/geometry_regression/scoring.py` | `research/geometry_regression/README.md` |
 | orientation: допустимые углы | `--angles 0,90` | `run_scripts/scan_markup/pack1/run_orientation.sh` | `reports/orientation_method.md` |
 | background_smoothing: `--threshold-bias` | 0.5 (в прогонах до 0.7) | `ocr_utils/background_smoothing`, `run_scripts/background_smoothing/*` | `ocr_utils/background_smoothing/README.md` |
 | background_smoothing: `--blur-mult` / `--blur-mode` | 4.0 / `masked` | там же | `ocr_utils/background_smoothing/README.md` |
