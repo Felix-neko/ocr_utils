@@ -107,6 +107,10 @@ LABEL_ROTATE_CCW90 = "Повернуть 90 против часовой"
 # ``pages.is_year_index``. Ставит детектор ``scan_markup.toc``, правит разметчик.
 LABEL_TOC = "Оглавление"
 LABEL_YEAR_INDEX = "Годовой указатель"
+# Вето человека — «это точно не оглавление»: гасит ложную тревогу внешней OCR-модели, которая на
+# обычных полосах проверяет, не оглавление ли перед ней (``pages.force_is_not_toc``). Детектор его не
+# ставит; в базу и обратно ходит теми же путями, что два тега выше.
+LABEL_NOT_TOC = "Не оглавление"
 
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
@@ -130,6 +134,7 @@ LABELS = [
     {"name": LABEL_ROTATE_CCW90, "type": "tag", "color": "#7C4DFF"},
     {"name": LABEL_TOC, "type": "tag", "color": "#00C853"},
     {"name": LABEL_YEAR_INDEX, "type": "tag", "color": "#2962FF"},
+    {"name": LABEL_NOT_TOC, "type": "tag", "color": "#B0BEC5"},  # серый: «ничего здесь нет»
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
@@ -156,8 +161,9 @@ ROTATION_BY_LABEL = {LABEL_ROTATE_CW90: 90, LABEL_ROTATE_180: 180, LABEL_ROTATE_
 LABEL_BY_ROTATION = {rotation: label for label, rotation in ROTATION_BY_LABEL.items()}
 
 # Метка-тег оглавления -> имя булевой колонки полосы. Как и у поворота, «не оглавление»
-# выражается ОТСУТСТВИЕМ тега.
-TOC_LABEL_BY_FIELD = {"is_toc": LABEL_TOC, "is_year_index": LABEL_YEAR_INDEX}
+# выражается ОТСУТСТВИЕМ тега; третий тег — явное вето человека (см. ``LABEL_NOT_TOC``), он
+# ходит в базу и обратно теми же функциями, что и первые два.
+TOC_LABEL_BY_FIELD = {"is_toc": LABEL_TOC, "is_year_index": LABEL_YEAR_INDEX, "force_is_not_toc": LABEL_NOT_TOC}
 FIELD_BY_TOC_LABEL = {label: fld for fld, label in TOC_LABEL_BY_FIELD.items()}
 
 # Качество JPEG, которым CVAT пережимает кадры уже у себя. Картинки и так уменьшены и
@@ -359,10 +365,12 @@ def rotation_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> l
 
 
 def toc_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
-    """Предразметка оглавления: ``page.is_toc`` / ``page.is_year_index`` -> теги CVAT.
+    """Предразметка оглавления: ``page.is_toc`` / ``page.is_year_index`` / ``page.force_is_not_toc`` -> теги CVAT.
 
     Полоса без признака тега не получает — как и у поворота, отсутствие тега значит «нет».
     Полосы, где детектор не считал (NULL), тоже без тега: отличить их можно по ``toc_version``.
+    Вето «Не оглавление» детектор не ставит, но из базы оно переливается наравне с остальными —
+    иначе дозаливка после пересоздания задачи потеряла бы его.
     """
     from cvat_sdk import models
 

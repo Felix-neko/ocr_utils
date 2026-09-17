@@ -47,6 +47,7 @@
 | `OUT_DIR` (table_processing) | `/mnt/SYSTEM/raw/mts/pack1_table_research` | Исследование таблиц, `JOBS=12` (память и диск, не счёт) | SYSTEM |
 | `ROTATED_INFO_DIR` | `/mnt/SYSTEM/raw/mts/pack1_rotated_tables` | Таблицы с повёрнутым текстом: `sheets/`, `pairs/`, `after/`, `info/`, `summary.csv` | SYSTEM |
 | `EXTERNAL_OCR_ROOT` | `/mnt/SYSTEM/raw/mts/pack1_external_ocr` | Выходы внешних OCR-моделей: подпапка на модель, `{год}/{выпуск}/полоса.{json,md,meta.json}`. `EXTERNAL_OCR_JOBS=4` — лимиты провайдеров | SYSTEM |
+| `EXTERNAL_OCR_SERVICES_ROOT` | `/mnt/SYSTEM/raw/mts/pack1_external_ocr_services` | Боевой внешний OCR: `out/{год}/{выпуск}/полоса.{md,json,meta.json}` + `toc.json`/`toc.md` на выпуск, `debug/` с сырыми ответами, промптами и тайлами, `probe/` для проб. `missed_toc.txt` в `out/` — оглавления, найденные моделью вне базы | SYSTEM |
 | `EXTERNAL_OCR_PROBE_ROOT` | `/mnt/SYSTEM/raw/mts/pack1_external_ocr_probe` | Пробник: 13 полос на всех моделях, отдельно, чтобы полные прогоны не затирали | SYSTEM |
 
 Ключ OpenRouter — только из `$OPENROUTER_API_KEY`, в скрипты и логи не попадает.

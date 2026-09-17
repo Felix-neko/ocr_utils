@@ -88,6 +88,25 @@ ocr_utils — обработка сканов книг и журналов.
 | `docx_to_md.py` | Экспорт DOCX-документов в Markdown. |  |
 | `split_md_by_articles.py` | Нарезка MD-файла (OCR журнала/книги) на куски по статьям для подачи в LLM. | `Unit` — Атомарная (неделимая) единица документа — статья, рубрика или обложка. |
 
+## ocr_utils/external_ocr_services
+
+Внешний OCR выпуска через VLM (DeepSeek V4.1 Flash): оглавление -> список статей -> остальные полосы.
+
+| Модуль | Назначение | Классы |
+|---|---|---|
+| `__main__.py` | Точка входа: ``uv run python -m ocr_utils.external_ocr_services <команда>``. |  |
+| `cli.py` | Команды пакета: ``uv run python -m ocr_utils.external_ocr_services <команда>``. |  |
+| `client.py` | Клиент OpenRouter поверх ``requests``: один вызов chat/completions с ретраями и учётом цены. | `OpenRouterError` (RuntimeError)<br>`ChatResponse`<br>`OpenRouterClient` |
+| `models.py` | Реестр OpenRouter-моделей боевого прогона: короткое имя, id, режим JSON, рассуждения, провайдеры. | `ModelSpec` |
+| `ocr.py` | Одна полоса → один запрос к модели → PageResult, файлы выхода и .meta.json. | `RunOptions` — Настройки прогона, общие для всех полос.<br>`SecondPass` — Что первый проход сказал о повреждениях — подсказка для второго прохода той же полосы.<br>`PageJob` — Что распознать: полоса, этап и известное оглавление выпуска (для этапа ``page``). |
+| `pages.py` | Полосы на входе и что о них знает база: обход папки, списки, флаги оглавления. | `PageFlags` — Что база знает о полосе. ``known=False`` — записи нет, полоса считается обычной. |
+| `pipeline.py` | Обход пака по выпускам: полосы оглавления -> список статей -> остальные полосы -> fallback. | `PipelineParams`<br>`PipelineStats` |
+| `render.py` | Разложить PageResult в .md: YAML-шапка с полями полосы и тело в markdown. |  |
+| `schema.py` | Ответ модели на одну полосу: поля, JSON-схема по этапу и терпимый разбор. | `ParseError` (ValueError) — Ответ модели не удалось привести к PageResult.<br>`TocArticle` — Статья в оглавлении: название, авторы, номер страницы и (в указателе) номер выпуска.<br>`TocSection` — Секция оглавления: рубрика (``None`` — без рубрики) и её статьи по порядку.<br>`TocPage` — Структурированное оглавление ОДНОЙ полосы; слияние полос выпуска — в ``toc.py``.<br>`PageResult` |
+| `structure.py` | Пост-обработка markdown полосы: `#` только из оглавления, авторы при своей статье, рубрика перед `#`. | `StructureReport` — Что изменила пост-обработка — попадает в .meta.json. |
+| `tiling.py` | Нарезка полосы на тайлы по сетке в пикселях исходника и подготовка каждого к отправке. | `TileBox` — Один тайл сетки: позиция в сетке и прямоугольник в пикселях исходника.<br>`PreparedImage` — Готовый к отправке тайл: JPEG-байты, размер после уменьшения и его место в сетке. |
+| `toc.py` | Оглавление выпуска: слияние полос, рубрики-продолжения, списки для промпта и их отпечаток. | `IssueToc` — Слитое оглавление одного вида (contents или index) по всем его полосам выпуска. |
+
 ## ocr_utils/gutter_loss_detection
 
 Поиск разворотов, у которых текст ушёл под переплёт при тугой подшивке.
@@ -399,6 +418,15 @@ ocr_utils — обработка сканов книг и журналов.
 | Модуль | Назначение | Классы |
 |---|---|---|
 
+## research/deepseek_damage_lesson
+
+Учебный скрипт: одна повреждённая страница → DeepSeek V4.1 Flash → JSON и Markdown с пометками.
+
+| Модуль | Назначение | Классы |
+|---|---|---|
+| `compare_prompt_languages.py` | Сравнение английских и русских промптов на мини-наборе повреждённых сканов. |  |
+| `ocr_damaged_page.py` | Одна повреждённая страница → DeepSeek V4.1 Flash через OpenRouter → JSON, Markdown и метаданные. |  |
+
 ## research/external_ocr_models
 
 Внешние OCR-модели: страница журнала → размеченный markdown через VLM.
@@ -407,7 +435,7 @@ ocr_utils — обработка сканов книг и журналов.
 |---|---|---|
 | `__main__.py` | Точка входа: ``uv run python -m research.external_ocr_models <команда>``. |  |
 | `cli.py` | Команды пакета: ``uv run python -m research.external_ocr_models <команда>``. |  |
-| `client.py` | Клиент OpenRouter поверх ``requests``: один вызов chat/completions с ретраями и учётом цены. | `OpenRouterError` (RuntimeError)<br>`ChatResponse`<br>`OpenRouterClient` |
+| `client.py` | Клиент OpenRouter переехал в боевой пакет ``ocr_utils.external_ocr_services.client``; здесь — реэкспорт. |  |
 | `evaluate.py` | Метрики по выходам моделей: буквы, структура, надёжность, цена. | `Structure`<br>`PageOutput`<br>`PageScore` |
 | `imaging.py` | Подготовка полосы к отправке: уменьшить, обесцветить, сжать, закодировать. | `PreparedImage` |
 | `local/deepseek_ocr2/worker.py` | DeepSeek-OCR-2 по папке полос: «Convert the document to markdown» → markdown. |  |

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from ocr_utils.scan_markup.cvat import publish
 from ocr_utils.scan_markup.cvat.export import ExportParams, ExportStats, _toc_from_tags, import_task
 from ocr_utils.scan_markup.cvat.project import (
+    LABEL_NOT_TOC,
     LABEL_RASTER_COLOR,
     LABEL_ROTATE_CW90,
     LABEL_TOC,
@@ -33,18 +34,42 @@ from tests.ocr_utils.scan_markup.test_publish_drift import (
 )  # noqa: F401
 
 FRAMES = {"пак-1/1975/12/a.jpg": 0, "пак-1/1975/12/b.jpg": 1, "пак-1/1975/12/c.jpg": 2}
-LABEL_IDS = {LABEL_RASTER_COLOR: 11, LABEL_ROTATE_CW90: 101, LABEL_TOC: 201, LABEL_YEAR_INDEX: 202}
+LABEL_IDS = {LABEL_RASTER_COLOR: 11, LABEL_ROTATE_CW90: 101, LABEL_TOC: 201, LABEL_YEAR_INDEX: 202, LABEL_NOT_TOC: 203}
 LABEL_NAMES = {value: key for key, value in LABEL_IDS.items()}
 
 
-def _page(rel_path, is_toc=None, is_year_index=None, rotate_cw=0):
-    return SimpleNamespace(cvat_rel_path=rel_path, is_toc=is_toc, is_year_index=is_year_index, rotate_cw=rotate_cw)
+def _page(rel_path, is_toc=None, is_year_index=None, rotate_cw=0, force_is_not_toc=None):
+    return SimpleNamespace(
+        cvat_rel_path=rel_path,
+        is_toc=is_toc,
+        is_year_index=is_year_index,
+        rotate_cw=rotate_cw,
+        force_is_not_toc=force_is_not_toc,
+    )
 
 
 def test_toc_labels_are_tags():
     by_name = {label["name"]: label for label in LABELS}
     assert by_name[LABEL_TOC]["type"] == "tag" and by_name[LABEL_YEAR_INDEX]["type"] == "tag"
-    assert set(TOC_LABEL_BY_FIELD) == {"is_toc", "is_year_index"}
+    assert by_name[LABEL_NOT_TOC]["type"] == "tag"
+    assert set(TOC_LABEL_BY_FIELD) == {"is_toc", "is_year_index", "force_is_not_toc"}
+
+
+def test_veto_tag_travels_to_cvat_and_back(page_and_session):
+    """«Не оглавление» ставится только руками, но из базы переливается и из CVAT читается."""
+    pages = [_page("пак-1/1975/12/a.jpg", is_toc=True, force_is_not_toc=True), _page("пак-1/1975/12/b.jpg")]
+    assert sorted((t.frame, t.label_id) for t in toc_tags(pages, FRAMES, LABEL_IDS)) == [(0, 201), (0, 203)]
+
+    page, session = page_and_session
+    task = _ExportTask([page.cvat_rel_path], [])
+    task.get_annotations = lambda: _Annotations([], [SimpleNamespace(frame=0, label_id=203)])
+    stats = ExportStats()
+    import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), stats)
+    assert (page.is_toc, page.is_year_index, page.force_is_not_toc) == (False, False, True)
+    assert stats.not_toc_pages == 1
+    task.get_annotations = lambda: _Annotations([], [])
+    import_task(task, LABEL_NAMES, {0: page}, session, ExportParams(None, None, "пак-1"), ExportStats())
+    assert page.force_is_not_toc is False, "снятое вето — False, снимок тегов"
 
 
 def test_only_flagged_pages_get_tags_and_both_flags_give_two():
@@ -84,7 +109,7 @@ def test_import_reads_flags_from_tags_and_absent_tag_means_false(page_and_sessio
 
 def test_toc_from_tags_ignores_foreign_labels():
     tags = [SimpleNamespace(frame=0, label_id=11), SimpleNamespace(frame=0, label_id=201)]
-    assert _toc_from_tags(tags, LABEL_NAMES) == {"is_toc": True, "is_year_index": False}
+    assert _toc_from_tags(tags, LABEL_NAMES) == {"is_toc": True, "is_year_index": False, "force_is_not_toc": False}
 
 
 class _TaggingTask(_FullTask):

@@ -24,6 +24,7 @@ FOLDS=(
     --fold IMG_0053.jpg=2613,2537
     --fold IMG_0067.jpg=2436,2422
     --fold IMG_0068.jpg=2447,2438
+    --fold IMG_0648.jpg=2836,2748
 )
 uv run python -m research.external_ocr_models split-spreads \
     --in-dir "$DAMAGED/сырые сканы" \

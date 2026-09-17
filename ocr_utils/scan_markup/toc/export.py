@@ -58,7 +58,8 @@ def export_lists(
                     f"{Path(page.source_file_name).with_suffix(suffix)}  # {kind} {page.toc_score or 0:.2f}"
                     f" {page.toc_source}"
                     for page in pages
-                    if (kind := kind_from_flags(page.is_toc, page.is_year_index)) in kinds
+                    # Вето человека «Не оглавление» сильнее любого признака.
+                    if not page.force_is_not_toc and (kind := kind_from_flags(page.is_toc, page.is_year_index)) in kinds
                 ]
                 target = out_dir / rel_dir / LIST_NAME
                 target.parent.mkdir(parents=True, exist_ok=True)

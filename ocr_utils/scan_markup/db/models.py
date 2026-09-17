@@ -371,6 +371,13 @@ class Page(Base):
     toc_source: Mapped[str | None] = mapped_column(String(16), default=None)
     toc_version: Mapped[int | None] = mapped_column(Integer, default=None)
     toc_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    # ВЕТО ЧЕЛОВЕКА: полоса точно не оглавление и не указатель, что бы ни сказали детектор или
+    # внешняя модель. Внешний OCR (``ocr_utils.external_ocr_services``) просит модель проверять
+    # каждую полосу «не оглавление ли это», и на таблицах-перечнях она поднимает ложную тревогу;
+    # этот признак её гасит. Отдельная колонка, а не ``is_toc = False``: False там означает лишь
+    # «тега нет», и от него ложная тревога модели ничем не отличается. В CVAT — тег «Не оглавление»,
+    # ставится только руками; NULL — не ставился.
+    force_is_not_toc: Mapped[bool | None] = mapped_column(Boolean, default=None)
 
     issue: Mapped[Issue] = relationship(back_populates="pages")
     rect_regions: Mapped[list["RectRegion"]] = relationship(back_populates="page", cascade="all, delete-orphan")

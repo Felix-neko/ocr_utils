@@ -15,6 +15,7 @@ from ocr_utils.scan_markup.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import scan_pack
 from ocr_utils.scan_markup.toc import KIND_CONTENTS, KIND_INDEX, SOURCE_AUTO, SOURCE_CVAT, TOC_VERSION, kind_from_flags
 from ocr_utils.scan_markup.toc import run as toc_run
+from ocr_utils.scan_markup.db.repo import require_pack
 from ocr_utils.scan_markup.toc.export import LIST_NAME, export_lists
 from ocr_utils.scan_markup.toc.features import PageFeatures
 from ocr_utils.scan_markup.toc.run import TocParams, run_toc
@@ -141,3 +142,11 @@ def test_export_lists(pack_dir, tmp_path, session_factory, fake_features) -> Non
 
     stats = export_lists(session_factory, PACK, out, kinds=(KIND_INDEX,))
     assert stats.pages == 3
+
+    # Вето «Не оглавление» сильнее признака: полоса выпадает из списка.
+    with session_factory() as session:
+        pack = require_pack(session, PACK)
+        page = next(p for p in pack.year_packages[0].issues[0].pages if p.order_index == 2)
+        page.force_is_not_toc = True
+        session.commit()
+    assert export_lists(session_factory, PACK, out).pages == 4

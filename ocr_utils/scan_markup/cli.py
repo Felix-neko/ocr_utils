@@ -856,7 +856,8 @@ def from_cvat_command(
         f"Полос под поворот: {stats.rotated}"
         + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")
         + ".\n"
-        f"Полос оглавления: {stats.toc_pages}, полос годового указателя: {stats.year_index_pages}.\n"
+        f"Полос оглавления: {stats.toc_pages}, полос годового указателя: {stats.year_index_pages}, "
+        f"с вето «Не оглавление»: {stats.not_toc_pages}.\n"
         f"Шейпов с чужими метками: {stats.unknown_labels}, кадров без полосы: {stats.unmatched_frames}."
     )
 

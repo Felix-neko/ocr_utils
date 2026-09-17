@@ -32,6 +32,7 @@
 | faint zone restore | `restore_faint_zone.py` | исследование | поле «во сколько придавлена краска» + усиление + Ричардсон–Люси; разовый прогон | `reports/faint_zone_restore_IMG_0056.md` |
 | rotated_text | `ocr_utils/rotated_text/tables` | рабочее | tesseract читает боковые ячейки, текст набирается прямо, DPI страницы поднимается | `reports/rotated_text_tables.md`, `reports/table_processing_rotation.md`, `reports/table_processing_ocr.md` |
 | external OCR (OpenRouter) | `research/external_ocr_models` | исследование | Gemini 3.1 Flash Lite основной; Qwen3.8 Flash и DeepSeek V4.1 Flash (2 куска) вторым/третьим голосом; промпт v13 | `reports/external_ocr_models.md`, `reports/external_ocr_models_issue_1966_03.md`, `reports/external_ocr_models_probe_1966_03.md` |
+| external OCR: боевой прогон | `ocr_utils/external_ocr_services` | рабочее | два этапа на выпуск: полосы оглавления (теги CVAT + вето `force_is_not_toc`) → рубрики и статьи в промпт остальных полос; `#` строго из оглавления, авторы при своей статье (`structure.py` доводит кодом); тайлы по сетке 4500 px, теги повреждений всегда, второй проход по полосам с `damaged=true` (мини-набор: 111/75 → 216/234 `<restored>`, на чистых 0 из 40 срабатываний); fallback «оглавление вне базы» | `ocr_utils/external_ocr_services/README.md` |
 | external OCR: повреждённые буквы | `research/external_ocr_models` (`--damage`) | исследование | теги `<restored>/<fuzzy>/<unknown/>` + список `edge_words`, промпт v7 | `reports/external_ocr_models.md` (разд. 8, 10) |
 | pdf_utils / FineReader | `ocr_utils/pdf_utils` | рабочее | `intermediate_pdfs` (две промежуточные), `final_pdfs`, `collect_sharpened` | `finereader_compare_pack1.md` |
 | MRC-остатки FineReader | — | исследование | буквы, провалившиеся в фоновый слой MRC; поиск по расхождению маски и фона | `reports/mrc_leftovers_report.md` |
@@ -111,6 +112,14 @@
 - DeepSeek-OCR-2 локально — теряет тело таблиц с боковыми шапками, нестабилен, не инструктивен (`reports/external_ocr_models.md`).
 - Marker 1.10 локально — строки таблиц перепутывает, отточия превращает в «20-20-20» (`reports/external_ocr_models.md`).
 - Специализированные OCR-API (Mistral OCR, Yandex Vision, Google, Azure) — не дешевле VLM и не дают семантики статьи (`reports/external_ocr_models.md`).
+- Рубрика по месту печати — в МТС 1991/02 маркер рубрики стоит в нижнем углу страницы и в колонтитуле, тег `<rubric>` там разрезал бы статью при нарезке по рубрикам; теперь рубрика статьи берётся из оглавления, код подтягивает тег к `#`, прочие надписи — `<marker>` (`structure.place_rubrics`).
+- Оговорка «`#` и для отдельной заметки с автором» в промпте — модель ставила `#` подзаголовку вверху страницы-продолжения (1966/03 `IMG_0106_1L`); теперь `#` строго из списка, остальное понижает код (`structure.py`).
+- Поле `damage` без ограничения длины — DeepSeek ушёл в цикл, перечисляя номера строк (16 000 токенов на странице 1946 «Планового хозяйства»); ограничено одним предложением.
+- Нейтральная фраза «помечай только то, что видишь» без подсказки о повреждении — модель перестаёт достраивать скрытые буквы: на IMG_0006_L 55 `<unknown/>` вместо 47 `<restored>`; заменена на «ищи повреждения сам, скрытые буквы достраивай по контексту» — 52 `<restored>`, 0 `<unknown/>` в двух прогонах. Без подсказки часть повреждённых страниц модель всё равно не видит (IMG_0006_R: 0 против 26 с подсказкой), подсказки по полосам `--hints` остаются полезными.
+- Триггер второго прохода по тексту `damage` — с фразой «ищи повреждения сам» модель пишет «повреждений не обнаружено» на 33 из 40 чистых полос (82 % ложных срабатываний); заменён булевым `damaged` в схеме — 0 из 40.
+- Полный текст первого прохода во втором запросе (`--second-pass-transcript`) — 213/243 `<restored>` против 216/234 без текста, выигрыша нет, оставлен опцией.
+- Опция стороны корешка (`--damage-side`, в т. ч. по суффиксу `_L`/`_R` имени файла) — убрана: суффикс бывает ложным, а сторона плавает от части к части выпуска; сторону модель определяет сама по картинке.
+- DeepSeek `json_object` с длинным промптом (список статей выпуска) — в 20–40 % ответов эхо `{"type": "json_object"}` вместо страницы; лечится повтором без `response_format` (`ocr_utils/external_ocr_services/ocr.py`, `is_format_echo`).
 - Промпт: правило «склеивать перенос внутри шапки без дефиса» — не сработало даже с явным отрицательным примером (`reports/external_ocr_models.md`).
 - Завышенная подсказка «часть букв может быть скрыта» — модель выдумывает скрытые буквы на обычных переносах (`reports/external_ocr_models.md`).
 
@@ -152,6 +161,8 @@
 | table_detection: константы детектора | FRAGMENT_MM 3, CHAIN_GAP_MM 8, MAX_ISOLATION 0.55, MAX_INK_SHARE 0.25, GROW_CAP_MM 40 и др. | `ocr_utils/scan_markup/table_detection` | `ocr_utils/scan_markup/table_detection/README.md` |
 | external OCR: модель и настройки | Gemini 3.1 Flash Lite, JSON-схема, `reasoning.max_tokens=1024`, картинка 2200 px | `research/external_ocr_models`, `run_scripts/external_ocr_models/*` | `reports/external_ocr_models.md` |
 | external OCR: версия промпта | `PROMPT_VERSION = 13` | `research/external_ocr_models/__init__.py` | `reports/external_ocr_models.md` (разд. 9.6) |
+| external_ocr_services: промпт | `PROMPT_VERSION = 6`; регрессия v2 → v6 на 1966/03: CER к FineReader 0.036 → 0.028 (среднее), эхо формата 9 → 0, сбоев 0 | `ocr_utils/external_ocr_services/__init__.py` | `ocr_utils/external_ocr_services/README.md` |
+| external_ocr_services: тайлы | `--max-src-tile-size 4500` (обычная полоса 1×2, разворот 2×2), `--max-model-tile-size 2200`, перекрытие 8 % | `ocr_utils/external_ocr_services/tiling.py`, `run_scripts/external_ocr_services/*` | замер размеров по базе пака-1 (2998–4499 × 4961–6692, разворот 6444×5336) |
 | scan_cropping: пальцы и кроп | `--finger-dilate-px` 60–120, `--max-asymmetric-dilation-ratio` 1.6–2.0, `--extra-erosion-px` 80–110, `--layout-pad-px` 12–18, `--bg-fill-blur-px=16` | `run_scripts/scan_cropping/*` | `reports/finger_border_check_predilate_report.md` |
 | select_best_raws | `--min-match-ratio 0.2`, `--n-search 5`, `--max-scale-change 1.15` | `run_scripts/select_best_raws/*` | `reports/select_best_raws_report.md` |
 | параллелизм по умолчанию | `--jobs 16` (16 физических ядер), на медленном NTFS меньше | `run_scripts/*`, `CLAUDE.md` | `CLAUDE.md` |
@@ -162,7 +173,7 @@
   пользователя от 2026-09-05). Поэтому размытие фона в `scan_cleanup` сильнее прежнего, а
   защитная маска щедрее (Sauvola, припуск 25 px вместо 15): при выборе параметров не оптимизировать
   чистоту фона в ущерб бледным штрихам.
-- Промпт v14: отдельный запрос извлечения оглавления по `toc_pages.txt` (JSON `kind`/`rubrics`/`articles`) и правило «`#` только для статей из списка, авторы после названия» (`reports/toc_detection.md`).
+- Боевой внешний OCR (`ocr_utils/external_ocr_services`): прогнать пак целиком (`run_pack_sharpened.sh`), разобрать `missed_toc.txt` через теги CVAT, проверить долю ложных `<fuzzy>` от нейтральной фразы про повреждения на чистых полосах.
 - Перекрёстная проверка декабрьского годового указателя по спискам всех выпусков года (`reports/toc_detection.md`).
 - Слияние версии FineReader и версии VLM в один markdown: голосование по заголовкам/авторам, таблицы из VLM, кривые строки из FineReader (`reports/external_ocr_models.md`).
 - Прогнать пробник внешних OCR на 1974–76 (пятнистый фон, петит) и проверить рост расхождения с FineReader (`reports/external_ocr_models.md`).

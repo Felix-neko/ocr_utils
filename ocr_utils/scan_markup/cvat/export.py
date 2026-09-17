@@ -88,6 +88,8 @@ class ExportStats:
     # Полосы с тегами оглавления: «Содержание» выпуска и указатель за год.
     toc_pages: int = 0
     year_index_pages: int = 0
+    # Полосы с вето «Не оглавление».
+    not_toc_pages: int = 0
     unknown_labels: int = 0
     unmatched_frames: int = 0
 
@@ -198,6 +200,7 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         toc_source=src_page.toc_source,
                         toc_version=src_page.toc_version,
                         toc_detected_at=src_page.toc_detected_at,
+                        force_is_not_toc=src_page.force_is_not_toc,
                     )
                 )
             dst_session.flush()
@@ -310,7 +313,7 @@ def _rotation_from_tags(tags: list, label_names: dict[int, str], stats: "ExportS
 
 
 def _toc_from_tags(tags: list, label_names: dict[int, str]) -> dict[str, bool]:
-    """Признаки оглавления по тегам кадра: ``{"is_toc": ..., "is_year_index": ...}``.
+    """Признаки оглавления по тегам кадра: ``{"is_toc": ..., "is_year_index": ..., "force_is_not_toc": ...}``.
     Нет тега — False, «не оглавление»; правило то же, что у поворота."""
     flags = {field_name: False for field_name in FIELD_BY_TOC_LABEL.values()}
     for tag in tags:
@@ -401,8 +404,10 @@ def import_task(
         toc_flags = _toc_from_tags(tags_by_frame.get(frame, []), label_names)
         page.is_toc = toc_flags["is_toc"]
         page.is_year_index = toc_flags["is_year_index"]
+        page.force_is_not_toc = toc_flags["force_is_not_toc"]
         stats.toc_pages += page.is_toc
         stats.year_index_pages += page.is_year_index
+        stats.not_toc_pages += page.force_is_not_toc
         page.toc_source = SOURCE_CVAT
         page.toc_detected_at = _utcnow()
         page.toc_score = None

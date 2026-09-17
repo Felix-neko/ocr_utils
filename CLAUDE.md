@@ -33,6 +33,7 @@
 | `background_smoothing` | Сглаживание фона под бинаризацию FineReader | `python -m ocr_utils.background_smoothing` |
 | `zonal_deblur` | Зональный смаз: PSF по спектру, Винер | `python -m ocr_utils.zonal_deblur` |
 | `inpainting` | Общие примитивы закраса (ROI, LaMa) для пальцев и разметки | библиотека |
+| `external_ocr_services` | Боевой внешний OCR (DeepSeek V4.1 Flash): оглавление → список статей → остальные полосы, тайлы по сетке, теги повреждений | `python -m ocr_utils.external_ocr_services run` |
 | `docx_md` | DOCX → Markdown, нарезка под LLM | библиотека |
 | `legacy` | Помойка: не поддерживается, без тестов | — |
 | `research/external_ocr_models` | Полоса → размеченный markdown через VLM (OpenRouter), промпты v1–v13 | `python -m research.external_ocr_models` |

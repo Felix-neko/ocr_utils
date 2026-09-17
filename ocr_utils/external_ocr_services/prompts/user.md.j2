@@ -1,0 +1,33 @@
+{#- Текст пользовательского сообщения рядом с тайлами. Переменные: ntiles, ncols, nrows —
+    раскладка; hint — подсказка про повреждения (нейтральная по умолчанию); stage; toc_kind —
+    вид полосы для этапа toc. -#}
+{% if ntiles > 1 -%}
+The page is given as {{ ntiles }} overlapping tiles: {{ ncols }} column(s) × {{ nrows }} row(s) of the page, listed column by column, each column from top to bottom{% if ncols > 1 %}, the whole left column before the right one{% endif %}. Neighbouring tiles overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
+{% endif -%}
+{% if second_pass -%}
+A first reading of this page reported damage: «{{ second_pass.damage or "(no description)" }}». It marked {{ second_pass.tags.get("restored", 0) }} reconstructed, {{ second_pass.tags.get("fuzzy", 0) }} unreliable and {{ second_pass.tags.get("unknown", 0) }} unreadable fragments{% if second_pass.edge_words %} and listed these affected lines (as seen → as written, kind):
+{% for item in second_pass.edge_words[:max_lines] %}- «{{ item.seen }}» → «{{ item.full }}», {{ item.kind }}
+{% endfor %}{% if second_pass.edge_words | length > max_lines %}- … and {{ second_pass.edge_words | length - max_lines }} more
+{% endif %}{% else %}.
+{% endif %}
+{%- if second_pass.transcript %}
+Its transcription was:
+<<<
+{{ second_pass.transcript }}
+>>>
+Use it only to see WHERE the doubtful places are; read every word from the image again, do not copy the transcription.
+{% endif %}
+Now re-read the page with this in mind. First decide for the affected area whether the letters are HIDDEN (cut off, lost in the binding gutter, covered) or VISIBLE BUT UNRELIABLE (blurred, squashed, smeared, washed out by overexposure) — the first reading may have named the wrong kind. Hidden letters → reconstruct them from the context and the visible remains of the word and wrap them in <restored>; unreliable letters → <fuzzy> on EVERY word where at least one letter was read by shape or context rather than by clear print; <unknown/> only where no confident reconstruction is possible. Give one `edge_words` entry for EVERY affected line. If on inspection the page is actually clean, say so (`damage` = "") and return the plain transcription without tags.
+{%- else -%}
+{{ hint }}
+{%- endif %}
+{% if stage == "toc" -%}
+{% if toc_kind == "index" -%}
+This page belongs to the ANNUAL INDEX of articles published in the journal during the year (it may continue from a previous page and continue on the next one). Transcribe it and fill the `toc` object with kind «index».
+{%- else -%}
+This page belongs to the TABLE OF CONTENTS of the issue (it may continue from a previous page and continue on the next one). Transcribe it and fill the `toc` object with kind «contents».
+{%- endif %}
+{%- else -%}
+Transcribe this page.
+{%- endif %}
+Apply rule 6 strictly: in a damaged zone every letter you did not actually see goes inside <restored>…</restored>, every letter you read by shape or context rather than by clear print goes inside <fuzzy>…</fuzzy>, and a fragment you cannot read or reconstruct becomes <unknown/>. Writing a reconstructed letter without a tag is an error; tagging clean print is also an error.
