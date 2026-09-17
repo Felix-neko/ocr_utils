@@ -148,7 +148,7 @@ def test_black_line_art_never_reaches_the_markup() -> None:
 
     from PIL import Image
 
-    from ocr_utils.scan_markup.db.models import KIND_COLOR
+    from ocr_utils.db.models import KIND_COLOR
     from ocr_utils.scan_markup.detection.page import PageOptions, detect_page
 
     class _Stub:
@@ -192,7 +192,7 @@ def test_small_coloured_line_art_becomes_a_stamp_suspect() -> None:
 
     from PIL import Image
 
-    from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_STAMP_SUSPECT
+    from ocr_utils.db.models import KIND_COLOR, KIND_STAMP_SUSPECT
     from ocr_utils.scan_markup.detection.page import PageOptions, detect_page
 
     class _Stub:

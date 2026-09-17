@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE
 from ocr_utils.scan_markup.detection.color_kind import chroma_fraction, classify, paper_color
 
 # Цвет пожелтевшей бумаги в BGR: синего заметно меньше красного.

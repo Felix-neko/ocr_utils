@@ -316,8 +316,8 @@ def save_cleaned_paths(params: CleanupParams, reports: "list[PageReport]") -> in
     Полосы, упавшие с ошибкой или не найденные на диске, пропускаются: записанный путь
     означает «файл есть», и врать тут нельзя — на нём стоит вся дальнейшая сборка PDF.
     """
-    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import iter_pages, require_pack
+    from ocr_utils.db.session import open_db
 
     by_rel = {r.rel_path: r for r in reports if r.status not in ("error", "missing") and r.out_rel_path}
     if not by_rel:

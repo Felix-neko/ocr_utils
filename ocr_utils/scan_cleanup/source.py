@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 
 from ocr_utils.scan_markup.cvat.export import mask_from_row
-from ocr_utils.scan_markup.db.models import COLOR_PICTURE_KINDS, MASK_KINDS, MaskAnnotation
-from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import COLOR_PICTURE_KINDS, MASK_KINDS, MaskAnnotation
+from ocr_utils.db.repo import iter_pages, require_pack
+from ocr_utils.db.session import open_db
 
 logger = logging.getLogger(__name__)
 

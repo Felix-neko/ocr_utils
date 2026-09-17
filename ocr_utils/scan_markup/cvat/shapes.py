@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ocr_utils.scan_markup.cvat.client import CvatSettings, make_cvat_client
 from ocr_utils.scan_markup.cvat.project import frame_index_by_name
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.repo import require_pack
 
 logger = logging.getLogger(__name__)
 

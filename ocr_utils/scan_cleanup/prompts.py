@@ -35,7 +35,7 @@ import numpy as np
 
 from ocr_utils.background_smoothing.processing import has_halftone
 from ocr_utils.scan_cleanup.source import PageMarkup, Rect
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_OTHER_REMOVAL
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_OTHER_REMOVAL
 from ocr_utils.scan_markup.detection.color_kind import classify, paper_color
 
 # Доля площади РАМКИ ГРУППЫ, которая должна лежать внутри растровой области, чтобы

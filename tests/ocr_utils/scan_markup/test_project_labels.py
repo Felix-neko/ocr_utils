@@ -179,7 +179,7 @@ def test_every_rect_kind_has_a_rectangle_label_and_back() -> None:
     (шейп ушёл бы в «чужие метки»). Проверяется по спискам, а не по паре примеров.
     """
     from ocr_utils.scan_markup.cvat.project import KIND_BY_LABEL, LABEL_BY_KIND
-    from ocr_utils.scan_markup.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE, RECT_KINDS
+    from ocr_utils.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE, RECT_KINDS
 
     by_name = {label["name"]: label for label in LABELS}
     assert set(LABEL_BY_KIND) == set(RECT_KINDS)

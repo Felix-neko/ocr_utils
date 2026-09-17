@@ -1,6 +1,7 @@
 ---
 paths:
   - "ocr_utils/scan_markup/**"
+  - "ocr_utils/db/**"
   - "run_scripts/scan_markup/**"
   - "ocr_utils/scan_cleanup/**"
 ---

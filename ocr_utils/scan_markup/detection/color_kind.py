@@ -49,7 +49,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE
 
 # Доля самых светлых пикселей полосы, по которой оценивается цвет бумаги. 5% — это поля
 # и просветы между строк: на полосе журнала бумаги всегда заметно больше, а брать больше

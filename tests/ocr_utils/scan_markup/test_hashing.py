@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ocr_utils.scan_markup.db.models import Page
+from ocr_utils.db.models import Page
 from ocr_utils.scan_markup.hashing import (
     HASH_ALGO,
     apply_stamp,

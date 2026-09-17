@@ -226,8 +226,8 @@ def fill_database(
     db_path: Path, pack_name: str, dest_root: Path, moved_names: "dict[str, str]", report: CollectReport
 ) -> None:
     """Записывает в базу корень заострённых копий и имена файлов по полосам."""
-    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import iter_pages, require_pack
+    from ocr_utils.db.session import open_db
 
     session_factory = open_db(db_path)
     with session_factory() as session:

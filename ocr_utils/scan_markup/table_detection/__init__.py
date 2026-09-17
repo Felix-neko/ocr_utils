@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ocr_utils.scan_markup.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE
+from ocr_utils.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE
 from ocr_utils.scan_markup.table_detection.geometry import KIND_TABLE as KIND_TABLE_RU
 from ocr_utils.scan_markup.table_detection.geometry import TableBox
 from ocr_utils.scan_markup.table_detection.layout import PageLayout

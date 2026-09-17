@@ -31,4 +31,4 @@ DATABASES=(
 )
 
 # Несуществующие файлы скрипт пропускает сам, поэтому список можно не подчищать руками.
-uv run python -m ocr_utils.scan_markup.db.migrate "${DATABASES[@]}" "$@"
+uv run python -m ocr_utils.db.migrate "${DATABASES[@]}" "$@"

@@ -11,7 +11,7 @@ from PIL import Image
 from ocr_utils.scan_cleanup.inpaint import InpaintOptions, inpaint_page
 from ocr_utils.scan_cleanup.runner import CleanupParams, process_page, run_cleanup, select_pages, summary
 from ocr_utils.scan_cleanup.source import load_markup
-from ocr_utils.scan_markup.db.models import MASK_LIBRARY_STAMP
+from ocr_utils.db.models import MASK_LIBRARY_STAMP
 
 FILL = 111
 
@@ -170,8 +170,8 @@ def test_summary_mentions_every_status(pack, params):
 
 def _with_hashes(db_path, pack_name):
     """Проставляет полосам отпечатки, как это делает шаг ``detect``."""
-    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import iter_pages, require_pack
+    from ocr_utils.db.session import open_db
 
     digests = {}
     with open_db(db_path)() as session:
@@ -209,8 +209,8 @@ def test_skip_if_exists_still_works_with_fingerprints(pack, params):
 
 def test_cleaned_paths_land_in_the_database(pack, params):
     """Без этой записи следующий шаг не найдёт файл: его имени в базе больше неоткуда взять."""
-    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import iter_pages, require_pack
+    from ocr_utils.db.session import open_db
 
     db_path, _pack_dir, pack_name = pack
     _with_hashes(db_path, pack_name)

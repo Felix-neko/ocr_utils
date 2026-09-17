@@ -10,7 +10,7 @@ from cvat_sdk import models
 
 from ocr_utils.scan_markup.cvat import publish
 from ocr_utils.scan_markup.cvat.project import shapes_to_requests
-from ocr_utils.scan_markup.db.models import Issue, Page
+from ocr_utils.db.models import Issue, Page
 
 
 def make_page(name: str, file_hash: str | None, cvat_hash: str | None) -> Page:
@@ -276,8 +276,8 @@ def _fake_cvat(monkeypatch, tasks_by_name, log):
 @pytest.fixture
 def pack_db(tmp_path):
     """Пак из одного года, двух выпусков по две полосы, уже прошедший detect."""
-    from ocr_utils.scan_markup.db.repo import upsert_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import upsert_pack
+    from ocr_utils.db.session import open_db
     from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
 
     db = tmp_path / "markup.sqlite"
@@ -321,7 +321,7 @@ def test_first_publish_records_what_was_uploaded(monkeypatch, pack_db):
     assert stats.stale_years == []
 
     with factory() as session:
-        from ocr_utils.scan_markup.db.repo import require_pack
+        from ocr_utils.db.repo import require_pack
 
         pages = [p for y in require_pack(session, "пак-1").year_packages for i in y.issues for p in i.pages]
         assert all(p.cvat_file_hash == p.file_hash for p in pages)
@@ -344,7 +344,7 @@ def test_cvat_dpi_chooses_divisor_at_publish(monkeypatch, pack_db):
     assert {job.divisor for job in captured} == {4}
     assert all(job.force for job in captured)
     with factory() as session:
-        from ocr_utils.scan_markup.db.repo import require_pack
+        from ocr_utils.db.repo import require_pack
 
         page = require_pack(session, "пак-1").year_packages[0].issues[0].pages[0]
         assert page.divisor == 4
@@ -365,7 +365,7 @@ def test_published_page_keeps_its_divisor(monkeypatch, pack_db):
     assert {job.divisor for job in captured} == {8}
     assert not any(job.force for job in captured)
     with factory() as session:
-        from ocr_utils.scan_markup.db.repo import require_pack
+        from ocr_utils.db.repo import require_pack
 
         pages = [p for y in require_pack(session, "пак-1").year_packages for i in y.issues for p in i.pages]
         assert {page.divisor for page in pages} == {8}
@@ -379,7 +379,7 @@ def test_changed_file_is_reported_and_task_left_alone_without_flag(monkeypatch, 
     publish.run_publish(_params(db, tmp_path), factory)
 
     with factory() as session:
-        from ocr_utils.scan_markup.db.repo import require_pack
+        from ocr_utils.db.repo import require_pack
 
         page = require_pack(session, "пак-1").year_packages[0].issues[1].pages[0]
         page.file_hash = "hash-новый"
@@ -406,7 +406,7 @@ def test_recreate_stale_keeps_markup_of_untouched_pages(monkeypatch, pack_db):
     changed_name = task.get_frames_info()[2].name  # первая полоса второго выпуска
 
     with factory() as session:
-        from ocr_utils.scan_markup.db.repo import require_pack
+        from ocr_utils.db.repo import require_pack
 
         pack = require_pack(session, "пак-1")
         page = next(p for y in pack.year_packages for i in y.issues for p in i.pages if p.cvat_rel_path == changed_name)
@@ -422,7 +422,7 @@ def test_recreate_stale_keeps_markup_of_untouched_pages(monkeypatch, pack_db):
     assert [entry[0] for entry in log] == ["create", "upload", "remove", "rename"]
 
     with factory() as session:
-        from ocr_utils.scan_markup.db.repo import require_pack
+        from ocr_utils.db.repo import require_pack
 
         pack = require_pack(session, "пак-1")
         pages = [p for y in pack.year_packages for i in y.issues for p in i.pages]

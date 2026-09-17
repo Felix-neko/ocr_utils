@@ -5,7 +5,7 @@ import pytest
 
 from ocr_utils.scan_cleanup.protect import ProtectOptions, analysis_roi, build_protect, is_full_page, rects_mask
 from ocr_utils.scan_cleanup.source import PageMarkup, Rect
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_COLOR_TEXT, KIND_GRAYSCALE, KIND_STAMP_SUSPECT
+from ocr_utils.db.models import KIND_COLOR, KIND_COLOR_TEXT, KIND_GRAYSCALE, KIND_STAMP_SUSPECT
 
 SHAPE = (600, 400)
 

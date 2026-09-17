@@ -88,7 +88,7 @@ from ocr_utils.scan_markup.cvat.project import (
     upload_preannotations,
     year_task_name,
 )
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.geometry import CVAT_DPI, crop_size, cvat_size, divisor_for_dpi
 from ocr_utils.scan_markup.hashing import is_stale_in_cvat
 

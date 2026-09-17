@@ -8,12 +8,15 @@
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ocr_utils.scan_markup.db.models import Issue, MaskAnnotation, Pack, Page, RectRegion, YearPackage
-from ocr_utils.scan_markup.scan_tree import ScannedYear
+from ocr_utils.db.models import Issue, MaskAnnotation, Pack, Page, RectRegion, YearPackage
+
+if TYPE_CHECKING:  # ``db`` — общий слой, во время исполнения от ``scan_markup`` не зависит
+    from ocr_utils.scan_markup.scan_tree import ScannedYear
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ def require_pack(session: Session, name: str) -> Pack:
     return pack
 
 
-def upsert_pack(session: Session, name: str, root: Path, years: list[ScannedYear]) -> Pack:
+def upsert_pack(session: Session, name: str, root: Path, years: "list[ScannedYear]") -> Pack:
     """Заводит или дополняет пак по дереву из :func:`scan_tree.scan_pack`.
 
     Возвращает объект пака. Существующие годы, выпуски и полосы переиспользуются по

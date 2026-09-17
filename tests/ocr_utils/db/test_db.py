@@ -7,9 +7,9 @@ import pytest
 from PIL import Image
 from sqlalchemy import func, select
 
-from ocr_utils.scan_markup.db.models import Issue, Page, RectRegion, YearPackage
-from ocr_utils.scan_markup.db.repo import iter_pages, replace_rect_regions, upsert_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import Issue, Page, RectRegion, YearPackage
+from ocr_utils.db.repo import iter_pages, replace_rect_regions, upsert_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import scan_pack
 
 
@@ -139,7 +139,7 @@ def test_new_columns_are_added_to_an_old_database(tmp_path):
     """
     from sqlalchemy import create_engine, inspect
 
-    from ocr_utils.scan_markup.db.session import add_missing_columns
+    from ocr_utils.db.session import add_missing_columns
 
     db = _old_schema_db(tmp_path)
 
@@ -160,7 +160,7 @@ def test_old_database_is_not_opened_without_migration(tmp_path):
     """
     import pytest
 
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.session import open_db
 
     db = _old_schema_db(tmp_path)
     with pytest.raises(RuntimeError, match="migrate"):
@@ -169,8 +169,8 @@ def test_old_database_is_not_opened_without_migration(tmp_path):
 
 def test_migration_renames_columns_and_keeps_data(tmp_path):
     """Миграция переименовывает колонки, сохраняет строки и повторяется вхолостую."""
-    from ocr_utils.scan_markup.db.migrate import migrate_db
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.migrate import migrate_db
+    from ocr_utils.db.session import open_db
 
     db = _old_schema_db(tmp_path)
 
@@ -197,7 +197,7 @@ def test_add_missing_columns_is_idempotent(tmp_path):
     """Повторное открытие уже дополненной базы ничего не трогает."""
     from sqlalchemy import create_engine
 
-    from ocr_utils.scan_markup.db.session import add_missing_columns, open_db
+    from ocr_utils.db.session import add_missing_columns, open_db
 
     db = tmp_path / "markup.sqlite"
     open_db(db)
@@ -211,7 +211,7 @@ def test_colour_text_is_a_picture_kind_and_is_colour() -> None:
     вовсе, а ``COLOR_PICTURE_KINDS`` — сохранять ли её цветной. Потребитель, написавший
     «цвет, если kind == color, иначе серый», обесцветил бы цветной текст молча.
     """
-    from ocr_utils.scan_markup.db.models import COLOR_PICTURE_KINDS, KIND_COLOR_TEXT, PICTURE_KINDS
+    from ocr_utils.db.models import COLOR_PICTURE_KINDS, KIND_COLOR_TEXT, PICTURE_KINDS
 
     assert KIND_COLOR_TEXT in PICTURE_KINDS
     assert KIND_COLOR_TEXT in COLOR_PICTURE_KINDS
@@ -251,7 +251,7 @@ def test_database_with_raster_regions_is_not_opened_without_migration(tmp_path):
     """
     import pytest
 
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.session import open_db
 
     with pytest.raises(RuntimeError, match="raster_regions"):
         open_db(_db_with_raster_regions_table(tmp_path))
@@ -261,8 +261,8 @@ def test_migration_renames_raster_regions_table_and_keeps_rows(tmp_path):
     """Таблица переименовывается в ``rect_regions``, строки и индекс на месте, повтор — вхолостую."""
     from sqlalchemy import create_engine, inspect
 
-    from ocr_utils.scan_markup.db.migrate import migrate_db
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.migrate import migrate_db
+    from ocr_utils.db.session import open_db
 
     db = _db_with_raster_regions_table(tmp_path)
     report = migrate_db(db)
@@ -293,7 +293,7 @@ def test_migration_renames_raster_regions_table_and_keeps_rows(tmp_path):
 
 def test_replace_rect_regions_by_kinds_keeps_other_kinds(pack_dir: Path, session_factory) -> None:
     """Детектор таблиц заменяет только таблицы и схемы; ручной растр остаётся нетронутым."""
-    from ocr_utils.scan_markup.db.models import (
+    from ocr_utils.db.models import (
         KIND_GRAYSCALE,
         KIND_LINE_ART_SCHEMA,
         KIND_TABLE,

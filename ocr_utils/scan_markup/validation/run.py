@@ -15,8 +15,8 @@ from pathlib import Path
 from sqlalchemy import select
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import Issue, Page, YearPackage
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.models import Issue, Page, YearPackage
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.detection.overlay import write_debug_overlay
 from ocr_utils.scan_markup.detection.page import (
     PageAnalysis,
@@ -124,7 +124,7 @@ def _order_index_by_rel(params: ValidateParams, rel_paths: set[str]) -> dict[str
     """
     if params.db_path is None or params.pack_name is None:
         return {}
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.session import open_db
 
     # create=True не заводит базу заново, а дописывает недостающие колонки: база с прошлого
     # прогона схемы не знает про detector_version, и без миграции любой SELECT по Page падает.
@@ -149,7 +149,7 @@ def _control_jobs(params: ValidateParams, skip: set[str]) -> tuple[list[_Job], d
 
     if params.db_path is None or params.pack_name is None or params.control_limit <= 0:
         return [], {}
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.session import open_db
 
     with open_db(params.db_path)() as session:
         pack = require_pack(session, params.pack_name)

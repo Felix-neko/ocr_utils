@@ -6,8 +6,8 @@ import fitz
 import pytest
 
 from ocr_utils.pdf_utils.intermediate_pdfs import BuildParams, load_plans, run_build
-from ocr_utils.scan_markup.db.repo import require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.repo import require_pack
+from ocr_utils.db.session import open_db
 
 from .conftest import DPI, H, ORIGINAL_COLOR, PACK_NAME, SHARPENED_COLOR, W
 

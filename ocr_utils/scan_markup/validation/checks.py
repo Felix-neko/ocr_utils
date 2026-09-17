@@ -1,6 +1,6 @@
 """Проверка «починен ли дефект» по найденным на полосе областям."""
 
-from ocr_utils.scan_markup.db.models import KIND_GRAYSCALE
+from ocr_utils.db.models import KIND_GRAYSCALE
 from ocr_utils.scan_markup.validation.cases import (
     COLOR_ON_GRAY,
     DOT_LEADERS,

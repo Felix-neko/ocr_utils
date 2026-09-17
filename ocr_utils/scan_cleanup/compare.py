@@ -42,7 +42,7 @@ from ocr_utils.scan_cleanup.prompts import PromptSet, prompt_chooser
 from ocr_utils.scan_cleanup.protect import analysis_roi, build_protect
 from ocr_utils.scan_cleanup.smoothing import SmoothOptions, smooth_page
 from ocr_utils.scan_cleanup.source import PageMarkup, load_markup
-from ocr_utils.scan_markup.db.models import MASK_KINDS
+from ocr_utils.db.models import MASK_KINDS
 
 logger = logging.getLogger(__name__)
 

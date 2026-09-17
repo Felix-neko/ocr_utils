@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from ocr_utils.pdf_utils.intermediate_pdfs import PagePlan, PicturePlan
-from ocr_utils.scan_markup.db.models import KIND_GRAYSCALE
+from ocr_utils.db.models import KIND_GRAYSCALE
 from ocr_utils.scan_markup.rotation import rotate_box, rotate_cw, rotate_size
 
 WIDTH, HEIGHT = 3420, 6071

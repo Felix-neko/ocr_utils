@@ -12,9 +12,9 @@ import pytest
 from click.testing import CliRunner
 
 from ocr_utils.scan_markup.cli import main
-from ocr_utils.scan_markup.db.models import SOURCE_AUTO, SOURCE_CVAT
-from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import SOURCE_AUTO, SOURCE_CVAT
+from ocr_utils.db.repo import iter_pages, require_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
 from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
 

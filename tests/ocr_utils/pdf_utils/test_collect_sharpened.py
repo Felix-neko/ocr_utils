@@ -7,8 +7,8 @@ import numpy as np
 from PIL import Image
 
 from ocr_utils.pdf_utils.collect_sharpened import collect, fill_database
-from ocr_utils.scan_markup.db.repo import require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.repo import require_pack
+from ocr_utils.db.session import open_db
 
 from .conftest import PAGES
 

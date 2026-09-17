@@ -42,7 +42,7 @@ from PIL import Image
 
 from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.scan_cropping.image_io import read_dpi
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_STAMP_SUSPECT
+from ocr_utils.db.models import KIND_COLOR, KIND_STAMP_SUSPECT
 from ocr_utils.scan_markup.detection import cover as cover_module
 from ocr_utils.scan_markup.detection import layout_cache
 from ocr_utils.scan_markup.detection.layout_cache import CachedLayout

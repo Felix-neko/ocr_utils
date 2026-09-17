@@ -71,7 +71,7 @@ from ocr_utils.pdf_utils.padding import (
     pad_jpeg_lossless_xy,
     set_jpeg_dpi,
 )
-from ocr_utils.scan_markup.db.models import COLOR_PICTURE_KINDS, PICTURE_KINDS
+from ocr_utils.db.models import COLOR_PICTURE_KINDS, PICTURE_KINDS
 from ocr_utils.scan_markup.rotation import rotate_box, rotate_size
 
 logger = logging.getLogger(__name__)
@@ -453,8 +453,8 @@ def load_plans(
     трогает вовсе, а номера всё равно должны попасть в базу — иначе повторный прогон стёр
     бы то, что записал первый.
     """
-    from ocr_utils.scan_markup.db.repo import require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import require_pack
+    from ocr_utils.db.session import open_db
 
     plans: "list[IssuePlan]" = []
     session_factory = open_db(db_path, create=False)
@@ -528,8 +528,8 @@ def save_plans(
     готовый файлы не трогали, и что за поля в них лежат — знает предыдущая запись в базе,
     а не текущие ключи командной строки. Затирать её сегодняшним значением нельзя.
     """
-    from ocr_utils.scan_markup.db.repo import require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import require_pack
+    from ocr_utils.db.session import open_db
 
     by_issue = {plan.issue_id: plan for plan in plans}
     margins = {r.issue_id: r for r in (reports or []) if r.status == "ok"}

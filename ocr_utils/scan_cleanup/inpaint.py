@@ -37,7 +37,7 @@ from ocr_utils.inpainting.backends import BACKEND_LAMA, SdParams, make_filler
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC, MIN_ZONE_AREA, group_masks
 from ocr_utils.scan_cleanup.prompts import PromptSet, prompt_chooser
 from ocr_utils.scan_cleanup.source import PageMarkup, decode_mask_rows
-from ocr_utils.scan_markup.db.models import MASK_KINDS
+from ocr_utils.db.models import MASK_KINDS
 
 logger = logging.getLogger(__name__)
 

@@ -23,8 +23,8 @@ from typing import Iterable, Iterator, Sequence
 
 import cv2
 
-from ocr_utils.scan_markup.db.models import Issue, Page, YearPackage
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.models import Issue, Page, YearPackage
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.toc import KIND_CONTENTS, KIND_INDEX, SOURCE_AUTO, SOURCE_CVAT, TOC_VERSION, flags_from_kind
 from ocr_utils.scan_markup.toc.decide import Decision, Thresholds, decide_issue, in_window
 from ocr_utils.scan_markup.toc.features import METRIC_NAMES, PageFeatures, page_features

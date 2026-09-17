@@ -23,8 +23,8 @@
 
 Запуск::
 
-    python -m ocr_utils.scan_markup.db.migrate путь/к/base.sqlite [ещё.sqlite ...]
-    python -m ocr_utils.scan_markup.db.migrate --dry-run base.sqlite
+    python -m ocr_utils.db.migrate путь/к/base.sqlite [ещё.sqlite ...]
+    python -m ocr_utils.db.migrate --dry-run base.sqlite
 """
 
 import logging
@@ -170,7 +170,7 @@ def migrate_db(db_path: Path, backup: bool = True, dry_run: bool = False) -> Mig
         # переименование обязано отработать ДО того, как схема из моделей коснётся файла.
         from sqlalchemy import create_engine
 
-        from ocr_utils.scan_markup.db.session import add_missing_columns
+        from ocr_utils.db.session import add_missing_columns
 
         engine = create_engine(f"sqlite:///{db_path}")
         report.added = add_missing_columns(engine)

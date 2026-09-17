@@ -41,8 +41,8 @@ import click
 import numpy as np
 from PIL import Image
 
-from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.repo import iter_pages, require_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.rotation import ROTATION_NAMES, rotate_cw
 
 Image.MAX_IMAGE_PIXELS = None

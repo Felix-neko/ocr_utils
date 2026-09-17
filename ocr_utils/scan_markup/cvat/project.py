@@ -29,7 +29,7 @@ import logging
 
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import (
+from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,

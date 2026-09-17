@@ -29,7 +29,7 @@ from ocr_utils.scan_markup.cvat.project import (
     POINT_KIND_BY_LABEL,
     ROTATION_BY_LABEL,
 )
-from ocr_utils.scan_markup.db.models import (
+from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
@@ -44,7 +44,7 @@ from ocr_utils.scan_markup.db.models import (
     RectRegion,
     YearPackage,
 )
-from ocr_utils.scan_markup.db.repo import get_pack, require_pack
+from ocr_utils.db.repo import get_pack, require_pack
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC
 from ocr_utils.scan_markup.geometry import mask_to_original, point_to_original, rect_to_original
 
@@ -446,7 +446,7 @@ def copy_regions(src_session: Session, dst_session: Session, pack_name: str, kin
     ищется по ``source_rel_path``; полосы, которых в целевой базе нет, считаются и
     пропускаются — пересоздавать дерево не наше дело, это делает ``from-cvat``.
     """
-    from ocr_utils.scan_markup.db.repo import replace_rect_regions
+    from ocr_utils.db.repo import replace_rect_regions
 
     source = require_pack(src_session, pack_name)
     target = require_pack(dst_session, pack_name)

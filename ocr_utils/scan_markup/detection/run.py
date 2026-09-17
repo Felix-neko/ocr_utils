@@ -35,7 +35,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
-from ocr_utils.scan_markup.db.models import (
+from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_GRAYSCALE,
     KIND_LINE_ART_SCHEMA,
@@ -47,7 +47,7 @@ from ocr_utils.scan_markup.db.models import (
     Page,
     RectRegion,
 )
-from ocr_utils.scan_markup.db.repo import iter_pages, replace_rect_regions, upsert_pack
+from ocr_utils.db.repo import iter_pages, replace_rect_regions, upsert_pack
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
 from ocr_utils.scan_markup.table_detection import TABLE_DETECTOR_VERSION
 from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION

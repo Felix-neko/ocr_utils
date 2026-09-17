@@ -21,8 +21,8 @@ from ocr_utils.scan_markup.cvat.project import (
     page_tags,
     toc_tags,
 )
-from ocr_utils.scan_markup.db.models import SOURCE_CVAT
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.models import SOURCE_CVAT
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.toc import TOC_VERSION
 from tests.ocr_utils.scan_markup.test_cvat_roundtrip import _Task as _ExportTask, page_and_session  # noqa: F401
 from tests.ocr_utils.scan_markup.test_publish_drift import (

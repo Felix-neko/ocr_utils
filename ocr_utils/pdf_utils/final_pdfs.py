@@ -177,8 +177,8 @@ def _run_job(job: "tuple[IssuePlan, AssembleParams]") -> IssueReport:
 
 def load_pdf_names(db_path: Path, pack_name: str) -> "dict[int, tuple[str, str | None]]":
     """Имена промежуточных PDF по выпускам — их же ищем среди распознанных."""
-    from ocr_utils.scan_markup.db.repo import require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import require_pack
+    from ocr_utils.db.session import open_db
 
     names: "dict[int, tuple[str, str | None]]" = {}
     with open_db(db_path, create=False)() as session:
@@ -197,8 +197,8 @@ def save_results(
     db_path: Path, pack_name: str, plans: "list[IssuePlan]", params: AssembleParams, built: "set[int]"
 ) -> None:
     """Записывает корень финальных PDF и имена собранных файлов."""
-    from ocr_utils.scan_markup.db.repo import require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import require_pack
+    from ocr_utils.db.session import open_db
 
     by_issue = {plan.issue_id: plan for plan in plans}
     with open_db(db_path)() as session:

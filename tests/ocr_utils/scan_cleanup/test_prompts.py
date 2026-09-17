@@ -14,7 +14,7 @@ from ocr_utils.scan_cleanup.prompts import (
     raster_kind_at,
 )
 from ocr_utils.scan_cleanup.source import PageMarkup, Rect
-from ocr_utils.scan_markup.db.models import (
+from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,

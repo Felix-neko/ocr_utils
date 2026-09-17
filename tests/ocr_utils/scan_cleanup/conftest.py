@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from cvat_sdk.masks import encode_mask
 
-from ocr_utils.scan_markup.db.models import (
+from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_GRAYSCALE,
     MASK_LIBRARY_STAMP,
@@ -18,8 +18,8 @@ from ocr_utils.scan_markup.db.models import (
     MaskAnnotation,
     RectRegion,
 )
-from ocr_utils.scan_markup.db.repo import upsert_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.repo import upsert_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
 
 PACK_NAME = "пак-тест"

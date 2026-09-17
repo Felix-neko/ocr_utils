@@ -9,7 +9,7 @@ import numpy as np
 from cvat_sdk.masks import decode_mask, encode_mask
 
 from ocr_utils.scan_markup.cvat.export import mask_from_row, shape_to_mask
-from ocr_utils.scan_markup.db.models import MASK_LIBRARY_STAMP, Page
+from ocr_utils.db.models import MASK_LIBRARY_STAMP, Page
 from ocr_utils.scan_markup.geometry import mask_to_original
 
 W, H, D = 3492, 6051, 8

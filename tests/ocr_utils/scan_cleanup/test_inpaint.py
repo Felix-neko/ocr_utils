@@ -14,7 +14,7 @@ from ocr_utils.scan_cleanup.inpaint import (
     zone_kinds,
 )
 from ocr_utils.scan_cleanup.source import MaskRow, PageMarkup
-from ocr_utils.scan_markup.db.models import MASK_HANDWRITING, MASK_LIBRARY_STAMP
+from ocr_utils.db.models import MASK_HANDWRITING, MASK_LIBRARY_STAMP
 
 from .conftest import mask_rle, text_page
 

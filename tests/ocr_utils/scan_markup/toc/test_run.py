@@ -9,13 +9,13 @@ import pytest
 from PIL import Image
 from sqlalchemy import select
 
-from ocr_utils.scan_markup.db.models import Page
-from ocr_utils.scan_markup.db.repo import upsert_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import Page
+from ocr_utils.db.repo import upsert_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import scan_pack
 from ocr_utils.scan_markup.toc import KIND_CONTENTS, KIND_INDEX, SOURCE_AUTO, SOURCE_CVAT, TOC_VERSION, kind_from_flags
 from ocr_utils.scan_markup.toc import run as toc_run
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.toc.export import LIST_NAME, export_lists
 from ocr_utils.scan_markup.toc.features import PageFeatures
 from ocr_utils.scan_markup.toc.run import TocParams, run_toc

@@ -13,11 +13,11 @@ import pytest
 from sqlalchemy import inspect
 
 from ocr_utils.scan_markup.cvat.export import copy_tree
-from ocr_utils.scan_markup.db.models import Issue, Page, Pack, YearPackage
-from ocr_utils.scan_markup.db.session import open_db
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.models import Issue, Page, Pack, YearPackage
+from ocr_utils.db.session import open_db
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
-from ocr_utils.scan_markup.db.repo import upsert_pack
+from ocr_utils.db.repo import upsert_pack
 
 # Колонки, которые копировать НЕ надо, и почему.
 SKIP = {

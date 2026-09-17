@@ -5,8 +5,8 @@ import pytest
 
 from ocr_utils.pdf_utils.final_pdfs import AssembleParams, run_assemble
 from ocr_utils.pdf_utils.intermediate_pdfs import BuildParams, run_build
-from ocr_utils.scan_markup.db.repo import require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.repo import require_pack
+from ocr_utils.db.session import open_db
 
 from .conftest import DPI, H, ORIGINAL_COLOR, SHARPENED_COLOR, W
 

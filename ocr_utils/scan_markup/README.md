@@ -66,6 +66,10 @@ uv run python -m ocr_utils.scan_markup copy-regions \
 | `пак-1/1974/01/` | `issues` | джоб (job) |
 | `пак-1/1974/01/a.tif` | `pages` | кадр (frame) |
 
+Схема базы, её открытие и миграции — в общем подпакете `ocr_utils/db` (`models.py`, `session.py`,
+`repo.py`, `migrate.py`): базой пользуются и `scan_cleanup`, `pdf_utils`, `line_art_detection`,
+`rotated_text`, `external_ocr_services`.
+
 Джобы по границам выпусков задаются параметром `job_file_mapping` — единственным способом
 описать их явно. Разбиение по `segment_size` режет задачу на равные куски и границы
 выпусков не соблюдает, а сочетать одно с другим сервер запрещает.

@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_cleanup.source import PageMarkup, Rect
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT
 
 # Виды растровых областей, защищаемых целиком: PICTURE_KINDS без color_text.
 PROTECT_REGION_KINDS = (KIND_COLOR, KIND_GRAYSCALE)

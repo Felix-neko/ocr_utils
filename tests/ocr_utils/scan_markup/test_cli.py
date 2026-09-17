@@ -9,8 +9,8 @@ from PIL import Image
 from sqlalchemy import select
 
 from ocr_utils.scan_markup.cli import main
-from ocr_utils.scan_markup.db.models import KIND_COLOR, Page, RectRegion
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import KIND_COLOR, Page, RectRegion
+from ocr_utils.db.session import open_db
 from tests.ocr_utils.scan_markup import synthetic
 
 DPI = 300

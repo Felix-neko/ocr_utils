@@ -21,6 +21,7 @@
 | Подпакет | Что делает | Точка входа |
 |---|---|---|
 | `scan_cropping` | Главный пайплайн кадра: YOLO-World+SAM → разворот, палец (LaMa), поворот, crop-зона | `python -m ocr_utils.scan_cropping` |
+| `db` | Схема SQLite-базы разметки (пак → год → выпуск → полоса → области/маски/точки), открытие с дописыванием колонок, идемпотентная запись, миграции | `python -m ocr_utils.db.migrate` |
 | `scan_markup` | Разметка пака: растр, таблицы, схемы, печати → CVAT → SQLite; внутри `toc`, `orientation`, `curved_lines`, `table_detection` | `python -m ocr_utils.scan_markup <команда>` |
 | `scan_cleanup` | Закрас разметки из CVAT (LaMa) и размытие фона по паку | `python -m ocr_utils.scan_cleanup` |
 | `pdf_utils` | Промежуточные и финальные PDF под FineReader, сбор заострённых копий | `python -m ocr_utils.pdf_utils` |
@@ -37,6 +38,7 @@
 | `docx_md` | DOCX → Markdown, нарезка под LLM | библиотека |
 | `legacy` | Помойка: не поддерживается, без тестов | — |
 | `research/external_ocr_models` | Полоса → размеченный markdown через VLM (OpenRouter), промпты v1–v13 | `python -m research.external_ocr_models` |
+| `research/geometry_regression` | Страницы, где коррекция геометрии FineReader сделала хуже: пары PDF «с/без», поле смещений, штрихи, строки, кромки; картинки «было \| стало» | `python -m research.geometry_regression run\|report` |
 | `research/legacy/table_processing` | Стенд исследования таблиц; живой код переехал в `scan_markup` | заморожено |
 | `scripts/` | Разовые утилиты; `gen_module_map.py` — генератор карты | — |
 | `run_scripts/<пакет>/` | Готовые прогоны с числами в шапке, `source common.sh` | — |

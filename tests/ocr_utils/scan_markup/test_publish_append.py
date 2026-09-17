@@ -8,8 +8,8 @@ import pytest
 
 from ocr_utils.scan_markup.cvat import publish
 from ocr_utils.scan_markup.cvat.project import LABEL_LINE_ART, LABEL_RASTER_COLOR, LABEL_TABLE
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_LINE_ART_SCHEMA, KIND_TABLE, SOURCE_CVAT, RectRegion
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.models import KIND_COLOR, KIND_LINE_ART_SCHEMA, KIND_TABLE, SOURCE_CVAT, RectRegion
+from ocr_utils.db.repo import require_pack
 from tests.ocr_utils.scan_markup.test_publish_drift import _FullTask, _Shape, _fake_cvat, _params, pack_db  # noqa: F401
 
 LABEL_IDS = {LABEL_RASTER_COLOR: 11, LABEL_TABLE: 17, LABEL_LINE_ART: 18}
@@ -122,9 +122,9 @@ def test_copy_regions_moves_only_wanted_kinds_and_keeps_manual_raster(tmp_path, 
 
     from ocr_utils.scan_markup.cli import main
     from ocr_utils.scan_markup.cvat.export import copy_tree
-    from ocr_utils.scan_markup.db.models import KIND_GRAYSCALE, SOURCE_AUTO, Page
-    from ocr_utils.scan_markup.db.repo import upsert_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.models import KIND_GRAYSCALE, SOURCE_AUTO, Page
+    from ocr_utils.db.repo import upsert_pack
+    from ocr_utils.db.session import open_db
     from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
 
     src_db, dst_db = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"

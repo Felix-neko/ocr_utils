@@ -197,8 +197,8 @@ def _run_job(job: "tuple[PageCheck, float, float]") -> CheckResult:
 
 def load_pages(db_path: Path, pack_name: str, originals_dir: Path, sharpened_dir: Path) -> "list[PageCheck]":
     """Полосы пака с путями к обеим версиям; база читается один раз, в родителе."""
-    from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-    from ocr_utils.scan_markup.db.session import open_db
+    from ocr_utils.db.repo import iter_pages, require_pack
+    from ocr_utils.db.session import open_db
 
     pages: "list[PageCheck]" = []
     with open_db(db_path, create=False)() as session:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE
 from ocr_utils.scan_markup.detection.overlay import overlay_name, overlay_to_rel_path
 from ocr_utils.scan_markup.detection.page import DetectedRegion
 from ocr_utils.scan_markup.validation.cases import BY_FOLDER, DEFECTS, collect_cases

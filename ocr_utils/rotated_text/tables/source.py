@@ -28,9 +28,9 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from ocr_utils.scan_markup.db.models import KIND_TABLE
-from ocr_utils.scan_markup.db.repo import iter_pages, require_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import KIND_TABLE
+from ocr_utils.db.repo import iter_pages, require_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.rotation import rotate_box
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
 from ocr_utils.scan_markup.table_detection.geometry import Box

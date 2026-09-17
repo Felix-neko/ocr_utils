@@ -5,7 +5,7 @@ import pickle
 import numpy as np
 
 from ocr_utils.scan_cleanup.source import decode_mask_rows, load_markup
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_LIBRARY_STAMP
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_LIBRARY_STAMP
 
 
 def test_loads_pages_with_their_markup(pack):

@@ -21,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.db.models import MASK_HANDWRITING, MASK_LIBRARY_STAMP, MASK_OTHER_REMOVAL
+from ocr_utils.db.models import MASK_HANDWRITING, MASK_LIBRARY_STAMP, MASK_OTHER_REMOVAL
 
 logger = logging.getLogger(__name__)
 

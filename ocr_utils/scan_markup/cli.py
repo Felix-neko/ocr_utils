@@ -17,8 +17,8 @@ from ocr_utils.scan_markup.cvat import shapes
 from ocr_utils.scan_markup.cvat.client import CvatSettings
 from ocr_utils.scan_markup.cvat.export import ExportParams, copy_regions, run_export
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
-from ocr_utils.scan_markup.db.models import RECT_KINDS, TABLE_KINDS
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import RECT_KINDS, TABLE_KINDS
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
 from ocr_utils.scan_markup.detection.color_kind import (
     CHROMA_SELF_FRAC_THR,

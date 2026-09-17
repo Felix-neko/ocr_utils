@@ -10,9 +10,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from ocr_utils.scan_markup.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_CVAT, RectRegion
-from ocr_utils.scan_markup.db.repo import upsert_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_CVAT, RectRegion
+from ocr_utils.db.repo import upsert_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
 
 PACK_NAME = "пак-тест"

@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from ocr_utils.scan_markup.db.models import Base
+from ocr_utils.db.models import Base
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ def check_schema_is_current(engine: Engine, path: Path) -> None:
     if stale:
         raise RuntimeError(
             f"база {path} — прошлой схемы: {', '.join(stale)}. "
-            f"Выполните: uv run python -m ocr_utils.scan_markup.db.migrate {path}"
+            f"Выполните: uv run python -m ocr_utils.db.migrate {path}"
         )
 
 

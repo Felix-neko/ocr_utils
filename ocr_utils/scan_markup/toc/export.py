@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ocr_utils.scan_markup.db.repo import require_pack
+from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.toc import KINDS, TOC_VERSION, kind_from_flags
 
 LIST_NAME = "toc_pages.txt"

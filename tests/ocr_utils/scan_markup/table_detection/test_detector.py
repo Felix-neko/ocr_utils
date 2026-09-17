@@ -241,7 +241,7 @@ def test_regions_scale_to_original_and_carry_kind_and_info() -> None:
     """Находки копии 1/4 уезжают в оригинал ×4, зажатые в кадр, с видом базы и JSON подробностей."""
     import json
 
-    from ocr_utils.scan_markup.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE as DB_TABLE
+    from ocr_utils.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE as DB_TABLE
     from ocr_utils.scan_markup.table_detection import to_regions
     from ocr_utils.scan_markup.table_detection.geometry import KIND_DRAWING, TableBox
 
@@ -258,7 +258,7 @@ def test_regions_scale_to_original_and_carry_kind_and_info() -> None:
 
 def test_detect_regions_end_to_end_on_a_synthetic_page() -> None:
     """Сквозной ход: серая копия -> регион вида ``table`` в пикселях оригинала."""
-    from ocr_utils.scan_markup.db.models import KIND_TABLE as DB_TABLE
+    from ocr_utils.db.models import KIND_TABLE as DB_TABLE
     from ocr_utils.scan_markup.table_detection import detect_regions
 
     table = _filled_table()
