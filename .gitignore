@@ -108,3 +108,8 @@ research/external_ocr_models/damaged/
 /eg_82_1_3.txt
 /*_sheet_*.png
 /*_sheet.png
+
+# Базы разметки (ручная разметка из CVAT, невоспроизводимы): живут в ~/Projects/mts_markup,
+# в репозитории им не место ни как копии, ни как бэкапу.
+*.sqlite
+*.sqlite.bak
