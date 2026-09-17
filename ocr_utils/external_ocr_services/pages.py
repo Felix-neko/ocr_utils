@@ -1,19 +1,24 @@
 """Полосы на входе и что о них знает база: обход папки, списки, флаги оглавления.
 
 Раскладка входа — ``{год}/{выпуск}/{полоса}`` (как у ``sharpened`` и ``blurred``). Флаги
-``is_toc`` / ``is_year_index`` / ``force_is_not_toc`` читаются из SQLite разметки напрямую
-через ``sqlite3`` в режиме только-чтение: ORM при открытии дописывает недостающие колонки, а
-этому пакету в базу писать нельзя вовсе. Полоса в базе значится под именем оригинала
-(``.tif``), а на входе лежит заострённая копия (``.jpg``) — сопоставление по пути без суффикса.
-Запасной вход без базы — списки ``toc_pages.txt`` из ``scan_markup toc-pages``.
+``is_toc`` / ``is_year_index`` / ``force_is_not_toc`` читаются из базы разметки через ORM
+``ocr_utils.db`` с ``open_db(create=False)``: без создания таблиц и дописывания колонок, одним
+``select`` и без ``commit`` — этому пакету в базу писать нельзя вовсе. Полоса в базе значится
+под именем оригинала (``.tif``), а на входе лежит заострённая копия (``.jpg``) — сопоставление
+по пути без суффикса. Запасной вход без базы — списки ``toc_pages.txt`` из ``scan_markup toc-pages``.
 """
 
 from __future__ import annotations
 
 import logging
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+
+from sqlalchemy import inspect, select
+
+from ocr_utils.db.models import Issue, Page, YearPackage
+from ocr_utils.db.repo import require_pack
+from ocr_utils.db.session import open_db
 
 logger = logging.getLogger(__name__)
 
@@ -101,32 +106,30 @@ def group_by_issue(rels: list[Path]) -> dict[str, list[Path]]:
 def flags_from_db(db_path: Path, pack_name: str) -> dict[str, PageFlags]:
     """Флаги оглавления всех полос пака из базы разметки, ключ — :func:`page_key`.
 
-    База открывается только на чтение; колонки ``force_is_not_toc`` в старой базе может не быть —
-    тогда вето считается не поставленным.
+    База открывается через :func:`open_db` с ``create=False``: ни ``create_all``, ни дописывания
+    колонок, только чтение. Колонки ``force_is_not_toc`` в старой базе может не быть — тогда она
+    не запрашивается, и вето считается не поставленным.
     """
-    uri = f"file:{db_path}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
-    try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(pages)")}
-        veto = "p.force_is_not_toc" if "force_is_not_toc" in columns else "NULL"
-        rows = connection.execute(
-            f"""
-            SELECT p.source_rel_path, p.is_toc, p.is_year_index, {veto}
-            FROM pages p
-            JOIN issues i ON p.issue_id = i.id
-            JOIN year_packages y ON i.year_package_id = y.id
-            JOIN packs k ON y.pack_id = k.id
-            WHERE k.name = ?
-            """,
-            (pack_name,),
-        ).fetchall()
-    finally:
-        connection.close()
+    factory = open_db(db_path, create=False)
+    with factory() as session:
+        pack = require_pack(session, pack_name)  # LookupError с перечнем паков, если имя не то
+        # Только нужные колонки, а не целые Page: полос в паке 12 тыс., а колонок у полосы за 40.
+        columns = [Page.source_rel_path, Page.is_toc, Page.is_year_index]
+        present = {column["name"] for column in inspect(session.get_bind()).get_columns(Page.__tablename__)}
+        has_veto = "force_is_not_toc" in present
+        if has_veto:
+            columns.append(Page.force_is_not_toc)
+        query = (
+            select(*columns)
+            .join(Issue, Page.issue_id == Issue.id)
+            .join(YearPackage, Issue.year_package_id == YearPackage.id)
+            .where(YearPackage.pack_id == pack.id)
+        )
+        rows = session.execute(query).all()
     if not rows:
-        raise LookupError(f"в базе {db_path} нет пака {pack_name!r} или у него нет полос")
+        raise LookupError(f"в базе {db_path} у пака {pack_name!r} нет полос")
     return {
-        page_key(rel): PageFlags(bool(is_toc), bool(is_year_index), bool(force))
-        for rel, is_toc, is_year_index, force in rows
+        page_key(row[0]): PageFlags(bool(row[1]), bool(row[2]), bool(row[3]) if has_veto else False) for row in rows
     }
 
 

@@ -34,7 +34,7 @@ uv run python -m ocr_utils.external_ocr_services balance   # баланс клю
 | опция | что делает |
 |---|---|
 | `--in-dir`, `--out-dir`, `--debug-dir` | вход `{год}/{выпуск}/{полоса}`; выход той же раскладки; отладка (сырые ответы, промпты, тайлы, оба прохода) |
-| `--db`, `--pack-name` | база разметки (обычно `DB_REVIEWED`): флаги оглавления `is_toc` / `is_year_index` и вето `force_is_not_toc`; читается через `sqlite3` в режиме только-чтение, ничего не пишется |
+| `--db`, `--pack-name` | база разметки (обычно `DB_REVIEWED`): флаги оглавления `is_toc` / `is_year_index` и вето `force_is_not_toc`; читается через ORM `ocr_utils.db` с `open_db(create=False)` — без создания таблиц и дописывания колонок, одним `select`, ничего не пишется |
 | `--toc-lists` | запасной вход без базы: корень списков `<год>/<выпуск>/toc_pages.txt` от `scan_markup toc-pages` |
 | `--model` | имя из реестра (`models.py`); умолчание `deepseek-v41-flash` |
 | `--max-src-tile-size` | шаг сетки тайлов в пикселях исходника (пак-1: 4500 — обычная полоса 1×2, разворот 2×2) |

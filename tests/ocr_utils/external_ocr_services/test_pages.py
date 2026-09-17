@@ -1,5 +1,6 @@
-"""Обход входа, флаги из базы (только чтение) и из списков, сопоставление .tif ↔ .jpg."""
+"""Обход входа, флаги из базы (через ORM, только чтение) и из списков, сопоставление .tif ↔ .jpg."""
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,8 @@ from ocr_utils.external_ocr_services.pages import (
     group_by_issue,
     list_pages,
 )
-from ocr_utils.scan_markup.db.repo import require_pack, upsert_pack
-from ocr_utils.scan_markup.db.session import open_db
+from ocr_utils.db.repo import require_pack, upsert_pack
+from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
 
 
@@ -77,6 +78,25 @@ def test_flags_from_db_match_jpg_input_and_veto_wins(tmp_path):
     assert flags_for(Path("1966/03/нет.jpg"), table) is UNKNOWN and flags_for(Path("x.jpg"), None) is UNKNOWN
     with pytest.raises(LookupError):
         flags_from_db(db, "другой")
+
+
+def test_flags_from_db_does_not_write(tmp_path):
+    """Чтение флагов не трогает файл базы: ни create_all, ни дописывания колонок, ни commit."""
+    db = _db_with_flags(tmp_path)
+    before = (db.stat().st_mtime_ns, db.stat().st_size)
+    flags_from_db(db, "пак-1")
+    assert (db.stat().st_mtime_ns, db.stat().st_size) == before
+
+
+def test_flags_from_db_without_veto_column(tmp_path):
+    """Старая база без force_is_not_toc читается, вето считается не поставленным."""
+    db = _db_with_flags(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("ALTER TABLE pages DROP COLUMN force_is_not_toc")
+    table = flags_from_db(db, "пак-1")
+    assert flags_for(Path("1966/03/IMG_0104_2R.jpg"), table).toc_kind == "contents"
+    no_veto = flags_for(Path("1966/03/IMG_0105_1L.jpg"), table)
+    assert no_veto.is_year_index and not no_veto.force_is_not_toc and no_veto.toc_kind == "index"
 
 
 def test_flags_from_lists(tmp_path):
