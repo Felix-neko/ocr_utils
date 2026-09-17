@@ -2,7 +2,7 @@
 
 Пак-1 («Материально-техническое снабжение», 1966-1976), 12 135 полос. Детектор —
 `ocr_utils/scan_markup/curved_lines`, прогон — `run_scripts/scan_markup/pack1/run_curved_lines.sh`,
-машинный отчёт с таблицами — `curved_lines_pack1.md`, все метрики — `curved_lines_pack1.csv`,
+машинный отчёт с таблицами — `../curved_lines_pack1.md`, все метрики — `curved_lines_pack1.csv`,
 симлинки — `curved_lines_pack1_links/`, оверлеи — `~/Projects/mts_markup/curved_lines_overlay/`.
 
 ## 1. Зачем это делалось
@@ -97,7 +97,7 @@ FineReader с включённой коррекцией геометрии (ис
 ## 5. Прогон по паку (итоговый, 4-й)
 
 12 135 полос, четыре детектора, около часа (surya) при холодном кэше; пересчёт с кэшем —
-15 минут. Файлы: `curved_lines_pack1.md` (машинный отчёт), `curved_lines_pack1.csv`,
+15 минут. Файлы: `../curved_lines_pack1.md` (машинный отчёт), `curved_lines_pack1.csv`,
 `curved_lines_pack1_links/` (симлинки на оригинальные TIFF, имя = год_выпуск_имя_страница
 PDF_score), `curved_lines_pack1_sheet_*.png` (миниатюры с реперными горизонталями),
 `~/Projects/mts_markup/curved_lines_overlay/` (оверлеи по всем полосам, где флаг хоть у одного).
