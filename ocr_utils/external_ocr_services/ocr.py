@@ -159,10 +159,9 @@ def reasoning_field(spec: ModelSpec, override: str | None) -> dict | None:
     if level == "none" or spec.reasoning == "none":
         return None
     if level == "off":
-        return {"enabled": False}
-    if spec.reasoning_max_tokens:
-        # У OpenRouter effort и max_tokens взаимоисключающие; потолок важнее уровня.
-        return {"max_tokens": spec.reasoning_max_tokens}
+        # ``effort: none`` выключает рассуждения целиком (доки OpenRouter); прежнее ``enabled: false``
+        # модель SDK не знает и молча выбросила бы — thinking включился бы обратно.
+        return {"effort": "none"}
     return {"effort": level}
 
 

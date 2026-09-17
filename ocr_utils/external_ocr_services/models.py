@@ -14,8 +14,10 @@ from typing import Literal
 # провайдеров), «верни валидный JSON» со схемой в промпте, либо только промпт.
 JsonMode = Literal["json_schema", "json_object", "none"]
 
-# Уровень рассуждений. ``off`` — выключить thinking, ``low``/``medium`` — reasoning.effort,
-# ``none`` — параметр модели не знаком, не слать. На OCR рассуждения не помогают, а стоят втрое.
+# Уровень рассуждений. ``off`` — выключить thinking (уходит как ``reasoning.effort: none``),
+# ``low``/``medium`` — reasoning.effort, ``none`` — параметр модели не знаком, не слать.
+# На OCR рассуждения не помогают, а стоят втрое. Потолок ``reasoning.max_tokens`` штатный SDK
+# OpenRouter не передаёт, поэтому у моделей с невыключаемым thinking (Gemini) остаётся только уровень.
 Reasoning = Literal["off", "low", "medium", "none"]
 
 DEFAULT_MODEL = "deepseek-v41-flash"
@@ -34,8 +36,6 @@ class ModelSpec:
     # Предпочтительные провайдеры OpenRouter по убыванию; ``provider_ignore`` — кого не брать никогда.
     provider_order: tuple[str, ...] = ()
     provider_ignore: tuple[str, ...] = ()
-    # Потолок токенов рассуждений там, где thinking не выключается (Gemini 3.x).
-    reasoning_max_tokens: int | None = None
     notes: str = ""
 
 
@@ -48,7 +48,7 @@ MODELS: tuple[ModelSpec, ...] = (
         json_mode="json_object", provider_order=("deepseek",), provider_ignore=("relace",),
         notes="нативное зрение, потолок 1024 токенов на картинку ≈ 1300 px: полоса идёт тайлами",
     ),
-    ModelSpec("gemini-31-flash-lite", "google/gemini-3.1-flash-lite", 0.25, 1.50, reasoning="low", reasoning_max_tokens=1024, notes="плитки 768 px; thinking не выключается, только low + потолок"),
+    ModelSpec("gemini-31-flash-lite", "google/gemini-3.1-flash-lite", 0.25, 1.50, reasoning="low", notes="плитки 768 px; thinking не выключается, только low (потолок через SDK не передать)"),
     ModelSpec("qwen38-flash", "qwen/qwen3.8-flash", 0.15, 0.47, notes="MoE-flash Qwen3.8, thinking выключаем"),
 )
 # fmt: on

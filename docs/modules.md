@@ -105,7 +105,7 @@ ocr_utils — обработка сканов книг и журналов.
 |---|---|---|
 | `__main__.py` | Точка входа: ``uv run python -m ocr_utils.external_ocr_services <команда>``. |  |
 | `cli.py` | Команды пакета: ``uv run python -m ocr_utils.external_ocr_services <команда>``. |  |
-| `client.py` | Клиент OpenRouter поверх ``requests``: один вызов chat/completions с ретраями и учётом цены. | `OpenRouterError` (RuntimeError)<br>`ChatResponse`<br>`OpenRouterClient` |
+| `client.py` | Клиент OpenRouter поверх штатного SDK ``openrouter``: один вызов chat/completions с ретраями и учётом цены. | `OpenRouterError` (RuntimeError) — Сбой запроса: HTTP-статус (если был), начало тела ответа; сеть — без статуса.<br>`ChatResponse` — Разобранный ответ chat/completions: текст, кто обслужил, токены, цена, время, число попыток.<br>`OpenRouterClient` — Синхронный клиент: ``chat(payload)`` с ретраями; ``http_client`` — подмена httpx в тестах. |
 | `models.py` | Реестр OpenRouter-моделей боевого прогона: короткое имя, id, режим JSON, рассуждения, провайдеры. | `ModelSpec` |
 | `ocr.py` | Одна полоса → один запрос к модели → PageResult, файлы выхода и .meta.json. | `RunOptions` — Настройки прогона, общие для всех полос: тайлы, модель, второй проход, отладочный выход.<br>`SecondPass` — Что первый проход сказал о повреждениях — подсказка для второго прохода той же полосы.<br>`PageJob` — Что распознать: полоса, этап и известное оглавление выпуска (для этапа ``page``). |
 | `pages.py` | Полосы на входе и что о них знает база: обход папки, списки, флаги оглавления. | `PageFlags` — Что база знает о полосе. ``known=False`` — записи нет, полоса считается обычной. |

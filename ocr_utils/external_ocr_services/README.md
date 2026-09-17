@@ -203,6 +203,26 @@ Jinja-шаблоны в `prompts/`: `system.md.j2` (правила, ветки �
 (сторона плавает от части к части выпуска), а суффикс `_L`/`_R` имени файла бывает ложным.
 Ручных подсказок про повреждения нет: их роль выполняет второй проход по полосам с `damaged = true`.
 
+## Клиент OpenRouter
+
+`client.py` работает поверх штатного SDK `openrouter` (PyPI, `OpenRouterTeam/python-sdk`): запрос
+уходит через `OpenRouter.chat.send`, баланс — через `credits.get_credits`. Интерфейс клиента прежний:
+`OpenRouterClient(api_key, timeout, attempts).chat(payload)` принимает «сырой» payload в форме HTTP API
+и переводит его в аргументы SDK. Три вещи SDK не умеет так, как нужно прогону, поэтому они остались
+в клиенте:
+
+* **Ретраи.** SDK повторяет только 5xx; нам нужны ещё 429/408, сетевые обрывы и «200 с ошибкой
+  провайдера в теле». У SDK ретраи выключены, цикл с backoff свой (`RETRY_STATUSES`, `--attempts`).
+* **Выключение thinking.** Модель запроса SDK знает у `reasoning` только `effort`; прежнее
+  `{"enabled": false}` она молча выбросила бы, и DeepSeek думал бы за втрое большие деньги. Уходит
+  `{"effort": "none"}` (по докам OpenRouter выключает рассуждения целиком; проверено — 0 reasoning-токенов).
+  Потолок `reasoning.max_tokens` через SDK не передать, поэтому у Gemini остаётся только уровень.
+* **Кто обслужил запрос.** В модели ответа SDK нет поля `provider`; клиент запрашивает
+  `x_open_router_metadata=enabled` и берёт провайдера из `openrouter_metadata.endpoints` (`selected`).
+
+Заголовки-визитка (`HTTP-Referer`, `X-Title`) задаются в конструкторе SDK. В тестах сеть подменяется
+`httpx.MockTransport` через параметр `http_client`.
+
 ## Что лежит в выходе
 
 На полосу `имя.md` (YAML-шапка: `page_number`, колонтитулы, `toc_kind`, `rubric`, `title`;
@@ -233,5 +253,5 @@ Jinja-шаблоны в `prompts/`: `system.md.j2` (правила, ветки �
 | `toc.py` | слияние полос оглавления, списки для промпта, `toc_hash` |
 | `structure.py` | пост-обработка markdown: `#` из списка, авторы при статье, рубрики |
 | `prompts/` | шаблоны и их переводы |
-| `client.py` | клиент OpenRouter (его же реэкспортирует стенд `research/external_ocr_models`) |
+| `client.py` | клиент OpenRouter поверх SDK `openrouter`: адаптер payload, ретраи, provider из metadata (его же реэкспортирует стенд `research/external_ocr_models`) |
 | `models.py` | реестр моделей |

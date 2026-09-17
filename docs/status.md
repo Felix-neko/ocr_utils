@@ -80,6 +80,7 @@
 - Клин высоты строки (верх/низ букв по третям) для наклонённых заголовков — 0.056 на 1967/03 с.36 при шуме 0.05–0.25 на обычных строках.
 - Сопоставление строк по перекрытию от короткой — строке, распавшейся в A на куски, доставался короткий кусок с шумным наклоном (1967/01 с.4); перекрытие ≥ 0.75 от длинной.
 - Наклон строки и кромки в градусах как флаг — короткие куски строк дают 1.5° шума (1973/01 с.43); мерится уход конца в мм (длина × sin).
+- DeepSeek V4.1 Flash как детектор порчи геометрии (`vlm-probe`, 4 варианта картинки, 2 редакции промпта, 1104 запроса за $0.26) — 12 % на эталонных плохих, 8–13 % в поясе score ≥ 2, 0 ложных: наклоны в 0.5–1.5° ниже её разрешения (`research/geometry_regression/README.md`).
 - Кромки по номеру колонки — сегментация колонок в A и B расходится, кромке всей колонки доставалась кромка нижней трети (1967/04 с.9); сопоставление по стороне и перекрытию по вертикали, кромки считаются по блокам строк.
 
 **таблицы**
@@ -135,6 +136,7 @@
 - DeepSeek `json_object` с длинным промптом (список статей выпуска) — в 20–40 % ответов эхо `{"type": "json_object"}` вместо страницы; лечится повтором без `response_format` (`ocr_utils/external_ocr_services/ocr.py`, `is_format_echo`).
 - Промпт: правило «склеивать перенос внутри шапки без дефиса» — не сработало даже с явным отрицательным примером (`reports/external_ocr_models.md`).
 - Завышенная подсказка «часть букв может быть скрыта» — модель выдумывает скрытые буквы на обычных переносах (`reports/external_ocr_models.md`).
+- Штатный SDK `openrouter` «как есть» — его модель запроса не знает `reasoning.enabled`/`max_tokens` (молча выбрасывает: thinking у DeepSeek включился бы обратно), в ответе нет `provider`, ретраи только на 5xx; поэтому клиент переводит `enabled:false` → `effort:none`, просит `openrouter_metadata` и держит свой цикл ретраев (`ocr_utils/external_ocr_services/client.py`).
 
 **scan_cropping**
 - «По экземпляру `GpuModels` на воркер» — один экземпляр занимает 6.2 ГБ VRAM, в 16 ГБ влезает два (`reports/scan_cropping_multiprocess_report.md`).
@@ -166,7 +168,7 @@
 | curved_lines: `line_fit` | sagitta_rel_p90 0.11 / max3 0.17 / slope_spread 0.54° / resid 0.18° | там же | `curved_lines_pack1.md` |
 | curved_lines: `surya_lines` | sagitta_rel_p90 0.09 / max3 0.13 / slope_spread 0.54° / resid 0.21° | там же | `curved_lines_pack1.md` |
 | curved_lines: `end_curl` | end_slope 0.8° / edge_angle_diff 0.8° / tensor_edge_diff 1.0° | там же | `reports/curved_lines_detection_report.md` |
-| geometry_regression: пороги (стартовые, по эталону) | vstroke/hstroke_dev_max_delta_mm 0.5 мм, parallel_spread_delta_max 0.6°, field_lineart_weak_frac 0.3, line_dev_max_delta_mm 1.0 мм, line_wobble_delta_max 0.055, edge_dev_max_delta_mm 1.5 мм | `research/geometry_regression/scoring.py` | `research/geometry_regression/README.md` |
+| geometry_regression: пороги (калибровка по паку-1, p98–p99) | vstroke 0.7 мм, hstroke 0.8 мм, parallel_spread 1.5°, field_lineart_weak_frac 0.3, line_dev 0.9 мм, line_wobble 0.1, edge_dev 2.4 мм + line_stretch_mm 0.2 мм → 6 % страниц (без stretch) | `research/geometry_regression/scoring.py` | `research/geometry_regression/README.md` |
 | orientation: допустимые углы | `--angles 0,90` | `run_scripts/scan_markup/pack1/run_orientation.sh` | `reports/orientation_method.md` |
 | background_smoothing: `--threshold-bias` | 0.5 (в прогонах до 0.7) | `ocr_utils/background_smoothing`, `run_scripts/background_smoothing/*` | `ocr_utils/background_smoothing/README.md` |
 | background_smoothing: `--blur-mult` / `--blur-mode` | 4.0 / `masked` | там же | `ocr_utils/background_smoothing/README.md` |
