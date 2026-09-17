@@ -66,8 +66,6 @@ class PageResult:
     running_footer: str | None = None
     toc_kind: str = "none"
     notes: str = ""
-    # Полоса начинается серединой статьи с предыдущей полосы — для сборки выпуска.
-    continues_previous: bool = False
     # Структура статьи: рубрика, заголовок статьи, начинающейся на полосе, авторы с должностями —
     # дубль того, что в теле стоит в тегах <rubric>/<author>/<position>. ``title_in_list`` —
     # совпал ли заголовок с переданным списком статей (None — списка не было).
@@ -182,10 +180,6 @@ def json_schema(stage: str = "page") -> dict:
             "description": "Whether the title matches an article from the given list; null if no list was given.",
         },
         "authors": {"type": "array", "items": _PAGE_AUTHOR_SCHEMA, "description": "Every author named on the page."},
-        "continues_previous": {
-            "type": "boolean",
-            "description": "True if the page starts in the middle of an article that began on a previous page.",
-        },
         "running_header": {"type": ["string", "null"]},
         "running_footer": {"type": ["string", "null"]},
         "toc_kind": {
@@ -356,7 +350,6 @@ def _coerce(payload: dict, stage: str) -> PageResult:
         rubric=_text_or_none(payload.get("rubric")),
         title=_text_or_none(payload.get("title")),
         title_in_list=None if title_in_list is None else bool(title_in_list),
-        continues_previous=bool(payload.get("continues_previous", False)),
         authors=_authors(payload.get("authors"), with_article=True),
         damaged=_damaged(payload),
         damage=str(payload.get("damage") or ""),

@@ -22,7 +22,6 @@ def to_markdown(result: PageResult) -> str:
         f"running_header: {_yaml_value(result.running_header)}",
         f"running_footer: {_yaml_value(result.running_footer)}",
         f"toc_kind: {_yaml_value(result.toc_kind)}",
-        f"continues_previous: {_yaml_value(result.continues_previous)}",
         f"rubric: {_yaml_value(result.rubric)}",
         f"title: {_yaml_value(result.title)}",
         f"notes: {_yaml_value(result.notes)}",

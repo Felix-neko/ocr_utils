@@ -46,7 +46,7 @@ def _answer(toc_kind="none", body="# Заголовок\n\nТекст.", toc=Non
 def _toc_answer(titles, rubric="Опыт работы", continues=False, kind="contents"):
     toc = {
         "kind": kind,
-        "continues_previous": continues,
+        "continues_previous": continues,  # поле оглавления (полоса продолжает список), остаётся
         "sections": [
             {
                 "rubric": rubric,

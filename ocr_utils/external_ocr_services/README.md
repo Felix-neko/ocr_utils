@@ -95,8 +95,11 @@ uv run python -m ocr_utils.external_ocr_services balance   # баланс клю
   `<rubric>`/`#`.
 * Имя из колонтитула на странице-продолжении — в `running_header` и в `authors`
   (`article: continues`, `printed: running_header`), в тело не пишется.
-* В JSON у каждого автора `article` (`starts_here` / `ends_here` / `continues`) и `printed`;
-  у полосы `continues_previous`.
+* В JSON у каждого автора `article` (`starts_here` / `ends_here` / `continues`) и `printed`.
+  Поля «полоса продолжает статью» нет намеренно, а в промпте стоит прямой запрет писать
+  заголовок, которого нет на странице: без него модель подписывала продолжение названием
+  статьи из списка (1991/02, с. 95: 5 из 5 прогонов; после запрета 0 из 5). Продолжение —
+  это просто полоса без `#`.
 * Таблицы — всегда HTML `<table>` (строка на печатную строку, `rowspan`/`colspan`), блок-схемы —
   `> [блок-схема]`, картинки — `> [картинка: …]`, сноски `[^1]`, разрядка → курсив.
 * Повреждения — теги в тексте: `<restored>` (буквы не видны, достроены по контексту), `<fuzzy>`
@@ -151,7 +154,7 @@ Jinja-шаблоны в `prompts/`: `system.md.j2` (правила, ветки �
 `prompts/system.ru.md` и `prompts/user.ru.md`**, ветки шаблона в них помечены `[если …]`;
 при правке оригинала обновлять и перевод. Нейтральная фраза по умолчанию — `DEFAULT_DAMAGE_NOTE`
 в `prompts/__init__.py` (переведена в `user.ru.md`). При любой правке шаблонов поднимать
-`PROMPT_VERSION` в `__init__.py` (сейчас 5); версия пишется в каждый `.meta.json`.
+`PROMPT_VERSION` в `__init__.py` (сейчас 7); версия пишется в каждый `.meta.json`.
 
 Ответ запрашивается как `response_format: json_schema` (strict) → `json_object` → без формата;
 отвергнутый `reasoning` убирается. У DeepSeek сразу `json_object`, схема продублирована текстом в
@@ -174,8 +177,8 @@ Jinja-шаблоны в `prompts/`: `system.md.j2` (правила, ветки �
 
 ## Что лежит в выходе
 
-На полосу `имя.md` (YAML-шапка: `page_number`, колонтитулы, `toc_kind`, `continues_previous`,
-`rubric`, `title`; тело — markdown), `имя.json` (все поля `schema.PageResult`, у полос оглавления —
+На полосу `имя.md` (YAML-шапка: `page_number`, колонтитулы, `toc_kind`, `rubric`, `title`;
+тело — markdown), `имя.json` (все поля `schema.PageResult`, у полос оглавления —
 `toc`) и `имя.meta.json` (этап, `toc_hash`, сетка тайлов, провайдер, токены, `cost_usd`,
 `structure`, `second_pass`, ошибки). При сбое разбора рядом `имя.raw.txt`. На выпуск `toc.json`
 и `toc.md`. В корне `summary.csv`, `run.log`, `missed_toc.txt`. В `--debug-dir`: `имя.raw.txt`

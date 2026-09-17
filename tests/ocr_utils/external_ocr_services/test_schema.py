@@ -18,7 +18,7 @@ PAGE = {
         {"name": "", "position": None},
         {"name": "Б. Мительман", "position": None, "article": "чушь", "printed": None},
     ],
-    "continues_previous": True,
+    "continues_previous": True,  # старое поле полосы: разбор его игнорирует
     "running_header": None,
     "running_footer": "МТС",
     "toc_kind": "none",
@@ -36,7 +36,8 @@ def test_schema_is_strict_and_stage_specific():
     assert page["additionalProperties"] is False and page["required"] == list(page["properties"])
     assert "toc" not in page["properties"] and page["properties"]["toc_kind"]["enum"] == ["none", "contents", "index"]
     author = page["properties"]["authors"]["items"]
-    assert author["required"] == ["name", "position", "article", "printed"] and "continues_previous" in page["required"]
+    assert author["required"] == ["name", "position", "article", "printed"]
+    assert "continues_previous" not in page["properties"], "поле полосы убрано"
     toc = json_schema("toc")
     assert "toc" in toc["properties"] and toc["required"] == list(toc["properties"]) and "toc" in toc["required"]
     with pytest.raises(ValueError):
@@ -50,12 +51,12 @@ def test_parse_page_fields_and_unspace():
         {"name": "И. Фетисов", "position": "начальник", "article": "starts_here", "printed": "below_title"},
         {"name": "Б. Мительман", "position": None, "article": None, "printed": None},
     ]
-    assert result.continues_previous is True
+    assert not hasattr(result, "continues_previous")
     assert "*Примечание*." in result.content_markdown and result.toc is None
     assert tag_counts(result.content_markdown) == {"restored": 0, "fuzzy": 1, "unknown": 1}
     md = to_markdown(result)
     assert md.startswith('---\npage_number: "12"') and 'toc_kind: "none"' in md and 'title: "О нормах"' in md
-    assert "continues_previous: true" in md
+    assert "continues_previous" not in md
 
 
 def test_parse_toc_stage_with_fence_and_trailing_junk():

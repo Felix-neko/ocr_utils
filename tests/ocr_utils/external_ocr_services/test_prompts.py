@@ -27,7 +27,10 @@ def test_page_stage_prompt_with_and_without_lists():
     assert '"toc":' not in with_lists and "Check whether this page is itself a table of contents" in with_lists
     plain = system_prompt("page")
     assert "KNOWN STRUCTURE" not in plain and "Article title → `# Заголовок статьи`" in plain
-    assert "starts_here" in plain and '"continues_previous": boolean' in plain
+    assert "starts_here" in plain and "continues_previous" not in system_prompt("page")
+    assert (
+        "continues_previous" not in with_lists
+    ), "поле полосы убрано: оно подталкивало модель подписывать продолжение названием"
     assert '"article":' not in system_prompt("toc")
     assert "journal or a newspaper" in plain and "this one:" not in plain
 
