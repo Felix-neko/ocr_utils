@@ -317,15 +317,23 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         params.options.max_src_tile,
         params.options.max_model_tile,
     )
+    # Выпуски идут строго по одному: этап page зависит от этапа toc того же выпуска, а полосы
+    # внутри этапа распараллеливает run_issue своим пулом потоков.
     for issue_key, pages in groups.items():
         stats.issues += 1
+        # Весь цикл выпуска: полосы оглавления → toc.json → остальные полосы со списком → fallback.
         run_issue(client, spec, params, issue_key, pages, stats)
+    # Сколько полос входа база (или списки) считает оглавлением/указателем — для итоговой строки.
     stats.toc_pages = sum(1 for rel in rels if flags_for(rel, params.flags).toc_kind is not None)
+    # Сводка строится по ВСЕМ .meta.json под out-dir, а не по этому прогону: с --skip-done прогон
+    # видел только недоделанные полосы, а summary.csv должен описывать папку целиком.
     rows = collect_meta(params.out_dir)
     summary = write_summary(params.out_dir, rows)
+    # Доля токенов входа, взятых провайдером из кэша префикса: по ней видно, что кэш работает
+    # (одинаковое начало системного промпта внутри выпуска) и сколько он экономит.
     prompt_total = sum(int(r.get("prompt_tokens") or 0) for r in rows)
     cached_total = sum(int(r.get("cached_tokens") or 0) for r in rows)
-    if prompt_total:
+    if prompt_total:  # пустая папка или одни сбои — делить не на что
         logger.info(
             "кэш префикса: %d из %d токенов входа (%.0f %%)",
             cached_total,
