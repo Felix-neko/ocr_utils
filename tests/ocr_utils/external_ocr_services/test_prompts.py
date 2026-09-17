@@ -37,12 +37,11 @@ def test_page_stage_prompt_with_and_without_lists():
     assert "journal or a newspaper" in plain and "this one:" not in plain
 
 
-def test_user_prompt_tiles_and_hint():
+def test_user_prompt_tiles_and_damage_note():
     two = user_prompt(2, 1, 2)
     assert "2 overlapping tiles: 1 column(s) × 2 row(s)" in two and "left column before" not in two
-    assert DEFAULT_DAMAGE_NOTE in two and "Transcribe this page." in two
-    four = user_prompt(4, 2, 2, "левый край срезан", "toc", "index")
+    assert DEFAULT_DAMAGE_NOTE in two and "Transcribe this page." in two and "which edge" in two
+    four = user_prompt(4, 2, 2, stage="toc", toc_kind="index")
     assert "the whole left column before the right one" in four and "ANNUAL INDEX" in four
-    assert "левый край срезан" in four and DEFAULT_DAMAGE_NOTE not in four
     one = user_prompt(1, 1, 1, stage="toc")
     assert "tiles" not in one and "TABLE OF CONTENTS of the issue" in one

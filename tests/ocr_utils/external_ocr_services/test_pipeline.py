@@ -177,10 +177,12 @@ def test_missed_toc_skip_writes_list_and_veto_silences(tmp_path):
 
 def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path):
     _make_pages(tmp_path / "in")
-    fake = FakeClient(lambda p: None)
-    # Полоса IMG_0002 узнаётся по подсказке в пользовательском промпте — так ответ не зависит от
+    # Полоса IMG_0002 делается выше остальных: при шаге сетки 700 px только она уходит двумя тайлами,
+    # и фейк узнаёт её по фразе про тайлы в пользовательском промпте — так ответ не зависит от
     # порядка запросов в пуле потоков.
-    marker = "метка-второй-полосы"
+    Image.new("L", (400, 900), 230).save(tmp_path / "in" / ISSUE / "IMG_0002.jpg")
+    fake = FakeClient(lambda p: None)
+    marker = "2 overlapping tiles"
 
     def reply(payload):
         user = payload["messages"][1]["content"][0]["text"]
@@ -194,7 +196,7 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path):
 
     fake.reply = reply
     params = _params(tmp_path, on_missed_toc="redo")
-    params.options.hints = {f"{ISSUE}/IMG_0002.jpg": marker}
+    params.options.max_src_tile = 700
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.redone_issues == [ISSUE] and stats.missed
     # 1 toc + 3 page + 1 toc (найденная) + 2 page заново = 7 запросов; первая toc-полоса переиспользована.
@@ -348,14 +350,3 @@ def test_page_stage_moves_author_after_listed_heading(tmp_path):
     )
     assert result.content_markdown.startswith("# Первые шаги\n\n<author>**С. Демидов**</author>")
     assert meta["structure"]["moved_authors"] == ["С. Демидов"] and result.title_in_list is True
-
-
-def test_page_hint_is_only_explicit_hints():
-    from ocr_utils.external_ocr_services.ocr import page_hint
-
-    rel = Path(ISSUE) / "IMG_0006_L.jpg"
-    assert page_hint(RunOptions(), rel) == "", "суффикс _L в имени ничего не значит"
-    assert page_hint(RunOptions(hint="общая", hints={rel.as_posix(): "особая"}), rel) == "общая особая"
-    from ocr_utils.external_ocr_services.prompts import user_prompt
-
-    assert "which edge" in user_prompt(2, 1, 2), "сторону корешка модель определяет сама"

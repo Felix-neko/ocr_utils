@@ -60,13 +60,12 @@ def user_prompt(
     ntiles: int,
     ncols: int,
     nrows: int,
-    hint: str = "",
     stage: str = "page",
     toc_kind: str = "contents",
     second_pass: object | None = None,
     max_lines: int = 60,
 ) -> str:
-    """Текст рядом с картинками: раскладка тайлов, подсказка про повреждения, задача этапа.
+    """Текст рядом с картинками: раскладка тайлов, фраза про повреждения, задача этапа.
 
     ``second_pass`` — сводка первого прохода (``ocr.SecondPass``: ``damage``, ``edge_words``,
     ``tags``, ``transcript``); с ней вместо нейтральной фразы идёт блок «первое чтение нашло…».
@@ -76,7 +75,7 @@ def user_prompt(
         ntiles=ntiles,
         ncols=ncols,
         nrows=nrows,
-        hint=hint.strip() or DEFAULT_DAMAGE_NOTE,
+        damage_note=DEFAULT_DAMAGE_NOTE,
         stage=stage,
         toc_kind=toc_kind,
         second_pass=second_pass,

@@ -56,18 +56,6 @@ def read_page_list(path: Path) -> list[Path]:
     return [Path(item) for item in wanted if item]
 
 
-def read_hints(path: Path) -> dict[str, str]:
-    """Подсказки по полосам: «относительный путь<TAB>текст», # — комментарий."""
-    hints: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        rel, _, text = line.partition("\t")
-        if text.strip():
-            hints[Path(rel.strip()).as_posix()] = text.strip()
-    return hints
-
-
 def list_pages(
     in_dir: Path,
     pages_file: Path | None = None,

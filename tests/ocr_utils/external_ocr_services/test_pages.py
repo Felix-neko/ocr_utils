@@ -13,7 +13,6 @@ from ocr_utils.external_ocr_services.pages import (
     flags_from_lists,
     group_by_issue,
     list_pages,
-    read_hints,
 )
 from ocr_utils.scan_markup.db.repo import require_pack, upsert_pack
 from ocr_utils.scan_markup.db.session import open_db
@@ -90,9 +89,3 @@ def test_flags_from_lists(tmp_path):
     assert flags_for(Path("1975/12/IMG_0002.jpg"), table).toc_kind == "contents"
     assert flags_for(Path("1975/12/IMG_0090.jpg"), table).toc_kind == "index"
     assert not flags_for(Path("1975/12/IMG_0003.jpg"), table).known
-
-
-def test_read_hints(tmp_path):
-    path = tmp_path / "hints.txt"
-    path.write_text("# комментарий\nа/b.jpg\tсрезан правый край\nпусто\t\n", encoding="utf-8")
-    assert read_hints(path) == {"а/b.jpg": "срезан правый край"}

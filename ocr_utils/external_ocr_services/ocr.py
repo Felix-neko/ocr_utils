@@ -75,11 +75,6 @@ class RunOptions:
     max_tokens: int = DEFAULT_MAX_TOKENS
     # Описание издания для промпта; «{year}» подставляется годом выпуска.
     source: str = ""
-    hint: str = ""  # подсказка про повреждения на все полосы прогона
-    # Подсказки по полосам: относительный путь -> текст. Какой край у корешка, модель определяет
-    # сама по картинке: опции «сторона на весь прогон» нет намеренно — сторона плавает от части
-    # к части выпуска, а суффикс _L/_R в имени файла бывает ложным.
-    hints: dict[str, str] = field(default_factory=dict)
     debug_dir: Path | None = None  # сырые ответы, промпты и отправленные тайлы
     # Второй проход по полосе, которую первый проход счёл повреждённой: подсказка собирается из
     # его же ответа (описание, затронутые строки, счётчики). Включён всегда (опции в CLI нет;
@@ -155,12 +150,6 @@ def reasoning_field(spec: ModelSpec, override: str | None) -> dict | None:
     return {"effort": level}
 
 
-def page_hint(options: RunOptions, rel: Path) -> str:
-    """Подсказка для полосы: общая ``--hint`` + строка из ``--hints``."""
-    parts = [options.hint, options.hints.get(rel.as_posix(), "")]
-    return " ".join(part.strip() for part in parts if part and part.strip())
-
-
 def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -> tuple[str, str]:
     """(системный, пользовательский) промпты полосы."""
     info = describe(tiles)
@@ -170,7 +159,6 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
         len(tiles),
         info["ncols"],
         info["nrows"],
-        page_hint(options, job.rel),
         job.stage,
         job.toc_kind,
         second_pass=job.second_pass,

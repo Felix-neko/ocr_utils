@@ -10,7 +10,7 @@ import click
 from ocr_utils.external_ocr_services import models as registry
 from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions
-from ocr_utils.external_ocr_services.pages import flags_from_db, flags_from_lists, read_hints
+from ocr_utils.external_ocr_services.pages import flags_from_db, flags_from_lists
 from ocr_utils.external_ocr_services.pipeline import ON_MISSED_CHOICES, PipelineParams, run_pipeline
 from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE, DEFAULT_QUALITY
 
@@ -93,14 +93,6 @@ def main(log_level: str) -> None:
 )
 @click.option("--quality", type=int, default=DEFAULT_QUALITY, show_default=True, help="Качество JPEG тайла.")
 @click.option("--source", default="", help="Описание издания для промпта; «{year}» заменяется годом выпуска.")
-@click.option("--hint", default="", help="Подсказка про повреждения на все полосы; пусто — нейтральная фраза.")
-@click.option(
-    "--hints",
-    "hints_file",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    default=None,
-    help="Подсказки по полосам: относительный путь<TAB>текст.",
-)
 @click.option(
     "--second-pass-transcript",
     is_flag=True,
@@ -156,8 +148,6 @@ def run(
     max_model_tile_size: int,
     quality: int,
     source: str,
-    hint: str,
-    hints_file: Path | None,
     second_pass_transcript: bool,
     reasoning: str | None,
     max_tokens: int,
@@ -199,8 +189,6 @@ def run(
         reasoning=reasoning,
         max_tokens=max_tokens,
         source=source,
-        hint=hint,
-        hints=read_hints(hints_file) if hints_file else {},
         debug_dir=debug_dir,
         second_pass_transcript=second_pass_transcript,
     )

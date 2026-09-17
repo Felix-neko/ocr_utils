@@ -1,5 +1,5 @@
 {#- Текст пользовательского сообщения рядом с тайлами. Переменные: ntiles, ncols, nrows —
-    раскладка; hint — подсказка про повреждения (нейтральная по умолчанию); stage; toc_kind —
+    раскладка; damage_note — фраза про повреждения по умолчанию (ищи сам, скрытое достраивай); stage; toc_kind —
     вид полосы для этапа toc. -#}
 {% if ntiles > 1 -%}
 The page is given as {{ ntiles }} overlapping tiles: {{ ncols }} column(s) × {{ nrows }} row(s) of the page, listed column by column, each column from top to bottom{% if ncols > 1 %}, the whole left column before the right one{% endif %}. Neighbouring tiles overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
@@ -19,7 +19,7 @@ Use it only to see WHERE the doubtful places are; read every word from the image
 {% endif %}
 Now re-read the page with this in mind. First decide for the affected area whether the letters are HIDDEN (cut off, lost in the binding gutter, covered) or VISIBLE BUT UNRELIABLE (blurred, squashed, smeared, washed out by overexposure) — the first reading may have named the wrong kind. Hidden letters → reconstruct them from the context and the visible remains of the word and wrap them in <restored>; unreliable letters → <fuzzy> on EVERY word where at least one letter was read by shape or context rather than by clear print; <unknown/> only where no confident reconstruction is possible. Give one `edge_words` entry for EVERY affected line. If on inspection the page is actually clean, say so (`damage` = "") and return the plain transcription without tags.
 {%- else -%}
-{{ hint }}
+{{ damage_note }}
 {%- endif %}
 {% if stage == "toc" -%}
 {% if toc_kind == "index" -%}
