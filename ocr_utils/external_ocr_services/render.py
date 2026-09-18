@@ -39,7 +39,9 @@ def to_markdown(result: PageResult) -> str:
         f"rubric: {_yaml_value(result.rubric)}",
         f"title: {_yaml_value(result.title)}",
         f"notes: {_yaml_value(result.notes)}",
-        "---",
-        "",
     ]
+    # Замечания пост-обработки — только если есть: JSON-список строк, он же валидный YAML.
+    if result.messages:
+        head.append(f"messages: {json.dumps(result.messages, ensure_ascii=False)}")
+    head += ["---", ""]
     return "\n".join(head) + result.content_markdown.rstrip() + "\n"

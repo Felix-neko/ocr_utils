@@ -11,6 +11,7 @@ def test_toc_stage_prompt():
     assert "▒" not in text and "at most 6" not in text, "число вместо повтора заполнителя"
     # v10: предварительная классификация, список в <toc>, рубрики оглавления своим тегом и полностью.
     assert "PRELIMINARILY classified" in text and "`<toc>` … `</toc>`" in text
+    assert "two are independent transcriptions" in text, "тело не сокращать из-за объекта toc (v13)"
     assert "<rubric_in_toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric_in_toc>" in text
     assert "never shortened" in text and "`<rubric>*ОПЫТ РАБОТЫ*</rubric>`" not in text
     for old in ("<restored>", "<fuzzy>", "<unknown/>", "[картинка"):

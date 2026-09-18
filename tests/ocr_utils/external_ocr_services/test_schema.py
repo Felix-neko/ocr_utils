@@ -175,3 +175,28 @@ def test_tags_from_edge_words_numeric_gap():
     ]
     out, inserted = tags_from_edge_words(body, edge)
     assert inserted == 2 and "предпри<gap>▒▒▒▒</gap>" in out and "<gap>[20 symbols]</gap>ности" in out
+
+
+def test_messages_field_roundtrip_and_header():
+    """messages — не из ответа модели (пусто), но перечитывается из .json и попадает в шапку .md."""
+    result = parse_json_text('{"content_markdown": "Текст.", "messages": ["не поле модели"]}')
+    assert result.messages == ["не поле модели"]
+    result.messages.append("оглавление: блок <toc> построен заново по toc")
+    assert json.loads(result.to_json())["messages"] == result.messages
+    md = to_markdown(result)
+    assert 'messages: ["не поле модели", "оглавление: блок <toc> построен заново по toc"]\n---\n' in md
+    assert "messages:" not in to_markdown(parse_json_text('{"content_markdown": "Текст."}'))
+
+
+def test_tag_homoglyphs_and_spaces_normalised():
+    """Модель пишет <тoc>, <тоc>, < toc>: имена наших тегов приводятся к латинице без пробелов; чужие теги не трогаются."""
+    from ocr_utils.external_ocr_services.schema import normalise_tags
+
+    assert normalise_tags("<тoc>\n- а — 1\n</ toc >") == "<toc>\n- а — 1\n</toc>"
+    assert normalise_tags("< toc>x<тоc>y<аuthor>**И**</аuthor>") == "<toc>x<toc>y<author>**И**</author>"
+    assert (
+        normalise_tags("<table><tr><td>1</td></tr></table> <неизвестный>")
+        == "<table><tr><td>1</td></tr></table> <неизвестный>"
+    )
+    result = parse_json_text('{"content_markdown": "< toc>\\n- а — 1\\n</toc>"}')
+    assert result.content_markdown.startswith("<toc>\n")

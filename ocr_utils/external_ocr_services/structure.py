@@ -12,15 +12,11 @@
 
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass, field
 
 from ocr_utils.external_ocr_services.schema import FORMULA_TAG, AuthorArticle, AuthorPrinted, StructureTag
-from ocr_utils.external_ocr_services.toc import normalize_title
-
-# Порог похожести названия из списка и заголовка на полосе (по нормализованным строкам).
-TITLE_MATCH_RATIO = 0.75
+from ocr_utils.external_ocr_services.toc import TITLE_MATCH_RATIO, normalize_title, title_matches  # noqa: F401
 
 # Абзацы, которые различает пост-обработка. Теги допускают курсив/жирный внутри (`<author>**И. Иванов**</author>`).
 _H1 = re.compile(r"^# (.+?)\s*$")
@@ -79,31 +75,6 @@ class StructureReport:
             "dropped_headings": self.dropped_headings,
             "wrapped_math": self.wrapped_math,
         }
-
-
-def title_matches(heading: str, titles: list[str]) -> bool:
-    """Совпадает ли заголовок с одним из названий: равенство, вхождение или похожесть ≥ порога.
-
-    Args:
-        heading: Заголовок (или рубрика) как напечатан на полосе.
-        titles: Названия из оглавления, с которыми сверяем.
-
-    Returns:
-        ``True``, если нормализованный заголовок равен одному из названий, входит в него (или
-        оно в заголовок) либо похож на него по ``difflib`` не меньше чем на ``TITLE_MATCH_RATIO``.
-    """
-    key = normalize_title(heading)
-    if not key:
-        return False
-    for title in titles:
-        other = normalize_title(title)
-        if not other:
-            continue
-        if key == other or key in other or other in key:
-            return True
-        if difflib.SequenceMatcher(None, key, other).ratio() >= TITLE_MATCH_RATIO:
-            return True
-    return False
 
 
 def _paragraphs(body: str) -> list[str]:

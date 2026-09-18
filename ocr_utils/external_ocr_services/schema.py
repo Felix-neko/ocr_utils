@@ -206,6 +206,8 @@ class PageResult:
         edge_words: ``[{"seen", "full", "kind": EdgeKind}]`` — записи по повреждённым строкам:
             что видно, полное слово, вид повреждения; по ним ставятся теги, если модель их не поставила.
         toc: Структурированное оглавление полосы — только у этапа ``TOC``, иначе ``None``.
+        messages: Замечания пост-обработки к полосе (что достроено, какие расхождения найдены) —
+            не из ответа модели; нужны, чтобы при прогоне всего пака видеть проблемные полосы.
     """
 
     content_markdown: str
@@ -225,6 +227,7 @@ class PageResult:
     gap: int = 0
     edge_words: list[dict] = field(default_factory=list)
     toc: TocPage | None = None
+    messages: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Все поля как JSON (StrEnum сериализуются своими строковыми значениями); indent=1 — читаемый diff."""
@@ -563,7 +566,7 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         toc_kind = TocKind.CONTENTS if payload.get("is_toc") else TocKind.NONE
     title_in_list = payload.get("title_in_list")
     return PageResult(
-        content_markdown=expand_gaps(modernise_tags(unspace_letters(body))),
+        content_markdown=expand_gaps(modernise_tags(normalise_tags(unspace_letters(body)))),
         page_number=_text_or_none(payload.get("page_number")),
         running_header=_text_or_none(payload.get("running_header")),
         running_footer=_text_or_none(payload.get("running_footer")),
@@ -581,6 +584,8 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         # Запись без полного слова бесполезна для расстановки тегов — пропускаем.
         edge_words=[item for item in (payload.get("edge_words") or []) if isinstance(item, dict) and item.get("full")],
         toc=_coerce_toc(payload.get("toc")) if Stage(stage) is Stage.TOC else None,
+        # Замечания пост-обработки: у ответа модели их нет, у перечитанного .json — сохраняются.
+        messages=[str(item) for item in (payload.get("messages") or []) if str(item).strip()],
     )
 
 
@@ -694,6 +699,41 @@ def is_gap_runaway(text: str) -> bool:
         ``True``, если в тексте есть ряд из 20 и более ``▒`` подряд — такой ответ обрезан и не разберётся.
     """
     return GAP_FILLER * 20 in text
+
+
+# Кириллические омоглифы латинских букв в именах тегов: модель пишет ``<тoc>`` / ``<тоc>`` / ``< toc>``
+# (1966/03 с. 93: 48 из 60 ответов), и тег перестаёт быть тегом.
+_HOMOGLYPHS = str.maketrans("аеорсухАЕОРСУХТт", "aeopcyxAEOPCYXTt")
+_KNOWN_TAGS = {tag.value for enum in (DamageTag, StructureTag, BlockTag) for tag in enum} | {FORMULA_TAG}
+_TAG_LIKE = re.compile(r"<(\s*/?)\s*([A-Za-z_\u0400-\u04FF]+)\s*(/?)\s*>")
+
+
+def _normalise_tag(match: re.Match) -> str:
+    """Замена одного тега-кандидата: омоглифы → латиница, пробелы убраны; чужие имена не трогаются.
+
+    Args:
+        match: Совпадение ``_TAG_LIKE``: (закрывающий слеш, имя, самозакрывающий слеш).
+
+    Returns:
+        Тег в каноническом виде, если имя после замены омоглифов — один из наших тегов, иначе как было.
+    """
+    closing, name, selfclose = match.groups()
+    latin = name.translate(_HOMOGLYPHS)
+    if latin not in _KNOWN_TAGS:
+        return match.group(0)
+    return f"<{'/' if closing.strip() else ''}{latin}{'/' if selfclose else ''}>"
+
+
+def normalise_tags(text: str) -> str:
+    """Привести написание наших тегов к каноническому: ``<тoc>``, ``< toc>``, ``</ toc >`` → ``<toc>`` / ``</toc>``.
+
+    Args:
+        text: Тело полосы в markdown.
+
+    Returns:
+        Текст, где имена известных тегов написаны латиницей без пробелов; остальной текст не меняется.
+    """
+    return _TAG_LIKE.sub(_normalise_tag, text)
 
 
 def modernise_tags(text: str) -> str:

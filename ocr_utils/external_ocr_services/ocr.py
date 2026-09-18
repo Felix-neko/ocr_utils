@@ -683,10 +683,13 @@ def recognise_page(
         # первая полоса «Содержания» с шапкой журнала) — доводится кодом по границам элементов.
         result.content_markdown, wrapped = toc_module.ensure_toc_block(result.content_markdown)
         meta["toc_wrapped"] = wrapped
-        # Изредка в теле остаются одни рубрики, а статьи — только в объекте toc: тогда блок
-        # <toc> строится заново по объекту (та же транскрипция, только структурная).
-        result.content_markdown, rebuilt = toc_module.ensure_toc_entries(result.content_markdown, result.toc)
-        meta["toc_rebuilt"] = rebuilt
+        # Сверка тела с объектом toc в обе стороны: статьи только из тела — в объект, потом блок
+        # <toc> строится заново по достроенному объекту; расхождения — в лог и в messages полосы.
+        result.content_markdown, result.toc, check = toc_module.reconcile_toc(result.content_markdown, result.toc)
+        meta["toc_check"] = check.as_dict()
+        if (message := check.message()) is not None:
+            logger.warning("%s: %s", job.rel, message)
+            result.messages.append(message)
     if job.stage is Stage.PAGE:
         # `#` только из оглавления, авторы при своей статье, рубрика перед `#` — доводится кодом.
         # Оглавление — источник истины: заголовки не из списка понижаются, утёкшие названия
@@ -718,6 +721,7 @@ def recognise_page(
         blocks={tag: result.content_markdown.count(f"<{tag}>") for tag in BlockTag},
         damaged=result.damaged,
         damage_seen=result.damage,
+        messages="; ".join(result.messages),
     )
     if job.stage is Stage.TOC and result.toc is not None:
         meta["toc_articles"] = sum(len(section.articles) for section in result.toc.sections)

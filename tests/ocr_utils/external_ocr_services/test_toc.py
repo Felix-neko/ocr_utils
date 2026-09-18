@@ -97,29 +97,101 @@ def test_ensure_toc_block_wraps_entries_once():
     assert ensure_toc_block("Обычный текст.\n") == ("Обычный текст.\n", False)
     index = "- Иванов И. Название — № 3, 12\n\n- Петров П. Другое — № 4, 5\n"
     assert ensure_toc_block(index)[0].startswith("<toc>\n\n- Иванов")
+    # Пункты подряд и `</toc>` приклеен к последнему без пустой строки — весь абзац внутри блока.
+    glued = "# С\n\n- А — 1\n- Б — 2\n</toc>\n\nРедколлегия.\n"
+    assert ensure_toc_block(glued)[0] == "# С\n\n<toc>\n\n- А — 1\n- Б — 2\n\n</toc>\n\nРедколлегия.\n"
 
 
-def test_ensure_toc_entries_rebuilds_lost_list():
-    """Тело с одними рубриками при 3 статьях в toc → блок <toc> строится заново по объекту; полный список не трогается."""
+def _page():
     from ocr_utils.external_ocr_services.schema import TocArticle, TocKind, TocPage, TocSection
-    from ocr_utils.external_ocr_services.toc import ensure_toc_entries, render_toc_block
 
-    page = TocPage(
-        TocKind.INDEX,
+    return TocPage(
+        TocKind.CONTENTS,
         sections=[
-            TocSection(None, [TocArticle("Первая", [{"name": "И. Иванов", "position": None}], "5", "3")]),
             TocSection(
-                "ОПЫТ", [TocArticle("Вторая", [], "9", "3"), TocArticle("Третья", [{"name": "П. Петров"}], None, None)]
+                None, [TocArticle("Первые шаги работы по-новому", [{"name": "В. Тычинин", "position": None}], "1")]
+            ),
+            TocSection(
+                "ОПЫТ РАБОТЫ",
+                [
+                    TocArticle("Развивать связи", [{"name": "И. Комаровский"}, {"name": "М. Кругман"}], "37"),
+                    TocArticle("Затраты и рентабельность", [{"name": "С. Финкель"}], "63"),
+                ],
             ),
         ],
     )
-    lost = "# УКАЗАТЕЛЬ\n\n<toc>\n\n<rubric_in_toc>*ОПЫТ*</rubric_in_toc>\n\n</toc>\n\nРедколлегия.\n"
-    out, rebuilt = ensure_toc_entries(lost, page)
-    assert rebuilt and out.startswith("# УКАЗАТЕЛЬ\n\n<toc>\n\n- <author>**И. Иванов**</author>. Первая — № 3, 5\n\n")
-    assert (
-        "<rubric_in_toc>*ОПЫТ*</rubric_in_toc>\n\n- Вторая — № 3, 9\n- <author>**П. Петров**</author>. Третья\n\n</toc>\n\nРедколлегия."
-        in out
+
+
+def test_parse_toc_block_entries_and_rubrics():
+    """Разбор блока: пункты с одним и двумя авторами, без автора, с номером выпуска; рубрики задают секции."""
+    from ocr_utils.external_ocr_services.toc import parse_toc_block
+
+    body = (
+        "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги — 1\n\n"
+        "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n"
+        "- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        "- Семинар по совершенствованию — № 3, 92\n\nЛишний абзац.\n\n</toc>\n\nРедколлегия.\n"
     )
-    full = "<toc>\n\n- Первая — № 3, 5\n\n- Вторая — № 3, 9\n\n</toc>\n"
-    assert ensure_toc_entries(full, page) == (full, False), "две из трёх — больше половины, список цел"
-    assert render_toc_block(page).count("\n- ") == 3
+    sections = parse_toc_block(body)
+    assert [s.rubric for s in sections] == [None, "ОПЫТ РАБОТЫ"]
+    first = sections[0].articles[0]
+    assert (first.title, first.page, first.issue, first.authors) == (
+        "Первые шаги",
+        "1",
+        None,
+        [{"name": "В. Тычинин", "position": None}],
+    )
+    second, third = sections[1].articles
+    assert [a["name"] for a in second.authors] == ["И. Комаровский", "М. Кругман"] and second.page == "37"
+    assert (third.title, third.issue, third.page, third.authors) == ("Семинар по совершенствованию", "3", "92", [])
+    assert parse_toc_block("Обычный текст.\n") is None
+
+
+def test_reconcile_toc_body_without_entries_is_rebuilt():
+    """Тело с одними рубриками при 3 статьях в toc → все три «не было в теле», блок построен по toc."""
+    from ocr_utils.external_ocr_services.toc import reconcile_toc
+
+    lost = "# СОДЕРЖАНИЕ\n\n<toc>\n\n<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n</toc>\n\nРедколлегия.\n"
+    body, page, check = reconcile_toc(lost, _page())
+    assert check.rebuilt and len(check.missing_in_body) == 3 and check.missing_in_toc == []
+    assert "в теле не было 3 статей из toc" in check.message() and "построен заново" in check.message()
+    assert body.startswith(
+        "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги работы по-новому — 1\n\n"
+    )
+    assert (
+        "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        in body
+    )
+    assert body.endswith("— 63\n\n</toc>\n\nРедколлегия.\n") and sum(len(s.articles) for s in page.sections) == 3
+
+
+def test_reconcile_toc_extra_body_entry_goes_to_toc_section():
+    """Статья только в теле под рубрикой → добавлена в секцию toc с той же рубрикой; блок перестроен."""
+    from ocr_utils.external_ocr_services.toc import reconcile_toc
+
+    body = (
+        "<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги работы по-новому — 1\n\n"
+        "<rubric_in_toc>*Опыт работы*</rubric_in_toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        "- <author>**С. Финкель**</author>. Затраты и рентабельность — 63\n"
+        "- <author>**П. Шейн**</author>. Планирование потребности — 76\n\n</toc>\n"
+    )
+    out, page, check = reconcile_toc(body, _page())
+    assert check.missing_in_body == [] and check.missing_in_toc == ["Планирование потребности"] and check.rebuilt
+    added = page.sections[1].articles[-1]
+    assert page.sections[1].rubric == "ОПЫТ РАБОТЫ" and added.title == "Планирование потребности" and added.page == "76"
+    assert added.authors == [{"name": "П. Шейн", "position": None}] and "Планирование потребности — 76" in out
+    assert "в toc добавлено 1 статей из тела" in check.message()
+
+
+def test_reconcile_toc_matching_bodies_untouched():
+    """Полное совпадение (регистр, перенос, без «- ») — ничего не меняется, сообщения нет."""
+    from ocr_utils.external_ocr_services.toc import reconcile_toc
+
+    body = (
+        "<toc>\n\n<author>**В. Тычинин**</author>. первые шаги работы\nпо-новому — 1\n\n"
+        "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n\n"
+        "- <author>**С. Финкель**</author>. ЗАТРАТЫ И РЕНТАБЕЛЬНОСТЬ — 63\n\n</toc>\n"
+    )
+    out, page, check = reconcile_toc(body, _page())
+    assert out == body and check.message() is None and not check.rebuilt
+    assert check.as_dict() == {"missing_in_body": [], "missing_in_toc": [], "rebuilt": False}

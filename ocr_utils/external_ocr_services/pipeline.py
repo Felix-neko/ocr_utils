@@ -101,6 +101,7 @@ SUMMARY_FIELDS = (
     "content_chars",
     "toc_articles",
     "tags",
+    "messages",
     "parse_error",
     "error",
 )
@@ -144,6 +145,7 @@ class PipelineStats:
     missed: list[str] = field(default_factory=list)  # «выпуск: полосы», где оглавление не в базе
     redone_issues: list[str] = field(default_factory=list)  # выпуски, прошедшие круг повтора
     demoted_toc: list[str] = field(default_factory=list)  # «выпуск: полосы», которые модель не признала оглавлением
+    page_messages: int = 0  # полос с замечаниями пост-обработки (meta.messages)
 
 
 def _recognise_one(
@@ -220,6 +222,8 @@ def _recognise_many(
             if meta.get("second_pass_reason"):
                 stats.second_passes += 1
                 stats.second_pass_kept_first += meta.get("second_pass_chosen") == PassChoice.PASS1
+            if meta.get("messages"):
+                stats.page_messages += 1
             # В строке лога — сетевая ошибка, иначе ошибка разбора, иначе «ok».
             status = meta.get("error") or meta.get("parse_error") or "ok"
             if result is None:
@@ -629,6 +633,9 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         )
     # Напоминание в самом конце лога, чтобы не потерялось среди строк по полосам: эти теги надо
     # проставить в CVAT независимо от того, был ли повтор выпуска.
+    # Полосы с замечаниями пост-обработки (сверка оглавления и т. п.) — искать по колонке messages в summary.csv.
+    if stats.page_messages:
+        logger.warning("полос с замечаниями пост-обработки: %d (колонка messages в summary.csv)", stats.page_messages)
     if stats.demoted_toc:
         logger.warning(
             "в базе оглавление, модель — нет (%d выпусков): %s", len(stats.demoted_toc), "; ".join(stats.demoted_toc)

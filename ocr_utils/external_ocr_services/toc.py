@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import re
@@ -30,6 +31,10 @@ KINDS = TOC_KINDS_WITH_TOC
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 
 
+# Порог похожести названия из списка и заголовка на полосе (по нормализованным строкам).
+TITLE_MATCH_RATIO = 0.75
+
+
 def normalize_title(title: str) -> str:
     """Ключ дедупликации: без регистра, пунктуации и лишних пробелов.
 
@@ -37,6 +42,31 @@ def normalize_title(title: str) -> str:
         title: Название статьи или рубрики как напечатано.
     """
     return _NON_WORD.sub(" ", title.replace("ё", "е").replace("Ё", "Е")).strip().lower()
+
+
+def title_matches(heading: str, titles: list[str]) -> bool:
+    """Совпадает ли заголовок с одним из названий: равенство, вхождение или похожесть ≥ порога.
+
+    Args:
+        heading: Заголовок (или рубрика) как напечатан на полосе.
+        titles: Названия из оглавления, с которыми сверяем.
+
+    Returns:
+        ``True``, если нормализованный заголовок равен одному из названий, входит в него (или
+        оно в заголовок) либо похож на него по ``difflib`` не меньше чем на ``TITLE_MATCH_RATIO``.
+    """
+    key = normalize_title(heading)
+    if not key:
+        return False
+    for title in titles:
+        other = normalize_title(title)
+        if not other:
+            continue
+        if key == other or key in other or other in key:
+            return True
+        if difflib.SequenceMatcher(None, key, other).ratio() >= TITLE_MATCH_RATIO:
+            return True
+    return False
 
 
 @dataclass
@@ -246,8 +276,16 @@ def ensure_toc_block(body: str) -> tuple[str, bool]:
     """
     if _TOC_OPEN in body:
         return body, False
+    # Открывающего тега нет, а закрывающий модель написать успела — он теперь лишний.
+    body = body.replace(_TOC_CLOSE, "")
     paragraphs = [block for block in re.split(r"\n\s*\n", body.strip()) if block.strip()]
-    hits = [index for index, paragraph in enumerate(paragraphs) if _TOC_ENTRY.match(paragraph.strip())]
+    # Абзац считается элементом списка, если хоть одна его строка — пункт или рубрика (пункты
+    # часто идут подряд без пустых строк, а модель может приклеить к ним `</toc>`).
+    hits = [
+        index
+        for index, paragraph in enumerate(paragraphs)
+        if any(_TOC_ENTRY.match(line.strip()) for line in paragraph.split("\n"))
+    ]
     if not hits:
         return body, False
     first, last = hits[0], hits[-1]
@@ -255,10 +293,15 @@ def ensure_toc_block(body: str) -> tuple[str, bool]:
     return "\n\n".join(wrapped).rstrip() + "\n", True
 
 
-# Пункт списка с номером страницы в конце — то, что должно стоять в <toc> на каждую статью.
-_TOC_ARTICLE_LINE = re.compile(r"^(- )?.+ — (№ ?\d+[^\d]*)?\d+[.,;\s]*$", re.S)
-# Доля статей объекта ``toc``, ниже которой список в теле считается потерянным и строится заново.
-TOC_BODY_MIN_SHARE = 0.5
+# Пункт списка оглавления: «[- ][<author>**Имена**</author>. ]Название — [№ выпуск, ]страница».
+_TOC_ARTICLE_LINE = re.compile(
+    rf"^(?:- )?(?:<{StructureTag.AUTHOR}>\*{{0,2}}(?P<authors>.+?)\*{{0,2}}</{StructureTag.AUTHOR}>\.?\s*)?"
+    r"(?P<title>.+?)\s+—\s+(?:№\s?(?P<issue>\d+)[,\s]+)?(?P<page>\d+)[.,;\s]*$",
+    re.S,
+)
+_TOC_RUBRIC_LINE = re.compile(
+    rf"^<{StructureTag.RUBRIC_IN_TOC}>\*{{0,2}}(?P<rubric>.+?)\*{{0,2}}</{StructureTag.RUBRIC_IN_TOC}>\s*$", re.S
+)
 
 
 def render_toc_block(page: TocPage) -> str:
@@ -288,26 +331,144 @@ def render_toc_block(page: TocPage) -> str:
     return "\n".join(lines)
 
 
-def ensure_toc_entries(body: str, page: TocPage) -> tuple[str, bool]:
-    """Если в теле осталось меньше половины статей из ``toc`` — блок ``<toc>`` строится заново по ``toc``.
-
-    Модель изредка выдаёт в теле только рубрики, а статьи кладёт лишь в объект ``toc`` (1966/03,
-    с. 93: 0 пунктов при 20 статьях). Объект — та же транскрипция той же полосы, только
-    структурная, поэтому список из него полный и в той же разметке.
+def parse_toc_block(body: str) -> list[TocSection] | None:
+    """Разобрать блок ``<toc>…</toc>`` тела в секции: рубрики и пункты «Автор. Название — страница».
 
     Args:
-        body: Тело полосы после ``ensure_toc_block`` (тег ``<toc>`` уже есть).
-        page: Структурированное оглавление полосы.
+        body: Тело полосы этапа toc в markdown.
 
     Returns:
-        ``(тело, перестроен ли блок)``.
+        Секции в порядке чтения (рубрика ``None`` до первой ``<rubric_in_toc>``); ``None`` — блока
+        ``<toc>`` в теле нет. Абзацы, не похожие ни на пункт, ни на рубрику, пропускаются.
     """
-    expected = sum(len(section.articles) for section in page.sections)
-    if not expected or _TOC_OPEN not in body or _TOC_CLOSE not in body:
-        return body, False
+    if _TOC_OPEN not in body or _TOC_CLOSE not in body:
+        return None
+    inside = body[body.index(_TOC_OPEN) + len(_TOC_OPEN) : body.index(_TOC_CLOSE)]
+    sections: list[TocSection] = [TocSection(None)]
+    for block in re.split(r"\n\s*\n", inside):
+        # Пункты могут идти подряд без пустой строки — режем абзац на строки, каждая — кандидат.
+        for line in (item.strip() for item in block.split("\n")):
+            if not line:
+                continue
+            rubric = _TOC_RUBRIC_LINE.match(line)
+            if rubric is not None:
+                sections.append(TocSection(rubric.group("rubric").strip()))
+                continue
+            entry = _TOC_ARTICLE_LINE.match(line)
+            if entry is None:
+                continue
+            names = [name.strip() for name in (entry.group("authors") or "").split(",") if name.strip()]
+            sections[-1].articles.append(
+                TocArticle(
+                    entry.group("title").strip(),
+                    [{"name": name, "position": None} for name in names],
+                    entry.group("page"),
+                    entry.group("issue"),
+                )
+            )
+    return [section for section in sections if section.rubric is not None or section.articles]
+
+
+@dataclass
+class TocReconcile:
+    """Итог сверки тела полосы оглавления с объектом ``toc``.
+
+    Args:
+        missing_in_body: Названия статей из ``toc``, которых в теле не было (тело достроено).
+        missing_in_toc: Названия статей из тела, которых в ``toc`` не было (объект достроен).
+        rebuilt: Блок ``<toc>`` тела построен заново по достроенному объекту.
+    """
+
+    missing_in_body: list[str] = field(default_factory=list)
+    missing_in_toc: list[str] = field(default_factory=list)
+    rebuilt: bool = False
+
+    def message(self) -> str | None:
+        """Одна строка для лога и поля ``messages`` полосы; ``None`` — расхождений не было.
+
+        Returns:
+            Текст вида «оглавление: в теле не было N статей из toc (…); в toc добавлено M статей из
+            тела (…); блок <toc> построен заново» или ``None``.
+        """
+        if not self.missing_in_body and not self.missing_in_toc:
+            return None
+        parts = []
+        if self.missing_in_body:
+            parts.append(f"в теле не было {len(self.missing_in_body)} статей из toc ({_few(self.missing_in_body)})")
+        if self.missing_in_toc:
+            parts.append(f"в toc добавлено {len(self.missing_in_toc)} статей из тела ({_few(self.missing_in_toc)})")
+        if self.rebuilt:
+            parts.append("блок <toc> построен заново по toc")
+        return "оглавление: " + "; ".join(parts)
+
+    def as_dict(self) -> dict:
+        """Плоский словарь для ``meta["toc_check"]``."""
+        return {"missing_in_body": self.missing_in_body, "missing_in_toc": self.missing_in_toc, "rebuilt": self.rebuilt}
+
+
+def _few(titles: list[str], limit: int = 3) -> str:
+    """Первые названия списком через запятую, остальное — «и ещё N».
+
+    Args:
+        titles: Названия статей.
+        limit: Сколько показывать целиком.
+    """
+    shown = ", ".join(f"«{title}»" for title in titles[:limit])
+    rest = len(titles) - limit
+    return shown + (f" и ещё {rest}" if rest > 0 else "")
+
+
+def _section_for(page: TocPage, rubric: str | None) -> TocSection:
+    """Секция объекта ``toc`` для статьи из тела: по рубрике, иначе без рубрики, иначе новая в конце.
+
+    Args:
+        page: Объект ``toc`` полосы (достраивается на месте).
+        rubric: Рубрика контекста статьи в теле; ``None`` — до первой рубрики.
+    """
+    if rubric is not None:
+        for section in page.sections:
+            if section.rubric and title_matches(rubric, [section.rubric]):
+                return section
+    else:
+        for section in page.sections:
+            if section.rubric is None:
+                return section
+    section = TocSection(rubric)
+    page.sections.append(section)
+    return section
+
+
+def reconcile_toc(body: str, page: TocPage) -> tuple[str, TocPage, TocReconcile]:
+    """Сверить пункты блока ``<toc>`` тела с объектом ``toc`` в обе стороны и достроить оба.
+
+    Модель изредка выдаёт в теле только рубрики, а статьи кладёт лишь в объект (1966/03, с. 93:
+    0 пунктов при 20 статьях), или наоборот теряет статью в объекте. Объект и тело — две
+    транскрипции одной полосы, поэтому расхождения закрываются друг из друга: статьи только из
+    тела добавляются в секцию объекта с той же рубрикой, после чего блок ``<toc>`` строится
+    заново по объекту — тело и объект совпадают ровно.
+
+    Args:
+        body: Тело полосы после ``ensure_toc_block`` (тег ``<toc>`` на месте).
+        page: Объект ``toc`` из ответа модели; достраивается на месте.
+
+    Returns:
+        ``(тело, объект, итог сверки)``; без расхождений тело и объект возвращаются как есть.
+    """
+    check = TocReconcile()
+    parsed = parse_toc_block(body)
+    if parsed is None or not page.sections:
+        return body, page, check
+    body_titles = [article.title for section in parsed for article in section.articles]
+    toc_titles = [article.title for section in page.sections for article in section.articles]
+    check.missing_in_body = [title for title in toc_titles if not title_matches(title, body_titles)]
+    for section in parsed:
+        for article in section.articles:
+            if title_matches(article.title, toc_titles):
+                continue
+            check.missing_in_toc.append(article.title)
+            _section_for(page, section.rubric).articles.append(article)
+    if not check.missing_in_body and not check.missing_in_toc:
+        return body, page, check
     start, end = body.index(_TOC_OPEN), body.index(_TOC_CLOSE) + len(_TOC_CLOSE)
-    inside = body[start:end]
-    found = sum(1 for block in re.split(r"\n\s*\n", inside) if _TOC_ARTICLE_LINE.match(block.strip()))
-    if found >= expected * TOC_BODY_MIN_SHARE:
-        return body, False
-    return body[:start] + render_toc_block(page) + body[end:], True
+    check.rebuilt = True
+    return body[:start] + render_toc_block(page) + body[end:], page, check
