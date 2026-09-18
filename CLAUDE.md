@@ -36,6 +36,7 @@
 | `inpainting` | Общие примитивы закраса (ROI, LaMa) для пальцев и разметки | библиотека |
 | `external_ocr_services` | Боевой внешний OCR (DeepSeek V4.1 Flash): оглавление → список статей → остальные полосы, тайлы по сетке, теги повреждений | `python -m ocr_utils.external_ocr_services run` |
 | `docx_md` | DOCX → Markdown, нарезка под LLM | библиотека |
+| `experimental` | Новый функционал внешнего OCR до переноса в основные пакеты: склейка переносов по словарю, полосы 1×N, подсказки из детектора корешка, короткий промпт; стенд `scripts/replay_page.py` | библиотека |
 | `legacy` | Помойка: не поддерживается, без тестов | — |
 | `research/external_ocr_models` | Полоса → размеченный markdown через VLM (OpenRouter), промпты v1–v13 | `python -m research.external_ocr_models` |
 | `research/geometry_regression` | Страницы, где коррекция геометрии FineReader сделала хуже: пары PDF «с/без», поле смещений, штрихи, строки, кромки; картинки «было \| стало» | `python -m research.geometry_regression run\|report` |

@@ -1,0 +1,48 @@
+{#- Копия боевого user.md.j2 для короткого промпта (experimental/prompts_short): текст рядом с тайлами. Порядок блоков — под кэш префикса: сначала
+    то, что одинаково для всех полос (фраза о повреждениях, задача этапа), потом то, что меняется
+    от выпуска к выпуску (список статей), потом от полосы к полосе (раскладка тайлов, второй проход).
+    Переменные: damage_note — фраза про повреждения по умолчанию (ищи сам, скрытое достраивай);
+    stage; toc_kind — вид полосы для этапа toc; rubrics, articles — оглавление выпуска для этапа
+    page ([{title, authors: [str], rubric}]); ntiles, ncols, nrows — раскладка; second_pass —
+    сводка первого прохода или None; max_lines — сколько строк edge_words показывать.
+    v16: абзац «Apply rule 5 strictly» убран (третий повтор правила; на втором проходе его
+    удаление ничего не меняло); во втором проходе список edge_words — только «как видно» и вид,
+    без догадок full: с ними модель перечитывала названные строки и портила чистые слова
+    («Солкомфлот» 8/12, без списка 0/12). -#}
+{% if not second_pass -%}
+{{ damage_note }}
+{% endif -%}
+{% if stage == "toc" -%}
+{% if toc_kind == "index" -%}
+A detector has preliminarily classified this page as part of the ANNUAL INDEX of articles published in the journal during the year (it may continue from a previous page and continue on the next one). Check it against the image: if it really is an index, transcribe it and fill the `toc` object with kind «index»; if it is not, set `toc_kind` to «none», leave `toc.sections` empty and transcribe it as an ordinary page.
+{%- else -%}
+A detector has preliminarily classified this page as part of the TABLE OF CONTENTS of the issue (it may continue from a previous page and continue on the next one). Check it against the image: if it really is a table of contents, transcribe it and fill the `toc` object with kind «contents»; if it is not, set `toc_kind` to «none», leave `toc.sections` empty and transcribe it as an ordinary page.
+{%- endif %}
+{%- else -%}
+Transcribe this page.
+{%- endif %}
+{% if stage != "toc" and articles %}
+KNOWN STRUCTURE OF THIS ISSUE (from its table of contents). Article titles:
+{% for article in articles %}* «{{ article.title }}»{% if article.authors %} — {{ article.authors | join(", ") }}{% endif %}{% if article.get("rubric") %} [рубрика: {{ article.get("rubric") }}]{% endif %}
+{% endfor -%}
+{% if rubrics %}Rubrics: {% for rubric in rubrics %}«{{ rubric }}»{% if not loop.last %}, {% endif %}{% endfor %}.
+{% endif %}
+{%- endif %}
+{% if ntiles > 1 %}
+The page is given as {{ ntiles }} overlapping tiles: {{ ncols }} column(s) × {{ nrows }} row(s) of the page, listed column by column, each column from top to bottom{% if ncols > 1 %}, the whole left column before the right one{% endif %}. Neighbouring tiles overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
+{%- endif %}
+{% if second_pass %}
+A first reading of this page reported damage: «{{ second_pass.damage_description or "(no description)" }}». It marked {{ second_pass.tags.get("supplied", 0) }} reconstructed, {{ second_pass.tags.get("unclear", 0) }} unreliable and {{ second_pass.tags.get("gap", 0) }} unreadable fragments{% if second_pass.edge_words %} and listed these affected words (as seen, kind):
+{% for item in second_pass.edge_words[:max_lines] %}- «{{ item.seen }}», {{ item.kind }}
+{% endfor %}{% if second_pass.edge_words | length > max_lines %}- … and {{ second_pass.edge_words | length - max_lines }} more
+{% endif %}{% else %}.
+{% endif %}
+{%- if second_pass.transcript %}
+Its transcription was:
+<<<
+{{ second_pass.transcript }}
+>>>
+Use it only to see WHERE the doubtful places are; read every word from the image again, do not copy the transcription.
+{% endif %}
+Now re-read the page with this in mind. First decide for the affected area whether the letters are HIDDEN (cut off, lost in the binding gutter, covered) or VISIBLE BUT UNRELIABLE (blurred, squashed, smeared, washed out by overexposure) — the first reading may have named the wrong kind. Hidden letters → reconstruct them from the context and the visible remains of the word and wrap them in <supplied>; unreliable letters → <unclear> on EVERY word where at least one letter was read by shape or context rather than by clear print; <gap>N</gap> (N — the approximate number of missing characters, nothing else inside the tag) only where no confident reconstruction is possible. Give one `edge_words` entry for EVERY affected line. If on inspection the page is actually clean, say so (`is_damaged` = false, `damage_description` = "") and return the plain transcription without tags.
+{%- endif %}

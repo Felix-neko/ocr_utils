@@ -1,0 +1,166 @@
+"""Склейка разорванных переносов («кре-диты» → «кредиты») по словарю морфоанализатора: два бэкенда, три правила.
+
+Откуда задача. На полосах с обрезанным левым краем DeepSeek в части ответов оставляет переносы
+как напечатано («кре-дитного», 38 из 39 дефисов на с. 47 МТС 1991/02; режим A в
+`reports/external_ocr_hyphenation_second_pass.md`), и промптом это не лечится. Прежний опыт
+(сессия 17–18.09.2026, в репо не попал) с `pymorphy3`: правило «слитная форма известна словарю,
+а первая половина не оканчивается на соединительную «о» перед словарным словом» дало 36/39 на
+с. 47 и 9 срабатываний на 348 дефисных словах остальных полос, из них 3 — настоящие составные
+(«торгово-экономических»: `known("торгово")` у pymorphy3 ложно, и оговорка не срабатывает).
+Здесь то же правило воспроизведено (``JoinRule.C``), рядом — простое ``A`` и ``D``, где
+дефисная форма, которую анализатор сам знает как составное слово («материально-техническое» у
+`mawo-pymorphy3`), не трогается. Сравнение бэкендов и правил — `scripts/compare_hyphen_join.py`,
+разметка — `run_scripts/experimental/hyphen_labels.csv`.
+
+Теги внутри слова (``<supplied>``, ``<unclear>``) снимаются на время проверки и остаются на месте
+в тексте: заменяется только дефис. Морфология — группа зависимостей ``experimental``.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from enum import StrEnum
+from functools import lru_cache
+
+# Дефис между двумя кириллическими кусками от двух букв, не часть более длинной цепочки
+# («научно-производственно-технический» не трогаем); теги внутри слова допускаются.
+_TAG = r"(?:</?(?:supplied|unclear)>)*"
+HYPHENATED = re.compile(
+    rf"(?<![\w-])(?P<a>{_TAG}[а-яёА-ЯЁ]{{2,}}(?:{_TAG}[а-яёА-ЯЁ]+)*{_TAG})-(?P<b>{_TAG}[а-яё]{{2,}}(?:{_TAG}[а-яё]+)*{_TAG})(?![\w-])"
+)
+_STRIP_TAGS = re.compile(r"</?(?:supplied|unclear)>")
+
+
+class MorphBackend(StrEnum):
+    """Какой морфоанализатор отвечает на вопрос «известно ли слово словарю»."""
+
+    PYMORPHY3 = "pymorphy3"  # pymorphy3 + pymorphy3-dicts-ru (OpenCorpora)
+    MAWO = "mawo"  # mawo-pymorphy3: встроенный DAWG-словарь OpenCorpora 2025, разбор составных слов
+
+
+class JoinRule(StrEnum):
+    """Когда дефис между половинами ``a`` и ``b`` считается переносом и убирается.
+
+    ``A`` — слитная форма известна словарю.
+    ``C`` — то же, но не тогда, когда обе половины известны и первая кончается на «о» (защита
+    составных «торгово-экономический»; прежнее правило опыта 18.09).
+    ``D`` — ``A``, но дефисная форма целиком, известная анализатору как составное слово
+    («материально-техническое»), не трогается; половины при этом не проверяются.
+    ``E`` — ``A``, но первая половина от пяти букв на «о» перед известным словом от пяти букв —
+    соединительная гласная составного прилагательного («торгово-экономических», «резино-асбестовые»),
+    не перенос («миллио-нов», «эконо-мику» с короткой второй половиной остаются переносами);
+    в отличие от ``C`` не требует, чтобы первая половина была известна словарю (у pymorphy3
+    «торгово» неизвестно, и ``C`` на этих словах ошибается). Добавлено после разбора трёх ложных
+    слияний правила C на корпусе `hyphen_labels.csv`.
+    """
+
+    A = "A"
+    C = "C"
+    D = "D"
+    E = "E"
+
+
+class Morph:
+    """Обёртка над анализатором: ``known(слово)`` с кэшем; создаётся один раз на процесс.
+
+    Args:
+        backend: Какой пакет использовать.
+    """
+
+    def __init__(self, backend: MorphBackend):
+        self.backend = MorphBackend(backend)
+        if self.backend is MorphBackend.PYMORPHY3:
+            import pymorphy3  # noqa: PLC0415 — тяжёлая зависимость группы experimental, грузится по требованию
+
+            self._analyzer = pymorphy3.MorphAnalyzer()
+        else:
+            from mawo_pymorphy3 import create_analyzer  # noqa: PLC0415
+
+            self._analyzer = create_analyzer()
+
+    @lru_cache(maxsize=65536)
+    def known(self, word: str) -> bool:
+        """Известно ли слово словарю (хотя бы один разбор не «по догадке»).
+
+        Args:
+            word: Слово без тегов, регистр не важен.
+
+        Returns:
+            ``True``, если анализатор нашёл слово в словаре (``is_known`` у разбора); у обоих
+            бэкендов дефисные составные слова тоже могут быть известны.
+        """
+        return any(parse.is_known for parse in self._analyzer.parse(word.lower()))
+
+
+@dataclass
+class JoinReport:
+    """Что склеено и что оставлено — для стенда и meta."""
+
+    joined: list[str] = field(default_factory=list)  # «кре-диты» → «кредиты», как в тексте до склейки
+    kept: list[str] = field(default_factory=list)  # дефисные слова, оставленные как есть
+
+
+def should_join(a: str, b: str, morph: Morph, rule: JoinRule) -> bool:
+    """Решение по правилу для половин без тегов.
+
+    Args:
+        a: Часть до дефиса.
+        b: Часть после дефиса.
+        morph: Анализатор.
+        rule: Правило.
+
+    Returns:
+        ``True`` — дефис считается переносом, слово склеивается.
+    """
+    rule = JoinRule(rule)
+    whole = a + b
+    if rule is JoinRule.D and morph.known(f"{a}-{b}"):
+        return False  # анализатор сам знает дефисную форму как слово — это составное, не перенос
+    if not morph.known(whole):
+        return False
+    if rule is JoinRule.C and morph.known(a) and morph.known(b) and a.lower().endswith("о"):
+        return False
+    if rule is JoinRule.E and len(a) >= 5 and len(b) >= 5 and a.lower().endswith("о") and morph.known(b):
+        return False
+    return True
+
+
+class _Replacer:
+    """Замена для ``re.sub``: решает по половинам слова и копит отчёт (вместо вложенной функции).
+
+    Args:
+        morph: Анализатор.
+        rule: Правило склейки.
+    """
+
+    def __init__(self, morph: Morph, rule: JoinRule):
+        self.morph = morph
+        self.rule = JoinRule(rule)
+        self.report = JoinReport()
+
+    def __call__(self, match: re.Match) -> str:
+        """Слово без дефиса, если это перенос; иначе совпадение как есть."""
+        a_raw, b_raw = match.group("a"), match.group("b")
+        a, b = _STRIP_TAGS.sub("", a_raw), _STRIP_TAGS.sub("", b_raw)
+        if should_join(a, b, self.morph, self.rule):
+            self.report.joined.append(f"{a}-{b}")
+            return a_raw + b_raw
+        self.report.kept.append(f"{a}-{b}")
+        return match.group(0)
+
+
+def join_broken_hyphens(text: str, morph: Morph, rule: JoinRule = JoinRule.E) -> tuple[str, JoinReport]:
+    """Убрать дефисы-переносы внутри слов текста по словарю.
+
+    Args:
+        text: Тело полосы в markdown (теги повреждений внутри слов допустимы).
+        morph: Анализатор (:class:`Morph`).
+        rule: Правило склейки.
+
+    Returns:
+        ``(текст со склеенными переносами, отчёт)``: в тексте заменён только дефис, теги и
+        регистр сохранены; в отчёте — какие слова склеены и какие оставлены.
+    """
+    replacer = _Replacer(morph, rule)
+    return HYPHENATED.sub(replacer, text), replacer.report

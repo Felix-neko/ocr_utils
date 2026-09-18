@@ -43,8 +43,10 @@ import click
 # Пакет не установлен в окружение: при запуске файлом корень репо — руками.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ocr_utils.experimental import damage_hints, strips  # noqa: E402
 from ocr_utils.external_ocr_services import PROMPT_VERSION, prompts  # noqa: E402
 from ocr_utils.external_ocr_services import models as registry  # noqa: E402
+from ocr_utils.external_ocr_services import ocr as ocr_module  # noqa: E402
 from ocr_utils.external_ocr_services.client import OpenRouterClient, api_key_from  # noqa: E402
 from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, recognise_page  # noqa: E402
 from ocr_utils.external_ocr_services.pages import list_pages  # noqa: E402
@@ -83,7 +85,7 @@ def use_prompts_dir(prompts_dir: Path) -> None:
 
 
 def _recognise_one(
-    client: OpenRouterClient, spec, in_dir: Path, out_dir: Path, options: RunOptions, rel: Path
+    client: OpenRouterClient, spec, in_dir: Path, out_dir: Path, options: RunOptions, joiner, rel: Path
 ) -> tuple[Path, dict]:
     """Одна полоса одним проходом — для пула потоков.
 
@@ -93,13 +95,40 @@ def _recognise_one(
         in_dir: Корень входа.
         out_dir: Корень выхода этого повтора.
         options: Настройки запроса.
+        joiner: ``(Morph, JoinRule)`` для склейки переносов после разбора или ``None``.
         rel: Полоса относительно ``in_dir``.
 
     Returns:
-        ``(rel, meta)`` — meta как записана в ``.meta.json``.
+        ``(rel, meta)`` — meta как записана в ``.meta.json`` (при склейке — плюс ``hyphens_joined``).
     """
-    meta, _ = recognise_page(client, spec, in_dir / rel, PageJob(rel), out_dir, options)
+    meta, result = recognise_page(client, spec, in_dir / rel, PageJob(rel), out_dir, options)
+    if joiner is not None and result is not None:
+        # Склейка — поверх готового выхода: .json/.md перезаписываются, число склеек — в meta.
+        from ocr_utils.experimental.hyphen_join import join_broken_hyphens  # noqa: PLC0415
+
+        result.content_markdown, report = join_broken_hyphens(result.content_markdown, *joiner)
+        meta = dict(meta, hyphens_joined=len(report.joined), hyphens_kept=len(report.kept))
+        ocr_module._write_outputs(out_dir, rel, result, meta)
     return rel, meta
+
+
+def use_strips(rows: int) -> None:
+    """Подменить нарезку полосы в боевом коде на горизонтальные полосы 1×``rows`` (``experimental.strips``)."""
+    ocr_module.prepare_tiles = partial(_strips_like_tiles, rows)
+    logger.info("тайлы: %d горизонтальных полос вместо сетки", rows)
+
+
+def _strips_like_tiles(rows: int, path: Path, max_src_tile: int, max_model_tile: int, quality: int):
+    """Сигнатура ``tiling.prepare_tiles`` → ``strips.prepare_strips`` (шаг сетки игнорируется)."""
+    return strips.prepare_strips(path, rows, max_model_tile, quality)
+
+
+def use_hints(csv_path: Path) -> damage_hints.HintedPrompts:
+    """Подменить сборку промптов: фраза о повреждениях — из CSV детектора корешка по имени кадра."""
+    hinted = damage_hints.HintedPrompts(damage_hints.hints_from_gutter_csv(csv_path))
+    ocr_module.prompts_for = hinted
+    logger.info("подсказки о повреждениях: %d страниц из %s", len(hinted.hints), csv_path)
+    return hinted
 
 
 @click.group()
@@ -128,6 +157,18 @@ def main() -> None:
 @click.option("--max-model-tile-size", type=int, default=DEFAULT_MAX_MODEL_TILE, show_default=True)
 @click.option("--jobs", type=int, default=4, show_default=True, help="Параллельных запросов (сеть, не CPU).")
 @click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
+@click.option("--rows", type=int, default=None, help="Горизонтальные полосы 1×N вместо сетки (experimental.strips).")
+@click.option(
+    "--hints-csv",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="CSV детектора корешка: подсказка о повреждении на страницу вместо нейтральной фразы.",
+)
+@click.option(
+    "--join-hyphens",
+    default=None,
+    help="Склейка переносов после разбора: БЭКЕНД:ПРАВИЛО, например pymorphy3:E (experimental.hyphen_join).",
+)
 def run_command(
     in_dir: Path,
     out_dir: Path,
@@ -143,10 +184,22 @@ def run_command(
     max_model_tile_size: int,
     jobs: int,
     api_key: str | None,
+    rows: int | None,
+    hints_csv: Path | None,
+    join_hyphens: str | None,
 ) -> None:
     """Распознать полосы ``--repeats`` раз каждую; повтор i пишется в ``<out-dir>/run<i>/``."""
     if prompts_dir is not None:
         use_prompts_dir(prompts_dir)
+    if rows is not None:
+        use_strips(rows)
+    hinted = use_hints(hints_csv) if hints_csv is not None else None
+    joiner = None
+    if join_hyphens is not None:
+        from ocr_utils.experimental.hyphen_join import JoinRule, Morph  # noqa: PLC0415
+
+        backend, _, rule = join_hyphens.partition(":")
+        joiner = (Morph(backend), JoinRule(rule or "E"))
     spec = registry.resolve(model_name)
     rels = list_pages(in_dir, pages_file, only_year, only_issue, limit)
     if not rels:
@@ -164,7 +217,7 @@ def run_command(
             debug_dir=out_dir / "debug" if index == 1 else None,
             second_pass=False,
         )
-        work = partial(_recognise_one, client, spec, in_dir, run_dir, options)
+        work = partial(_recognise_one, client, spec, in_dir, run_dir, options, joiner)
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             for rel, meta in pool.map(work, rels):
                 total_cost += float(meta.get("cost_usd") or 0.0)
@@ -173,8 +226,12 @@ def run_command(
                     "run%d %s: %s, теги %s, is_damaged=%s", index, rel, status, meta.get("tags"), meta.get("is_damaged")
                 )
     (out_dir / "prompt_version.txt").write_text(
-        f"{PROMPT_VERSION}\n{prompts_dir or 'шаблоны пакета'}\n", encoding="utf-8"
+        f"{PROMPT_VERSION}\n{prompts_dir or 'шаблоны пакета'}\nrows={rows or 'сетка'} hints={hints_csv or '-'} "
+        f"join={join_hyphens or '-'}\n",
+        encoding="utf-8",
     )
+    if hinted is not None:
+        logger.info("подсказка нашлась для %d запросов", hinted.used)
     click.echo(f"Готово: {len(rels)} полос × {repeats}, ${total_cost:.4f}; сводка — summarise --out-dir {out_dir}")
 
 
@@ -247,6 +304,33 @@ def read_page(base: Path) -> PageMetrics:
     )
 
 
+def reference_texts(reference_pdf: Path, issue_dir: Path | None) -> dict[str, str]:
+    """Текстовый слой PDF FineReader по полосам выпуска: страница i PDF ↔ i-я полоса папки по имени.
+
+    Args:
+        reference_pdf: PDF FineReader выпуска (``full_1966_03.pdf``).
+        issue_dir: Папка полос выпуска — порядок страниц берётся из сортировки имён файлов.
+
+    Returns:
+        ``{stem полосы: нормализованный текст страницы}``; при расхождении числа страниц —
+        предупреждение в лог, лишнее отбрасывается.
+    """
+    from research.external_ocr_models import evaluate  # noqa: PLC0415 — стенд: pymupdf, rapidfuzz
+
+    names = list_pages(issue_dir) if issue_dir is not None else []
+    texts = evaluate.finereader_pages(reference_pdf)
+    if len(names) != len(texts):
+        logger.warning("в PDF %d страниц, полос в %s — %d; сопоставляю по порядку", len(texts), issue_dir, len(names))
+    return {name.stem: evaluate.normalize(text) for name, text in zip(names, texts)}
+
+
+def page_cer(text: str, reference: str) -> float | None:
+    """CER текста без тегов к нормализованному эталону (``evaluate.cer``); ``None`` при пустом эталоне."""
+    from research.external_ocr_models import evaluate  # noqa: PLC0415
+
+    return evaluate.cer(evaluate.normalize(text), reference)
+
+
 def similarity(a: str, b: str) -> float:
     """Сходство двух текстов без тегов (``difflib``, 0–1); пусто с обеих сторон — 1."""
     if not a and not b:
@@ -308,12 +392,29 @@ def _totals(pages: dict[str, list[PageMetrics | None]], run_index: int) -> dict[
     default=None,
     help="Другой прогон тех же полос (этого скрипта или боевой): сходство текстов с его первым повтором.",
 )
-def summarise_command(out_dir: Path, baseline_dir: Path | None) -> None:
-    """Таблица по полосам и повторам: флаг, теги, edge_words, «[неразборчиво]», дефисы, длина, сходство."""
+@click.option(
+    "--reference-pdf",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="PDF FineReader выпуска: CER текста без тегов к его текстовому слою (страница i ↔ i-я полоса по имени).",
+)
+@click.option(
+    "--issue-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Папка полос выпуска (для порядка страниц PDF), например SHARPENED_DIR/1966/03.",
+)
+def summarise_command(
+    out_dir: Path, baseline_dir: Path | None, reference_pdf: Path | None, issue_dir: Path | None
+) -> None:
+    """Таблица по полосам и повторам: флаг, теги, edge_words, «[неразборчиво]», дефисы, длина, сходство, CER."""
     pages = collect(out_dir)
     if not pages:
         raise click.ClickException(f"в {out_dir} нет результатов")
     baseline = collect(baseline_dir) if baseline_dir is not None else {}
+    reference = reference_texts(reference_pdf, issue_dir) if reference_pdf is not None else {}
+    if reference_pdf is not None and issue_dir is None:
+        raise click.ClickException("--reference-pdf требует --issue-dir")
     n_runs = max(len(runs) for runs in pages.values())
     lines = [
         f"# Повторы: {out_dir}",
@@ -328,7 +429,11 @@ def summarise_command(out_dir: Path, baseline_dir: Path | None) -> None:
     header = "| полоса | " + " | ".join(f"run{i + 1}" for i in range(n_runs)) + " | сходство повторов |"
     if baseline:
         header += " сходство с базой |"
-    lines += [header, "|---|" + "---|" * (n_runs + 1) + ("---|" if baseline else "")]
+    if reference:
+        header += " CER run1 |" + (" CER базы |" if baseline else "")
+    extra = (1 if baseline else 0) + ((2 if baseline else 1) if reference else 0)
+    lines += [header, "|---|" + "---|" * (n_runs + 1 + extra)]
+    cers: dict[str, list[float]] = {"run1": [], "база": []}
     for key, runs in pages.items():
         cells = [m.cell() if m is not None else "—" for m in runs] + ["—"] * (n_runs - len(runs))
         texts = [m.text for m in runs if m is not None and not m.error]
@@ -338,6 +443,19 @@ def summarise_command(out_dir: Path, baseline_dir: Path | None) -> None:
             base_runs = baseline.get(key) or []
             base_text = next((m.text for m in base_runs if m is not None and not m.error), None)
             row += f" {similarity(texts[0], base_text):.3f} |" if texts and base_text is not None else " — |"
+        if reference:
+            ref = reference.get(Path(key).stem)
+            own = page_cer(texts[0], ref) if texts and ref else None
+            row += f" {own:.4f} |" if own is not None else " — |"
+            if own is not None:
+                cers["run1"].append(own)
+            if baseline:
+                base_runs = baseline.get(key) or []
+                base_text = next((m.text for m in base_runs if m is not None and not m.error), None)
+                base_cer = page_cer(base_text, ref) if base_text is not None and ref else None
+                row += f" {base_cer:.4f} |" if base_cer is not None else " — |"
+                if base_cer is not None:
+                    cers["база"].append(base_cer)
         lines.append(row)
     lines += ["", "## Итого по повторам", ""]
     keys = list(_totals(pages, 0))
@@ -349,6 +467,15 @@ def summarise_command(out_dir: Path, baseline_dir: Path | None) -> None:
     if baseline:
         totals = _totals(baseline, 0)
         lines.append(f"| база run1 | " + " | ".join(str(totals[k]) for k in keys) + " |")
+    if reference:
+        lines += ["", "## CER к FineReader (текст без тегов)", ""]
+        for name, values in cers.items():
+            if values:
+                values = sorted(values)
+                lines.append(
+                    f"- {name}: полос {len(values)}, медиана {values[len(values) // 2]:.4f}, "
+                    f"среднее {sum(values) / len(values):.4f}, максимум {values[-1]:.4f}"
+                )
     text = "\n".join(lines) + "\n"
     (out_dir / "summary.md").write_text(text, encoding="utf-8")
     click.echo(text)
