@@ -40,7 +40,7 @@ def test_stamp_suspect_follows_the_flag():
     assert build_protect(SHAPE, page, ProtectOptions(protect_stamp_suspect=True))[0][100, 100] == 255
 
 
-def test_full_page_region_is_recognised():
+def test_full_page_region_is_recognized():
     assert is_full_page(markup(rect(KIND_COLOR, (0, 0, 400, 600), full_page=True))) is not None
     assert is_full_page(markup(rect(KIND_COLOR))) is None
 

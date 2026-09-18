@@ -32,7 +32,7 @@ def _remap_color(img: np.ndarray, page_dims, params, config) -> np.ndarray:
     Повторяет вычисление карты из ``page_dewarp.dewarp.RemappedImage``, но применяет
     ``cv2.remap`` к ЦВЕТНОМУ ``img`` (библиотека ремапит только grayscale).
     """
-    from page_dewarp.normalisation import norm2pix
+    from page_dewarp.normalization import norm2pix
     from page_dewarp.projection import project_xy
 
     # Ширину выхода фиксируем РОВНО по входу (ничего не обрезаем и не растягиваем по X);

@@ -71,7 +71,7 @@ def test_curl_page_raises_sagitta():
 
 
 @pytest.mark.parametrize("name", CPU)
-def test_raw_is_json_serialisable(name):
+def test_raw_is_json_serializable(name):
     measure = DETECTORS[name].run(frame_of(bow_page()), True)
     assert measure.raw is not None
     json.dumps(measure.raw)
@@ -91,6 +91,6 @@ def test_end_curl_flags_curled_line_ends_but_not_straight_page():
     assert curled.metrics["end_slope_deg"] > 3 * straight.metrics["end_slope_deg"]
 
 
-def test_end_curl_raw_is_json_serialisable():
+def test_end_curl_raw_is_json_serializable():
     measure = DETECTORS["end_curl"].run(frame_of(curl_page()), True)
     json.dumps(measure.raw)

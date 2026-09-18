@@ -174,7 +174,7 @@ def is_done(out_dir: Path, rel: Path) -> bool:
     return not meta.get("error") and not meta.get("parse_error")
 
 
-def recognise_page(
+def recognize_page(
     client: OpenRouterClient, spec: ModelSpec, in_path: Path, rel: Path, out_dir: Path, options: RunOptions
 ) -> dict:
     """Распознать одну полосу и записать выходы. Возвращает meta (он же строка сводки)."""

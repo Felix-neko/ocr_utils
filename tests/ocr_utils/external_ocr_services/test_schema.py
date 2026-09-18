@@ -105,7 +105,7 @@ def test_old_is_toc_field_and_bad_json():
             parse_json_text(text)
 
 
-def test_enums_serialise_as_plain_strings():
+def test_enums_serialize_as_plain_strings():
     """StrEnum в результате и meta уходят в JSON своими значениями — формат файлов не меняется."""
     result = parse_json_text('{"content_markdown": "<supplied>а</supplied>б<gap>▒</gap>", "toc_kind": "index"}', "toc")
     assert result.toc_kind is TocKind.INDEX and result.toc_kind == "index"
@@ -116,7 +116,7 @@ def test_enums_serialise_as_plain_strings():
     assert json_schema("page") == json_schema(Stage.PAGE)
 
 
-def test_legacy_damage_tags_and_fields_are_modernised():
+def test_legacy_damage_tags_and_fields_are_modernized():
     """Ответ по старой схеме (до v10): теги и поля переводятся в TEI, <unknown/> — в <gap> с заполнителем."""
     legacy = {
         "content_markdown": "снабже<restored>ния</restored> пр<fuzzy>е</fuzzy>д <unknown/>ности",
@@ -212,26 +212,26 @@ def test_messages_field_roundtrip_and_header():
     assert "messages:" not in to_markdown(parse_json_text('{"content_markdown": "Текст."}'))
 
 
-def test_tag_homoglyphs_and_spaces_normalised():
+def test_tag_homoglyphs_and_spaces_normalized():
     """Модель пишет <тoc>, <тоc>, < toc>: имена наших тегов приводятся к латинице без пробелов; чужие теги не трогаются."""
-    from ocr_utils.external_ocr_services.schema import normalise_tags
+    from ocr_utils.external_ocr_services.schema import normalize_tags
 
-    assert normalise_tags("<тoc>\n- а — 1\n</ toc >") == "<toc>\n- а — 1\n</toc>"
-    assert normalise_tags("< toc>x<тоc>y<аuthor>**И**</аuthor>") == "<toc>x<toc>y<author>**И**</author>"
+    assert normalize_tags("<тoc>\n- а — 1\n</ toc >") == "<toc>\n- а — 1\n</toc>"
+    assert normalize_tags("< toc>x<тоc>y<аuthor>**И**</аuthor>") == "<toc>x<toc>y<author>**И**</author>"
     assert (
-        normalise_tags("<table><tr><td>1</td></tr></table> <неизвестный>")
+        normalize_tags("<table><tr><td>1</td></tr></table> <неизвестный>")
         == "<table><tr><td>1</td></tr></table> <неизвестный>"
     )
     result = parse_json_text('{"content_markdown": "< toc>\\n- а — 1\\n</toc>"}')
     assert result.content_markdown.startswith("<toc>\n")
 
 
-def test_legacy_tag_names_and_hyphen_tags_normalised():
+def test_legacy_tag_names_and_hyphen_tags_normalized():
     """v15: <rubric_in_toc> старых ответов → <rubric-in-toc>; имя с дефисом узнаётся и чистится от омоглифов."""
-    from ocr_utils.external_ocr_services.schema import normalise_tags
+    from ocr_utils.external_ocr_services.schema import normalize_tags
 
-    assert normalise_tags("<rubric_in_toc>*А*</rubric_in_toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
-    assert normalise_tags("< rubric-in-toc >*А*</ rubriс-in-toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
+    assert normalize_tags("<rubric_in_toc>*А*</rubric_in_toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
+    assert normalize_tags("< rubric-in-toc >*А*</ rubriс-in-toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
     result = parse_json_text('{"content_markdown": "<rubric_in_toc>*А*</rubric_in_toc>"}')
     assert result.content_markdown == "<rubric-in-toc>*А*</rubric-in-toc>"
 
@@ -262,17 +262,17 @@ def test_legacy_illustration_blocks_become_fenced_blocks():
     from ocr_utils.external_ocr_services.schema import (
         IllustrationKind,
         count_illustrations,
-        modernise_illustrations,
+        modernize_illustrations,
         unbalanced_fences,
     )
 
-    out = modernise_illustrations(LEGACY_ILLUSTRATIONS)
+    out = modernize_illustrations(LEGACY_ILLUSTRATIONS)
     assert (
         out == "Текст.\n\n```\n[фотография]\nпортрет мужчины в костюме\nподпись: И. Иванов\n```\n\n"
         "```\n[блок-схема]\nЗаявка → Склад\nнадпись: план\n```\n\n"
         "```\n[графика]\nграфик роста\nось X: годы, 1960, 1965\n```\n\nДальше."
     )
-    assert modernise_illustrations(out) == out, "идемпотентно"
+    assert modernize_illustrations(out) == out, "идемпотентно"
     assert count_illustrations(out) == {
         IllustrationKind.PHOTO: 1,
         IllustrationKind.SCHEMA: 1,

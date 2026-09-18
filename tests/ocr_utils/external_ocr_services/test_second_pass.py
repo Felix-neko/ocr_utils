@@ -14,7 +14,7 @@ from ocr_utils.external_ocr_services.ocr import (
     RunOptions,
     SecondPass,
     choose_final,
-    recognise_with_second_pass,
+    recognize_with_second_pass,
     second_pass_reason,
 )
 from ocr_utils.external_ocr_services.prompts import DEFAULT_DAMAGE_NOTE, user_prompt
@@ -81,7 +81,7 @@ def _run(tmp_path, answers, **options):
     rel = Path(ISSUE) / "IMG_0002.jpg"
     fake = FakeClient(lambda p: answers.pop(0))
     opts = RunOptions(debug_dir=tmp_path / "dbg", second_pass=True, **options)
-    meta, result = recognise_with_second_pass(
+    meta, result = recognize_with_second_pass(
         fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", opts
     )
     return fake, meta, result, tmp_path / "out" / ISSUE / "IMG_0002", tmp_path / "dbg" / ISSUE / "IMG_0002"
@@ -130,7 +130,7 @@ def test_second_pass_off_by_default_means_single_request(tmp_path):
     rel = Path(ISSUE) / "IMG_0002.jpg"
     answers = [_page(damaged=True, damage="Край")]
     fake = FakeClient(lambda p: answers.pop(0))
-    meta, _ = recognise_with_second_pass(
+    meta, _ = recognize_with_second_pass(
         fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", RunOptions()
     )
     assert len(fake.payloads) == 1 and meta["second_pass_reason"] is None

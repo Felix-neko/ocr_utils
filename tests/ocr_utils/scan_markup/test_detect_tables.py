@@ -11,15 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from ocr_utils.scan_markup.cli import main
-from ocr_utils.db.models import (
-    KIND_GRAYSCALE,
-    KIND_TABLE,
-    SOURCE_AUTO,
-    SOURCE_CVAT,
-    TABLE_KINDS,
-    Page,
-    RectRegion,
-)
+from ocr_utils.db.models import KIND_GRAYSCALE, KIND_TABLE, SOURCE_AUTO, SOURCE_CVAT, TABLE_KINDS, Page, RectRegion
 from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
 from ocr_utils.scan_markup.table_detection import TABLE_DETECTOR_VERSION

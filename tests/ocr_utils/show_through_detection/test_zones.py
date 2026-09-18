@@ -74,7 +74,7 @@ def test_otsu_level_matches_real_scans() -> None:
     assert 0.55 < zones.otsu < 0.75, f"порог Оцу синтетики уехал: {zones.otsu:.3f}"
 
 
-def test_paper_level_is_about_one_after_normalisation() -> None:
+def test_paper_level_is_about_one_after_normalization() -> None:
     """Нормировка обязана приводить бумагу к единице при любой экспозиции.
 
     Это и есть ответ на «в разных выпусках разный цвет бумаги и освещение»: дальше

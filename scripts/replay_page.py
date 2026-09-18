@@ -4,7 +4,7 @@
 16 против 64 ``<supplied>`` при том же промпте), поэтому сравнивать версии промпта по одному прогону
 нельзя. Раньше такие повторы собирались в scratchpad-скриптах и терялись вместе с сессией (а один
 раз ушли впустую $0.30, потому что руками собранный payload не выключал ``reasoning``). Здесь
-запрос идёт через ``ocr.recognise_page`` — тот же код, что в прогоне: тайлы, цепочка режимов
+запрос идёт через ``ocr.recognize_page`` — тот же код, что в прогоне: тайлы, цепочка режимов
 JSON, ``reasoning.effort none``, разбор, теги из ``edge_words``, доводка структуры — только без
 второго прохода и без оглавления выпуска (список статей в промпт не уходит).
 
@@ -19,11 +19,11 @@ JSON, ``reasoning.effort none``, разбор, теги из ``edge_words``, д�
     uv run python scripts/replay_page.py run ... --out-dir .../damaged_v15 --prompts-dir /tmp/prompts_v15
 
     # сводка по повторам (и сходство с другим прогоном тех же полос)
-    uv run python scripts/replay_page.py summarise --out-dir .../damaged_v16 [--baseline-dir .../damaged_v15]
+    uv run python scripts/replay_page.py summarize --out-dir .../damaged_v16 [--baseline-dir .../damaged_v15]
 
 Выход ``run``: ``<out-dir>/run1/``, ``run2/`` … с той же раскладкой, что у прогона
 (``.json``/``.md``/``.meta.json`` по полосе); сырые ответы, промпты и тайлы первого повтора — в
-``<out-dir>/debug/``. Сводка ``summarise`` печатается в терминал и пишется в ``<out-dir>/summary.md``.
+``<out-dir>/debug/``. Сводка ``summarize`` печатается в терминал и пишется в ``<out-dir>/summary.md``.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from ocr_utils.external_ocr_services import PROMPT_VERSION, prompts  # noqa: E40
 from ocr_utils.external_ocr_services import models as registry  # noqa: E402
 from ocr_utils.external_ocr_services import ocr as ocr_module  # noqa: E402
 from ocr_utils.external_ocr_services.client import OpenRouterClient, api_key_from  # noqa: E402
-from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, recognise_page  # noqa: E402
+from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, recognize_page  # noqa: E402
 from ocr_utils.external_ocr_services.pages import list_pages  # noqa: E402
 from ocr_utils.external_ocr_services.schema import DamageTag  # noqa: E402
 from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE  # noqa: E402
@@ -84,7 +84,7 @@ def use_prompts_dir(prompts_dir: Path) -> None:
     logger.info("промпты из %s%s", prompts_dir, " (+ damage_note.txt)" if note.is_file() else "")
 
 
-def _recognise_one(
+def _recognize_one(
     client: OpenRouterClient, spec, in_dir: Path, out_dir: Path, options: RunOptions, joiner, rel: Path
 ) -> tuple[Path, dict]:
     """Одна полоса одним проходом — для пула потоков.
@@ -101,10 +101,10 @@ def _recognise_one(
     Returns:
         ``(rel, meta)`` — meta как записана в ``.meta.json`` (при склейке — плюс ``hyphens_joined``).
     """
-    meta, result = recognise_page(client, spec, in_dir / rel, PageJob(rel), out_dir, options)
+    meta, result = recognize_page(client, spec, in_dir / rel, PageJob(rel), out_dir, options)
     if joiner is not None and result is not None:
         # Склейка — поверх готового выхода: .json/.md перезаписываются, число склеек — в meta.
-        from ocr_utils.experimental.hyphen_join import join_broken_hyphens  # noqa: PLC0415
+        from ocr_utils.external_ocr_services.hyphen_join import join_broken_hyphens  # noqa: PLC0415
 
         result.content_markdown, report = join_broken_hyphens(result.content_markdown, *joiner)
         meta = dict(meta, hyphens_joined=len(report.joined), hyphens_kept=len(report.kept))
@@ -167,7 +167,7 @@ def main() -> None:
 @click.option(
     "--join-hyphens",
     default=None,
-    help="Склейка переносов после разбора: БЭКЕНД:ПРАВИЛО, например pymorphy3:E (experimental.hyphen_join).",
+    help="Дополнительная склейка переносов другим бэкендом/правилом: БЭКЕНД:ПРАВИЛО (боевая pymorphy3:E идёт всегда, --no-join нет).",
 )
 def run_command(
     in_dir: Path,
@@ -196,7 +196,7 @@ def run_command(
     hinted = use_hints(hints_csv) if hints_csv is not None else None
     joiner = None
     if join_hyphens is not None:
-        from ocr_utils.experimental.hyphen_join import JoinRule, Morph  # noqa: PLC0415
+        from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph  # noqa: PLC0415
 
         backend, _, rule = join_hyphens.partition(":")
         joiner = (Morph(backend), JoinRule(rule or "E"))
@@ -217,7 +217,7 @@ def run_command(
             debug_dir=out_dir / "debug" if index == 1 else None,
             second_pass=False,
         )
-        work = partial(_recognise_one, client, spec, in_dir, run_dir, options, joiner)
+        work = partial(_recognize_one, client, spec, in_dir, run_dir, options, joiner)
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             for rel, meta in pool.map(work, rels):
                 total_cost += float(meta.get("cost_usd") or 0.0)
@@ -232,7 +232,7 @@ def run_command(
     )
     if hinted is not None:
         logger.info("подсказка нашлась для %d запросов", hinted.used)
-    click.echo(f"Готово: {len(rels)} полос × {repeats}, ${total_cost:.4f}; сводка — summarise --out-dir {out_dir}")
+    click.echo(f"Готово: {len(rels)} полос × {repeats}, ${total_cost:.4f}; сводка — summarize --out-dir {out_dir}")
 
 
 @dataclass(frozen=True)
@@ -384,7 +384,7 @@ def _totals(pages: dict[str, list[PageMetrics | None]], run_index: int) -> dict[
     }
 
 
-@main.command("summarise")
+@main.command("summarize")
 @click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option(
     "--baseline-dir",
@@ -404,7 +404,7 @@ def _totals(pages: dict[str, list[PageMetrics | None]], run_index: int) -> dict[
     default=None,
     help="Папка полос выпуска (для порядка страниц PDF), например SHARPENED_DIR/1966/03.",
 )
-def summarise_command(
+def summarize_command(
     out_dir: Path, baseline_dir: Path | None, reference_pdf: Path | None, issue_dir: Path | None
 ) -> None:
     """Таблица по полосам и повторам: флаг, теги, edge_words, «[неразборчиво]», дефисы, длина, сходство, CER."""

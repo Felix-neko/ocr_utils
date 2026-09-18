@@ -85,7 +85,7 @@ def test_hinted_prompts_replace_default_note_only_when_hint_exists(tmp_path):
 @pytest.mark.parametrize("backend", ["pymorphy3", "mawo"])
 def test_join_broken_hyphens_by_dictionary(backend):
     pytest.importorskip("pymorphy3" if backend == "pymorphy3" else "mawo_pymorphy3")
-    from ocr_utils.experimental.hyphen_join import JoinRule, Morph, join_broken_hyphens
+    from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, join_broken_hyphens
 
     morph = Morph(backend)
     text = "взять кре-диты и ва<supplied>л</supplied>ютных, материально-техническое, когда-нибудь, Мифи-нанц"

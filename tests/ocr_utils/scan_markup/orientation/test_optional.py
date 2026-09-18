@@ -105,7 +105,7 @@ def test_correction_meaning_is_taken_as_is(monkeypatch):
     assert verdicts[0].rotate_cw == 90
 
 
-def test_input_is_shaped_and_normalised_by_the_description(monkeypatch):
+def test_input_is_shaped_and_normalized_by_the_description(monkeypatch):
     """Размер и раскладка берутся из описания: угадывать их нельзя, чужая нормировка
     не роняет модель, а тихо превращает её ответы в правдоподобную чушь."""
     _, session = run_with(monkeypatch, {**BASE_CONFIG, "meaning": "correction"}, [[9.0, 0.0, 0.0, 0.0]])

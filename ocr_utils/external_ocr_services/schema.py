@@ -136,7 +136,7 @@ class IllustrationKind(StrEnum):
 
 
 # Старые XML-обёртки иллюстраций (промпты v10–v14): тег по виду вокруг block quote. Читаются из
-# прежних .json и «по памяти» модели и переводятся в fenced-блок (``modernise_illustrations``).
+# прежних .json и «по памяти» модели и переводятся в fenced-блок (``modernize_illustrations``).
 LEGACY_ILLUSTRATION_TAGS = {
     "schema": IllustrationKind.SCHEMA,
     "photo": IllustrationKind.PHOTO,
@@ -643,7 +643,7 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         toc_kind = TocKind.CONTENTS if payload.get("is_toc") else TocKind.NONE
     title_in_list = payload.get("title_in_list")
     return PageResult(
-        content_markdown=expand_gaps(modernise_illustrations(modernise_tags(normalise_tags(unspace_letters(body))))),
+        content_markdown=expand_gaps(modernize_illustrations(modernize_tags(normalize_tags(unspace_letters(body))))),
         page_number=_text_or_none(payload.get("page_number")),
         running_header=_text_or_none(payload.get("running_header")),
         running_footer=_text_or_none(payload.get("running_footer")),
@@ -790,7 +790,7 @@ _KNOWN_TAGS = (
 _TAG_LIKE = re.compile(r"<(\s*/?)\s*([A-Za-z_\-\u0400-\u04FF]+)\s*(/?)\s*>")
 
 
-def _normalise_tag(match: re.Match) -> str:
+def _normalize_tag(match: re.Match) -> str:
     """Замена одного тега-кандидата: омоглифы → латиница, пробелы убраны; чужие имена не трогаются.
 
     Args:
@@ -808,7 +808,7 @@ def _normalise_tag(match: re.Match) -> str:
     return f"<{'/' if closing.strip() else ''}{latin}{'/' if selfclose else ''}>"
 
 
-def normalise_tags(text: str) -> str:
+def normalize_tags(text: str) -> str:
     """Привести написание наших тегов к каноническому: ``<тoc>``, ``< toc>``, ``</ toc >`` → ``<toc>`` / ``</toc>``.
 
     Args:
@@ -817,10 +817,10 @@ def normalise_tags(text: str) -> str:
     Returns:
         Текст, где имена известных тегов написаны латиницей без пробелов; остальной текст не меняется.
     """
-    return _TAG_LIKE.sub(_normalise_tag, text)
+    return _TAG_LIKE.sub(_normalize_tag, text)
 
 
-def modernise_tags(text: str) -> str:
+def modernize_tags(text: str) -> str:
     """Теги прежних промптов в тексте → TEI: ``<restored>``→``<supplied>``, ``<fuzzy>``→``<unclear>``,
     ``<unknown/>``→``<gap>▒▒▒</gap>``; модель иногда пишет их по памяти.
 
@@ -835,7 +835,7 @@ def modernise_tags(text: str) -> str:
 
 
 def _modern_tag(match: re.Match) -> str:
-    """Замена одного прежнего тега на новый (для ``modernise_tags``).
+    """Замена одного прежнего тега на новый (для ``modernize_tags``).
 
     Args:
         match: Совпадение ``_LEGACY_TAG``.
@@ -860,7 +860,7 @@ _LEGACY_ILLUSTRATION_HEAD = re.compile(r"^\[(?P<kind>[^\]:]+?)(?::\s*(?P<caption
 
 
 def _modern_illustration(match: re.Match) -> str:
-    """Один старый блок иллюстрации → fenced-блок нового формата (для ``modernise_illustrations``).
+    """Один старый блок иллюстрации → fenced-блок нового формата (для ``modernize_illustrations``).
 
     Args:
         match: Совпадение ``_LEGACY_ILLUSTRATION``: тег и тело block quote.
@@ -886,7 +886,7 @@ def _modern_illustration(match: re.Match) -> str:
     return "```\n" + "\n".join(out) + "\n```"
 
 
-def modernise_illustrations(text: str) -> str:
+def modernize_illustrations(text: str) -> str:
     """Иллюстрации прежних промптов (v10–v14: block quote в теге ``<schema>``/``<photo>``/``<line_art>``)
     → fenced-блок с видом первой строкой; тело без старых блоков не меняется.
 

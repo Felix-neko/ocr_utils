@@ -12,7 +12,7 @@ from PIL import Image
 from ocr_utils.external_ocr_services import cli, pipeline
 from ocr_utils.external_ocr_services.client import ChatResponse, OpenRouterError
 from ocr_utils.external_ocr_services.models import resolve
-from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, build_payload, is_done, recognise_page
+from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, build_payload, is_done, recognize_page
 from ocr_utils.external_ocr_services.pages import PageFlags
 from ocr_utils.external_ocr_services.pipeline import (
     PipelineParams,
@@ -188,7 +188,7 @@ def test_missed_toc_skip_writes_list_and_veto_silences(tmp_path):
 
 
 @pytest.mark.parametrize("redo_scope", [RedoScope.ALL, RedoScope.STRUCTURED])
-def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path, redo_scope):
+def test_missed_toc_redo_rebuilds_lists_and_rerecognizes(tmp_path, redo_scope):
     _make_pages(tmp_path / "in")
     # Полоса IMG_0002 делается выше остальных: при шаге сетки 700 px только она уходит двумя тайлами,
     # и фейк узнаёт её по фразе про тайлы в пользовательском промпте — так ответ не зависит от
@@ -340,7 +340,7 @@ def test_request_and_parse_failures_are_not_done(tmp_path):
     job = PageJob(rel, "page", "none", "1966", (), (), "abc")
     spec = resolve("deepseek-v41-flash")
     out = tmp_path / "out"
-    meta, result = recognise_page(
+    meta, result = recognize_page(
         FakeClient(lambda p: OpenRouterError("HTTP 402", 402, "no credits")),
         spec,
         tmp_path / "in" / rel,
@@ -349,12 +349,12 @@ def test_request_and_parse_failures_are_not_done(tmp_path):
         RunOptions(),
     )
     assert "402" in meta["error"] and result is None and not is_done(out, job)
-    meta, result = recognise_page(
+    meta, result = recognize_page(
         FakeClient(lambda p: "это не json"), spec, tmp_path / "in" / rel, job, out, RunOptions()
     )
     assert meta["parse_error"] and (out / ISSUE / "IMG_0002.raw.txt").read_text(encoding="utf-8") == "это не json"
     assert not is_done(out, job)
-    meta, result = recognise_page(FakeClient(lambda p: _answer()), spec, tmp_path / "in" / rel, job, out, RunOptions())
+    meta, result = recognize_page(FakeClient(lambda p: _answer()), spec, tmp_path / "in" / rel, job, out, RunOptions())
     assert result is not None and is_done(out, job) and not (out / ISSUE / "IMG_0002.raw.txt").exists()
     assert not is_done(out, PageJob(rel, "page", "none", "1966", (), (), "другой"))
     assert not is_done(out, PageJob(rel, "toc", "contents", "1966"))
@@ -370,7 +370,7 @@ def test_schema_rejected_falls_back_and_reasoning_removed(tmp_path):
         _answer(),
     ]
     fake = FakeClient(lambda p: answers.pop(0))
-    meta, result = recognise_page(
+    meta, result = recognize_page(
         fake, resolve("gemini-31-flash-lite"), tmp_path / "in" / rel, job, tmp_path / "out", RunOptions()
     )
     assert meta["error"] is None and meta["json_mode_used"] == "json_object" and meta["reasoning_sent"] is False
@@ -438,7 +438,7 @@ def test_response_format_echo_is_retried_without_format(tmp_path):
     rel = Path(ISSUE) / "IMG_0002.jpg"
     answers = ['{"type": "json_object"}', _answer()]
     fake = FakeClient(lambda p: answers.pop(0))
-    meta, result = recognise_page(
+    meta, result = recognize_page(
         fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", RunOptions()
     )
     assert result is not None and meta["json_mode_used"] == "none" and meta["cost_usd_wasted"] == 0.001
@@ -455,7 +455,7 @@ def test_page_stage_moves_author_after_listed_heading(tmp_path):
         {"name": "С. Демидов", "position": None, "article": "starts_here", "printed": "running_header"}
     ]
     job = PageJob(rel, "page", "none", "1966", (), ({"title": "Первые шаги", "authors": []},), "h")
-    meta, result = recognise_page(
+    meta, result = recognize_page(
         FakeClient(lambda p: json.dumps(answer, ensure_ascii=False)),
         resolve("deepseek-v41-flash"),
         tmp_path / "in" / rel,

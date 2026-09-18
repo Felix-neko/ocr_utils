@@ -19,7 +19,7 @@ import click
 from research.external_ocr_models import models as registry
 from research.external_ocr_models.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
 from research.external_ocr_models.imaging import DEFAULT_MAX_SIDE, DEFAULT_QUALITY
-from research.external_ocr_models.ocr import DEFAULT_MAX_TOKENS, RunOptions, is_done, recognise_page
+from research.external_ocr_models.ocr import DEFAULT_MAX_TOKENS, RunOptions, is_done, recognize_page
 
 logger = logging.getLogger("research.external_ocr_models")
 
@@ -328,7 +328,7 @@ def _run_remote(
         options.max_side,
     )
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = {pool.submit(recognise_page, client, spec, in_dir / rel, rel, out_dir, options): rel for rel in rels}
+        futures = {pool.submit(recognize_page, client, spec, in_dir / rel, rel, out_dir, options): rel for rel in rels}
         for future in as_completed(futures):
             rel = futures[future]
             try:

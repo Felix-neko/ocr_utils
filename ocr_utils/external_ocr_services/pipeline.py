@@ -45,8 +45,8 @@ from ocr_utils.external_ocr_services.ocr import (
     load_result,
     output_paths,
     read_meta,
-    recognise_page,
-    recognise_with_second_pass,
+    recognize_page,
+    recognize_with_second_pass,
     save_demoted_toc,
     write_meta,
 )
@@ -125,7 +125,7 @@ _AUTHOR_TAGS = (StructureTag.AUTHOR, StructureTag.POSITION)
 
 
 # Колонки сводки прогона; пересобирается по всем .meta.json под out-dir. Ключи совпадают с
-# ключами meta полосы (см. ocr.recognise_page), лишние ключи meta в сводку не попадают.
+# ключами meta полосы (см. ocr.recognize_page), лишние ключи meta в сводку не попадают.
 SUMMARY_FIELDS = (
     "page",
     "stage",
@@ -155,6 +155,7 @@ SUMMARY_FIELDS = (
     "toc_articles",
     "tags",
     "is_damaged",
+    "hyphens_joined",
     "messages",
     "parse_error",
     "error",
@@ -235,7 +236,7 @@ class PipelineStats:
         )
 
 
-def _recognise_one(
+def _recognize_one(
     client: OpenRouterClient, spec: ModelSpec, params: PipelineParams, job: PageJob
 ) -> tuple[PageJob, dict, PageResult | None]:
     """Одна полоса в потоке пула: первый проход и, если полоса повреждена, второй.
@@ -251,19 +252,19 @@ def _recognise_one(
         полосы как записана в ``.meta.json`` и разобранный результат — ``None`` при сбое сети или
         разбора (причина — в ``meta["error"]`` / ``meta["parse_error"]``).
     """
-    # Второй проход (по умолчанию выключен, ``--second-pass``) — обёртка над recognise_page: та же полоса ещё раз
+    # Второй проход (по умолчанию выключен, ``--second-pass``) — обёртка над recognize_page: та же полоса ещё раз
     # с подсказками первого ответа, если модель сочла её повреждённой; выбор финала — внутри.
-    recognise = recognise_with_second_pass if params.options.second_pass else recognise_page
-    meta, result = recognise(client, spec, params.in_dir / job.rel, job, params.out_dir, params.options)
+    recognize = recognize_with_second_pass if params.options.second_pass else recognize_page
+    meta, result = recognize(client, spec, params.in_dir / job.rel, job, params.out_dir, params.options)
     return job, meta, result
 
 
-def _recognise_many(
+def _recognize_many(
     client: OpenRouterClient, spec: ModelSpec, params: PipelineParams, jobs: list[PageJob], reuse: bool
 ) -> tuple[dict[Path, PageResult | None], PipelineStats]:
     """Полосы пачкой в пуле потоков; готовые (по ``is_done``) не запрашиваются, если ``reuse``.
 
-    Файлы выхода пишет сам ``recognise_*`` — здесь только счётчики и лог.
+    Файлы выхода пишет сам ``recognize_*`` — здесь только счётчики и лог.
 
     Args:
         client: Клиент OpenRouter, общий на прогон.
@@ -294,7 +295,7 @@ def _recognise_many(
 
     # Пул потоков, не процессов: работа — ожидание сети, GIL не мешает; тайлы режутся в потоке
     # перед запросом. pool.map отдаёт результаты в порядке очереди, счётчики правятся в одном потоке.
-    work = partial(_recognise_one, client, spec, params)
+    work = partial(_recognize_one, client, spec, params)
     with ThreadPoolExecutor(max_workers=max(1, params.jobs)) as pool:
         for job, meta, result in pool.map(work, todo):
             stats.requests += 1
@@ -529,7 +530,7 @@ def keep_unchanged_pages(
     """Круг повтора по ``--redo-scope structured``: разделить обычные полосы на «оставить» и «заново».
 
     У оставленных полос meta переписывается с новым ``toc_hash`` и пометкой ``redo_kept`` —
-    дальше штатный ``is_done`` считает их готовыми, и ``_recognise_many`` берёт их с диска.
+    дальше штатный ``is_done`` считает их готовыми, и ``_recognize_many`` берёт их с диска.
     ``articles_in_prompt`` не трогается: список в их промпте был старый, и это должно быть видно.
 
     Args:
@@ -630,7 +631,7 @@ def run_issue(
 
     # Этап 1: полосы оглавления/указателя — без списка статей (его ещё нет), с видом полосы в промпте.
     toc_jobs = [PageJob(rel, Stage.TOC, kind, year) for rel, kind in toc_pages.items()]
-    toc_results, toc_stats = _recognise_many(client, spec, params, toc_jobs, reuse)
+    toc_results, toc_stats = _recognize_many(client, spec, params, toc_jobs, reuse)
     stats = stats + toc_stats
     # Слияние ответов по видам в порядке полос выпуска: продолжения списка дописываются к
     # рубрикам предыдущей полосы того же вида. Сбои этапа toc в результатах отсутствуют.
@@ -691,7 +692,7 @@ def run_issue(
         PageJob(rel, Stage.PAGE, TocKind.NONE, year, tuple(rubrics), tuple(articles), digest, None, rel in demoted)
         for rel in regular
     ]
-    page_results, page_stats = _recognise_many(client, spec, params, page_jobs, reuse)
+    page_results, page_stats = _recognize_many(client, spec, params, page_jobs, reuse)
     stats = stats + page_stats
 
     # Fallback: обычные полосы, на которых модель увидела оглавление или указатель. Полосы, где

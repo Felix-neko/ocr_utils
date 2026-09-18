@@ -9,7 +9,7 @@ from PIL import Image
 from research.external_ocr_models import cli, ocr
 from research.external_ocr_models.client import ChatResponse, OpenRouterError
 from research.external_ocr_models.models import resolve
-from research.external_ocr_models.ocr import RunOptions, build_payload, recognise_page
+from research.external_ocr_models.ocr import RunOptions, build_payload, recognize_page
 from research.external_ocr_models.imaging import prepare
 
 ANSWER = '{"page_number": "3", "running_header": "МТС", "running_footer": null, "is_toc": false, "content_markdown": "# Заголовок\\n\\n**И. Фетисов**\\n\\nТекст.", "notes": ""}'
@@ -75,7 +75,7 @@ def test_reasoning_rejected_is_resent_without_it(tmp_path):
     _make_pages(in_dir)
     rel = Path("1966/03/IMG_0104_2R.jpg")
     fake = FakeClient([OpenRouterError("HTTP 400", 400, "unknown parameter: reasoning"), ANSWER])
-    meta = recognise_page(fake, resolve("claude-haiku-45"), in_dir / rel, rel, out_dir, RunOptions())
+    meta = recognize_page(fake, resolve("claude-haiku-45"), in_dir / rel, rel, out_dir, RunOptions())
     assert meta["error"] is None and meta["json_mode_used"] == "json_schema" and meta["reasoning_sent"] is False
     assert "reasoning" not in fake.payloads[1]
 
@@ -140,7 +140,7 @@ def test_parse_failure_keeps_raw_and_is_redone(tmp_path):
     _make_pages(in_dir)
     rel = Path("1966/03/IMG_0104_2R.jpg")
     spec = resolve("gemini-31-flash-lite")
-    meta = recognise_page(FakeClient(["это не json"]), spec, in_dir / rel, rel, out_dir, RunOptions())
+    meta = recognize_page(FakeClient(["это не json"]), spec, in_dir / rel, rel, out_dir, RunOptions())
     assert (
         meta["parse_error"] and (out_dir / "1966/03/IMG_0104_2R.raw.txt").read_text(encoding="utf-8") == "это не json"
     )
@@ -152,7 +152,7 @@ def test_schema_rejected_falls_back_to_json_object(tmp_path):
     _make_pages(in_dir)
     rel = Path("1966/03/IMG_0104_2R.jpg")
     fake = FakeClient([OpenRouterError("HTTP 400", 400, "no structured outputs"), ANSWER])
-    meta = recognise_page(fake, resolve("gemini-31-flash-lite"), in_dir / rel, rel, out_dir, RunOptions())
+    meta = recognize_page(fake, resolve("gemini-31-flash-lite"), in_dir / rel, rel, out_dir, RunOptions())
     assert meta["error"] is None and meta["json_mode_used"] == "json_object"
     assert fake.payloads[1]["response_format"] == {"type": "json_object"}
     assert ocr.is_done(out_dir, rel)
@@ -162,7 +162,7 @@ def test_request_error_recorded(tmp_path):
     in_dir, out_dir = tmp_path / "in", tmp_path / "out"
     _make_pages(in_dir)
     rel = Path("1966/03/IMG_0104_2R.jpg")
-    meta = recognise_page(
+    meta = recognize_page(
         FakeClient([OpenRouterError("HTTP 402", 402, "no credits")]),
         resolve("gemini-31-flash-lite"),
         in_dir / rel,
@@ -192,7 +192,7 @@ def test_damage_tags_recorded_in_meta(tmp_path):
     _make_pages(in_dir)
     rel = Path("1966/03/IMG_0104_2R.jpg")
     answer = ANSWER.replace("Текст.", "<restored>Те</restored>кст <fuzzy>и</fuzzy> <unknown/> <fuzzy>хвост")
-    meta = recognise_page(
+    meta = recognize_page(
         FakeClient([answer]), resolve("gemini-31-flash-lite"), in_dir / rel, rel, out_dir, RunOptions(damage=True)
     )
     assert meta["tags"] == {"restored": 1, "fuzzy": 1, "unknown": 1} and "fuzzy" in meta["tag_warning"]

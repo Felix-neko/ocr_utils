@@ -424,7 +424,7 @@ def to_markdown(result: dict) -> str:
     return "\n".join(head) + result["content_markdown"].rstrip() + "\n"
 
 
-def recognise(scan: Path, hint: str, out_dir: Path, lang: str = PROMPT_LANG) -> dict:
+def recognize(scan: Path, hint: str, out_dir: Path, lang: str = PROMPT_LANG) -> dict:
     """Одна страница от картинки до трёх файлов; возвращает .meta.json в виде словаря."""
     out_dir.mkdir(parents=True, exist_ok=True)
     base = out_dir / scan.stem  # IMG_0006_L → IMG_0006_L.json / .md / .meta.json
@@ -494,7 +494,7 @@ def recognise(scan: Path, hint: str, out_dir: Path, lang: str = PROMPT_LANG) -> 
 
 def main() -> None:
     """Точка входа: константы SCAN, HINT, OUT_DIR, PROMPT_LANG → одна страница."""
-    recognise(SCAN, HINT, OUT_DIR, PROMPT_LANG)
+    recognize(SCAN, HINT, OUT_DIR, PROMPT_LANG)
 
 
 if __name__ == "__main__":

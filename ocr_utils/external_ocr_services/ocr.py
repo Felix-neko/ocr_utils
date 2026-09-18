@@ -23,6 +23,7 @@ from typing import Any
 from ocr_utils.external_ocr_services import PROMPT_VERSION
 from ocr_utils.external_ocr_services.client import ChatResponse, OpenRouterClient, OpenRouterError
 from ocr_utils.external_ocr_services.models import JsonMode, ModelSpec, Reasoning
+from ocr_utils.external_ocr_services.hyphen_join import default_morph, join_broken_hyphens
 from ocr_utils.external_ocr_services.prompts import system_prompt, user_prompt
 from ocr_utils.external_ocr_services import structure
 from ocr_utils.external_ocr_services import toc as toc_module
@@ -107,6 +108,11 @@ class RunOptions:
     # весь текст первого прохода.
     second_pass: bool = False
     second_pass_transcript: bool = False
+    # Склейка разорванных переносов («кре-диты» → «кредиты») по словарю pymorphy3 после доводки
+    # структуры: на полосе с обрезанным краем модель в части ответов оставляет переносы как
+    # напечатано (с. 47 МТС 1991/02 — 38 из 39), промптом не лечится. Правило E: 77/79 переносов,
+    # 1 ложное слияние на 234 составных (`reports/external_ocr_damaged_research.md`). ``--no-join-hyphens``.
+    join_hyphens: bool = True
 
 
 @dataclass(frozen=True)
@@ -538,7 +544,7 @@ def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], 
         paths.raw.write_text(raw, encoding="utf-8")
 
 
-def recognise_page(
+def recognize_page(
     client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, out_dir: Path, options: RunOptions
 ) -> tuple[dict, PageResult | None]:
     """Распознать одну полосу и записать выходы. Возвращает (meta, результат или None при сбое).
@@ -720,6 +726,11 @@ def recognise_page(
         # title_in_list модель проставляет сама; при непустом списке вердикт кода точнее.
         if titles and report.title_in_list is not None:
             result.title_in_list = report.title_in_list
+    if options.join_hyphens:
+        # Разорванные переносы («кре-диты») склеиваются по словарю; список склеек — в meta, чтобы при
+        # слиянии с FineReader видеть, где вмешался словарь, а не модель.
+        result.content_markdown, join_report = join_broken_hyphens(result.content_markdown, default_morph())
+        meta["hyphens_joined"] = join_report.joined
     # Два представления одного результата: .json — для сборки выпуска и повторов, .md — глазами.
     paths.json.write_text(result.to_json(), encoding="utf-8")
     paths.md.write_text(to_markdown(result), encoding="utf-8")
@@ -770,7 +781,7 @@ def write_meta(path: Path, meta: dict) -> None:
 
 
 def _write_outputs(out_dir: Path, rel: Path, result: PageResult, meta: dict) -> None:
-    """Финальные .json/.md/.meta.json полосы — тем же набором, что пишет :func:`recognise_page`.
+    """Финальные .json/.md/.meta.json полосы — тем же набором, что пишет :func:`recognize_page`.
 
     Args:
         out_dir: Корень выхода.
@@ -801,7 +812,7 @@ def _write_debug_copy(options: RunOptions, rel: Path, chosen: PassChoice, result
     paths.md.write_text(to_markdown(result), encoding="utf-8")
 
 
-def recognise_with_second_pass(
+def recognize_with_second_pass(
     client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, out_dir: Path, options: RunOptions
 ) -> tuple[dict, PageResult | None]:
     """Первый проход; если он счёл полосу повреждённой — второй с подсказкой из его ответа.
@@ -820,12 +831,12 @@ def recognise_with_second_pass(
             ``second_pass_transcript`` (слать ли текст первого прохода), debug-dir.
 
     Returns:
-        ``(meta, result)`` выбранного прохода, как у :func:`recognise_page`; при втором проходе в meta
+        ``(meta, result)`` выбранного прохода, как у :func:`recognize_page`; при втором проходе в meta
         добавлены ``second_pass`` (подробности), ``second_pass_reason``, ``second_pass_chosen`` и
         ``cost_usd`` — сумма обоих запросов.
     """
     # Первый проход — обычный запрос; его выход уже лежит под out-dir.
-    meta1, result1 = recognise_page(client, spec, in_path, job, out_dir, options)
+    meta1, result1 = recognize_page(client, spec, in_path, job, out_dir, options)
     # Сбой, этап TOC (оглавление не восстанавливаем) или проход выключен (умолчание) — без второго.
     if result1 is None or job.stage is not Stage.PAGE or not options.second_pass:
         return meta1, result1
@@ -845,7 +856,7 @@ def recognise_with_second_pass(
     _write_debug_copy(options, job.rel, PassChoice.PASS1, result1)
     # Та же полоса, тот же этап и списки, плюс подсказка; второй проход перезапишет .json/.md/meta.
     job2 = replace(job, second_pass=hint)
-    meta2, result2 = recognise_page(client, spec, in_path, job2, out_dir, options)
+    meta2, result2 = recognize_page(client, spec, in_path, job2, out_dir, options)
     tags2 = tag_counts(result2.content_markdown) if result2 is not None else None
     chosen, why = choose_final(tags1, tags2)
     # Всё о втором проходе — в meta финала под ключом second_pass; плоские second_pass_reason /

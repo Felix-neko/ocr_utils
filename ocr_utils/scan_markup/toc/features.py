@@ -173,7 +173,7 @@ def _levenshtein(a: str, b: str, limit: int) -> int:
     return previous[-1]
 
 
-def _normalise(text: str) -> str:
+def _normalize(text: str) -> str:
     return "".join(ch for ch in text.upper() if ch.isalpha()).replace("Ё", "Е")
 
 
@@ -197,7 +197,7 @@ def keyword_tokens(line_words: Sequence[Word]) -> list[Token]:
     spaced = ""
     for word in line_words:
         raw = "".join(ch for ch in word.text if ch.isalpha())
-        letters = _normalise(raw)
+        letters = _normalize(raw)
         if not letters:
             continue
         if len(letters) == 1:

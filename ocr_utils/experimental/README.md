@@ -11,7 +11,7 @@
 Зависимости морфологии — группа `experimental` в `pyproject.toml`:
 
 ```bash
-uv sync --group experimental          # pymorphy3 + pymorphy3-dicts-ru, mawo-pymorphy3
+uv sync --group experimental          # mawo-pymorphy3 для стенда сравнения; pymorphy3 — в основных
 uv run pytest tests/ocr_utils/experimental -q
 ```
 
@@ -19,7 +19,7 @@ uv run pytest tests/ocr_utils/experimental -q
 
 | модуль | что | стенд |
 |---|---|---|
-| `hyphen_join.py` | склейка разорванных переносов («кре-диты» → «кредиты») по словарю: `Morph(MorphBackend)` (`pymorphy3` / `mawo`), `JoinRule` A/C/D/E, `join_broken_hyphens(text, morph, rule) -> (text, JoinReport)`; теги `<supplied>`/`<unclear>` внутри слова сохраняются | `scripts/compare_hyphen_join.py` на разметке `run_scripts/experimental/hyphen_labels.csv` (322 дефисных слова: 79 переносов, 234 составных, 9 спорных); `replay_page.py run --join-hyphens pymorphy3:E` |
+| ~~`hyphen_join.py`~~ → `external_ocr_services/hyphen_join.py` | склейка разорванных переносов прошла порог и перенесена в боевой пакет (шаг `recognize_page`, `--no-join-hyphens` выключает); здесь остались стенд сравнения и разметка | `scripts/compare_hyphen_join.py` на разметке `run_scripts/experimental/hyphen_labels.csv` (322 дефисных слова: 79 переносов, 234 составных, 9 спорных); `replay_page.py run --join-hyphens pymorphy3:E` |
 | `strips.py` | полоса → горизонтальные полосы 1×N (`prepare_strips`), перекрытие 15 % высоты полосы; `rows_for_area` — сколько полос нужно, чтобы каждая уложилась в потолок площади DeepSeek (≈ 1.8 Мпкс, дальше провайдер ужимает картинку сам) | `replay_page.py run --rows N` (подмена `ocr.prepare_tiles`) |
 | `damage_hints.py` | подсказка о повреждении на страницу из CSV детектора корешка `gutter_loss_detection` (`hints_from_gutter_csv`, `HintedPrompts` вместо `ocr.prompts_for`); страница узнаётся по имени кадра `IMG_0006` → `_L`/`_R` (`_1L`/`_2R` у пака-1) | `replay_page.py run --hints-csv детектор.csv` |
 | `prompts_short/` | «ядро» промпта v16 без таблиц, иллюстраций, формул и структуры (≈ 940 слов против 2250) — проверка гипотезы «длинный промпт перегружает модель на повреждённых полосах» | `replay_page.py run --prompts-dir ocr_utils/experimental/prompts_short` |
@@ -30,8 +30,8 @@ uv run pytest tests/ocr_utils/experimental -q
   половина от 5 букв на «о» перед известным словом от 5 букв — составное, не трогать): 77 из 79
   переносов склеены (с. 47 — 36/36), 1 ложное слияние на 234 составных («узко-техническим»),
   загрузка 0.05 с, ≈ 1 мкс на слово с кэшем. `mawo-pymorphy3` непригоден: его `is_known` истинен
-  почти для любой склейки (227 из 234 составных слились бы). Кандидат на перенос в
-  `external_ocr_services.structure`.
+  почти для любой склейки (227 из 234 составных слились бы). **Перенесено** в
+  `external_ocr_services.hyphen_join` (19.09.2026).
 * **Детектор корешка как источник подсказок** — порог не пройден: на исходных разворотах
   мини-набора все 8 кадров с текстом у сгиба получили балл 0.97 и поле 0.03–0.05 шага строки
   независимо от того, скрыты буквы (IMG_0006/0008) или только сплющены и размыты

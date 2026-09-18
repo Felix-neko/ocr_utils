@@ -43,6 +43,8 @@ dependencies = [
     "cvat-sdk[masks]==2.70.0",
     "jinja2>=3.1",
     "openrouter>=1.1",
+    "pymorphy3>=2.0.6",
+    "pymorphy3-dicts-ru>=2.4.417150.4580142",
 ]
 
 [tool.uv]
@@ -72,6 +74,4 @@ dev = [
 ]
 experimental = [
     "mawo-pymorphy3>=1.0.4",
-    "pymorphy3>=2.0.6",
-    "pymorphy3-dicts-ru>=2.4.417150.4580142",
 ]

@@ -19,7 +19,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from research.deepseek_damage_lesson.ocr_damaged_page import HERE, recognise
+from research.deepseek_damage_lesson.ocr_damaged_page import HERE, recognize
 
 DAMAGED = HERE.parent / "external_ocr_models" / "damaged"
 PAGES_DIR = DAMAGED / "нарезанное по страницам"
@@ -72,7 +72,7 @@ def run_one(rel: str, hint: str, lang: str) -> dict:
     scan = PAGES_DIR / rel
     out_dir = OUT_DIR / lang / Path(rel).parent
     try:
-        meta = recognise(scan, hint, out_dir, lang)
+        meta = recognize(scan, hint, out_dir, lang)
     except SystemExit as error:  # сбой запроса или разбора — строка сводки с ошибкой
         meta = {"error": str(error), "tags": {}, "tags_from_edge_words": 0}
     meta["rel"], meta["lang"] = rel, lang

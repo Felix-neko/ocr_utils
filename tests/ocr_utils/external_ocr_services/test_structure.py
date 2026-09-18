@@ -135,7 +135,7 @@ def test_apply_all_and_report():
     assert report.title_in_list is True
 
 
-def test_rubric_is_recognised_before_heading_gets_demoted():
+def test_rubric_is_recognized_before_heading_gets_demoted():
     body = "## Читатель предлагает...\n\n# Укрепить дисциплину\n\nТекст.\n"
     out, report = apply(body, ["Другая статья"], ["Читатель предлагает"], [])
     # Рубрика из списка перед пониженным заголовком: `#` статьи этой рубрики на полосе нет — остаётся маркером.

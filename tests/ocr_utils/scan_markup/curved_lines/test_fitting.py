@@ -46,7 +46,7 @@ def test_centreline_is_ink_centre_of_mass_per_column():
     assert weights.tolist() == [3.0, 1.0]
 
 
-def test_page_stats_normalises_by_height_and_uses_long_lines_only():
+def test_page_stats_normalizes_by_height_and_uses_long_lines_only():
     xs = np.arange(0, 601, dtype=np.float64)
     curved = fitting.fit_line(xs, 10 + 4e-5 * (xs - 300) ** 2)
     straight = fitting.fit_line(xs, 10 + 0.0 * xs)

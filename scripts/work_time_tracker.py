@@ -164,7 +164,10 @@ def analyze_work_time(directory: Path, min_break_minutes: int = 15) -> None:
         total_break_time = timedelta()
 
         for i, (break_start, break_end, duration) in enumerate(breaks, 1):
-            print(f"{i}. {break_start.strftime('%H:%M:%S')} → {break_end.strftime('%H:%M:%S')} " f"({format_duration(duration)})")
+            print(
+                f"{i}. {break_start.strftime('%H:%M:%S')} → {break_end.strftime('%H:%M:%S')} "
+                f"({format_duration(duration)})"
+            )
             total_break_time += duration
 
         print("-" * 80)
@@ -188,7 +191,9 @@ def analyze_work_time(directory: Path, min_break_minutes: int = 15) -> None:
     print("=" * 80)
 
 
-def find_breaks(timestamps: List[Tuple[datetime, Path]], min_break_minutes: int) -> List[Tuple[datetime, datetime, timedelta]]:
+def find_breaks(
+    timestamps: List[Tuple[datetime, Path]], min_break_minutes: int
+) -> List[Tuple[datetime, datetime, timedelta]]:
     """
     Находит все перерывы >= заданной длительности.
 

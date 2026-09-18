@@ -38,7 +38,7 @@ def test_read_jpeg_info_reads_size_and_components():
     assert (gray.components, gray.color_space) == (1, pikepdf.Name.DeviceGray)
 
 
-def test_progressive_jpeg_is_recognised_and_refused():
+def test_progressive_jpeg_is_recognized_and_refused():
     """Прогрессивный JPEG PDF не декодирует — страница вышла бы пустой, а не кривой."""
     data = jpeg_bytes(progressive=True)
     assert read_jpeg_info(data).progressive

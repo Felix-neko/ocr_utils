@@ -267,7 +267,7 @@ def tile_counts(detection: Detection, shape: tuple[int, int], n: int = 3) -> np.
     return counts
 
 
-def summarise(name: str, detection: Detection, shape: tuple[int, int]) -> str:
+def summarize(name: str, detection: Detection, shape: tuple[int, int]) -> str:
     """Однострочная сводка по режиму детекции.
 
     Args:
@@ -339,7 +339,7 @@ def main() -> int:
                 detection = detect_page(predictor, gray, args.page_max_side or None, args.min_conf)
             else:
                 detection = detect_tiles(predictor, gray, args.tile_side, args.tile_overlap, args.min_conf, batch_size)
-            print(summarise(mode, detection, gray.shape))
+            print(summarize(mode, detection, gray.shape))
             save_overlay(args.out / f"{path.stem}_{mode}.jpg", gray, detection)
 
     print(f"\nНаложения: {args.out}")

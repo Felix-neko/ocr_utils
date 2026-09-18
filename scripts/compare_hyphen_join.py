@@ -1,4 +1,4 @@
-"""Сравнение бэкендов и правил склейки переносов (ocr_utils.experimental.hyphen_join) на размеченном корпусе.
+"""Сравнение бэкендов и правил склейки переносов (ocr_utils.external_ocr_services.hyphen_join) на размеченном корпусе.
 
 Корпус — `run_scripts/experimental/hyphen_labels.csv`: дефисные слова из выходов внешнего OCR
 (1991/02, 1966/03, 1976/12, мини-набор) и все 39 с с. 47 МТС 1991/02, каждое с меткой
@@ -22,7 +22,7 @@ import click
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ocr_utils.experimental.hyphen_join import JoinRule, Morph, MorphBackend, should_join  # noqa: E402
+from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, MorphBackend, should_join  # noqa: E402
 
 LABELS = Path(__file__).resolve().parents[1] / "run_scripts" / "experimental" / "hyphen_labels.csv"
 

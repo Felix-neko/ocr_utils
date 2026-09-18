@@ -25,15 +25,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
-from ocr_utils.db.models import (
-    KIND_COLOR,
-    KIND_GRAYSCALE,
-    SOURCE_AUTO,
-    Issue,
-    Page,
-    RectRegion,
-    YearPackage,
-)
+from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_AUTO, Issue, Page, RectRegion, YearPackage
 from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.detection.color_kind import (
     CHROMA_SELF_FRAC_THR,

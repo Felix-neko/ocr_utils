@@ -112,6 +112,12 @@ def main(log_level: str) -> None:
     "Выключен: на повреждённых полосах он то чинил, то портил текст (reports/external_ocr_hyphenation_second_pass.md).",
 )
 @click.option(
+    "--join-hyphens/--no-join-hyphens",
+    default=True,
+    show_default=True,
+    help="Склеивать разорванные переносы («кре-диты» → «кредиты») по словарю pymorphy3 после разбора; склейки — в meta.",
+)
+@click.option(
     "--second-pass-transcript",
     is_flag=True,
     help="Во второй проход (если включён) передавать и полный текст первого (иначе только описание, строки и счётчики).",
@@ -175,6 +181,7 @@ def run(
     quality: int,
     source: str,
     second_pass: bool,
+    join_hyphens: bool,
     second_pass_transcript: bool,
     reasoning: str | None,
     max_tokens: int,
@@ -224,6 +231,7 @@ def run(
         debug_dir=debug_dir,
         second_pass=second_pass,
         second_pass_transcript=second_pass_transcript,
+        join_hyphens=join_hyphens,
     )
     # Всё, что относится к прогону целиком: пути, флаги, отбор входа, параллелизм, fallback.
     params = PipelineParams(
