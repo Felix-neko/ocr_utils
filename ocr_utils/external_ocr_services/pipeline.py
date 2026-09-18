@@ -9,7 +9,9 @@
 увидела оглавление, которого в базе нет (и нет вето ``force_is_not_toc``), — предупреждение и,
 по ``--on-missed-toc``, повтор выпуска: найденные полосы распознаются как оглавление, список
 пересобирается, обычные полосы идут заново (у них меняется ``toc_hash``, готовые с прежним
-списком не считаются сделанными). Один круг повтора на выпуск.
+списком не считаются сделанными). Один круг повтора на выпуск. По ``--redo-scope structured``
+(умолчание) на этом круге заново запрашиваются не все обычные полосы, а только те, на которых
+списки выпуска вообще могут что-то изменить (см. :func:`redo_reason`); остальные берутся с диска.
 
 Запросы к сети — в пуле потоков ``--jobs`` внутри этапа; выпуски идут последовательно, потому
 что этап 2 зависит от этапа 1. В базу ничего не пишется: пропущенные оглавления складываются в
@@ -21,6 +23,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,12 +43,16 @@ from ocr_utils.external_ocr_services.ocr import (
     RunOptions,
     is_done,
     load_result,
+    output_paths,
+    read_meta,
     recognise_page,
     recognise_with_second_pass,
     save_demoted_toc,
+    write_meta,
 )
 from ocr_utils.external_ocr_services.pages import PageFlags, flags_for, group_by_issue, list_pages
-from ocr_utils.external_ocr_services.schema import PageResult, Stage, TocKind
+from ocr_utils.external_ocr_services.schema import PageResult, Stage, StructureTag, TocKind
+from ocr_utils.external_ocr_services.toc import normalize_title
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,49 @@ class OnMissedToc(StrEnum):
     SKIP = "skip"
 
 
+class RedoScope(StrEnum):
+    """Какие обычные полосы запрашивать заново на круге повтора выпуска (``--redo-scope``).
+
+    ``STRUCTURED`` (умолчание) — только полосы, на которых списки выпуска могут что-то изменить
+    (см. :func:`redo_reason`), остальные берутся с диска с новым ``toc_hash``; ``ALL`` — все
+    обычные полосы, как было до появления опции.
+    """
+
+    ALL = "all"
+    STRUCTURED = "structured"
+
+
+class RedoReason(StrEnum):
+    """Почему полоса идёт в сеть заново на круге повтора; пишется в лог по полосе.
+
+    ``DEMOTED`` — полоса понижена (в базе оглавление, модель: none) и идёт этапом page с новым
+    списком; ``HEADING`` — в теле есть заголовок ``#``/``##``; ``STRUCTURE_TAG`` — есть ``<rubric>``,
+    ``<marker>`` (так помечается рубрика-надпись не из списка), ``<author>`` или ``<position>``;
+    ``TITLE_OR_AUTHORS`` — модель заполнила ``title`` / ``rubric`` / ``authors``; всё это — не считая
+    текста колонтитула (``running_header`` / ``running_footer``); ``STRUCTURE_EDITS`` —
+    пост-обработка что-то правила (понижала ``#``, снимала утёкшие ``##``, переносила рубрики);
+    ``ARTICLE_START`` — номер страницы совпал с началом статьи по новому «Содержанию»;
+    ``NO_FIRST_PASS`` — результата первого круга на диске нет или он битый.
+    """
+
+    DEMOTED = "demoted"
+    HEADING = "heading"
+    STRUCTURE_TAG = "structure_tag"
+    TITLE_OR_AUTHORS = "title_or_authors"
+    STRUCTURE_EDITS = "structure_edits"
+    ARTICLE_START = "article_start"
+    NO_FIRST_PASS = "no_first_pass"
+
+
+# Строка-заголовок markdown любого уровня — признак полосы, чувствительной к спискам выпуска.
+_HEADING = re.compile(r"^#{1,6} (.+?)\s*$", re.M)
+# Рубрика или маркер с текстом: модель дублирует в них рубрику из колонтитула почти на каждой полосе
+# (МТС 1991/02: «ПРОБЛЕМЫ И СУЖДЕНИЯ» на с. 4–9), а колонтитул от списков выпуска не зависит.
+_RUBRIC_OR_MARKER = re.compile(rf"<({StructureTag.RUBRIC}|{StructureTag.MARKER})>\*{{0,2}}(.+?)\*{{0,2}}</\1>", re.S)
+# Теги, которые считаются признаком всегда: автор и должность привязываются к статье из списка.
+_AUTHOR_TAGS = (StructureTag.AUTHOR, StructureTag.POSITION)
+
+
 # Колонки сводки прогона; пересобирается по всем .meta.json под out-dir. Ключи совпадают с
 # ключами meta полосы (см. ocr.recognise_page), лишние ключи meta в сводку не попадают.
 SUMMARY_FIELDS = (
@@ -80,6 +130,7 @@ SUMMARY_FIELDS = (
     "toc_kind_expected",
     "toc_hash",
     "toc_demoted",
+    "redo_kept",
     "articles_in_prompt",
     "second_pass_reason",
     "second_pass_chosen",
@@ -118,6 +169,7 @@ class PipelineParams:
     jobs: int = 4  # потоков на сетевые запросы внутри этапа; ограничение — лимиты провайдера, не CPU
     skip_done: bool = False  # не запрашивать полосы, у которых выход на месте и совпадает toc_hash
     on_missed_toc: OnMissedToc = OnMissedToc.REDO  # что делать с оглавлением вне базы
+    redo_scope: RedoScope = RedoScope.STRUCTURED  # какие обычные полосы запрашивать заново на круге повтора
     pages_file: Path | None = None  # --pages: явный список относительных путей вместо обхода
     only_year: str | None = None  # --only-year / --only-issue: отбор по первым папкам пути
     only_issue: str | None = None
@@ -126,6 +178,7 @@ class PipelineParams:
     def __post_init__(self) -> None:
         # Строка из старых вызовов («redo») → перечисление; чужое значение падает сразу.
         self.on_missed_toc = OnMissedToc(self.on_missed_toc)
+        self.redo_scope = RedoScope(self.redo_scope)
 
 
 @dataclass
@@ -145,7 +198,38 @@ class PipelineStats:
     missed: list[str] = field(default_factory=list)  # «выпуск: полосы», где оглавление не в базе
     redone_issues: list[str] = field(default_factory=list)  # выпуски, прошедшие круг повтора
     demoted_toc: list[str] = field(default_factory=list)  # «выпуск: полосы», которые модель не признала оглавлением
+    redo_kept: int = 0  # полос, оставленных без повтора на круге повтора (--redo-scope structured)
     page_messages: int = 0  # полос с замечаниями пост-обработки (meta.messages)
+
+    def __add__(self, other: PipelineStats) -> PipelineStats:
+        """Сумма счётчиков двух прогонов (этапов, выпусков): числа складываются, списки склеиваются.
+
+        Ни один операнд не меняется — так этапы и выпуски отдают свои счётчики возвращаемым
+        значением, а вызывающий складывает их сам.
+
+        Args:
+            other: Счётчики, которые прибавляются к этим.
+
+        Returns:
+            Новый ``PipelineStats`` с суммой всех полей.
+        """
+        return PipelineStats(
+            issues=self.issues + other.issues,
+            pages=self.pages + other.pages,
+            requests=self.requests + other.requests,
+            reused=self.reused + other.reused,
+            failed=self.failed + other.failed,
+            cost_usd=self.cost_usd + other.cost_usd,
+            toc_pages=self.toc_pages + other.toc_pages,
+            unknown_pages=self.unknown_pages + other.unknown_pages,
+            second_passes=self.second_passes + other.second_passes,
+            second_pass_kept_first=self.second_pass_kept_first + other.second_pass_kept_first,
+            missed=self.missed + other.missed,
+            redone_issues=self.redone_issues + other.redone_issues,
+            demoted_toc=self.demoted_toc + other.demoted_toc,
+            redo_kept=self.redo_kept + other.redo_kept,
+            page_messages=self.page_messages + other.page_messages,
+        )
 
 
 def _recognise_one(
@@ -172,13 +256,8 @@ def _recognise_one(
 
 
 def _recognise_many(
-    client: OpenRouterClient,
-    spec: ModelSpec,
-    params: PipelineParams,
-    jobs: list[PageJob],
-    reuse: bool,
-    stats: PipelineStats,
-) -> dict[Path, PageResult | None]:
+    client: OpenRouterClient, spec: ModelSpec, params: PipelineParams, jobs: list[PageJob], reuse: bool
+) -> tuple[dict[Path, PageResult | None], PipelineStats]:
     """Полосы пачкой в пуле потоков; готовые (по ``is_done``) не запрашиваются, если ``reuse``.
 
     Файлы выхода пишет сам ``recognise_*`` — здесь только счётчики и лог.
@@ -189,13 +268,14 @@ def _recognise_many(
         params: Параметры прогона: пути, ``jobs`` (размер пула), настройки запроса.
         jobs: Задания на полосы одного этапа (у всех одинаковые списки выпуска).
         reuse: Брать ли готовые результаты с диска вместо запроса (``--skip-done`` или круг повтора).
-        stats: Счётчики прогона — сюда прибавляются запросы, повторы, сбои, стоимость.
 
     Returns:
-        Результат каждой полосы из ``jobs`` по её относительному пути: ``None`` у сбойных, чтобы
-        вызывающий отличал «сбой» от «полосы не было» (такой ключ отсутствует).
+        ``(результаты, счётчики)``: результат каждой полосы из ``jobs`` по её относительному пути —
+        ``None`` у сбойных, чтобы вызывающий отличал «сбой» от «полосы не было» (такой ключ
+        отсутствует); счётчики этого этапа — запросы, взятые с диска, сбои, стоимость, вторые проходы.
     """
     results: dict[Path, PageResult | None] = {}
+    stats = PipelineStats()
     todo: list[PageJob] = []
     for job in jobs:
         # Готовая полоса: выход на месте, без ошибки, тот же этап, тот же вид/отпечаток списков.
@@ -207,7 +287,7 @@ def _recognise_many(
                 continue
         todo.append(job)
     if not todo:
-        return results
+        return results, stats
 
     # Пул потоков, не процессов: работа — ожидание сети, GIL не мешает; тайлы режутся в потоке
     # перед запросом. pool.map отдаёт результаты в порядке очереди, счётчики правятся в одном потоке.
@@ -239,7 +319,7 @@ def _recognise_many(
                 meta.get("latency_s") or 0.0,
             )
             results[job.rel] = result
-    return results
+    return results, stats
 
 
 def build_issue_toc(
@@ -361,15 +441,111 @@ def _append_missed(out_dir: Path, issue_key: str, missed: list[tuple[Path, TocKi
             handle.write(f"{rel.as_posix()}  # {kind}, выпуск {issue_key}\n")
 
 
+def article_start_pages(toc: toc_module.IssueToc | None) -> set[str]:
+    """Номера страниц, с которых по «Содержанию» начинаются статьи, — как напечатаны, без пробелов.
+
+    Args:
+        toc: Слитое «Содержание» выпуска; ``None`` — оглавления нет.
+
+    Returns:
+        Множество строк-номеров (``{"3", "10", …}``); пустое, если оглавления нет или номера не указаны.
+    """
+    if toc is None:
+        return set()
+    return {article.page.strip() for article in toc.articles if article.page and article.page.strip()}
+
+
+def redo_reason(
+    result: PageResult | None, meta: dict | None, start_pages: set[str], demoted: bool
+) -> RedoReason | None:
+    """Надо ли запрашивать полосу заново на круге повтора, и почему.
+
+    Списки выпуска (рубрики и статьи «Содержания») влияют только на структуру ответа: ``#`` у
+    названий из списка, ``<rubric>`` / ``<marker>``, привязку ``<author>``, правки ``structure.apply``.
+    Полоса без единого такого признака при повторе даст тот же текст — её можно оставить.
+    Колонтитул не в счёт: заголовок, рубрика, маркер или поле ``rubric`` с текстом
+    ``running_header`` / ``running_footer`` — это переписанный колонтитул, списки его не меняют.
+
+    Args:
+        result: Результат первого круга (этап ``page``) с диска; ``None`` — нет или битый.
+        meta: Meta первого круга; ``None`` — нет или битая.
+        start_pages: Номера страниц начала статей по новому «Содержанию» (:func:`article_start_pages`).
+        demoted: Полоса понижена (шла этапом toc, модель сказала «не оглавление»).
+
+    Returns:
+        Причина повтора или ``None`` — полосу можно взять с диска как есть.
+    """
+    if demoted:
+        return RedoReason.DEMOTED
+    if result is None or meta is None:
+        return RedoReason.NO_FIRST_PASS
+    body = result.content_markdown
+    # Нормализованные колонтитулы — с ними сверяются заголовки, рубрики и маркеры на полосе.
+    headers = {normalize_title(text) for text in (result.running_header, result.running_footer) if text}
+    headers.discard("")
+    if any(normalize_title(text) not in headers for text in _HEADING.findall(body)):
+        return RedoReason.HEADING
+    if any(f"<{tag}>" in body for tag in _AUTHOR_TAGS):
+        return RedoReason.STRUCTURE_TAG
+    if any(normalize_title(text) not in headers for _, text in _RUBRIC_OR_MARKER.findall(body)):
+        return RedoReason.STRUCTURE_TAG
+    if result.title or result.authors or (result.rubric and normalize_title(result.rubric) not in headers):
+        return RedoReason.TITLE_OR_AUTHORS
+    # Пост-обработка что-то правила: следы лежат в meta.structure списками (пустые — не правила).
+    structure = meta.get("structure") or {}
+    if any(value for value in structure.values() if isinstance(value, list)):
+        return RedoReason.STRUCTURE_EDITS
+    # Страховка: по новому оглавлению здесь начинается статья, а заголовок первым проходом не выделен.
+    if result.page_number and result.page_number.strip() in start_pages:
+        return RedoReason.ARTICLE_START
+    return None
+
+
+def keep_unchanged_pages(
+    out_dir: Path, regular: list[Path], demoted: set[Path], digest: str, start_pages: set[str]
+) -> tuple[list[Path], dict[Path, RedoReason]]:
+    """Круг повтора по ``--redo-scope structured``: разделить обычные полосы на «оставить» и «заново».
+
+    У оставленных полос meta переписывается с новым ``toc_hash`` и пометкой ``redo_kept`` —
+    дальше штатный ``is_done`` считает их готовыми, и ``_recognise_many`` берёт их с диска.
+    ``articles_in_prompt`` не трогается: список в их промпте был старый, и это должно быть видно.
+
+    Args:
+        out_dir: Корень выхода — там лежат .json/.meta.json первого круга.
+        regular: Обычные полосы выпуска (включая понижённые).
+        demoted: Понижённые полосы — идут заново всегда.
+        digest: Отпечаток новых списков (``toc.toc_hash``).
+        start_pages: Номера страниц начала статей по новому «Содержанию».
+
+    Returns:
+        ``(оставленные полосы, {полоса: причина повтора} для остальных)``.
+    """
+    kept: list[Path] = []
+    redo: dict[Path, RedoReason] = {}
+    for rel in regular:
+        job = PageJob(rel, Stage.PAGE)
+        meta = read_meta(out_dir, rel)
+        # Битая или сбойная полоса первого круга — как «нет результата»: пойдёт заново.
+        result = load_result(out_dir, job) if meta and not (meta.get("error") or meta.get("parse_error")) else None
+        reason = redo_reason(result, meta, start_pages, rel in demoted)
+        if reason is not None:
+            redo[rel] = reason
+            continue
+        meta = dict(meta)
+        meta.update(toc_hash=digest, redo_kept=True)
+        write_meta(output_paths(out_dir, rel).meta, meta)
+        kept.append(rel)
+    return kept, redo
+
+
 def run_issue(
     client: OpenRouterClient,
     spec: ModelSpec,
     params: PipelineParams,
     issue_key: str,
     pages: list[Path],
-    stats: PipelineStats,
     extra_toc: dict[Path, TocKind] | None = None,
-) -> None:
+) -> PipelineStats:
     """Один выпуск целиком: этап toc, слияние, этап page, fallback.
 
     Последовательность: (1) полосы, которые база (или ``extra_toc``) считает оглавлением/указателем,
@@ -378,8 +554,9 @@ def run_issue(
     этапом ``page`` (``demoted_toc.txt``); (2) из «Содержания»
     берутся рубрики и статьи для промпта, остальные полосы идут этапом ``page``; (3) если модель на
     обычной полосе увидела оглавление, которого в базе нет, — предупреждение и, по
-    ``params.on_missed_toc``, один повторный вызов самой себя с этими полосами как оглавлением.
-    Ничего не возвращает: результат — файлы под ``params.out_dir`` и счётчики в ``stats``.
+    ``params.on_missed_toc``, один повторный вызов самой себя с этими полосами как оглавлением; по
+    ``params.redo_scope`` на этом круге заново идут либо все обычные полосы, либо только те, где
+    списки могут что-то изменить (:func:`redo_reason`). Файлы — под ``params.out_dir``.
 
     Args:
         client: Клиент OpenRouter; общий на весь прогон, потокобезопасный (ходит из пула потоков).
@@ -391,15 +568,19 @@ def run_issue(
             группируются под ключом ``«.»`` — года у них нет.
         pages: Все полосы выпуска (относительные пути), отсортированные по имени. Порядок важен:
             по нему сливаются многостраничные оглавления (продолжение — к предыдущей полосе).
-        stats: Счётчики прогона; сюда прибавляются запросы, сбои, стоимость, полосы без записи в
-            базе, а также ``missed`` / ``redone_issues`` для итоговой строки лога.
         extra_toc: Полосы, которые надо считать оглавлением помимо базы: ``{путь: «contents»
             | «index»}``. Заполняется только при повторном вызове из fallback (то, что модель нашла
             на обычных полосах); тег базы при этом главнее. ``None`` — обычный, первый вызов.
             Повторный вызов идёт с копией ``params``, где ``on_missed_toc=SKIP``: один круг на
             выпуск, иначе модель, «увидев» оглавление на очередной полосе, гоняла бы выпуск по кругу
             за деньги.
+
+    Returns:
+        Счётчики этого выпуска (обоих этапов и круга повтора, если он был): запросы, сбои,
+        стоимость, полосы без записи в базе, ``missed`` / ``redone_issues`` / ``demoted_toc`` /
+        ``redo_kept`` — вызывающий складывает их со своими через ``+``.
     """
+    stats = PipelineStats()
     # Ключ выпуска — «{год}/{выпуск}» относительно in-dir; год уходит в пользовательский промпт
     # («выпуск такого-то года»). Плоская папка без подпапок группируется под ключом «.», года нет.
     year = issue_key.split("/")[0] if issue_key != "." else ""
@@ -427,7 +608,8 @@ def run_issue(
 
     # Этап 1: полосы оглавления/указателя — без списка статей (его ещё нет), с видом полосы в промпте.
     toc_jobs = [PageJob(rel, Stage.TOC, kind, year) for rel, kind in toc_pages.items()]
-    toc_results = _recognise_many(client, spec, params, toc_jobs, reuse, stats)
+    toc_results, toc_stats = _recognise_many(client, spec, params, toc_jobs, reuse)
+    stats = stats + toc_stats
     # Слияние ответов по видам в порядке полос выпуска: продолжения списка дописываются к
     # рубрикам предыдущей полосы того же вида. Сбои этапа toc в результатах отсутствуют.
     tocs = build_issue_toc(pages, toc_pages, toc_results)
@@ -437,7 +619,8 @@ def run_issue(
     demoted = [rel for rel in pages if (result := toc_results.get(rel)) is not None and result.toc_kind is TocKind.NONE]
     for rel in demoted:
         save_demoted_toc(params.out_dir, rel, toc_results[rel])
-    if demoted:
+    # На круге повтора понижённые полосы те же (их ответ этапа toc взят с диска) — отчитаны первым кругом.
+    if demoted and extra_toc is None:
         stats.demoted_toc.append(f"{issue_key}: " + ", ".join(rel.name for rel in demoted))
         _append_demoted(params.out_dir, issue_key, demoted)
         logger.warning(
@@ -468,11 +651,26 @@ def run_issue(
 
     # Этап 2: все остальные полосы выпуска плюс понижённые, с рубриками и статьями «Содержания» в промпте.
     regular = [rel for rel in pages if rel not in toc_pages or rel in demoted]
+    # Круг повтора по --redo-scope structured: полосы, на которых новые списки ничего не изменят
+    # (нет заголовков, рубрик/маркеров/авторов, правок пост-обработки, и это не начало статьи по
+    # новому оглавлению), получают новый toc_hash в meta и ниже берутся с диска; остальные — заново.
+    if extra_toc is not None and params.redo_scope is RedoScope.STRUCTURED:
+        start_pages = article_start_pages(tocs.get(TocKind.CONTENTS))
+        kept, redo = keep_unchanged_pages(params.out_dir, regular, set(demoted), digest, start_pages)
+        stats.redo_kept += len(kept)
+        logger.info(
+            "%s: круг повтора — заново %d полос, оставлено без повтора %d:\n%s",
+            issue_key,
+            len(redo),
+            len(kept),
+            "\n".join(f"  {rel.name}: {reason}" for rel, reason in redo.items()),
+        )
     page_jobs = [
         PageJob(rel, Stage.PAGE, TocKind.NONE, year, tuple(rubrics), tuple(articles), digest, None, rel in demoted)
         for rel in regular
     ]
-    page_results = _recognise_many(client, spec, params, page_jobs, reuse, stats)
+    page_results, page_stats = _recognise_many(client, spec, params, page_jobs, reuse)
+    stats = stats + page_stats
 
     # Fallback: обычные полосы, на которых модель увидела оглавление или указатель. Полосы, где
     # человек поставил вето «Не оглавление», не считаются — модель на них ошибается регулярно
@@ -487,7 +685,7 @@ def run_issue(
         and not flags_for(rel, params.flags).force_is_not_toc
     ]
     if not missed:
-        return
+        return stats
     # В итоговую строку прогона — всегда, независимо от того, будет ли повтор.
     stats.missed.append(f"{issue_key}: " + ", ".join(rel.name for rel, _ in missed))
     # Решение — по --on-missed-toc: redo/skip без вопросов, ask — вопрос в терминал (без терминала
@@ -496,19 +694,16 @@ def run_issue(
     if decide_redo(params.on_missed_toc, issue_key, missed):
         stats.redone_issues.append(issue_key)
         # Тот же выпуск заново: найденные полосы — как оглавление, список пересобирается, обычные
-        # полосы с новым toc_hash не считаются готовыми и распознаются ещё раз.
-        run_issue(
-            client,
-            spec,
-            replace(params, on_missed_toc=OnMissedToc.SKIP),
-            issue_key,
-            pages,
-            stats,
-            extra_toc=dict(missed),
+        # полосы с новым toc_hash не считаются готовыми и распознаются ещё раз (все или только
+        # чувствительные к спискам — по redo_scope).
+        redo_stats = run_issue(
+            client, spec, replace(params, on_missed_toc=OnMissedToc.SKIP), issue_key, pages, extra_toc=dict(missed)
         )
+        stats = stats + redo_stats
     else:
         # Без повтора: полосы в missed_toc.txt — человеку на разметку в CVAT; в базу не пишем.
         _append_missed(params.out_dir, issue_key, missed)
+    return stats
 
 
 def collect_meta(out_dir: Path) -> list[dict]:
@@ -565,12 +760,17 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         Счётчики прогона (``PipelineStats``): выпуски, полосы, запросы, сбои, стоимость, список
         оглавлений вне базы — то, что CLI печатает в итоговых строках.
     """
-    stats = PipelineStats()
     # Отбор входа: обход in-dir или файл --pages, затем --only-year/--only-issue и --limit.
     rels = list_pages(params.in_dir, params.pages_file, params.only_year, params.only_issue, params.limit)
     # {«год/выпуск»: [полосы по имени]} — единица работы дальше выпуск, не полоса.
     groups = group_by_issue(rels)
-    stats.pages = len(rels)
+    # Свои счётчики прогона: сколько полос на входе, сколько из них база считает оглавлением;
+    # счётчики выпусков прибавляются ниже из возвращаемых значений run_issue.
+    stats = PipelineStats(
+        pages=len(rels),
+        issues=len(groups),
+        toc_pages=sum(1 for rel in rels if flags_for(rel, params.flags).toc_kind is not None),
+    )
     started = time.monotonic()
     logger.info(
         "%s (%s): выпусков %d, полос %d, потоков %d, тайл %d px → %d px",
@@ -585,11 +785,8 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     # Выпуски идут строго по одному: этап page зависит от этапа toc того же выпуска, а полосы
     # внутри этапа распараллеливает run_issue своим пулом потоков.
     for issue_key, pages in groups.items():
-        stats.issues += 1
         # Весь цикл выпуска: полосы оглавления → toc.json → остальные полосы со списком → fallback.
-        run_issue(client, spec, params, issue_key, pages, stats)
-    # Сколько полос входа база (или списки) считает оглавлением/указателем — для итоговой строки.
-    stats.toc_pages = sum(1 for rel in rels if flags_for(rel, params.flags).toc_kind is not None)
+        stats = stats + run_issue(client, spec, params, issue_key, pages)
     # Сводка строится по ВСЕМ .meta.json под out-dir, а не по этому прогону: с --skip-done прогон
     # видел только недоделанные полосы, а summary.csv должен описывать папку целиком.
     rows = collect_meta(params.out_dir)
@@ -639,6 +836,10 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     if stats.demoted_toc:
         logger.warning(
             "в базе оглавление, модель — нет (%d выпусков): %s", len(stats.demoted_toc), "; ".join(stats.demoted_toc)
+        )
+    if stats.redo_kept:
+        logger.info(
+            "круг повтора: без повтора оставлено %d полос (--redo-scope %s)", stats.redo_kept, params.redo_scope
         )
     if stats.missed:
         logger.warning("оглавления вне базы (%d выпусков): %s", len(stats.missed), "; ".join(stats.missed))

@@ -16,7 +16,7 @@ from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIM
 from ocr_utils.external_ocr_services.models import Reasoning
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions
 from ocr_utils.external_ocr_services.pages import flags_from_db, flags_from_lists
-from ocr_utils.external_ocr_services.pipeline import OnMissedToc, PipelineParams, run_pipeline
+from ocr_utils.external_ocr_services.pipeline import OnMissedToc, PipelineParams, RedoScope, run_pipeline
 from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE, DEFAULT_QUALITY
 
 logger = logging.getLogger("ocr_utils.external_ocr_services")
@@ -146,6 +146,13 @@ def main(log_level: str) -> None:
     show_default=True,
     help="Модель нашла оглавление вне базы: redo — перераспознать выпуск с ним (умолчание), ask — спросить в терминале (без терминала = skip), skip — только записать в missed_toc.txt.",
 )
+@click.option(
+    "--redo-scope",
+    type=click.Choice([scope.value for scope in RedoScope]),
+    default=RedoScope.STRUCTURED.value,
+    show_default=True,
+    help="Какие обычные полосы запрашивать заново на круге повтора: structured — только с заголовками, рубриками/маркерами, авторами, правками пост-обработки и начала статей по новому оглавлению (остальные берутся с диска); all — все.",
+)
 @click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
 @click.option("--log-level", default="INFO", show_default=True)
 def run(
@@ -172,6 +179,7 @@ def run(
     limit: int | None,
     skip_done: bool,
     on_missed_toc: str,
+    redo_scope: str,
     api_key: str | None,
     log_level: str,
 ) -> None:
@@ -217,6 +225,7 @@ def run(
         jobs=max(1, jobs),
         skip_done=skip_done,
         on_missed_toc=OnMissedToc(on_missed_toc),
+        redo_scope=RedoScope(redo_scope),
         pages_file=pages_file,
         only_year=only_year,
         only_issue=only_issue,

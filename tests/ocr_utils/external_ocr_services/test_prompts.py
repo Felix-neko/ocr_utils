@@ -9,8 +9,12 @@ def test_toc_stage_prompt():
     assert "ONLY `#` heading allowed is the main heading" in text and '"toc": {"kind"' in text
     assert "KNOWN STRUCTURE" not in text and "<supplied>" in text and "<gap>4</gap>" in text
     assert "▒" not in text and "at most 6" not in text, "число вместо повтора заполнителя"
-    # v10: предварительная классификация, список в <toc>, рубрики оглавления своим тегом и полностью.
-    assert "PRELIMINARILY classified" in text and "`<toc>` … `</toc>`" in text
+    # v10: предварительная классификация, рубрики оглавления своим тегом и полностью; v14: блок <toc>
+    # модель не пишет (тег искажался), его ставит код — в промптах тега нет вовсе.
+    assert "PRELIMINARILY classified" in text and "<toc>" not in text and "</toc>" not in text
+    assert "<toc>" not in user_prompt(1, 1, 1, stage="toc") and "<toc>" not in user_prompt(
+        1, 1, 1, stage="toc", toc_kind="index"
+    )
     assert "two are independent transcriptions" in text, "тело не сокращать из-за объекта toc (v13)"
     assert "<rubric_in_toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric_in_toc>" in text
     assert "never shortened" in text and "`<rubric>*ОПЫТ РАБОТЫ*</rubric>`" not in text

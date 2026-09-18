@@ -123,28 +123,38 @@ def _page():
 
 
 def test_parse_toc_block_entries_and_rubrics():
-    """Разбор блока: пункты с одним и двумя авторами, без автора, с номером выпуска; рубрики задают секции."""
+    """Разбор блока: пункты с одним и двумя авторами, без автора, с номером выпуска и «с.», пункт без тире; рубрики — контекст."""
     from ocr_utils.external_ocr_services.toc import parse_toc_block
 
     body = (
         "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги — 1\n\n"
         "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n"
         "- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
-        "- Семинар по совершенствованию — № 3, 92\n\nЛишний абзац.\n\n</toc>\n\nРедколлегия.\n"
+        "- Семинар по совершенствованию — № 3, 92\n- Указатель — № 12, с. 94\n- В указателе — 5, 49\n"
+        "- Информация — №№ 1, 2, 4\n- Новые книги № 1, с. 28; № 2, с. 20\n\nЛишний абзац.\n\n</toc>\n\nРедколлегия.\n"
     )
-    sections = parse_toc_block(body)
-    assert [s.rubric for s in sections] == [None, "ОПЫТ РАБОТЫ"]
-    first = sections[0].articles[0]
+    entries = parse_toc_block(body)
+    assert [e.rubric for e in entries] == [None] + ["ОПЫТ РАБОТЫ"] * 6
+    first = entries[0].article
     assert (first.title, first.page, first.issue, first.authors) == (
         "Первые шаги",
         "1",
         None,
         [{"name": "В. Тычинин", "position": None}],
     )
-    second, third = sections[1].articles
-    assert [a["name"] for a in second.authors] == ["И. Комаровский", "М. Кругман"] and second.page == "37"
-    assert (third.title, third.issue, third.page, third.authors) == ("Семинар по совершенствованию", "3", "92", [])
-    assert parse_toc_block("Обычный текст.\n") is None
+    assert [a["name"] for a in entries[1].article.authors] == ["И. Комаровский", "М. Кругман"] and entries[
+        1
+    ].article.page == "37"
+    assert (entries[2].article.title, entries[2].article.issue, entries[2].article.page) == (
+        "Семинар по совершенствованию",
+        "3",
+        "92",
+    )
+    assert (entries[3].article.issue, entries[3].article.page) == ("12", "94"), "«№ 12, с. 94»"
+    assert (entries[4].article.issue, entries[4].article.page) == ("5", "49"), "указатель без «№»: выпуск, страница"
+    assert (entries[5].article.issue, entries[5].article.page) == ("1", "4") and not entries[5].bare
+    assert entries[6].bare and entries[6].article.title.startswith("Новые книги") and entries[6].article.page is None
+    assert not any(e.bare for e in entries[:6]) and parse_toc_block("Обычный текст.\n") is None
 
 
 def test_reconcile_toc_body_without_entries_is_rebuilt():
@@ -177,6 +187,10 @@ def test_reconcile_toc_extra_body_entry_goes_to_toc_section():
     )
     out, page, check = reconcile_toc(body, _page())
     assert check.missing_in_body == [] and check.missing_in_toc == ["Планирование потребности"] and check.rebuilt
+    # Пункт без «— где» присутствием в теле считается, но в объект как новая статья не идёт.
+    bare_body = body.replace("</toc>", "- Заметка без номера страницы\n\n</toc>")
+    _, page2, check2 = reconcile_toc(bare_body, _page())
+    assert check2.missing_in_toc == ["Планирование потребности"] and sum(len(s.articles) for s in page2.sections) == 4
     added = page.sections[1].articles[-1]
     assert page.sections[1].rubric == "ОПЫТ РАБОТЫ" and added.title == "Планирование потребности" and added.page == "76"
     assert added.authors == [{"name": "П. Шейн", "position": None}] and "Планирование потребности — 76" in out

@@ -1,10 +1,11 @@
-"""Пайплайн выпуска на фейковом клиенте: этапы, списки в промпте, skip-done, fallback, вето."""
+"""Пайплайн выпуска на фейковом клиенте: этапы, списки в промпте, skip-done, fallback, вето, частичный повтор."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from PIL import Image
 
@@ -13,7 +14,15 @@ from ocr_utils.external_ocr_services.client import ChatResponse, OpenRouterError
 from ocr_utils.external_ocr_services.models import resolve
 from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, build_payload, is_done, recognise_page
 from ocr_utils.external_ocr_services.pages import PageFlags
-from ocr_utils.external_ocr_services.pipeline import PipelineParams, run_pipeline
+from ocr_utils.external_ocr_services.pipeline import (
+    PipelineParams,
+    PipelineStats,
+    RedoReason,
+    RedoScope,
+    redo_reason,
+    run_pipeline,
+)
+from ocr_utils.external_ocr_services.schema import PageResult
 from ocr_utils.external_ocr_services.tiling import prepare_tiles
 
 ISSUE = "1966/03"
@@ -177,7 +186,8 @@ def test_missed_toc_skip_writes_list_and_veto_silences(tmp_path):
     assert not stats.missed and not (params.out_dir / "missed_toc.txt").exists()
 
 
-def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path):
+@pytest.mark.parametrize("redo_scope", [RedoScope.ALL, RedoScope.STRUCTURED])
+def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path, redo_scope):
     _make_pages(tmp_path / "in")
     # Полоса IMG_0002 делается выше остальных: при шаге сетки 700 px только она уходит двумя тайлами,
     # и фейк узнаёт её по фразе про тайлы в пользовательском промпте — так ответ не зависит от
@@ -197,12 +207,13 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path):
         return _answer()
 
     fake.reply = reply
-    params = _params(tmp_path, on_missed_toc="redo")
+    params = _params(tmp_path, on_missed_toc="redo", redo_scope=redo_scope)
     params.options.max_src_tile = 700
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.redone_issues == [ISSUE] and stats.missed
     # 1 toc + 3 page + 1 toc (найденная) + 2 page заново = 7 запросов; первая toc-полоса переиспользована.
-    assert stats.requests == 7 and stats.reused == 1
+    # При structured обе обычные полосы тоже идут заново: у них в теле есть `# Заголовок`.
+    assert stats.requests == 7 and stats.reused == 1 and stats.redo_kept == 0
     toc = json.loads((params.out_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
     titles = [a["title"] for s in toc["contents"]["sections"] for a in s["articles"]]
     assert titles == ["Первые шаги", "Третий шаг"] and toc["contents"]["continuations"] == 1
@@ -215,6 +226,98 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path):
     assert metas["IMG_0001.jpg"]["stage"] == "toc" and metas["IMG_0003.jpg"]["stage"] == "page"
     assert len({metas[n]["toc_hash"] for n in ("IMG_0003.jpg", "IMG_0004.jpg")}) == 1
     assert not (params.out_dir / "missed_toc.txt").exists()
+
+
+def test_missed_toc_redo_structured_keeps_plain_pages(tmp_path):
+    """Круг повтора по structured: полоса сплошного текста берётся с диска, полоса с заголовком — заново."""
+    _make_pages(tmp_path / "in")
+    # Полосы различаются числом тайлов: IMG_0002 (2 тайла) — найденное оглавление, IMG_0004 (3 тайла) —
+    # сплошной текст без заголовков и тегов; IMG_0003 (1 тайл) — с заголовком.
+    Image.new("L", (400, 900), 230).save(tmp_path / "in" / ISSUE / "IMG_0002.jpg")
+    Image.new("L", (400, 2000), 230).save(tmp_path / "in" / ISSUE / "IMG_0004.jpg")
+    fake = FakeClient(lambda p: None)
+
+    def reply(payload):
+        user = payload["messages"][1]["content"][0]["text"]
+        if fake.stage_of(payload) == "toc":
+            if "2 overlapping tiles" in user:
+                return _toc_answer(["Третий шаг"], rubric=None, continues=True)
+            return _toc_answer(["Первые шаги"])
+        if "2 overlapping tiles" in user:
+            return _answer("contents")
+        if "3 overlapping tiles" in user:
+            return _answer(body="Сплошной текст полосы-продолжения.\n\nЕщё абзац.")
+        return _answer()
+
+    fake.reply = reply
+    params = _params(tmp_path, on_missed_toc="redo")  # умолчание — structured
+    params.options.max_src_tile = 700
+    stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
+    # 1 toc + 3 page + 1 toc (найденная) + 1 page заново (IMG_0003 с `#`) = 6; с диска — toc-полоса
+    # из базы и оставленная IMG_0004.
+    assert stats.redone_issues == [ISSUE]
+    assert (stats.requests, stats.reused, stats.redo_kept) == (6, 2, 1)
+    metas = {
+        name: json.loads((params.out_dir / ISSUE / f"{name[:-4]}.meta.json").read_text(encoding="utf-8"))
+        for name in PAGES
+    }
+    # У оставленной полосы — новый toc_hash (тот же, что у перезапрошенной) и пометка redo_kept;
+    # список в её промпте был старый — articles_in_prompt остался от первого круга.
+    assert metas["IMG_0004.jpg"]["redo_kept"] is True and metas["IMG_0004.jpg"]["articles_in_prompt"] == 1
+    assert metas["IMG_0004.jpg"]["toc_hash"] == metas["IMG_0003.jpg"]["toc_hash"]
+    assert not metas["IMG_0003.jpg"].get("redo_kept") and metas["IMG_0003.jpg"]["articles_in_prompt"] == 2
+    # Человек поставил тег найденной полосе в базе; повтор с --skip-done: всё готово, запросов нет.
+    tagged = _params(tmp_path, skip_done=True)
+    tagged.flags = _flags(toc=("IMG_0001", "IMG_0002"))
+    again = run_pipeline(fake, resolve("deepseek-v41-flash"), tagged)
+    assert again.requests == 0 and again.reused == 4
+
+
+def _page(body="Текст.", **fields) -> PageResult:
+    return PageResult(content_markdown=body, **fields)
+
+
+def test_redo_reason_by_structure_signs():
+    meta = {"structure": {"demoted_headings": [], "markers_from_rubrics": []}}
+    # Сплошной текст без признаков — оставить.
+    assert redo_reason(_page(), meta, {"3"}, False) is None
+    # Понижённая полоса — всегда заново; нет результата первого круга — тоже.
+    assert redo_reason(_page(), meta, set(), True) is RedoReason.DEMOTED
+    assert redo_reason(None, meta, set(), False) is RedoReason.NO_FIRST_PASS
+    assert redo_reason(_page(), None, set(), False) is RedoReason.NO_FIRST_PASS
+    # Заголовок любого уровня, теги структуры (маркер — рубрика не из списка), поля модели.
+    assert redo_reason(_page("Абзац.\n\n## Подзаголовок"), meta, set(), False) is RedoReason.HEADING
+    assert redo_reason(_page("<marker>*Рынок*</marker>\n\nТекст."), meta, set(), False) is RedoReason.STRUCTURE_TAG
+    assert (
+        redo_reason(_page("Текст.", authors=[{"name": "И. Иванов"}]), meta, set(), False) is RedoReason.TITLE_OR_AUTHORS
+    )
+    assert redo_reason(_page("Текст.", rubric="Опыт"), meta, set(), False) is RedoReason.TITLE_OR_AUTHORS
+    # Переписанный колонтитул — как `##`, `<rubric>`/`<marker>` или поле rubric — не признак.
+    header = _page(
+        "## Проблемы и суждения\n\n<marker>*ПРОБЛЕМЫ И СУЖДЕНИЯ*</marker>\n\nТекст.",
+        running_header="Проблемы и суждения",
+        rubric="ПРОБЛЕМЫ И СУЖДЕНИЯ",
+    )
+    assert redo_reason(header, meta, set(), False) is None
+    assert (
+        redo_reason(_page("<rubric>*Рынок*</rubric>\n\nТекст.", running_header="Опыт"), meta, set(), False)
+        is RedoReason.STRUCTURE_TAG
+    )
+    # Следы пост-обработки в meta и совпадение номера страницы с началом статьи по новому оглавлению.
+    edited = {"structure": {"demoted_headings": ["Старый"], "markers": 0}}
+    assert redo_reason(_page(), edited, set(), False) is RedoReason.STRUCTURE_EDITS
+    assert redo_reason(_page(page_number=" 3 "), meta, {"3"}, False) is RedoReason.ARTICLE_START
+    assert redo_reason(_page(page_number="4"), meta, {"3"}, False) is None
+
+
+def test_pipeline_stats_add_sums_and_keeps_operands():
+    left = PipelineStats(requests=2, cost_usd=0.5, missed=["a"], redo_kept=1)
+    right = PipelineStats(requests=3, reused=1, cost_usd=0.25, missed=["b"], demoted_toc=["d"])
+    total = left + right
+    assert (total.requests, total.reused, total.cost_usd, total.redo_kept) == (5, 1, 0.75, 1)
+    assert total.missed == ["a", "b"] and total.demoted_toc == ["d"]
+    assert left == PipelineStats(requests=2, cost_usd=0.5, missed=["a"], redo_kept=1)
+    assert right.missed == ["b"]
 
 
 def test_ask_without_tty_behaves_like_skip(tmp_path, monkeypatch):

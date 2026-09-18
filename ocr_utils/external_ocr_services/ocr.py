@@ -582,7 +582,7 @@ def recognise_page(
         tiles = prepare_tiles(in_path, options.max_src_tile, options.max_model_tile, options.quality)
     except Exception as error:  # битый файл — не повод ронять прогон
         meta["error"] = f"картинка: {error}"
-        _write_meta(paths.meta, meta)
+        write_meta(paths.meta, meta)
         return meta, None
     meta["tiling"] = describe(tiles).as_dict()  # сетка и размеры — чтобы сверять с тем, что видела модель
     meta["image_bytes"] = sum(len(tile.data) for tile in tiles)
@@ -645,7 +645,7 @@ def recognise_page(
     if response is None:
         meta.setdefault("error", "запрос не удался")
         _write_debug(options, job, tiles, payload, None)
-        _write_meta(paths.meta, meta)
+        write_meta(paths.meta, meta)
         return meta, None
 
     # Учёт удачного ответа: кто обслужил, сколько токенов (в том числе из кэша префикса), цена по
@@ -672,15 +672,15 @@ def recognise_page(
     except ParseError as error:
         meta["parse_error"] = str(error)
         paths.raw.write_text(response.text, encoding="utf-8")
-        _write_meta(paths.meta, meta)
+        write_meta(paths.meta, meta)
         return meta, None
     if result.edge_words:
         # Модель охотнее заполняет список повреждённых строк, чем ставит теги в тексте.
         result.content_markdown, inserted = tags_from_edge_words(result.content_markdown, result.edge_words)
         meta["tags_from_edge_words"] = inserted
     if job.stage is Stage.TOC and result.toc is not None and result.toc.sections:
-        # Список оглавления должен стоять в <toc>…</toc>; модель тег иногда забывает (1976/12,
-        # первая полоса «Содержания» с шапкой журнала) — доводится кодом по границам элементов.
+        # Блок <toc>…</toc> вокруг списка ставит код по границам элементов: модель его не просят
+        # (тег она искажала — «< toc>», «<тoc>»); написанный ею по памяти тег нормализован разбором.
         result.content_markdown, wrapped = toc_module.ensure_toc_block(result.content_markdown)
         meta["toc_wrapped"] = wrapped
         # Сверка тела с объектом toc в обе стороны: статьи только из тела — в объект, потом блок
@@ -729,11 +729,11 @@ def recognise_page(
     broken = unbalanced_tags(result.content_markdown)
     if broken:
         meta["tag_warning"] = "непарные теги: " + ", ".join(tag.value for tag in broken)
-    _write_meta(paths.meta, meta)
+    write_meta(paths.meta, meta)
     return meta, result
 
 
-def _write_meta(path: Path, meta: dict) -> None:
+def write_meta(path: Path, meta: dict) -> None:
     """``.meta.json`` целиком (перезапись); indent=1 — чтобы diff между прогонами читался построчно.
 
     Args:
@@ -755,7 +755,7 @@ def _write_outputs(out_dir: Path, rel: Path, result: PageResult, meta: dict) -> 
     paths = output_paths(out_dir, rel)
     paths.json.write_text(result.to_json(), encoding="utf-8")
     paths.md.write_text(to_markdown(result), encoding="utf-8")
-    _write_meta(paths.meta, meta)
+    write_meta(paths.meta, meta)
 
 
 def _write_debug_copy(options: RunOptions, rel: Path, chosen: PassChoice, result: PageResult) -> None:

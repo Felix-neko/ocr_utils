@@ -250,23 +250,65 @@ def from_dict(payload: dict) -> dict[TocKind, IssueToc]:
     return tocs
 
 
-# Абзац-элемент оглавления: пункт списка или абзац с автором/названием и номером страницы в конце
-# («… — 5», «… — № 3, 12»), либо рубрика внутри оглавления.
-_TOC_ENTRY = re.compile(
-    rf"^(- )?(<{StructureTag.AUTHOR}>.*?</{StructureTag.AUTHOR}>\.?\s*)?.+ — (№ ?\d+[^\d]*)?\d+[.,;\s]*$|"
-    rf"^<{StructureTag.RUBRIC_IN_TOC}>.*</{StructureTag.RUBRIC_IN_TOC}>\s*$",
-    re.S,
-)
 _TOC_OPEN = f"<{BlockTag.TOC}>"
 _TOC_CLOSE = f"</{BlockTag.TOC}>"
+# Пункт списка оглавления: «[- ][<author>**Имена**</author>. ]Название — где». «Где» — номера
+# страницы и выпуска в любом принятом виде: «5», «№ 3, 12», «№ 3, с. 12», «5, 49» (выпуск, страница
+# в указателе), «№№ 1, 2, 4», «№ 1, с. 28, 64; № 2, с. 20» — то есть только цифры, «№», «с.» и знаки.
+_TOC_ARTICLE_LINE = re.compile(
+    rf"^(?:- )?(?:<{StructureTag.AUTHOR}>\*{{0,2}}(?P<authors>.+?)\*{{0,2}}</{StructureTag.AUTHOR}>\.?\s*)?"
+    r"(?P<title>.+?)\s+—\s+(?P<where>[\d№,;.:с\s]*\d[\d№,;.:с\s]*)$",
+    re.S,
+)
+# Пункт списка без « — где» (модель забыла тире или вписала номера в название): «- Название…».
+_TOC_BARE_ITEM = re.compile(
+    rf"^- (?:<{StructureTag.AUTHOR}>\*{{0,2}}(?P<authors>.+?)\*{{0,2}}</{StructureTag.AUTHOR}>\.?\s*)?(?P<title>.+)$",
+    re.S,
+)
+_TOC_RUBRIC_LINE = re.compile(
+    rf"^<{StructureTag.RUBRIC_IN_TOC}>\*{{0,2}}(?P<rubric>.+?)\*{{0,2}}</{StructureTag.RUBRIC_IN_TOC}>\s*$", re.S
+)
+_NUMBER = re.compile(r"\d+")
+
+
+def _is_toc_entry_line(line: str) -> bool:
+    """Строка — элемент списка оглавления: пункт с «— где», пункт без него или рубрика ``<rubric_in_toc>``.
+
+    Args:
+        line: Одна строка тела без краевых пробелов.
+    """
+    return bool(_TOC_ARTICLE_LINE.match(line) or _TOC_BARE_ITEM.match(line) or _TOC_RUBRIC_LINE.match(line))
+
+
+def _split_where(where: str) -> tuple[str | None, str | None]:
+    """Номер выпуска и страницы из хвоста пункта «— где».
+
+    Args:
+        where: Текст после тире: «5», «№ 3, 12», «№ 3, с. 12», «5, 49», «№№ 1, 2, 4», «№ 1, с. 28; № 2, с. 20».
+
+    Returns:
+        ``(issue, page)``: выпуск — первое число после «№» (в указателе без «№» — первое из двух),
+        страница — последнее число; одно число без «№» — только страница.
+    """
+    numbers = _NUMBER.findall(where)
+    if not numbers:
+        return None, None
+    after_sign = re.search(r"№+\s*(\d+)", where)
+    if after_sign is not None:
+        page = numbers[-1] if len(numbers) > 1 else None
+        return after_sign.group(1), page
+    if len(numbers) >= 2:
+        return numbers[0], numbers[-1]
+    return None, numbers[0]
 
 
 def ensure_toc_block(body: str) -> tuple[str, bool]:
-    """Обернуть список оглавления в ``<toc>…</toc>``, если модель забыла тег.
+    """Обернуть список оглавления в ``<toc>…</toc>`` — это основной путь: промпт тег не просит.
 
-    Границы — первый и последний абзац, похожий на элемент оглавления (пункт «Автор. Название —
-    страница» или ``<rubric_in_toc>``); всё между ними, включая абзацы другого вида, попадает
-    внутрь. Тег уже есть — текст не меняется.
+    Модель писала тег искажённо (``< toc>``, ``<тoc>`` в 49–95 % ответов на 1966/03 с. 93), поэтому
+    с v14 она его не пишет вовсе, а границы находит код: первый и последний абзац, похожий на
+    элемент оглавления (пункт «Автор. Название — страница» или ``<rubric_in_toc>``); всё между
+    ними, включая абзацы другого вида, попадает внутрь. Если тег всё же есть — текст не меняется.
 
     Args:
         body: Тело полосы этапа toc в markdown.
@@ -284,24 +326,13 @@ def ensure_toc_block(body: str) -> tuple[str, bool]:
     hits = [
         index
         for index, paragraph in enumerate(paragraphs)
-        if any(_TOC_ENTRY.match(line.strip()) for line in paragraph.split("\n"))
+        if any(_is_toc_entry_line(line.strip()) for line in paragraph.split("\n"))
     ]
     if not hits:
         return body, False
     first, last = hits[0], hits[-1]
     wrapped = paragraphs[:first] + [_TOC_OPEN] + paragraphs[first : last + 1] + [_TOC_CLOSE] + paragraphs[last + 1 :]
     return "\n\n".join(wrapped).rstrip() + "\n", True
-
-
-# Пункт списка оглавления: «[- ][<author>**Имена**</author>. ]Название — [№ выпуск, ]страница».
-_TOC_ARTICLE_LINE = re.compile(
-    rf"^(?:- )?(?:<{StructureTag.AUTHOR}>\*{{0,2}}(?P<authors>.+?)\*{{0,2}}</{StructureTag.AUTHOR}>\.?\s*)?"
-    r"(?P<title>.+?)\s+—\s+(?:№\s?(?P<issue>\d+)[,\s]+)?(?P<page>\d+)[.,;\s]*$",
-    re.S,
-)
-_TOC_RUBRIC_LINE = re.compile(
-    rf"^<{StructureTag.RUBRIC_IN_TOC}>\*{{0,2}}(?P<rubric>.+?)\*{{0,2}}</{StructureTag.RUBRIC_IN_TOC}>\s*$", re.S
-)
 
 
 def render_toc_block(page: TocPage) -> str:
@@ -331,42 +362,60 @@ def render_toc_block(page: TocPage) -> str:
     return "\n".join(lines)
 
 
-def parse_toc_block(body: str) -> list[TocSection] | None:
-    """Разобрать блок ``<toc>…</toc>`` тела в секции: рубрики и пункты «Автор. Название — страница».
+@dataclass(frozen=True)
+class ParsedEntry:
+    """Пункт блока ``<toc>`` тела после разбора.
+
+    Args:
+        article: Статья: название, авторы, страница и выпуск (последние два — если хвост «— где» разобран).
+        rubric: Рубрика контекста — последняя ``<rubric_in_toc>`` выше пункта; ``None`` до первой.
+        bare: Пункт без «— где» (тире забыто или номера ушли в название): в сверке засчитывается как
+            присутствующий в теле, но в объект ``toc`` как новая статья не добавляется — разбор ненадёжен.
+    """
+
+    article: TocArticle
+    rubric: str | None
+    bare: bool
+
+
+def parse_toc_block(body: str) -> list[ParsedEntry] | None:
+    """Разобрать блок ``<toc>…</toc>`` тела: пункты «Автор. Название — где» с рубрикой контекста.
 
     Args:
         body: Тело полосы этапа toc в markdown.
 
     Returns:
-        Секции в порядке чтения (рубрика ``None`` до первой ``<rubric_in_toc>``); ``None`` — блока
-        ``<toc>`` в теле нет. Абзацы, не похожие ни на пункт, ни на рубрику, пропускаются.
+        Пункты в порядке чтения; ``None`` — блока ``<toc>`` в теле нет. Абзацы, не похожие ни на
+        пункт, ни на рубрику, пропускаются.
     """
     if _TOC_OPEN not in body or _TOC_CLOSE not in body:
         return None
     inside = body[body.index(_TOC_OPEN) + len(_TOC_OPEN) : body.index(_TOC_CLOSE)]
-    sections: list[TocSection] = [TocSection(None)]
-    for block in re.split(r"\n\s*\n", inside):
-        # Пункты могут идти подряд без пустой строки — режем абзац на строки, каждая — кандидат.
-        for line in (item.strip() for item in block.split("\n")):
-            if not line:
-                continue
-            rubric = _TOC_RUBRIC_LINE.match(line)
-            if rubric is not None:
-                sections.append(TocSection(rubric.group("rubric").strip()))
-                continue
-            entry = _TOC_ARTICLE_LINE.match(line)
-            if entry is None:
-                continue
-            names = [name.strip() for name in (entry.group("authors") or "").split(",") if name.strip()]
-            sections[-1].articles.append(
-                TocArticle(
-                    entry.group("title").strip(),
-                    [{"name": name, "position": None} for name in names],
-                    entry.group("page"),
-                    entry.group("issue"),
-                )
-            )
-    return [section for section in sections if section.rubric is not None or section.articles]
+    entries: list[ParsedEntry] = []
+    rubric: str | None = None
+    # Пункты могут идти подряд без пустой строки — каждая строка блока рассматривается отдельно.
+    for line in (item.strip() for item in inside.split("\n")):
+        if not line:
+            continue
+        heading = _TOC_RUBRIC_LINE.match(line)
+        if heading is not None:
+            rubric = heading.group("rubric").strip()
+            continue
+        entry = _TOC_ARTICLE_LINE.match(line)
+        bare = entry is None
+        issue = page = None
+        if entry is not None:
+            issue, page = _split_where(entry.group("where"))
+        else:
+            entry = _TOC_BARE_ITEM.match(line)  # пункт без «— где»: номера могли уйти в название
+        if entry is None:
+            continue
+        names = [name.strip() for name in (entry.group("authors") or "").split(",") if name.strip()]
+        article = TocArticle(
+            entry.group("title").strip(), [{"name": name, "position": None} for name in names], page, issue
+        )
+        entries.append(ParsedEntry(article, rubric, bare))
+    return entries
 
 
 @dataclass
@@ -458,15 +507,15 @@ def reconcile_toc(body: str, page: TocPage) -> tuple[str, TocPage, TocReconcile]
     parsed = parse_toc_block(body)
     if parsed is None or not page.sections:
         return body, page, check
-    body_titles = [article.title for section in parsed for article in section.articles]
+    body_titles = [entry.article.title for entry in parsed]
     toc_titles = [article.title for section in page.sections for article in section.articles]
     check.missing_in_body = [title for title in toc_titles if not title_matches(title, body_titles)]
-    for section in parsed:
-        for article in section.articles:
-            if title_matches(article.title, toc_titles):
-                continue
-            check.missing_in_toc.append(article.title)
-            _section_for(page, section.rubric).articles.append(article)
+    for entry in parsed:
+        # Пункт без разобранного «— где» в объект не добавляем: не факт, что это статья.
+        if entry.bare or title_matches(entry.article.title, toc_titles):
+            continue
+        check.missing_in_toc.append(entry.article.title)
+        _section_for(page, entry.rubric).articles.append(entry.article)
     if not check.missing_in_body and not check.missing_in_toc:
         return body, page, check
     start, end = body.index(_TOC_OPEN), body.index(_TOC_CLOSE) + len(_TOC_CLOSE)

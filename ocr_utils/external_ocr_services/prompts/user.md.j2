@@ -10,9 +10,9 @@
 {% endif -%}
 {% if stage == "toc" -%}
 {% if toc_kind == "index" -%}
-A detector has preliminarily classified this page as part of the ANNUAL INDEX of articles published in the journal during the year (it may continue from a previous page and continue on the next one). Check it against the image: if it really is an index, transcribe it with the list inside `<toc>` and fill the `toc` object with kind «index»; if it is not, set `toc_kind` to «none», leave `toc.sections` empty and transcribe it as an ordinary page.
+A detector has preliminarily classified this page as part of the ANNUAL INDEX of articles published in the journal during the year (it may continue from a previous page and continue on the next one). Check it against the image: if it really is an index, transcribe it and fill the `toc` object with kind «index»; if it is not, set `toc_kind` to «none», leave `toc.sections` empty and transcribe it as an ordinary page.
 {%- else -%}
-A detector has preliminarily classified this page as part of the TABLE OF CONTENTS of the issue (it may continue from a previous page and continue on the next one). Check it against the image: if it really is a table of contents, transcribe it with the list inside `<toc>` and fill the `toc` object with kind «contents»; if it is not, set `toc_kind` to «none», leave `toc.sections` empty and transcribe it as an ordinary page.
+A detector has preliminarily classified this page as part of the TABLE OF CONTENTS of the issue (it may continue from a previous page and continue on the next one). Check it against the image: if it really is a table of contents, transcribe it and fill the `toc` object with kind «contents»; if it is not, set `toc_kind` to «none», leave `toc.sections` empty and transcribe it as an ordinary page.
 {%- endif %}
 {%- else -%}
 Transcribe this page.
