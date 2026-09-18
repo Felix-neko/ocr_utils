@@ -29,7 +29,7 @@ KNOWN STRUCTURE OF THIS ISSUE (from its table of contents). Article titles:
 {% endif %}
 {%- endif %}
 {% if ntiles > 1 %}
-The page is given as {{ ntiles }} overlapping tiles: {{ ncols }} column(s) × {{ nrows }} row(s) of the page, listed column by column, each column from top to bottom{% if ncols > 1 %}, the whole left column before the right one{% endif %}. Neighbouring tiles overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
+The page is given as {{ ntiles }} overlapping tiles: {{ ncols }} column(s) × {{ nrows }} row(s) of the page, listed column by column, each column from top to bottom{% if ncols > 1 %}, the whole left column before the right one{% endif %}. Neighboring tiles overlap slightly. Treat them as ONE page: transcribe it once, in reading order, without repeating the overlapping lines.
 {%- endif %}
 {% if second_pass %}
 A first reading of this page reported damage: «{{ second_pass.damage_description or "(no description)" }}». It marked {{ second_pass.tags.get("supplied", 0) }} reconstructed, {{ second_pass.tags.get("unclear", 0) }} unreliable and {{ second_pass.tags.get("gap", 0) }} unreadable fragments{% if second_pass.edge_words %} and listed these affected words (as seen, kind):
