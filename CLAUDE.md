@@ -13,7 +13,7 @@
 - `docs/win10_vm.md` — Windows-VM с FineReader: Hot Folder, доступ через vmrun, ограничения.
 - README подпакетов: `ocr_utils/<пакет>/README.md` (есть у 11 из 18).
 
-Навыки: `/run-pack1-step`, `/new-detector`, `/write-report`, `/cvat-roundtrip`.
+Навыки: `/run-pack1-step`, `/new-detector`, `/write-report`, `/cvat-roundtrip`, `/recall` (поиск по переписке прошлых сессий).
 Правила по путям (`.claude/rules/`) подгружаются сами при работе с `scan_markup`, `run_scripts`, `tests`.
 
 ## Карта пакета
@@ -40,7 +40,7 @@
 | `research/external_ocr_models` | Полоса → размеченный markdown через VLM (OpenRouter), промпты v1–v13 | `python -m research.external_ocr_models` |
 | `research/geometry_regression` | Страницы, где коррекция геометрии FineReader сделала хуже: пары PDF «с/без», поле смещений, штрихи, строки, кромки; картинки «было \| стало» | `python -m research.geometry_regression run\|report` |
 | `research/legacy/table_processing` | Стенд исследования таблиц; живой код переехал в `scan_markup` | заморожено |
-| `scripts/` | Разовые утилиты; `gen_module_map.py` — генератор карты | — |
+| `scripts/` | Разовые утилиты; `gen_module_map.py` — генератор карты, `search_sessions.py` — поиск по прошлым сессиям Claude | — |
 | `run_scripts/<пакет>/` | Готовые прогоны с числами в шапке, `source common.sh` | — |
 | `reports/` | Отчёты по прогонам; оверлеи в подпапках вне git | — |
 | `ai_slop/` | Черновой код от ИИ, вне git | — |
@@ -97,6 +97,7 @@ while kill -0 "$PID" 2>/dev/null; do sleep 10; done
 * В Python-коде пиши подробные докстринги (с обязательным объяснием, что делает каждый аргумент и что возвращается) и подробные комменты (чтобы было понятно, что делает каждый фрагмент кода).
 * Вместо строковых ключей старайся применять enum.
 * Объявления функций внутри функций и методов - избегай, функции внутри функций м методов объявляй только тогда, когда без этого код не работает.
+* Если функция или метод отдают данные — через возвращаемое значение, а не через изменение объектов-аргументов (аккумуляторы, «заполни мне этот объект»). Несколько результатов — кортеж или dataclass; счётчики складывать у вызывающего (`stats = stats + run_issue(...)`).
 
 
 
