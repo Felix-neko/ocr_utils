@@ -18,15 +18,12 @@ PROMPTS_DIR = Path(__file__).parent
 # корешком буквах она ставила пропуск вместо достроенных букв (55 против 47 на
 # IMG_0006_L). Восстановление по контексту нужно обязательно, поэтому фраза требует его явно.
 DEFAULT_DAMAGE_NOTE = (
-    "Scans of bound volumes may have letters cut off, squashed or blurred near the binding gutter, and overexposed "
-    "spots anywhere on the page. No specific damage has been reported for this page, so look for it yourself: decide "
-    "from the image which edge, if any, runs into the gutter (it can be the left or the right one) and where the print "
-    "is unreliable. "
-    "Wherever letters are hidden, cut off or unreadable, DO reconstruct them from the context and the visible remains "
-    "of the word and mark the reconstructed letters with <supplied>; mark visible but unreliable letters with "
-    "<unclear>; use <gap>N</gap> (N — the approximate number of missing characters, only the number) where no confident "
-    "reconstruction is possible. "
-    "Do not tag clean print or ordinary end-of-line hyphenation."
+    "Scans of bound volumes may have letters cut off, squashed, shadowed or blurred near the binding gutter and "
+    "smeared or washed-out spots anywhere on the page. Nothing specific is known about this page: decide from the "
+    "image which edge, if any, runs into the gutter (it can be the left or the right one) and where the print is "
+    "unreliable. Hidden or cut-off letters → restore the whole word and mark the restored letters with <supplied>; "
+    "visible but unreliable letters → <unclear>; unrecoverable → <gap>N</gap> (N — the approximate number of missing "
+    "characters, only the number). Clean print and ordinary end-of-line hyphenation are not damage."
 )
 
 

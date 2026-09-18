@@ -77,13 +77,35 @@ class StructureReport:
         }
 
 
+# Строка-ограничитель fenced-блока (иллюстрации): между парой таких строк пустые строки не делят абзацы.
+_FENCE_LINE = re.compile(r"^[ \t]*```")
+
+
 def _paragraphs(body: str) -> list[str]:
     """Тело как список абзацев (разделитель — пустая строка); переносы внутри абзаца сохраняются.
+
+    Fenced-блок иллюстрации (``…``` … ```…``) — всегда один абзац, даже если модель оставила внутри
+    пустые строки: иначе правки ниже могли бы вставить рубрику или автора внутрь блока.
 
     Args:
         body: Тело полосы в markdown.
     """
-    return [block for block in re.split(r"\n\s*\n", body.strip()) if block.strip()]
+    paragraphs: list[str] = []
+    current: list[str] = []
+    inside_fence = False
+    for line in body.strip().split("\n"):
+        if _FENCE_LINE.match(line):
+            inside_fence = not inside_fence
+        if not line.strip() and not inside_fence:
+            # Пустая строка вне fenced-блока — граница абзаца.
+            if current:
+                paragraphs.append("\n".join(current))
+                current = []
+            continue
+        current.append(line)
+    if current:
+        paragraphs.append("\n".join(current))
+    return [block for block in paragraphs if block.strip()]
 
 
 def _join(paragraphs: list[str]) -> str:

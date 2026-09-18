@@ -105,9 +105,16 @@ def main(log_level: str) -> None:
 @click.option("--quality", type=int, default=DEFAULT_QUALITY, show_default=True, help="Качество JPEG тайла.")
 @click.option("--source", default="", help="Описание издания для промпта; «{year}» заменяется годом выпуска.")
 @click.option(
+    "--second-pass/--no-second-pass",
+    default=False,
+    show_default=True,
+    help="Второй проход по полосам с is_damaged: та же полоса ещё раз с подсказкой из первого ответа. "
+    "Выключен: на повреждённых полосах он то чинил, то портил текст (reports/external_ocr_hyphenation_second_pass.md).",
+)
+@click.option(
     "--second-pass-transcript",
     is_flag=True,
-    help="Во второй проход передавать и полный текст первого (иначе только описание, строки и счётчики).",
+    help="Во второй проход (если включён) передавать и полный текст первого (иначе только описание, строки и счётчики).",
 )
 @click.option(
     "--reasoning",
@@ -167,6 +174,7 @@ def run(
     max_model_tile_size: int,
     quality: int,
     source: str,
+    second_pass: bool,
     second_pass_transcript: bool,
     reasoning: str | None,
     max_tokens: int,
@@ -214,6 +222,7 @@ def run(
         max_tokens=max_tokens,
         source=source,
         debug_dir=debug_dir,
+        second_pass=second_pass,
         second_pass_transcript=second_pass_transcript,
     )
     # Всё, что относится к прогону целиком: пути, флаги, отбор входа, параллелизм, fallback.
@@ -247,7 +256,8 @@ def run(
         f"запросов: {stats.requests}, готовых пропущено: {stats.reused}, сбоев: {stats.failed}, "
         f"стоимость ${stats.cost_usd:.4f}."
     )
-    click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
+    if second_pass:
+        click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
     if stats.missed:
         click.echo("ОГЛАВЛЕНИЯ ВНЕ БАЗЫ: " + "; ".join(stats.missed))
     if stats.demoted_toc:

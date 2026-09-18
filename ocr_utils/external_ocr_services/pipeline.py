@@ -115,6 +115,8 @@ class RedoReason(StrEnum):
 
 # Строка-заголовок markdown любого уровня — признак полосы, чувствительной к спискам выпуска.
 _HEADING = re.compile(r"^#{1,6} (.+?)\s*$", re.M)
+# Fenced-блок иллюстрации целиком — вырезается перед поиском заголовков.
+_FENCED = re.compile(r"^[ \t]*```[^\n]*\n.*?^[ \t]*```[ \t]*$", re.M | re.S)
 # Рубрика или маркер с текстом: модель дублирует в них рубрику из колонтитула почти на каждой полосе
 # (МТС 1991/02: «ПРОБЛЕМЫ И СУЖДЕНИЯ» на с. 4–9), а колонтитул от списков выпуска не зависит.
 _RUBRIC_OR_MARKER = re.compile(rf"<({StructureTag.RUBRIC}|{StructureTag.MARKER})>\*{{0,2}}(.+?)\*{{0,2}}</\1>", re.S)
@@ -152,6 +154,7 @@ SUMMARY_FIELDS = (
     "content_chars",
     "toc_articles",
     "tags",
+    "is_damaged",
     "messages",
     "parse_error",
     "error",
@@ -248,7 +251,7 @@ def _recognise_one(
         полосы как записана в ``.meta.json`` и разобранный результат — ``None`` при сбое сети или
         разбора (причина — в ``meta["error"]`` / ``meta["parse_error"]``).
     """
-    # Второй проход (по умолчанию включён) — обёртка над recognise_page: та же полоса ещё раз
+    # Второй проход (по умолчанию выключен, ``--second-pass``) — обёртка над recognise_page: та же полоса ещё раз
     # с подсказками первого ответа, если модель сочла её повреждённой; выбор финала — внутри.
     recognise = recognise_with_second_pass if params.options.second_pass else recognise_page
     meta, result = recognise(client, spec, params.in_dir / job.rel, job, params.out_dir, params.options)
@@ -455,6 +458,18 @@ def article_start_pages(toc: toc_module.IssueToc | None) -> set[str]:
     return {article.page.strip() for article in toc.articles if article.page and article.page.strip()}
 
 
+def _outside_fences(body: str) -> str:
+    """Тело без fenced-блоков иллюстраций: их строки (надписи на схеме) — не заголовки и не теги.
+
+    Args:
+        body: Тело полосы в markdown.
+
+    Returns:
+        Тот же текст с вырезанными блоками между парами строк ```.
+    """
+    return _FENCED.sub("", body)
+
+
 def redo_reason(
     result: PageResult | None, meta: dict | None, start_pages: set[str], demoted: bool
 ) -> RedoReason | None:
@@ -483,7 +498,8 @@ def redo_reason(
     # Нормализованные колонтитулы — с ними сверяются заголовки, рубрики и маркеры на полосе.
     headers = {normalize_title(text) for text in (result.running_header, result.running_footer) if text}
     headers.discard("")
-    if any(normalize_title(text) not in headers for text in _HEADING.findall(body)):
+    outside = _outside_fences(body)
+    if any(normalize_title(text) not in headers for text in _HEADING.findall(outside)):
         return RedoReason.HEADING
     if any(f"<{tag}>" in body for tag in _AUTHOR_TAGS):
         return RedoReason.STRUCTURE_TAG
@@ -492,9 +508,15 @@ def redo_reason(
     if result.title or result.authors or (result.rubric and normalize_title(result.rubric) not in headers):
         return RedoReason.TITLE_OR_AUTHORS
     # Пост-обработка что-то правила: следы лежат в meta.structure списками (пустые — не правила).
+    # Колонтитул, переведённый из <rubric> в <marker> (markers_from_rubrics), — не правка по списку.
     structure = meta.get("structure") or {}
-    if any(value for value in structure.values() if isinstance(value, list)):
-        return RedoReason.STRUCTURE_EDITS
+    for key, value in structure.items():
+        if not isinstance(value, list):
+            continue
+        if key == "markers_from_rubrics":
+            value = [text for text in value if normalize_title(str(text)) not in headers]
+        if value:
+            return RedoReason.STRUCTURE_EDITS
     # Страховка: по новому оглавлению здесь начинается статья, а заголовок первым проходом не выделен.
     if result.page_number and result.page_number.strip() in start_pages:
         return RedoReason.ARTICLE_START

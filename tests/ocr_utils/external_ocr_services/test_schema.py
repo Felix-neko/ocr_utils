@@ -13,12 +13,15 @@ from ocr_utils.external_ocr_services.schema import (
     json_schema,
     parse_json_text,
     tag_counts,
+    drop_duplicate_supplied,
+    strip_hyphen_supplied,
     tags_from_edge_words,
     unbalanced_tags,
 )
 
 PAGE = {
-    "damage": "",
+    "is_damaged": False,
+    "damage_description": "",
     "page_number": 12,
     "rubric": "Консультация",
     "title": "О нормах",
@@ -129,17 +132,23 @@ def test_legacy_damage_tags_and_fields_are_modernised():
     assert unbalanced_tags("<gap>▒</gap> <supplied>а") == ["supplied"]
 
 
-def test_tags_from_edge_words_gap_filler_width():
-    """Пропуск из edge_words: ширина — по заполнителям модели, иначе по разнице длин, иначе три; сторона — как у модели."""
-    body = "Слово предпри и ности и конец."
+def test_tags_from_edge_words_gaps_stay_out_and_empty_entries_counted():
+    """Пропуски из edge_words в тело не переносятся (в теле слово целое — «в первую очередь»); hidden/unclear —
+    как раньше; записи «как видно = как написано» без тегов считаются пустыми."""
+    body = "Слово предпри и ности и конец, в первую очередь ещё."
     edge = [
         {"seen": "предпри", "full": "предпри<gap>▒▒▒▒</gap>", "kind": "gap"},
         {"seen": "ности", "full": "<gap>▒▒▒</gap>ности", "kind": "gap"},
+        {"seen": "первую", "full": "первую<gap>3</gap>", "kind": "gap"},
         {"seen": "кон", "full": "конец", "kind": "hidden"},
+        {"seen": "ещ", "full": "ещё", "kind": "unclear"},
+        {"seen": "Слово", "full": "Слово", "kind": "hidden"},
+        {"seen": "и", "full": "и", "kind": "hidden"},
     ]
-    out, inserted = tags_from_edge_words(body, edge)
-    assert inserted == 3
-    assert "предпри<gap>▒▒▒▒</gap>" in out and "<gap>▒▒▒</gap>ности" in out and "кон<supplied>ец</supplied>" in out
+    out, report = tags_from_edge_words(body, edge)
+    assert report.inserted == 2 and report.empty == 2
+    assert "кон<supplied>ец</supplied>" in out and "ещ<unclear>ё</unclear>" in out
+    assert "<gap>" not in out and "в первую очередь" in out
 
 
 def test_gap_number_expanded_by_code():
@@ -166,15 +175,30 @@ def test_gap_number_expanded_by_code():
     assert is_gap_runaway("x<gap>" + "▒" * 25) and not is_gap_runaway("<gap>▒▒▒▒▒▒</gap>")
 
 
-def test_tags_from_edge_words_numeric_gap():
-    """Пропуск из edge_words с числом в full: ширина из числа, сторона — как у модели."""
-    body = "Слово предпри и ности."
+def test_strip_hyphen_supplied_and_hyphenated_entries_skipped():
+    """Продолжение переноса, объявленное восстановленным («ва-» → «ва<supplied>л</supplied>ютных»): тег снимается,
+    буквы остаются; такая запись и тегов в тело не добавляет."""
+    body = "Курс ва<supplied>л</supplied>ютных операций и кре<supplied>ди</supplied>ты, а снабже<supplied>ния</supplied> нет."
     edge = [
-        {"seen": "предпри", "full": "предпри<gap>4</gap>", "kind": "gap"},
-        {"seen": "ности", "full": "<gap>20</gap>ности", "kind": "gap"},
+        {"seen": "ва-", "full": "ва<supplied>л</supplied>ютных", "kind": "hidden"},
+        {"seen": "кре-", "full": "кре<supplied>ди</supplied>ты", "kind": "hidden"},
+        {"seen": "снабже", "full": "снабже<supplied>ния</supplied>", "kind": "hidden"},
+        {"seen": "нет-", "full": "нет", "kind": "hidden"},
     ]
-    out, inserted = tags_from_edge_words(body, edge)
-    assert inserted == 2 and "предпри<gap>▒▒▒▒</gap>" in out and "<gap>[20 symbols]</gap>ности" in out
+    out, stripped = strip_hyphen_supplied(body, edge)
+    assert stripped == 2 and "Курс валютных операций и кредиты," in out
+    assert "снабже<supplied>ния</supplied>" in out, "честная достройка без дефиса не трогается"
+    out2, report = tags_from_edge_words("Курс валютных операций.", edge[:1])
+    assert report.inserted == 0 and out2 == "Курс валютных операций."
+
+
+def test_drop_duplicate_supplied():
+    """«трудностей <supplied>стей</supplied>» — слово целое, хвост в теге лишний; чужой хвост остаётся."""
+    body = "не без трудностей <supplied>стей</supplied> сформирован парк на базе трактора <supplied>ра</supplied> К-701"
+    out, dropped = drop_duplicate_supplied(body)
+    assert dropped == 2 and out == "не без трудностей сформирован парк на базе трактора К-701"
+    keep = "пункта <supplied>проката</supplied> и Ру<supplied>ко</supplied>водители"
+    assert drop_duplicate_supplied(keep) == (keep, 0)
 
 
 def test_messages_field_roundtrip_and_header():
@@ -200,3 +224,62 @@ def test_tag_homoglyphs_and_spaces_normalised():
     )
     result = parse_json_text('{"content_markdown": "< toc>\\n- а — 1\\n</toc>"}')
     assert result.content_markdown.startswith("<toc>\n")
+
+
+def test_legacy_tag_names_and_hyphen_tags_normalised():
+    """v15: <rubric_in_toc> старых ответов → <rubric-in-toc>; имя с дефисом узнаётся и чистится от омоглифов."""
+    from ocr_utils.external_ocr_services.schema import normalise_tags
+
+    assert normalise_tags("<rubric_in_toc>*А*</rubric_in_toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
+    assert normalise_tags("< rubric-in-toc >*А*</ rubriс-in-toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
+    result = parse_json_text('{"content_markdown": "<rubric_in_toc>*А*</rubric_in_toc>"}')
+    assert result.content_markdown == "<rubric-in-toc>*А*</rubric-in-toc>"
+
+
+LEGACY_ILLUSTRATIONS = """Текст.
+
+<photo>
+> [фотография: портрет мужчины в костюме]
+> подпись: И. Иванов
+</photo>
+
+<schema>
+> [блок-схема]
+> Заявка → Склад
+> надпись: план
+</schema>
+
+<line_art>
+> [графика: график роста]
+> ось X: годы, 1960, 1965
+</line_art>
+
+Дальше."""
+
+
+def test_legacy_illustration_blocks_become_fenced_blocks():
+    """v15: старые обёртки <photo>/<schema>/<line_art> с block quote → fenced-блок с видом первой строкой."""
+    from ocr_utils.external_ocr_services.schema import (
+        IllustrationKind,
+        count_illustrations,
+        modernise_illustrations,
+        unbalanced_fences,
+    )
+
+    out = modernise_illustrations(LEGACY_ILLUSTRATIONS)
+    assert (
+        out == "Текст.\n\n```\n[фотография]\nпортрет мужчины в костюме\nподпись: И. Иванов\n```\n\n"
+        "```\n[блок-схема]\nЗаявка → Склад\nнадпись: план\n```\n\n"
+        "```\n[графика]\nграфик роста\nось X: годы, 1960, 1965\n```\n\nДальше."
+    )
+    assert modernise_illustrations(out) == out, "идемпотентно"
+    assert count_illustrations(out) == {
+        IllustrationKind.PHOTO: 1,
+        IllustrationKind.SCHEMA: 1,
+        IllustrationKind.LINE_ART: 1,
+    }
+    assert not unbalanced_fences(out) and unbalanced_fences(out + "\n```\n[графика]\nоборван")
+    assert [kind.key for kind in IllustrationKind] == ["photo", "schema", "line-art"]
+    # Конвертация идёт при любом разборе — старые .json читаются в новом виде.
+    result = parse_json_text(json.dumps({"content_markdown": LEGACY_ILLUSTRATIONS}, ensure_ascii=False))
+    assert "<photo>" not in result.content_markdown and "[фотография]" in result.content_markdown

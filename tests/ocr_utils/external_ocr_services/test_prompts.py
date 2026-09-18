@@ -16,13 +16,25 @@ def test_toc_stage_prompt():
         1, 1, 1, stage="toc", toc_kind="index"
     )
     assert "two are independent transcriptions" in text, "тело не сокращать из-за объекта toc (v13)"
-    assert "<rubric_in_toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric_in_toc>" in text
+    assert "<rubric-in-toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric-in-toc>" in text
     assert "never shortened" in text and "`<rubric>*ОПЫТ РАБОТЫ*</rubric>`" not in text
     for old in ("<restored>", "<fuzzy>", "<unknown/>", "[картинка"):
         assert old not in text, old
-    # Картинки трёх видов и сноски — в тегах-обёртках.
-    for tag in ("<schema>", "<photo>", "<line_art>", "<footnote>[^1]:", "ось X", "ось Y"):
-        assert tag in text, tag
+    # v15: картинки трёх видов — fenced-блок с видом первой строкой, без XML-обёртки и без «> »;
+    # имена тегов без подчёркиваний; сноски — в теге.
+    for piece in ("[блок-схема]", "[фотография]", "[графика]", "<footnote>[^1]:", "ось X", "ось Y", "```"):
+        assert piece in text, piece
+    for old in ("<schema>", "<photo>", "<line_art>", "<rubric_in_toc>", "> [", "block quote wrapped"):
+        assert old not in text, old
+    # Нет напечатанного номера страницы — не повреждение (v15).
+    assert "NOT damage" in text and "null when no page number is printed" in text
+    # v16: без «[неразборчиво]» (спорил с тегами), правило 1 отсылает к правилу 5, поля переименованы,
+    # на смазанном слове — тег, а не подстановка; edge_words только по словам с достройкой/сомнением.
+    assert "[неразборчиво]" not in text and "rule 5 tells you to restore them" in text
+    assert '"is_damaged": boolean' in text and '"damage_description": string' in text
+    for old in ('"damaged"', '"damage":', "never nest tags", "for EVERY line that touches"):
+        assert old not in text, old
+    assert "never a plausible substitute without a tag" in text and "read it as the WHOLE word" in text
 
 
 def test_page_stage_prompt_with_and_without_lists():
@@ -48,7 +60,8 @@ def test_page_stage_prompt_with_and_without_lists():
     assert "«Улучшать методы» — И. Фетисов" in user and "* «Без автора»\n" in user
     assert "Rubrics: «Консультация»." in user
     assert user.index(DEFAULT_DAMAGE_NOTE) < user.index("Transcribe this page.") < user.index("KNOWN STRUCTURE")
-    assert user.index("KNOWN STRUCTURE") < user.index("2 overlapping tiles") < user.index("Apply rule 5 strictly")
+    assert user.index("KNOWN STRUCTURE") < user.index("2 overlapping tiles")
+    assert "Apply rule 5 strictly" not in user, "третий повтор правила о повреждениях убран (v16)"
     assert "KNOWN STRUCTURE" not in user_prompt(2, 1, 2) and "KNOWN STRUCTURE" not in user_prompt(1, 1, 1, stage="toc")
 
 

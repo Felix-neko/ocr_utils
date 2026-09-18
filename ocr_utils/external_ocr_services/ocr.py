@@ -28,18 +28,22 @@ from ocr_utils.external_ocr_services import structure
 from ocr_utils.external_ocr_services import toc as toc_module
 from ocr_utils.external_ocr_services.render import to_markdown
 from ocr_utils.external_ocr_services.schema import (
-    FORMULA_TAG,
     BlockTag,
     DamageTag,
+    FORMULA_TAG,
     PageResult,
     ParseError,
     Stage,
     TocKind,
+    count_illustrations,
+    drop_duplicate_supplied,
     is_gap_runaway,
     json_schema,
     parse_json_text,
+    strip_hyphen_supplied,
     tag_counts,
     tags_from_edge_words,
+    unbalanced_fences,
     unbalanced_tags,
 )
 from ocr_utils.external_ocr_services.tiling import (
@@ -95,9 +99,13 @@ class RunOptions:
     source: str = ""
     debug_dir: Path | None = None  # сырые ответы, промпты и отправленные тайлы
     # Второй проход по полосе, которую первый проход счёл повреждённой: подсказка собирается из
-    # его же ответа (описание, затронутые строки, счётчики). Включён всегда (опции в CLI нет;
-    # False — только в тестах). ``second_pass_transcript`` — слать ещё и весь текст первого прохода.
-    second_pass: bool = True
+    # его же ответа (описание, затронутые строки, счётчики). По умолчанию ВЫКЛЮЧЕН (``--second-pass``
+    # включает): на МТС 1991/02 он то чинил первый проход, то портил — снимал теги с достроек, не
+    # меняя букв, подставлял слова без тега на смазе («немецкое» вместо «акционерное») и переписывал
+    # чистые слова из списка подсказок («Солкомфлот» 8/12) — арбитраж 28:13 за первый проход
+    # (`reports/external_ocr_hyphenation_second_pass.md`). ``second_pass_transcript`` — слать ещё и
+    # весь текст первого прохода.
+    second_pass: bool = False
     second_pass_transcript: bool = False
 
 
@@ -109,7 +117,7 @@ class SecondPass:
     ``user.md.j2``): модель знает, где искать, и восстанавливает по контексту увереннее.
     """
 
-    damage: str  # описание повреждения словами (по-русски), как его дал первый проход
+    damage_description: str  # описание повреждения словами (по-русски), как его дал первый проход
     edge_words: tuple[dict, ...]  # затронутые строки: {"line", "text", "kind"}; режутся до SECOND_PASS_MAX_LINES
     tags: dict  # {DamageTag.SUPPLIED: n, DamageTag.UNCLEAR: n, DamageTag.GAP: n}
     transcript: str | None = None  # полный текст первого прохода, если решено его передавать
@@ -149,7 +157,7 @@ SECOND_PASS_MAX_LINES = 60
 class SecondPassReason(StrEnum):
     """Почему полоса ушла во второй проход; пишется в meta (``second_pass_reason``) и summary.csv.
 
-    ``DAMAGED`` — модель подняла булев флаг ``damaged``; ``TAGS`` — флага нет, но в тексте есть
+    ``DAMAGED`` — модель подняла булев флаг ``is_damaged``; ``TAGS`` — флага нет, но в тексте есть
     теги повреждений; ``EDGE_WORDS`` — флага и тегов нет, но список повреждённых строк не пуст.
     """
 
@@ -168,7 +176,7 @@ class PassChoice(StrEnum):
 def second_pass_reason(result: PageResult) -> SecondPassReason | None:
     """Почему полосе нужен второй проход: первый описал повреждение, поставил теги или назвал строки.
 
-    Главный признак — булево ``damaged`` (по тексту описания срабатывало на 82 % чистых полос);
+    Главный признак — булево ``is_damaged`` (по тексту описания срабатывало на 82 % чистых полос);
     теги и ``edge_words`` — на случай, когда модель разметила повреждение, но флаг не подняла.
 
     Args:
@@ -177,7 +185,7 @@ def second_pass_reason(result: PageResult) -> SecondPassReason | None:
     Returns:
         Причина второго прохода или ``None`` — полоса чистая, второго прохода не будет.
     """
-    if result.damaged:
+    if result.is_damaged:
         return SecondPassReason.DAMAGED
     if sum(tag_counts(result.content_markdown).values()) > 0:
         return SecondPassReason.TAGS
@@ -675,9 +683,19 @@ def recognise_page(
         write_meta(paths.meta, meta)
         return meta, None
     if result.edge_words:
+        # Продолжение переноса, объявленное «восстановленным» («ва-» → «ва<supplied>л</supplied>ютных»),
+        # — не повреждение: тег снимается, буквы остаются.
+        result.content_markdown, stripped = strip_hyphen_supplied(result.content_markdown, result.edge_words)
+        if stripped:
+            meta["hyphen_supplied_stripped"] = stripped
         # Модель охотнее заполняет список повреждённых строк, чем ставит теги в тексте.
-        result.content_markdown, inserted = tags_from_edge_words(result.content_markdown, result.edge_words)
-        meta["tags_from_edge_words"] = inserted
+        result.content_markdown, edge_report = tags_from_edge_words(result.content_markdown, result.edge_words)
+        meta["tags_from_edge_words"] = edge_report.inserted
+        meta["edge_words_empty"] = edge_report.empty
+    # «трудностей <supplied>стей</supplied>» — слово целое, хвост в теге лишний.
+    result.content_markdown, dropped = drop_duplicate_supplied(result.content_markdown)
+    if dropped:
+        meta["duplicate_supplied_dropped"] = dropped
     if job.stage is Stage.TOC and result.toc is not None and result.toc.sections:
         # Блок <toc>…</toc> вокруг списка ставит код по границам элементов: модель его не просят
         # (тег она искажала — «< toc>», «<тoc>»); написанный ею по памяти тег нормализован разбором.
@@ -717,10 +735,14 @@ def recognise_page(
         has_header=result.running_header is not None,
         tags=tag_counts(result.content_markdown),
         formulas=result.content_markdown.count(f"<{FORMULA_TAG}>"),
-        # Блоки-обёртки: оглавление, картинки трёх видов, сноски — для регрессии «объекты не хуже».
-        blocks={tag: result.content_markdown.count(f"<{tag}>") for tag in BlockTag},
-        damaged=result.damaged,
-        damage_seen=result.damage,
+        # Блоки: оглавление и сноски (теги) плюс иллюстрации трёх видов (fenced-блоки) — для
+        # регрессии «объекты не хуже»; ключи иллюстраций — photo / schema / line-art.
+        blocks={
+            **{tag.value: result.content_markdown.count(f"<{tag}>") for tag in BlockTag},
+            **{kind.key: count for kind, count in count_illustrations(result.content_markdown).items()},
+        },
+        is_damaged=result.is_damaged,
+        damage_description=result.damage_description,
         messages="; ".join(result.messages),
     )
     if job.stage is Stage.TOC and result.toc is not None:
@@ -729,6 +751,10 @@ def recognise_page(
     broken = unbalanced_tags(result.content_markdown)
     if broken:
         meta["tag_warning"] = "непарные теги: " + ", ".join(tag.value for tag in broken)
+    # Незакрытый fenced-блок иллюстрации утащит «в цитату» весь остаток полосы.
+    if unbalanced_fences(result.content_markdown):
+        meta["tag_warning"] = (meta.get("tag_warning") or "").rstrip("; ") + "; незакрытый fenced-блок ```"
+        meta["tag_warning"] = meta["tag_warning"].lstrip("; ")
     write_meta(paths.meta, meta)
     return meta, result
 
@@ -790,7 +816,7 @@ def recognise_with_second_pass(
         in_path: Файл полосы на диске.
         job: Задание первого прохода; второй получает его копию с ``second_pass``.
         out_dir: Корень выхода — финал перезаписывает файлы полосы целиком.
-        options: Настройки прогона: ``second_pass`` (выключается только в тестах),
+        options: Настройки прогона: ``second_pass`` (по умолчанию выключен, ``--second-pass``),
             ``second_pass_transcript`` (слать ли текст первого прохода), debug-dir.
 
     Returns:
@@ -800,7 +826,7 @@ def recognise_with_second_pass(
     """
     # Первый проход — обычный запрос; его выход уже лежит под out-dir.
     meta1, result1 = recognise_page(client, spec, in_path, job, out_dir, options)
-    # Сбой, этап TOC (оглавление не восстанавливаем) или проход выключен тестом — без второго.
+    # Сбой, этап TOC (оглавление не восстанавливаем) или проход выключен (умолчание) — без второго.
     if result1 is None or job.stage is not Stage.PAGE or not options.second_pass:
         return meta1, result1
     reason = second_pass_reason(result1)
@@ -811,7 +837,7 @@ def recognise_with_second_pass(
     # Подсказка второму проходу — всё, что первый сказал о повреждениях. Полный текст первого
     # прохода по умолчанию не шлём: в замерах он не помог, а промпт удваивал.
     hint = SecondPass(
-        damage=result1.damage,
+        damage_description=result1.damage_description,
         edge_words=tuple(result1.edge_words),
         tags=tags1,
         transcript=result1.content_markdown if options.second_pass_transcript else None,
@@ -828,8 +854,8 @@ def recognise_with_second_pass(
         "reason": reason,
         "pass1_tags": tags1,
         "pass2_tags": tags2,
-        "pass1_damage": result1.damage,
-        "pass2_damage": result2.damage if result2 is not None else None,
+        "pass1_damage": result1.damage_description,
+        "pass2_damage": result2.damage_description if result2 is not None else None,
         "chosen": chosen,
         "why": why,
         "cost_usd_pass1": meta1.get("cost_usd"),

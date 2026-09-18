@@ -238,3 +238,31 @@ def test_bare_dollar_math_is_wrapped_and_tagged_math_untouched():
     assert out.startswith("где <latex>$a_i$</latex> — ресурсы; <latex>$b_j$</latex> — потребность.")
     assert "<latex>$$\\sum_i x_i = 1$$</latex>" in out and "Цена 5 $ за тонну." in out
     assert report.wrapped_math == 2 and wrap_bare_math(out, StructureReport()) == out
+
+
+def test_case_insensitive_titles_and_rubrics_from_list():
+    """Регистр на полосе и в оглавлении разный (CAPS против строчных, и наоборот) — совпадение всё равно есть."""
+    articles = [{"title": "Выиграет тот, кто наладит деловое сотрудничество", "rubric": "Проблемы и суждения"}]
+    body = "## ПРОБЛЕМЫ И СУЖДЕНИЯ\n\n# ВЫИГРАЕТ ТОТ, КТО НАЛАДИТ ДЕЛОВОЕ СОТРУДНИЧЕСТВО\n\nТекст.\n"
+    out, report = apply(body, articles, ["Проблемы и суждения"], [])
+    assert out.startswith("<rubric>*ПРОБЛЕМЫ И СУЖДЕНИЯ*</rubric>\n\n# ВЫИГРАЕТ ТОТ")
+    assert report.title_in_list is True and report.demoted_headings == []
+    assert report.rubrics_from_headings == ["ПРОБЛЕМЫ И СУЖДЕНИЯ"]
+    # Обратный случай: список капителью, полоса строчными.
+    caps = [{"title": "ВЫИГРАЕТ ТОТ, КТО НАЛАДИТ ДЕЛОВОЕ СОТРУДНИЧЕСТВО", "rubric": "ПРОБЛЕМЫ И СУЖДЕНИЯ"}]
+    body = "<rubric>*Проблемы и суждения*</rubric>\n\n# Выиграет тот, кто наладит деловое сотрудничество\n\nТекст.\n"
+    out, report = apply(body, caps, ["ПРОБЛЕМЫ И СУЖДЕНИЯ"], [])
+    assert out.startswith("<rubric>*Проблемы и суждения*</rubric>\n\n# Выиграет")
+    assert report.title_in_list is True and report.markers_from_rubrics == [] and report.rubrics_replaced == []
+
+
+def test_fenced_illustration_block_is_one_paragraph():
+    """Fenced-блок с пустой строкой внутри не рвётся на абзацы, и рубрика/автор не встают внутрь него."""
+    from ocr_utils.external_ocr_services.structure import _paragraphs
+
+    body = (
+        "```\n[графика]\nсхема\n\nнадпись: А\n```\n\n# Фильм о снабжении\n\n<author>**И. Иванов**</author>\n\nТекст.\n"
+    )
+    assert _paragraphs(body)[0] == "```\n[графика]\nсхема\n\nнадпись: А\n```"
+    out, _ = apply(body, [{"title": "Фильм о снабжении", "rubric": "Кино"}], ["Кино"], [])
+    assert out.startswith("```\n[графика]\nсхема\n\nнадпись: А\n```\n\n<rubric>*Кино*</rubric>\n\n# Фильм о снабжении")

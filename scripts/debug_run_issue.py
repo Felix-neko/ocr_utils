@@ -19,7 +19,7 @@ from ocr_utils.external_ocr_services import models as registry
 from ocr_utils.external_ocr_services.client import OpenRouterClient, api_key_from
 from ocr_utils.external_ocr_services.ocr import RunOptions
 from ocr_utils.external_ocr_services.pages import flags_for, flags_from_db, list_pages
-from ocr_utils.external_ocr_services.pipeline import PipelineParams, PipelineStats, run_issue
+from ocr_utils.external_ocr_services.pipeline import PipelineParams, run_issue
 
 # --- Что распознаём (пути и числа те же, что в run_scripts/external_ocr_services/common.sh) ---
 YEAR, ISSUE = "1976", "12"
@@ -60,12 +60,11 @@ def main() -> None:
     pages = sorted(toc_pages + regular)  # run_issue ждёт порядок по имени: по нему сливается оглавление
     issue_key = f"{YEAR}/{ISSUE}"
     client = OpenRouterClient(api_key_from(None))
-    stats = PipelineStats(pages=len(pages))
 
-    run_issue(client, spec, params, issue_key, pages, stats)  # <- точка останова здесь
+    stats = run_issue(client, spec, params, issue_key, pages)  # <- точка останова здесь
 
     print(
-        f"полос {stats.pages}, запросов {stats.requests}, сбоев {stats.failed}, "
+        f"полос {len(pages)}, запросов {stats.requests}, сбоев {stats.failed}, "
         f"второй проход {stats.second_passes}, стоимость ${stats.cost_usd:.4f}; выход {OUT_DIR / issue_key}"
     )
     if stats.missed:

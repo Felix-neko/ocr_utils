@@ -24,7 +24,7 @@ from tests.ocr_utils.external_ocr_services.test_pipeline import ISSUE, FakeClien
 
 def _page(damaged=False, damage="", body="Текст.", edge=()):
     payload = json.loads(_answer(body=body))
-    payload.update(damaged=damaged, damage=damage, edge_words=list(edge))
+    payload.update(is_damaged=damaged, damage_description=damage, edge_words=list(edge))
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -37,11 +37,16 @@ def test_trigger_reasons_and_no_damage_text():
     )
     # Без булева поля вердикт выводится из текста: «повреждений не обнаружено» — не повреждение.
     old = json.loads(_page())
-    del old["damaged"]
+    del old["is_damaged"], old["damage_description"]
     old["damage"] = "Повреждений не обнаружено, все буквы читаются уверенно."
-    assert parse_json_text(json.dumps(old, ensure_ascii=False)).damaged is False
+    assert parse_json_text(json.dumps(old, ensure_ascii=False)).is_damaged is False
     old["damage"] = "Правая кромка обрезана"
-    assert parse_json_text(json.dumps(old, ensure_ascii=False)).damaged is True
+    assert parse_json_text(json.dumps(old, ensure_ascii=False)).is_damaged is True
+    # Файлы до v16: булево ``damaged`` и текст ``damage`` читаются в новые поля.
+    old["damaged"] = False
+    legacy = parse_json_text(json.dumps(old, ensure_ascii=False))
+    assert legacy.is_damaged is False and legacy.damage_description == "Правая кромка обрезана"
+    assert "is_damaged" in json.loads(legacy.to_json()) and "damaged" not in json.loads(legacy.to_json())
     assert is_no_damage_text("Помех и обрезки текста на странице не обнаружено, буквы чёткие.")
     assert not is_no_damage_text("Небольшие потертости и нечеткость по левому краю")
 
@@ -61,8 +66,10 @@ def test_second_pass_prompt_block():
     )
     text = user_prompt(2, 1, 2, second_pass=hint, max_lines=2)
     assert "A first reading of this page reported damage: «Край обрезан»" in text and "3 reconstructed" in text
-    assert text.count("«снабже» →") == 2 and "and 1 more" in text
+    # v16: во второй проход уходят только «как видно» и вид — без догадок full (они портили чистые слова).
+    assert text.count("- «снабже», hidden") == 2 and "and 1 more" in text and "<supplied>ния</supplied>" not in text
     assert "HIDDEN" in text and "VISIBLE BUT UNRELIABLE" in text and DEFAULT_DAMAGE_NOTE not in text
+    assert "Apply rule 5 strictly" not in text and '`damage_description` = ""' in text
     assert "Its transcription was" not in text
     with_text = user_prompt(1, 1, 1, second_pass=SecondPass("x", (), {}, "ПОЛНЫЙ ТЕКСТ"))
     assert "<<<\nПОЛНЫЙ ТЕКСТ\n>>>" in with_text and "do not copy" in with_text
@@ -114,24 +121,17 @@ def test_second_pass_failure_keeps_first_and_clean_page_has_one_request(tmp_path
     assert json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))["second_pass"]["pass2_error"]
     fake, meta, result, out, _ = _run(tmp_path, [_page()])
     assert len(fake.payloads) == 1 and meta["second_pass_reason"] is None
-    fake, meta, result, out, _ = (
-        _run(tmp_path, [_page(damaged=True, damage="Край")], second_pass=False)
-        if False
-        else (None, None, None, None, None)
-    )
 
 
-def test_pipeline_option_off_means_single_request(tmp_path):
+def test_second_pass_off_by_default_means_single_request(tmp_path):
+    """Умолчание — без второго прохода: повреждённая полоса даёт один запрос, флаг и описание в meta."""
+    assert RunOptions().second_pass is False
     _make_pages(tmp_path / "in")
     rel = Path(ISSUE) / "IMG_0002.jpg"
     answers = [_page(damaged=True, damage="Край")]
     fake = FakeClient(lambda p: answers.pop(0))
     meta, _ = recognise_with_second_pass(
-        fake,
-        resolve("deepseek-v41-flash"),
-        tmp_path / "in" / rel,
-        PageJob(rel),
-        tmp_path / "out",
-        RunOptions(second_pass=False),
+        fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", RunOptions()
     )
     assert len(fake.payloads) == 1 and meta["second_pass_reason"] is None
+    assert meta["is_damaged"] is True and meta["damage_description"] == "Край"

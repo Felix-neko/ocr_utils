@@ -1,7 +1,15 @@
 """Слияние полос оглавления, рубрики-продолжения, дедуп, списки для промпта и отпечаток."""
 
 from ocr_utils.external_ocr_services.schema import TocArticle, TocPage, TocSection
-from ocr_utils.external_ocr_services.toc import from_dict, merge_pages, prompt_lists, to_dict, to_markdown, toc_hash
+from ocr_utils.external_ocr_services.toc import (
+    from_dict,
+    merge_pages,
+    normalize_title,
+    prompt_lists,
+    to_dict,
+    to_markdown,
+    toc_hash,
+)
 
 
 def _article(title, *names, page=None, issue=None):
@@ -83,15 +91,15 @@ def test_ensure_toc_block_wraps_entries_once():
 
     body = (
         "# Материально-техническое снабжение\n\nОРГАН ГОСКОМИТЕТА\n\n# СОДЕРЖАНИЕ\n\n"
-        "<rubric_in_toc>*РЕШЕНИЯ СЪЕЗДА*</rubric_in_toc>\n\n"
+        "<rubric-in-toc>*РЕШЕНИЯ СЪЕЗДА*</rubric-in-toc>\n\n"
         "<author>**Христораднов Ю.**</author>. Большие задачи — 3\n\n"
-        "<rubric_in_toc>*ПРОБЛЕМЫ*</rubric_in_toc>\n\n"
+        "<rubric-in-toc>*ПРОБЛЕМЫ*</rubric-in-toc>\n\n"
         "- <author>**Колмаков С.**</author>. Система показателей — 11\n\n"
         "Редакционная коллегия: …\n"
     )
     out, wrapped = ensure_toc_block(body)
     assert wrapped
-    assert out.split("\n\n")[3:5] == ["<toc>", "<rubric_in_toc>*РЕШЕНИЯ СЪЕЗДА*</rubric_in_toc>"]
+    assert out.split("\n\n")[3:5] == ["<toc>", "<rubric-in-toc>*РЕШЕНИЯ СЪЕЗДА*</rubric-in-toc>"]
     assert "Система показателей — 11\n\n</toc>\n\nРедакционная коллегия" in out
     assert ensure_toc_block(out) == (out, False)
     assert ensure_toc_block("Обычный текст.\n") == ("Обычный текст.\n", False)
@@ -128,7 +136,7 @@ def test_parse_toc_block_entries_and_rubrics():
 
     body = (
         "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги — 1\n\n"
-        "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n"
+        "<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n"
         "- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
         "- Семинар по совершенствованию — № 3, 92\n- Указатель — № 12, с. 94\n- В указателе — 5, 49\n"
         "- Информация — №№ 1, 2, 4\n- Новые книги № 1, с. 28; № 2, с. 20\n\nЛишний абзац.\n\n</toc>\n\nРедколлегия.\n"
@@ -161,7 +169,7 @@ def test_reconcile_toc_body_without_entries_is_rebuilt():
     """Тело с одними рубриками при 3 статьях в toc → все три «не было в теле», блок построен по toc."""
     from ocr_utils.external_ocr_services.toc import reconcile_toc
 
-    lost = "# СОДЕРЖАНИЕ\n\n<toc>\n\n<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n</toc>\n\nРедколлегия.\n"
+    lost = "# СОДЕРЖАНИЕ\n\n<toc>\n\n<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n</toc>\n\nРедколлегия.\n"
     body, page, check = reconcile_toc(lost, _page())
     assert check.rebuilt and len(check.missing_in_body) == 3 and check.missing_in_toc == []
     assert "в теле не было 3 статей из toc" in check.message() and "построен заново" in check.message()
@@ -169,7 +177,7 @@ def test_reconcile_toc_body_without_entries_is_rebuilt():
         "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги работы по-новому — 1\n\n"
     )
     assert (
-        "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        "<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
         in body
     )
     assert body.endswith("— 63\n\n</toc>\n\nРедколлегия.\n") and sum(len(s.articles) for s in page.sections) == 3
@@ -181,7 +189,7 @@ def test_reconcile_toc_extra_body_entry_goes_to_toc_section():
 
     body = (
         "<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги работы по-новому — 1\n\n"
-        "<rubric_in_toc>*Опыт работы*</rubric_in_toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        "<rubric-in-toc>*Опыт работы*</rubric-in-toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
         "- <author>**С. Финкель**</author>. Затраты и рентабельность — 63\n"
         "- <author>**П. Шейн**</author>. Планирование потребности — 76\n\n</toc>\n"
     )
@@ -203,9 +211,23 @@ def test_reconcile_toc_matching_bodies_untouched():
 
     body = (
         "<toc>\n\n<author>**В. Тычинин**</author>. первые шаги работы\nпо-новому — 1\n\n"
-        "<rubric_in_toc>*ОПЫТ РАБОТЫ*</rubric_in_toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n\n"
+        "<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n\n"
         "- <author>**С. Финкель**</author>. ЗАТРАТЫ И РЕНТАБЕЛЬНОСТЬ — 63\n\n</toc>\n"
     )
     out, page, check = reconcile_toc(body, _page())
     assert out == body and check.message() is None and not check.rebuilt
     assert check.as_dict() == {"missing_in_body": [], "missing_in_toc": [], "rebuilt": False}
+
+
+def test_dedup_ignores_case_and_damage_tags():
+    """Одна и та же статья с двух полос (тайлы перекрываются): регистр и теги <supplied> в названии не мешают дедупу."""
+    assert normalize_title("Выгоден прокат техни<supplied>ки</supplied>") == normalize_title("ВЫГОДЕН ПРОКАТ ТЕХНИКИ")
+    assert normalize_title("Товар<gap>▒▒</gap> и деньги") == "товар и деньги"
+    first = TocPage("contents", sections=[TocSection("Почта", [_article("Выгоден прокат техники", page="91")])])
+    second = TocPage(
+        "contents",
+        continues_previous=True,
+        sections=[TocSection(None, [_article("Выгоден прокат техни<supplied>ки</supplied>", page="91")])],
+    )
+    toc = merge_pages("contents", [("a.jpg", first), ("b.jpg", second)])
+    assert [a.title for a in toc.articles] == ["Выгоден прокат техники"]

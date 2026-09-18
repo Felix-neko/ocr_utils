@@ -93,6 +93,9 @@ wheels/
 research/external_ocr_models/local/*/weights/
 research/external_ocr_models/local/*/sync.log
 research/external_ocr_models/damaged/
+research/external_ocr_models/damaged_issue/
+# Выход отладочного прогона «плохого выпуска» (scripts/debug_bad_issue.py): json/md/meta и тайлы.
+/scripts/debug_bad_issue_out/
 
 # Выходы прогонов, которые run-скрипты кладут в корень репо (BASE_NAME в шапке скрипта):
 # csv с метриками всех полос, машинные md-сводки, контактные листы, симлинки и оверлеи.
@@ -113,3 +116,5 @@ research/external_ocr_models/damaged/
 # в репозитории им не место ни как копии, ни как бэкапу.
 *.sqlite
 *.sqlite.bak
+# Выход учебного стенда сравнения языков промпта (research/deepseek_damage_lesson): json/md/raw по полосам.
+research/deepseek_damage_lesson/выход/

@@ -108,21 +108,42 @@ class StructureTag(StrEnum):
     не из оглавления)."""
 
     RUBRIC = "rubric"
-    RUBRIC_IN_TOC = "rubric_in_toc"
+    RUBRIC_IN_TOC = "rubric-in-toc"  # через дефис: имя с «_» вьюер markdown в PyCharm не прячет
     AUTHOR = "author"
     POSITION = "position"
     MARKER = "marker"
 
 
 class BlockTag(StrEnum):
-    """Теги-обёртки блоков: список оглавления, три вида картинок (block quote с описанием и
-    надписями) и сноска; считаются в meta (``blocks``)."""
+    """Теги-обёртки блоков: список оглавления и сноска; считаются в meta (``blocks``)."""
 
     TOC = "toc"
-    SCHEMA = "schema"
-    PHOTO = "photo"
-    LINE_ART = "line_art"
     FOOTNOTE = "footnote"
+
+
+class IllustrationKind(StrEnum):
+    """Вид иллюстрации — первая строка fenced-блока в квадратных скобках: ``[фотография]``,
+    ``[блок-схема]``, ``[графика]``; в meta (``blocks``) считаются под ключами :attr:`key`."""
+
+    PHOTO = "фотография"
+    SCHEMA = "блок-схема"
+    LINE_ART = "графика"
+
+    @property
+    def key(self) -> str:
+        """Ключ в meta ``blocks``: имя члена строчными через дефис (``photo``, ``schema``, ``line-art``)."""
+        return self.name.lower().replace("_", "-")
+
+
+# Старые XML-обёртки иллюстраций (промпты v10–v14): тег по виду вокруг block quote. Читаются из
+# прежних .json и «по памяти» модели и переводятся в fenced-блок (``modernise_illustrations``).
+LEGACY_ILLUSTRATION_TAGS = {
+    "schema": IllustrationKind.SCHEMA,
+    "photo": IllustrationKind.PHOTO,
+    "line_art": IllustrationKind.LINE_ART,
+}
+# Старые имена тегов структуры (до v15, с подчёркиванием) → новые.
+LEGACY_TAG_NAMES = {"rubric_in_toc": StructureTag.RUBRIC_IN_TOC.value}
 
 
 # Формулы: LaTeX внутри тега, номер формулы снаружи текстом.
@@ -197,9 +218,11 @@ class PageResult:
         title_in_list: Совпал ли заголовок со списком статей в промпте; ``None`` — списка не было.
         authors: ``[{"name", "position", "article": AuthorArticle | None, "printed": AuthorPrinted | None}]``
             — все имена авторов на полосе с привязкой к статье и местом печати.
-        damaged: Булев вердикт «на полосе есть повреждённые буквы» — надёжный триггер второго
-            прохода (в тексте ``damage`` модель пишет «повреждений не обнаружено» на 4 из 5 чистых).
-        damage: Описание повреждений глазами модели (по-русски); пусто — нет.
+        is_damaged: Булев вердикт «на полосе есть повреждённые буквы» (в описании модель пишет
+            «повреждений не обнаружено» на 4 из 5 чистых полос, поэтому вердикт — отдельное поле);
+            триггер второго прохода, если тот включён. В файлах до v16 — ``damaged``.
+        damage_description: Описание повреждений глазами модели (по-русски, одно предложение);
+            пусто — нет. В файлах до v16 — ``damage``.
         supplied: Слова с буквами, вписанными по контексту (то, что стоит в ``<supplied>``).
         unclear: Слова с буквами, прочитанными с сомнением (``<unclear>``).
         gap: Сколько мест утрачено без восстановления (тегов ``<gap>``).
@@ -220,8 +243,8 @@ class PageResult:
     title: str | None = None
     title_in_list: bool | None = None
     authors: list[dict] = field(default_factory=list)
-    damaged: bool = False
-    damage: str = ""
+    is_damaged: bool = False
+    damage_description: str = ""
     supplied: list[str] = field(default_factory=list)
     unclear: list[str] = field(default_factory=list)
     gap: int = 0
@@ -323,12 +346,15 @@ def json_schema(stage: Stage = Stage.PAGE) -> dict:
     """
     stage = Stage(stage)  # строка из старого вызова → член перечисления; чужое значение — ValueError
     properties: dict = {
-        "damaged": {
+        "is_damaged": {
             "type": "boolean",
             "description": "True only if some letters on the page are hidden, cut off, blurred, squashed, smeared or "
             "washed out; false for a cleanly printed page.",
         },
-        "damage": {"type": "string", "description": "What damage is visible on the page; empty string if none."},
+        "damage_description": {
+            "type": "string",
+            "description": "One short sentence in Russian: which edge or area is damaged and how; empty string if none.",
+        },
         "page_number": {"type": ["string", "null"], "description": 'Page number as printed, e.g. "12"; null if none.'},
         "rubric": {"type": ["string", "null"], "description": "Rubric printed above the title, without tags."},
         "title": {"type": ["string", "null"], "description": "Title of the article starting on this page."},
@@ -426,6 +452,41 @@ def unbalanced_tags(text: str) -> list[DamageTag]:
     return [tag for tag in PAIRED_DAMAGE_TAGS if text.count(f"<{tag}>") != text.count(f"</{tag}>")]
 
 
+# Fenced-блок иллюстрации: строка ``` (возможно с языком), первая строка внутри — вид в квадратных
+# скобках, дальше описание и надписи, закрывающая ```; всё на своих строках.
+_ILLUSTRATION_BLOCK = re.compile(
+    r"^[ \t]*```[^\n]*\n[ \t]*\[(?P<kind>[^\]\n]+)\][^\n]*\n.*?^[ \t]*```[ \t]*$", re.M | re.S
+)
+_FENCE_LINE = re.compile(r"^[ \t]*```", re.M)
+
+
+def count_illustrations(text: str) -> dict[IllustrationKind, int]:
+    """Сколько в теле fenced-блоков каждого вида (по первой строке ``[фотография]`` и т. п.).
+
+    Args:
+        text: Тело полосы в markdown.
+
+    Returns:
+        ``{IllustrationKind: число}`` по всем трём видам, нули включительно; блок с неизвестным
+        видом в первой строке не считается.
+    """
+    counts = {kind: 0 for kind in IllustrationKind}
+    for match in _ILLUSTRATION_BLOCK.finditer(text):
+        kind = _enum_or_none(match.group("kind").strip().lower(), IllustrationKind)
+        if kind is not None:
+            counts[kind] += 1
+    return counts
+
+
+def unbalanced_fences(text: str) -> bool:
+    """Нечётное число строк с ``` — незакрытый fenced-блок, дальше всё тело уедет «в цитату».
+
+    Args:
+        text: Тело полосы в markdown.
+    """
+    return len(_FENCE_LINE.findall(text)) % 2 == 1
+
+
 _FENCE = re.compile(r"^\s*```[a-zA-Z]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
 
@@ -485,22 +546,38 @@ def is_no_damage_text(text: str) -> bool:
     """Пустое описание или явное «повреждений нет» в первом предложении.
 
     Args:
-        text: Поле ``damage`` ответа.
+        text: Поле ``damage_description`` ответа (``damage`` в файлах до v16).
     """
     first = re.split(r"[.;]", text.strip(), maxsplit=1)[0]
     return not first.strip() or _NO_DAMAGE.search(first) is not None
 
 
-def _damaged(payload: dict) -> bool:
-    """Булев вердикт ``damaged``; если модель его не дала — по тексту описания (старые ответы).
+def _damage_description(payload: dict) -> str:
+    """Описание повреждения: поле ``damage_description``, иначе прежнее ``damage`` (файлы и ответы до v16).
 
     Args:
         payload: Разобранный JSON ответа.
+
+    Returns:
+        Текст описания; пустая строка, если ни одного из полей нет.
     """
-    value = payload.get("damaged")
-    if isinstance(value, bool):
-        return value
-    return not is_no_damage_text(str(payload.get("damage") or ""))
+    return str(payload.get("damage_description") or payload.get("damage") or "")
+
+
+def _damaged(payload: dict) -> bool:
+    """Булев вердикт ``is_damaged`` (до v16 — ``damaged``); если модель его не дала — по тексту описания.
+
+    Args:
+        payload: Разобранный JSON ответа.
+
+    Returns:
+        ``True``, если на полосе, по мнению модели, есть повреждённые буквы.
+    """
+    for key in ("is_damaged", "damaged"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return value
+    return not is_no_damage_text(_damage_description(payload))
 
 
 def _coerce_toc(payload: object) -> TocPage | None:
@@ -566,7 +643,7 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         toc_kind = TocKind.CONTENTS if payload.get("is_toc") else TocKind.NONE
     title_in_list = payload.get("title_in_list")
     return PageResult(
-        content_markdown=expand_gaps(modernise_tags(normalise_tags(unspace_letters(body)))),
+        content_markdown=expand_gaps(modernise_illustrations(modernise_tags(normalise_tags(unspace_letters(body))))),
         page_number=_text_or_none(payload.get("page_number")),
         running_header=_text_or_none(payload.get("running_header")),
         running_footer=_text_or_none(payload.get("running_footer")),
@@ -576,8 +653,8 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         title=_text_or_none(payload.get("title")),
         title_in_list=None if title_in_list is None else bool(title_in_list),
         authors=_authors(payload.get("authors"), with_article=True),
-        damaged=_damaged(payload),
-        damage=str(payload.get("damage") or ""),
+        is_damaged=_damaged(payload),
+        damage_description=_damage_description(payload),
         supplied=_word_list(payload, "supplied", "restored"),
         unclear=_word_list(payload, "unclear", "fuzzy"),
         gap=int(payload.get("gap") or payload.get("unknown") or 0),
@@ -704,8 +781,13 @@ def is_gap_runaway(text: str) -> bool:
 # Кириллические омоглифы латинских букв в именах тегов: модель пишет ``<тoc>`` / ``<тоc>`` / ``< toc>``
 # (1966/03 с. 93: 48 из 60 ответов), и тег перестаёт быть тегом.
 _HOMOGLYPHS = str.maketrans("аеорсухАЕОРСУХТт", "aeopcyxAEOPCYXTt")
-_KNOWN_TAGS = {tag.value for enum in (DamageTag, StructureTag, BlockTag) for tag in enum} | {FORMULA_TAG}
-_TAG_LIKE = re.compile(r"<(\s*/?)\s*([A-Za-z_\u0400-\u04FF]+)\s*(/?)\s*>")
+_KNOWN_TAGS = (
+    {tag.value for enum in (DamageTag, StructureTag, BlockTag) for tag in enum}
+    | {FORMULA_TAG}
+    | set(LEGACY_TAG_NAMES)
+    | set(LEGACY_ILLUSTRATION_TAGS)
+)
+_TAG_LIKE = re.compile(r"<(\s*/?)\s*([A-Za-z_\-\u0400-\u04FF]+)\s*(/?)\s*>")
 
 
 def _normalise_tag(match: re.Match) -> str:
@@ -721,6 +803,8 @@ def _normalise_tag(match: re.Match) -> str:
     latin = name.translate(_HOMOGLYPHS)
     if latin not in _KNOWN_TAGS:
         return match.group(0)
+    # Старое имя с подчёркиванием (``rubric_in_toc``) → новое через дефис.
+    latin = LEGACY_TAG_NAMES.get(latin, latin)
     return f"<{'/' if closing.strip() else ''}{latin}{'/' if selfclose else ''}>"
 
 
@@ -767,6 +851,54 @@ def _modern_tag(match: re.Match) -> str:
     return f"</{new}>" if closing else f"<{new}>"
 
 
+# Старая обёртка иллюстрации: ``<photo>`` на своей строке, внутри block quote (``> …``), ``</photo>``.
+_LEGACY_ILLUSTRATION = re.compile(
+    r"^[ \t]*<(?P<tag>schema|photo|line_art)>[ \t]*\n(?P<body>.*?)\n[ \t]*</(?P=tag)>[ \t]*$", re.M | re.S
+)
+# Первая строка старого блока: ``[фотография: описание]`` / ``[графика: описание]`` / ``[блок-схема]``.
+_LEGACY_ILLUSTRATION_HEAD = re.compile(r"^\[(?P<kind>[^\]:]+?)(?::\s*(?P<caption>[^\]]*))?\]\s*$")
+
+
+def _modern_illustration(match: re.Match) -> str:
+    """Один старый блок иллюстрации → fenced-блок нового формата (для ``modernise_illustrations``).
+
+    Args:
+        match: Совпадение ``_LEGACY_ILLUSTRATION``: тег и тело block quote.
+
+    Returns:
+        Fenced-блок: первая строка — вид из тега (``[фотография]``), затем описание из старой первой
+        строки (если было) отдельной строкой и остальные строки без ``> ``.
+    """
+    kind = LEGACY_ILLUSTRATION_TAGS[match.group("tag")]
+    lines = []
+    for raw in match.group("body").split("\n"):
+        line = re.sub(r"^[ \t]*>[ \t]?", "", raw).rstrip()
+        if line:
+            lines.append(line)
+    out = [f"[{kind}]"]
+    # Старая первая строка «[фотография: описание]» → вид уже написан, описание — своей строкой.
+    if lines and (head := _LEGACY_ILLUSTRATION_HEAD.match(lines[0])):
+        caption = (head.group("caption") or "").strip()
+        if caption:
+            out.append(caption)
+        lines = lines[1:]
+    out.extend(lines)
+    return "```\n" + "\n".join(out) + "\n```"
+
+
+def modernise_illustrations(text: str) -> str:
+    """Иллюстрации прежних промптов (v10–v14: block quote в теге ``<schema>``/``<photo>``/``<line_art>``)
+    → fenced-блок с видом первой строкой; тело без старых блоков не меняется.
+
+    Args:
+        text: Тело полосы в markdown.
+
+    Returns:
+        Текст, где каждая старая обёртка заменена fenced-блоком; идемпотентно.
+    """
+    return _LEGACY_ILLUSTRATION.sub(_modern_illustration, text)
+
+
 def _edge_kind(value: object) -> EdgeKind:
     """Вид повреждения из записи ``edge_words``; прежние имена (``fuzzy``, ``unknown``) и мусор → по умолчанию.
 
@@ -781,54 +913,59 @@ def _edge_kind(value: object) -> EdgeKind:
     return _enum_or_none(text, EdgeKind) or legacy.get(text, EdgeKind.HIDDEN)
 
 
-def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
+@dataclass(frozen=True)
+class EdgeWordsReport:
+    """Что сделал код по списку ``edge_words``: сколько тегов вставил в тело и сколько записей отбросил как пустые."""
+
+    inserted: int = 0  # вставлено тегов <supplied>/<unclear> в тело
+    empty: int = 0  # записей, где «как видно» совпадает с «как написано» и тегов нет — мусор модели
+
+
+def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, EdgeWordsReport]:
     """Расставить теги по списку ``edge_words`` там, где модель в тексте их не поставила.
 
     Модель охотнее заполняет список повреждённых строк, чем ставит теги в тексте. Для записи с
     ``kind=hidden`` невидимая часть — это ``full`` минус видимый фрагмент ``seen`` (с начала или с
     конца слова); первое вхождение голого ``full`` заменяется на слово с ``<supplied>``. ``unclear``
-    — то же с ``<unclear>``; ``gap`` — ``seen`` + ``<gap>`` с заполнителем по числу утраченных букв
-    (сколько ``▒`` написала модель, иначе разница длин, иначе три). Возвращает текст и число вставок.
+    — то же с ``<unclear>``. Записи ``kind=gap`` в тело не переносятся: почти всегда это строка,
+    оборванная переносом, а слово в теле целое — на МТС 1991/02 так появились 24 ложных пропуска
+    вида «в первую<gap>▒▒▒</gap> очередь» (`reports/external_ocr_hyphenation_second_pass.md`);
+    пропускам верим только из самого текста. Пустые записи (``seen == full`` без тегов — четверть
+    списка) пропускаются и считаются.
 
     Args:
         body: Тело полосы в markdown.
         edge_words: Записи ``{"seen", "full", "kind"}`` из ответа модели.
 
     Returns:
-        ``(тело с расставленными тегами, число вставок)``; число уходит в meta
-        (``tags_from_edge_words``), чтобы видеть, сколько тегов поставил код, а не модель.
+        ``(тело с расставленными тегами, отчёт)``: в отчёте число вставок и число пустых записей —
+        оба уходят в meta (``tags_from_edge_words``, ``edge_words_empty``), чтобы видеть, сколько
+        тегов поставил код, а не модель, и сколько мусора в списке.
     """
-    inserted = 0
+    inserted = empty = 0
     for item in edge_words:
         # Теги и заполнители внутри самих записей (модель копирует их из текста) снимаем — ищем голые слова.
         raw_full = str(item.get("full") or "")
         full = _TAG_STRIP.sub("", raw_full).strip()
         seen = _TAG_STRIP.sub("", str(item.get("seen") or "")).strip()
         kind = _edge_kind(item.get("kind"))
-        # «адми-» → «административные» — обычный перенос, а не срез.
-        if not full or full not in body or seen.endswith(("-", "­")):
+        # Запись без разницы между «видно» и «написано» и без тегов ничего не говорит о повреждении.
+        if seen == full and raw_full.strip() == full:
+            empty += 1
             continue
-        tagged = None
-        if kind is EdgeKind.GAP:
-            # Длина пропуска: из тега в full (число или заполнители), иначе разница длин, иначе по умолчанию.
-            tag_match = _GAP_TAG.search(raw_full)
-            width = gap_width(tag_match.group(1)) if tag_match else (max(len(full) - len(seen), 0) or GAP_DEFAULT_WIDTH)
-            gap = gap_markup(min(width, GAP_COUNT_MAX))
-            # Сторона пропуска: как написала модель (тег или заполнитель в начале full), иначе по
-            # тому, с какого края видимая часть совпадает с полным словом; при равенстве — в конце.
-            gap_first = raw_full.lstrip().startswith((f"<{DamageTag.GAP}>", GAP_FILLER)) or not full.startswith(seen)
-            tagged = (gap + seen) if gap_first else (seen + gap)
-        elif seen and full.startswith(seen) and len(full) > len(seen):
+        # «адми-» → «административные» — обычный перенос, а не срез; пропуски — только из тела.
+        if not full or full not in body or seen.endswith(("-", "\u00ad")) or kind is EdgeKind.GAP:
+            continue
+        tag = DamageTag.SUPPLIED if kind is EdgeKind.HIDDEN else DamageTag.UNCLEAR
+        if seen and full.startswith(seen) and len(full) > len(seen):
             # Видно начало слова — скрыт хвост.
-            tag = DamageTag.SUPPLIED if kind is EdgeKind.HIDDEN else DamageTag.UNCLEAR
             tagged = f"{seen}<{tag}>{full[len(seen):]}</{tag}>"
         elif seen and full.endswith(seen) and len(full) > len(seen):
             # Видно конец слова — скрыто начало.
-            tag = DamageTag.SUPPLIED if kind is EdgeKind.HIDDEN else DamageTag.UNCLEAR
             tagged = f"<{tag}>{full[: len(full) - len(seen)]}</{tag}>{seen}"
         elif kind is EdgeKind.UNCLEAR:
-            tagged = f"<{DamageTag.UNCLEAR}>{full}</{DamageTag.UNCLEAR}>"
-        if not tagged:
+            tagged = f"<{tag}>{full}</{tag}>"
+        else:
             continue
         # Целое слово, не внутри другого и не внутри тега.
         pattern = re.compile(r"(?<![\w<>/])" + re.escape(full) + r"(?![\w<])")
@@ -841,4 +978,91 @@ def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
             continue
         body = body[: match.start()] + tagged + body[match.end() :]
         inserted += 1
-    return body, inserted
+    return body, EdgeWordsReport(inserted=inserted, empty=empty)
+
+
+def _supplied_variants(word: str) -> re.Pattern:
+    """Регулярка на слово ``word`` в теле, как бы модель ни расставила в нём ``<supplied>``.
+
+    Args:
+        word: Голое слово без тегов.
+
+    Returns:
+        Скомпилированный шаблон: между любыми двумя буквами слова допускаются открывающие и
+        закрывающие теги ``<supplied>``; границы — не буква и не тег.
+    """
+    tag = rf"(?:</?{DamageTag.SUPPLIED}>)*"
+    inner = tag.join(re.escape(char) for char in word)
+    return re.compile(r"(?<![\w<>/])" + tag + inner + tag + r"(?![\w<])")
+
+
+def strip_hyphen_supplied(body: str, edge_words: list[dict]) -> tuple[str, int]:
+    """Снять ``<supplied>`` с продолжений переносов, которые модель сама объявила «восстановленными».
+
+    Режим ответа на полосе с обрезанным краем: перенос «ва-» в конце строки и продолжение «лютных»
+    в начале следующей модель читает как утрату и пишет «ва<supplied>л</supplied>ютных», а в
+    ``edge_words`` честно показывает ``seen`` с дефисом на конце — по этому признаку тег и снимается
+    (на с. 47 МТС 1991/02 таких 39 в одном ответе). Буквы не меняются, только разметка.
+
+    Args:
+        body: Тело полосы в markdown (теги уже приведены к TEI).
+        edge_words: Записи ``{"seen", "full", "kind"}`` из ответа модели.
+
+    Returns:
+        ``(тело без ложных тегов, сколько слов очищено)``; число уходит в meta
+        (``hyphen_supplied_stripped``).
+    """
+    stripped = 0
+    for item in edge_words:
+        seen = _TAG_STRIP.sub("", str(item.get("seen") or "")).strip()
+        raw_full = str(item.get("full") or "")
+        if not seen.endswith(("-", "\u00ad")) or f"<{DamageTag.SUPPLIED}>" not in raw_full:
+            continue
+        full = _TAG_STRIP.sub("", raw_full).strip()
+        if not full:
+            continue
+        # В теле слово может стоять с тегом не там, где в записи: ищем любую расстановку.
+        match = _supplied_variants(full).search(body)
+        if match is None or f"<{DamageTag.SUPPLIED}>" not in match.group(0):
+            continue
+        body = body[: match.start()] + full + body[match.end() :]
+        stripped += 1
+    return body, stripped
+
+
+# «трудностей <supplied>стей</supplied>»: слово уже целое, а следом — его же хвост в теге.
+_DUPLICATE_SUPPLIED = re.compile(rf"(\w+)([ \u00a0]+)<{DamageTag.SUPPLIED}>(\w+)</{DamageTag.SUPPLIED}>")
+
+
+def _drop_duplicate(match: re.Match) -> str:
+    """Замена для ``_DUPLICATE_SUPPLIED``: убрать тег, если он повторяет конец предыдущего слова.
+
+    Args:
+        match: Совпадение «слово, пробелы, ``<supplied>хвост</supplied>``».
+
+    Returns:
+        Одно слово, если хвост совпал с его концом; иначе исходный текст без изменений.
+    """
+    word, spaces, tail = match.group(1), match.group(2), match.group(3)
+    if word.lower().endswith(tail.lower()) and len(tail) < len(word):
+        return word
+    return match.group(0)
+
+
+def drop_duplicate_supplied(body: str) -> tuple[str, int]:
+    """Убрать дубли достройки: «трактора <supplied>ра</supplied>» → «трактора».
+
+    Модель на обрезанном крае иногда пишет слово целиком и тут же — его хвост в ``<supplied>``
+    отдельным словом (v15, с. 93 МТС 1991/02: «трудностей <supplied>стей</supplied>
+    сформирован»). Тег с хвостом, совпадающим с концом предыдущего слова, удаляется вместе с
+    пробелом.
+
+    Args:
+        body: Тело полосы в markdown.
+
+    Returns:
+        ``(тело без дублей, сколько убрано)``; число уходит в meta (``duplicate_supplied_dropped``).
+    """
+    # Считаем отдельно от замены, чтобы не заводить вложенную функцию-счётчик.
+    dropped = sum(1 for match in _DUPLICATE_SUPPLIED.finditer(body) if _drop_duplicate(match) != match.group(0))
+    return _DUPLICATE_SUPPLIED.sub(_drop_duplicate, body), dropped

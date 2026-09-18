@@ -31,7 +31,8 @@ PAGES = ("IMG_0001.jpg", "IMG_0002.jpg", "IMG_0003.jpg", "IMG_0004.jpg")
 
 def _answer(toc_kind="none", body="# Заголовок\n\nТекст.", toc=None, title=None):
     payload = {
-        "damage": "",
+        "is_damaged": False,
+        "damage_description": "",
         "page_number": "3",
         "rubric": None,
         "title": title,
@@ -299,6 +300,9 @@ def test_redo_reason_by_structure_signs():
         rubric="ПРОБЛЕМЫ И СУЖДЕНИЯ",
     )
     assert redo_reason(header, meta, set(), False) is None
+    header_marker = {"structure": {"markers_from_rubrics": ["Проблемы и суждения"], "markers": 1}}
+    assert redo_reason(_page("Текст.", running_header="ПРОБЛЕМЫ И СУЖДЕНИЯ"), header_marker, set(), False) is None
+    assert redo_reason(_page("Текст."), header_marker, set(), False) is RedoReason.STRUCTURE_EDITS
     assert (
         redo_reason(_page("<rubric>*Рынок*</rubric>\n\nТекст.", running_header="Опыт"), meta, set(), False)
         is RedoReason.STRUCTURE_TAG
@@ -414,6 +418,15 @@ def test_cli_run_with_db_and_toc_lists(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Выпусков: 1, полос: 4 (оглавление/указатель по базе: 1), запросов: 4" in result.output
     assert fake.stage_of(fake.payloads[0]) == "toc"
+    assert "Второй проход" not in result.output, "по умолчанию второго прохода нет — и строки о нём тоже"
+    summary = (tmp_path / "out" / "summary.csv").read_text(encoding="utf-8")
+    assert "is_damaged" in summary.splitlines()[0]
+    with_pass = CliRunner().invoke(
+        cli.main,
+        ["run", "--in-dir", str(tmp_path / "in"), "--out-dir", str(tmp_path / "out2"), "--second-pass", "--jobs", "1"],
+    )
+    assert with_pass.exit_code == 0, with_pass.output
+    assert "Второй проход: 0 полос" in with_pass.output, "флаг включает проход; на чистых полосах он не срабатывает"
     bad = CliRunner().invoke(
         cli.main, ["run", "--in-dir", str(tmp_path / "in"), "--out-dir", str(tmp_path / "out"), "--model", "нет"]
     )
