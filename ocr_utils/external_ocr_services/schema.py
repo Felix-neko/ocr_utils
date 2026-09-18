@@ -91,10 +91,13 @@ class DamageTag(StrEnum):
 PAIRED_DAMAGE_TAGS = tuple(DamageTag)
 # Символ на одну утраченную букву внутри ``<gap>``: в журналах не встречается, виден в любом шрифте.
 GAP_FILLER = "▒"
-# Потолок заполнителей в одном ``<gap>``: модель при temperature 0 может зациклиться на повторе
-# одного символа до потолка токенов (IMG_0008_L: 15 тыс. «▒»), поэтому в промпте — «не больше
-# шести», а в разборе длинные ряды режутся до этого числа.
-GAP_MAX_FILLERS = 6
+# Модель пишет в ``<gap>`` только ЧИСЛО утраченных букв (``<gap>4</gap>``): повтор одного символа
+# при temperature 0 зацикливался до потолка токенов (IMG_0008_L: 15 тыс. «▒»), а число — 1–3
+# токена, повторять нечего. Заполнитель расставляет разбор: меньше GAP_INLINE_MAX букв — по «▒»
+# на букву, иначе внутри тега пишется ``[N symbols]``; число сверх GAP_COUNT_MAX режется.
+GAP_INLINE_MAX = 16
+GAP_COUNT_MAX = 999
+GAP_DEFAULT_WIDTH = 3  # когда длина неизвестна (старый <unknown/>, мусор в теге)
 # Старые имена тегов и полей (промпты до v10) — чтобы читать прежние .json и ответы по памяти модели.
 LEGACY_DAMAGE_NAMES = {"restored": DamageTag.SUPPLIED, "fuzzy": DamageTag.UNCLEAR, "unknown": DamageTag.GAP}
 
@@ -560,7 +563,7 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         toc_kind = TocKind.CONTENTS if payload.get("is_toc") else TocKind.NONE
     title_in_list = payload.get("title_in_list")
     return PageResult(
-        content_markdown=cap_gap_fillers(modernise_tags(unspace_letters(body))),
+        content_markdown=expand_gaps(modernise_tags(unspace_letters(body))),
         page_number=_text_or_none(payload.get("page_number")),
         running_header=_text_or_none(payload.get("running_header")),
         running_footer=_text_or_none(payload.get("running_footer")),
@@ -612,28 +615,77 @@ def parse_json_text(text: str, stage: Stage = Stage.PAGE) -> PageResult:
     raise ParseError(f"невалидный JSON: {last_error}")
 
 
-# Теги повреждений (новые и прежние) и заполнитель пропуска — чтобы искать в тексте голое слово.
-_TAG_STRIP = re.compile(rf"</?(supplied|unclear|gap|restored|fuzzy)>|<unknown\s*/>|{GAP_FILLER}")
+# Теги повреждений (новые и прежние); ``<gap>`` снимается вместе с содержимым (число, заполнители,
+# «[N symbols]») — чтобы искать в тексте голое слово.
+_TAG_STRIP = re.compile(rf"<gap>.*?</gap>|</?(supplied|unclear|gap|restored|fuzzy)>|<unknown\s*/>|{GAP_FILLER}", re.S)
 _LEGACY_TAG = re.compile(r"</?(restored|fuzzy)>|<unknown\s*/>")
+# Содержимое ``<gap>`` как его пишет модель: число, ряд заполнителей (ответ по памяти v10) или мусор.
+_GAP_TAG = re.compile(rf"<{DamageTag.GAP}>(.*?)</{DamageTag.GAP}>", re.S)
+_GAP_LONG = re.compile(r"\[(\d+) symbols\]")
 
 
-_LONG_GAP_RUN = re.compile(rf"{GAP_FILLER}{{{GAP_MAX_FILLERS + 1},}}")
+def gap_width(content: str) -> int:
+    """Число утраченных букв по содержимому ``<gap>``.
+
+    Args:
+        content: Текст между ``<gap>`` и ``</gap>``: число («4»), ряд «▒», уже раскрытое
+            «[N symbols]» или что-то иное.
+
+    Returns:
+        Число от 1 до ``GAP_COUNT_MAX``; для пустого или чужого содержимого — ``GAP_DEFAULT_WIDTH``.
+    """
+    text = content.strip()
+    if text.isdigit():
+        width = int(text)
+    elif text and set(text) == {GAP_FILLER}:
+        width = len(text)
+    elif (match := _GAP_LONG.fullmatch(text)) is not None:
+        width = int(match.group(1))
+    else:
+        width = GAP_DEFAULT_WIDTH
+    return max(1, min(width, GAP_COUNT_MAX))
 
 
-def cap_gap_fillers(text: str) -> str:
-    """Ряды заполнителей длиннее ``GAP_MAX_FILLERS`` укорачиваются до потолка.
+def gap_markup(width: int) -> str:
+    """Тег ``<gap>`` для пропуска в ``width`` букв: заполнители или «[N symbols]» для длинных.
+
+    Args:
+        width: Число утраченных букв (уже в пределах ``GAP_COUNT_MAX``).
+
+    Returns:
+        ``<gap>▒▒▒▒</gap>`` при ``width < GAP_INLINE_MAX``, иначе ``<gap>[N symbols]</gap>``.
+    """
+    inner = GAP_FILLER * width if width < GAP_INLINE_MAX else f"[{width} symbols]"
+    return f"<{DamageTag.GAP}>{inner}</{DamageTag.GAP}>"
+
+
+def _expand_gap(match: re.Match) -> str:
+    """Замена одного ``<gap>…</gap>`` на раскрытый вид (для ``expand_gaps``).
+
+    Args:
+        match: Совпадение ``_GAP_TAG``.
+
+    Returns:
+        Тег с заполнителями или «[N symbols]».
+    """
+    return gap_markup(gap_width(match.group(1)))
+
+
+def expand_gaps(text: str) -> str:
+    """Раскрыть числовые пропуски модели: ``<gap>4</gap>`` → ``<gap>▒▒▒▒</gap>``, ``<gap>200</gap>`` →
+    ``<gap>[200 symbols]</gap>``; ряды «▒» из старых ответов приводятся к тому же правилу.
 
     Args:
         text: Тело полосы в markdown.
 
     Returns:
-        Текст, где в каждом ``<gap>`` не больше ``GAP_MAX_FILLERS`` символов ``▒``.
+        Текст, где содержимое каждого ``<gap>`` — заполнители или «[N symbols]».
     """
-    return _LONG_GAP_RUN.sub(GAP_FILLER * GAP_MAX_FILLERS, text)
+    return _GAP_TAG.sub(_expand_gap, text)
 
 
 def is_gap_runaway(text: str) -> bool:
-    """Ответ «убежал»: модель зациклилась на заполнителе пропуска и упёрлась в потолок токенов.
+    """Ответ «убежал»: модель по памяти старого формата зациклилась на «▒» и упёрлась в потолок токенов.
 
     Args:
         text: Сырой текст ответа модели.
@@ -669,7 +721,7 @@ def _modern_tag(match: re.Match) -> str:
     """
     old = match.group(0)
     if old.startswith("<unknown"):
-        return f"<{DamageTag.GAP}>{GAP_FILLER * 3}</{DamageTag.GAP}>"
+        return gap_markup(GAP_DEFAULT_WIDTH)
     closing = old.startswith("</")
     new = LEGACY_DAMAGE_NAMES[match.group(1)]
     return f"</{new}>" if closing else f"<{new}>"
@@ -718,9 +770,10 @@ def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
             continue
         tagged = None
         if kind is EdgeKind.GAP:
-            # Длина пропуска: сколько заполнителей написала модель, иначе разница длин, иначе три.
-            width = min(raw_full.count(GAP_FILLER) or max(len(full) - len(seen), 0) or 3, GAP_MAX_FILLERS)
-            gap = f"<{DamageTag.GAP}>{GAP_FILLER * width}</{DamageTag.GAP}>"
+            # Длина пропуска: из тега в full (число или заполнители), иначе разница длин, иначе по умолчанию.
+            tag_match = _GAP_TAG.search(raw_full)
+            width = gap_width(tag_match.group(1)) if tag_match else (max(len(full) - len(seen), 0) or GAP_DEFAULT_WIDTH)
+            gap = gap_markup(min(width, GAP_COUNT_MAX))
             # Сторона пропуска: как написала модель (тег или заполнитель в начале full), иначе по
             # тому, с какого края видимая часть совпадает с полным словом; при равенстве — в конце.
             gap_first = raw_full.lstrip().startswith((f"<{DamageTag.GAP}>", GAP_FILLER)) or not full.startswith(seen)

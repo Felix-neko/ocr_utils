@@ -24,7 +24,8 @@ DEFAULT_DAMAGE_NOTE = (
     "is unreliable. "
     "Wherever letters are hidden, cut off or unreadable, DO reconstruct them from the context and the visible remains "
     "of the word and mark the reconstructed letters with <supplied>; mark visible but unreliable letters with "
-    "<unclear>; use <gap>▒…</gap> (one ▒ per missing letter, at most 6) only where no confident reconstruction is possible. "
+    "<unclear>; use <gap>N</gap> (N — the approximate number of missing characters, only the number) where no confident "
+    "reconstruction is possible. "
     "Do not tag clean print or ordinary end-of-line hyphenation."
 )
 

@@ -17,7 +17,7 @@ Its transcription was:
 >>>
 Use it only to see WHERE the doubtful places are; read every word from the image again, do not copy the transcription.
 {% endif %}
-Now re-read the page with this in mind. First decide for the affected area whether the letters are HIDDEN (cut off, lost in the binding gutter, covered) or VISIBLE BUT UNRELIABLE (blurred, squashed, smeared, washed out by overexposure) — the first reading may have named the wrong kind. Hidden letters → reconstruct them from the context and the visible remains of the word and wrap them in <supplied>; unreliable letters → <unclear> on EVERY word where at least one letter was read by shape or context rather than by clear print; <gap>▒…</gap> (one ▒ per missing letter, at most 6) only where no confident reconstruction is possible. Give one `edge_words` entry for EVERY affected line. If on inspection the page is actually clean, say so (`damage` = "") and return the plain transcription without tags.
+Now re-read the page with this in mind. First decide for the affected area whether the letters are HIDDEN (cut off, lost in the binding gutter, covered) or VISIBLE BUT UNRELIABLE (blurred, squashed, smeared, washed out by overexposure) — the first reading may have named the wrong kind. Hidden letters → reconstruct them from the context and the visible remains of the word and wrap them in <supplied>; unreliable letters → <unclear> on EVERY word where at least one letter was read by shape or context rather than by clear print; <gap>N</gap> (N — the approximate number of missing characters, nothing else inside the tag) only where no confident reconstruction is possible. Give one `edge_words` entry for EVERY affected line. If on inspection the page is actually clean, say so (`damage` = "") and return the plain transcription without tags.
 {%- else -%}
 {{ damage_note }}
 {%- endif %}
@@ -30,4 +30,4 @@ A detector has preliminarily classified this page as part of the TABLE OF CONTEN
 {%- else -%}
 Transcribe this page.
 {%- endif %}
-Apply rule 6 strictly: in a damaged zone every letter you did not actually see goes inside <supplied>…</supplied>, every letter you read by shape or context rather than by clear print goes inside <unclear>…</unclear>, and a fragment you cannot read or reconstruct becomes <gap>▒▒▒</gap> with one ▒ per missing letter (at most 6). Writing a reconstructed letter without a tag is an error; tagging clean print is also an error.
+Apply rule 6 strictly: in a damaged zone every letter you did not actually see goes inside <supplied>…</supplied>, every letter you read by shape or context rather than by clear print goes inside <unclear>…</unclear>, and a fragment you cannot read or reconstruct becomes <gap>N</gap> with N the approximate number of missing characters (only the number inside the tag). Writing a reconstructed letter without a tag is an error; tagging clean print is also an error.

@@ -142,11 +142,36 @@ def test_tags_from_edge_words_gap_filler_width():
     assert "предпри<gap>▒▒▒▒</gap>" in out and "<gap>▒▒▒</gap>ности" in out and "кон<supplied>ец</supplied>" in out
 
 
-def test_gap_runaway_detected_and_capped():
-    """Цикл заполнителя: длинный ряд «▒» опознаётся как сбой, а в разобранном тексте режется до потолка."""
-    from ocr_utils.external_ocr_services.schema import GAP_MAX_FILLERS, cap_gap_fillers, is_gap_runaway
+def test_gap_number_expanded_by_code():
+    """Модель пишет <gap>N</gap>; разбор ставит заполнители (N < 16) или «[N symbols]»; мусор и ряды «▒» — по правилу."""
+    from ocr_utils.external_ocr_services.schema import GAP_COUNT_MAX, expand_gaps, gap_width, is_gap_runaway
 
+    assert expand_gaps("а<gap>4</gap>б") == "а<gap>▒▒▒▒</gap>б"
+    assert expand_gaps("<gap>15</gap>") == "<gap>" + "▒" * 15 + "</gap>"
+    assert (
+        expand_gaps("<gap>16</gap>") == "<gap>[16 symbols]</gap>"
+        and expand_gaps("<gap>200</gap>") == "<gap>[200 symbols]</gap>"
+    )
+    assert (
+        expand_gaps("<gap>▒▒</gap>") == "<gap>▒▒</gap>"
+        and expand_gaps("<gap>" + "▒" * 30 + "</gap>") == "<gap>[30 symbols]</gap>"
+    )
+    assert expand_gaps("<gap>abc</gap>") == "<gap>▒▒▒</gap>" and expand_gaps("<gap></gap>") == "<gap>▒▒▒</gap>"
+    assert expand_gaps("<gap>0</gap>") == "<gap>▒</gap>" and gap_width("99999") == GAP_COUNT_MAX
+    assert expand_gaps("<gap>[7 symbols]</gap>") == "<gap>▒▒▒▒▒▒▒</gap>", "уже раскрытое читается обратно"
+    result = parse_json_text('{"content_markdown": "предпри<gap>4</gap> и <gap>80</gap>", "gap": 2}')
+    assert result.content_markdown == "предпри<gap>▒▒▒▒</gap> и <gap>[80 symbols]</gap>" and result.gap == 2
+    assert tag_counts(result.content_markdown)["gap"] == 2
+    # Старый формат с повтором символа: ряд от 20 «▒» в сыром ответе — сбой (обрезанный ответ).
     assert is_gap_runaway("x<gap>" + "▒" * 25) and not is_gap_runaway("<gap>▒▒▒▒▒▒</gap>")
-    assert cap_gap_fillers("<gap>" + "▒" * 12 + "</gap>") == "<gap>" + "▒" * GAP_MAX_FILLERS + "</gap>"
-    result = parse_json_text('{"content_markdown": "а<gap>' + "▒" * 9 + '</gap>б"}')
-    assert result.content_markdown == "а<gap>" + "▒" * GAP_MAX_FILLERS + "</gap>б"
+
+
+def test_tags_from_edge_words_numeric_gap():
+    """Пропуск из edge_words с числом в full: ширина из числа, сторона — как у модели."""
+    body = "Слово предпри и ности."
+    edge = [
+        {"seen": "предпри", "full": "предпри<gap>4</gap>", "kind": "gap"},
+        {"seen": "ности", "full": "<gap>20</gap>ности", "kind": "gap"},
+    ]
+    out, inserted = tags_from_edge_words(body, edge)
+    assert inserted == 2 and "предпри<gap>▒▒▒▒</gap>" in out and "<gap>[20 symbols]</gap>ности" in out

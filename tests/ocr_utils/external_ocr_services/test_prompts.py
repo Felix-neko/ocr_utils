@@ -7,7 +7,8 @@ def test_toc_stage_prompt():
     text = system_prompt("toc", "журнал «МТС», 1975")
     assert "(this one: журнал «МТС», 1975)" in text
     assert "ONLY `#` heading allowed is the main heading" in text and '"toc": {"kind"' in text
-    assert "KNOWN STRUCTURE" not in text and "<supplied>" in text and "<gap>▒▒▒▒</gap>" in text
+    assert "KNOWN STRUCTURE" not in text and "<supplied>" in text and "<gap>4</gap>" in text
+    assert "▒" not in text and "at most 6" not in text, "число вместо повтора заполнителя"
     # v10: предварительная классификация, список в <toc>, рубрики оглавления своим тегом и полностью.
     assert "PRELIMINARILY classified" in text and "`<toc>` … `</toc>`" in text
     assert "<rubric_in_toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric_in_toc>" in text
