@@ -48,7 +48,13 @@ _NO_SDK_RETRIES = RetryConfig("none", BackoffStrategy(0, 0, 1.0, 0), False)
 
 
 class OpenRouterError(RuntimeError):
-    """Сбой запроса: HTTP-статус (если был), начало тела ответа; сеть — без статуса."""
+    """Сбой запроса: HTTP-статус (если был), начало тела ответа; сеть — без статуса.
+
+    Args:
+        message: Текст ошибки для лога и meta (``error``).
+        status: HTTP-статус или код ошибки провайдера из тела; ``None`` — сетевой сбой.
+        body: Начало тела ответа (обрезано) — чтобы понять причину без повторного запроса.
+    """
 
     def __init__(self, message: str, status: int | None = None, body: str = ""):
         super().__init__(message)
@@ -58,7 +64,23 @@ class OpenRouterError(RuntimeError):
 
 @dataclass
 class ChatResponse:
-    """Разобранный ответ chat/completions: текст, кто обслужил, токены, цена, время, число попыток."""
+    """Разобранный ответ chat/completions: текст, кто обслужил, токены, цена, время, число попыток.
+
+    Args:
+        text: Текст ответа модели (обычно JSON страницы).
+        finish_reason: Почему модель остановилась (``stop``, ``length`` …); ``length`` — упёрлась в потолок.
+        provider: Провайдер OpenRouter, обслуживший запрос (из ``openrouter_metadata``).
+        model: Идентификатор модели, который вернул сервер.
+        request_id: Идентификатор генерации у OpenRouter — для сверки в их кабинете.
+        prompt_tokens: Токенов входа (с картинками).
+        completion_tokens: Токенов выхода.
+        reasoning_tokens: Токенов рассуждений внутри выхода; при выключенном thinking — 0.
+        cost_usd: Стоимость по ``usage.cost``; ``None`` — провайдер не сообщил.
+        latency_s: Время от первой попытки до ответа, с (с паузами между попытками).
+        attempts: Номер удачной попытки (1 — с первого раза).
+        raw_usage: Блок ``usage`` ответа как есть — на случай новых полей.
+        cached_tokens: Токены входа, взятые провайдером из кэша префикса; по ним видно, работает ли кэш.
+    """
 
     text: str
     finish_reason: str | None
@@ -72,13 +94,15 @@ class ChatResponse:
     latency_s: float
     attempts: int
     raw_usage: dict = field(default_factory=dict)
-    # Токены входа, взятые провайдером из кэша префикса (``usage.prompt_tokens_details.cached_tokens``);
-    # по ним видно, работает ли кэш и сколько он экономит.
     cached_tokens: int = 0
 
 
 def api_key_from(option: str | None) -> str:
-    """Ключ: явная опция → переменная окружения → ошибка. В логи и meta ключ не попадает."""
+    """Ключ: явная опция → переменная окружения → ошибка. В логи и meta ключ не попадает.
+
+    Args:
+        option: Значение ``--api-key``; ``None`` или пусто — взять из ``$OPENROUTER_API_KEY``.
+    """
     key = option or os.environ.get(ENV_KEY)
     if not key:
         raise OpenRouterError(f"нет ключа OpenRouter: передайте --api-key или задайте ${ENV_KEY}")
@@ -86,7 +110,11 @@ def api_key_from(option: str | None) -> str:
 
 
 def _content_text(content: Any) -> str:
-    """Текст ответа: строка или список частей (некоторые провайдеры отдают части)."""
+    """Текст ответа: строка или список частей (некоторые провайдеры отдают части).
+
+    Args:
+        content: ``choices[0].message.content`` из модели ответа SDK.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -106,6 +134,9 @@ def adapt_reasoning(reasoning: dict | None) -> dict | None:
     и thinking у DeepSeek включился бы обратно. ``effort: none`` по докам OpenRouter выключает
     рассуждения целиком. ``max_tokens`` (потолок thinking у Gemini) через SDK не передать — только
     предупреждение.
+
+    Args:
+        reasoning: Поле ``reasoning`` payload в форме HTTP API; ``None`` — не слать.
     """
     if reasoning is None:
         return None
@@ -120,7 +151,11 @@ def adapt_reasoning(reasoning: dict | None) -> dict | None:
 
 
 def _provider_from(result: ChatResult) -> str | None:
-    """Имя провайдера из ``openrouter_metadata``: endpoint с ``selected``; иначе первый из попыток."""
+    """Имя провайдера из ``openrouter_metadata``: endpoint с ``selected``; иначе последний из попыток.
+
+    Args:
+        result: Модель ответа SDK; без metadata (заголовок не слали) — ``None``.
+    """
     metadata = result.openrouter_metadata
     if metadata is None:
         return None
@@ -133,7 +168,13 @@ def _provider_from(result: ChatResult) -> str | None:
 
 
 def _error_from_body(body: str) -> tuple[str, int | None] | None:
-    """OpenRouter умеет отдать 200 с ``{"error": {...}}`` вместо ответа; SDK на этом падает разбором."""
+    """OpenRouter умеет отдать 200 с ``{"error": {...}}`` вместо ответа; SDK на этом падает разбором.
+
+    Возвращает (сообщение, код) или ``None``, если тело — не такая ошибка.
+
+    Args:
+        body: Сырой текст ответа из ``ResponseValidationError.body``.
+    """
     try:
         parsed = json.loads(body)
     except ValueError:
@@ -146,7 +187,15 @@ def _error_from_body(body: str) -> tuple[str, int | None] | None:
 
 
 class OpenRouterClient:
-    """Синхронный клиент: ``chat(payload)`` с ретраями; ``http_client`` — подмена httpx в тестах."""
+    """Синхронный клиент: ``chat(payload)`` с ретраями; ``http_client`` — подмена httpx в тестах.
+
+    Args:
+        api_key: Ключ OpenRouter (из ``api_key_from``); в логи и repr не попадает.
+        timeout: Таймаут одного запроса, с (``--timeout``); полоса с 4 тайлами читается до минуты.
+        attempts: Попыток на запрос при 429/5xx/сети (``--attempts``).
+        http_client: Готовый ``httpx.Client`` (в тестах — с ``MockTransport``); ``None`` — свой у SDK.
+        sleep: Функция паузы между попытками; в тестах подменяется, чтобы не ждать.
+    """
 
     def __init__(
         self,
@@ -169,7 +218,12 @@ class OpenRouterClient:
         )
 
     def chat(self, payload: dict[str, Any]) -> ChatResponse:
-        """Один запрос chat/completions по «сырому» payload (как у HTTP API) с ретраями по RETRY_STATUSES."""
+        """Один запрос chat/completions по «сырому» payload (как у HTTP API) с ретраями по RETRY_STATUSES.
+
+        Args:
+            payload: Тело запроса в форме HTTP API (``ocr.build_payload``): ``model``, ``messages``,
+                ``temperature``, ``max_tokens``, ``provider``, ``response_format``, ``reasoning``.
+        """
         kwargs = self._kwargs(payload)
         started = time.monotonic()
         last_error: OpenRouterError | None = None
@@ -210,7 +264,14 @@ class OpenRouterClient:
 
     @staticmethod
     def _kwargs(payload: dict[str, Any]) -> dict[str, Any]:
-        """Payload в стиле HTTP API → именованные аргументы ``chat.send``; metadata запрашивается всегда."""
+        """Payload в стиле HTTP API → именованные аргументы ``chat.send``; metadata запрашивается всегда.
+
+        Поле, которого адаптер не знает, — ошибка, а не молчаливая потеря: SDK строгий, и
+        неизвестный параметр до модели всё равно не дошёл бы.
+
+        Args:
+            payload: Тело запроса в форме HTTP API.
+        """
         kwargs: dict[str, Any] = {"x_open_router_metadata": "enabled"}
         for key in ("model", "messages", "temperature", "max_tokens", "provider", "response_format"):
             if key in payload:
@@ -225,6 +286,13 @@ class OpenRouterClient:
 
     @staticmethod
     def _parse(result: ChatResult, latency: float, attempts: int) -> ChatResponse:
+        """Модель ответа SDK → ``ChatResponse``; ответ без ``choices`` — ошибка.
+
+        Args:
+            result: ``ChatResult`` из ``chat.send``.
+            latency: Время от первой попытки до этого ответа, с.
+            attempts: Номер удачной попытки.
+        """
         if not result.choices:
             raise OpenRouterError(f"в ответе нет choices: {result.model_dump_json()[:500]}")
         choice = result.choices[0]
@@ -251,7 +319,12 @@ class OpenRouterClient:
 
 
 def credits(api_key: str, timeout: float = 30.0) -> dict:
-    """Баланс ключа: ``{"total_credits": ..., "total_usage": ...}`` — для сверки суммы прогона."""
+    """Баланс ключа: ``{"total_credits": ..., "total_usage": ...}`` — для сверки суммы прогона.
+
+    Args:
+        api_key: Ключ OpenRouter.
+        timeout: Таймаут запроса, с.
+    """
     sdk = OpenRouter(api_key=api_key, timeout_ms=int(timeout * 1000), retry_config=_NO_SDK_RETRIES)
     data = sdk.credits.get_credits().data
     return {"total_credits": data.total_credits, "total_usage": data.total_usage}

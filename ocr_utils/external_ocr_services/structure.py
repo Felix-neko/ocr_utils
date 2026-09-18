@@ -16,43 +16,56 @@ import difflib
 import re
 from dataclasses import dataclass, field
 
+from ocr_utils.external_ocr_services.schema import FORMULA_TAG, AuthorArticle, AuthorPrinted, StructureTag
 from ocr_utils.external_ocr_services.toc import normalize_title
 
 # Порог похожести названия из списка и заголовка на полосе (по нормализованным строкам).
 TITLE_MATCH_RATIO = 0.75
 
+# Абзацы, которые различает пост-обработка. Теги допускают курсив/жирный внутри (`<author>**И. Иванов**</author>`).
 _H1 = re.compile(r"^# (.+?)\s*$")
 _H2 = re.compile(r"^## (.+?)\s*$")
-_AUTHOR = re.compile(r"^(?:- )?<author>\*{0,2}(.+?)\*{0,2}</author>")
-_POSITION = re.compile(r"^<position>")
-_RUBRIC = re.compile(r"^<rubric>\*{0,2}(.+?)\*{0,2}</rubric>\s*$")
-_MARKER = re.compile(r"^<marker>")
-_MARKER_TEXT = re.compile(r"^<marker>\*{0,2}(.+?)\*{0,2}</marker>\s*$")
+_AUTHOR = re.compile(rf"^(?:- )?<{StructureTag.AUTHOR}>\*{{0,2}}(.+?)\*{{0,2}}</{StructureTag.AUTHOR}>")
+_POSITION = re.compile(rf"^<{StructureTag.POSITION}>")
+_RUBRIC = re.compile(rf"^<{StructureTag.RUBRIC}>\*{{0,2}}(.+?)\*{{0,2}}</{StructureTag.RUBRIC}>\s*$")
+_MARKER = re.compile(rf"^<{StructureTag.MARKER}>")
+_MARKER_TEXT = re.compile(rf"^<{StructureTag.MARKER}>\*{{0,2}}(.+?)\*{{0,2}}</{StructureTag.MARKER}>\s*$")
 
 
 @dataclass
 class StructureReport:
-    """Что изменила пост-обработка — попадает в .meta.json."""
+    """Что изменила пост-обработка — попадает в .meta.json (``structure``).
+
+    Args:
+        demoted_headings: Заголовки ``#``, не найденные в оглавлении и пониженные до ``##``.
+        moved_authors: Имена авторов, чьи блоки перенесены после ``#`` своей статьи.
+        dropped_authors: Имена из колонтитула на полосе-продолжении, убранные из тела.
+        rubrics_from_headings: Тексты ``##`` перед ``#``, оказавшиеся рубриками из списка и ставшие ``<rubric>``.
+        moved_rubrics: Рубрики (и маркеры с текстом рубрики), перенесённые к ``#`` своей статьи.
+        rubrics_from_toc: Рубрики, вставленные перед ``#`` из оглавления, потому что на полосе их не было.
+        rubrics_replaced: Напечатанные варианты, заменённые рубрикой из оглавления (сами стали ``<marker>``).
+        markers_from_rubrics: Тексты ``<rubric>`` не из оглавления, перетегированные в ``<marker>``.
+        markers: Сколько ``<marker>`` в итоге (и от модели, и от пост-обработки).
+        dropped_headings: ``##`` в начале полосы-продолжения с названием из списка — утечка промпта, убраны.
+        wrapped_math: Сколько формул в голых долларах обёрнуто в ``<latex>``.
+        title_in_list: Совпал ли хоть один ``#`` с оглавлением; ``None`` — ``#`` на полосе нет или списка не было.
+    """
 
     demoted_headings: list[str] = field(default_factory=list)
     moved_authors: list[str] = field(default_factory=list)
     dropped_authors: list[str] = field(default_factory=list)
     rubrics_from_headings: list[str] = field(default_factory=list)
-    # Рубрики по оглавлению: перенесённые к `#`, вставленные из оглавления, заменённые, и
-    # теги `<rubric>` не из оглавления, ставшие `<marker>`; `markers` — сколько `<marker>` в итоге.
     moved_rubrics: list[str] = field(default_factory=list)
     rubrics_from_toc: list[str] = field(default_factory=list)
     rubrics_replaced: list[str] = field(default_factory=list)
     markers_from_rubrics: list[str] = field(default_factory=list)
     markers: int = 0
-    # `##` в начале страницы-продолжения с текстом названия из оглавления: на странице его нет,
-    # модель повторила название из списка — убирается.
     dropped_headings: list[str] = field(default_factory=list)
-    # Формулы в долларах без тега <latex>, обёрнутые кодом.
     wrapped_math: int = 0
     title_in_list: bool | None = None
 
     def as_dict(self) -> dict:
+        """Поля для .meta.json — все, кроме ``title_in_list`` (он уходит в ``PageResult``)."""
         return {
             "demoted_headings": self.demoted_headings,
             "moved_authors": self.moved_authors,
@@ -69,7 +82,12 @@ class StructureReport:
 
 
 def title_matches(heading: str, titles: list[str]) -> bool:
-    """Совпадает ли заголовок с одним из названий: равенство, вхождение или похожесть ≥ порога."""
+    """Совпадает ли заголовок с одним из названий: равенство, вхождение или похожесть ≥ порога.
+
+    Args:
+        heading: Заголовок (или рубрика) как напечатан на полосе.
+        titles: Названия из оглавления, с которыми сверяем.
+    """
     key = normalize_title(heading)
     if not key:
         return False
@@ -85,16 +103,31 @@ def title_matches(heading: str, titles: list[str]) -> bool:
 
 
 def _paragraphs(body: str) -> list[str]:
-    """Тело как список абзацев (разделитель — пустая строка); переносы внутри абзаца сохраняются."""
+    """Тело как список абзацев (разделитель — пустая строка); переносы внутри абзаца сохраняются.
+
+    Args:
+        body: Тело полосы в markdown.
+    """
     return [block for block in re.split(r"\n\s*\n", body.strip()) if block.strip()]
 
 
 def _join(paragraphs: list[str]) -> str:
+    """Обратно в текст: абзацы через пустую строку, один перевод строки в конце.
+
+    Args:
+        paragraphs: Абзацы из ``_paragraphs`` после правок.
+    """
     return "\n\n".join(paragraphs).rstrip() + "\n"
 
 
 def demote_unlisted_headings(body: str, titles: list[str], report: StructureReport) -> str:
-    """`# …`, не совпавший ни с одним названием из списка, → `## …`. Пустой список — без изменений."""
+    """`# …`, не совпавший ни с одним названием из списка, → `## …`. Пустой список — без изменений.
+
+    Args:
+        body: Тело полосы в markdown.
+        titles: Названия статей из оглавления выпуска.
+        report: Отчёт пост-обработки — сюда пишутся понижённые заголовки и ``title_in_list``.
+    """
     if not titles:
         return body
     lines = body.split("\n")
@@ -105,20 +138,30 @@ def demote_unlisted_headings(body: str, titles: list[str], report: StructureRepo
         if title_matches(match.group(1), titles):
             report.title_in_list = True
             continue
-        lines[index] = "#" + line
+        lines[index] = "#" + line  # `# ` → `## `
         report.demoted_headings.append(match.group(1))
+    # Были `#`, и ни один не совпал — заголовок точно не из списка.
     if report.title_in_list is None and report.demoted_headings:
         report.title_in_list = False
     return "\n".join(lines)
 
 
 def normalize_name(name: str) -> str:
-    """Ключ сопоставления имени автора: без регистра, точек, запятых и пробелов между инициалами."""
+    """Ключ сопоставления имени автора: без регистра, точек, запятых и пробелов между инициалами.
+
+    Args:
+        name: Имя как в теге ``<author>`` или в поле ``authors`` ответа.
+    """
     return re.sub(r"[\s.,*]+", "", name.replace("ё", "е")).lower()
 
 
 def _author_block(paragraphs: list[str], index: int) -> tuple[int, int]:
-    """Границы блока автора: сам абзац `<author>` и все `<position>` сразу за ним."""
+    """Границы блока автора: сам абзац `<author>` и все `<position>` сразу за ним.
+
+    Args:
+        paragraphs: Абзацы тела.
+        index: Индекс абзаца с ``<author>``.
+    """
     end = index + 1
     while end < len(paragraphs) and _POSITION.match(paragraphs[end]):
         end += 1
@@ -136,13 +179,21 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
     * `article == "continues"` и `printed == "running_header"` → блок удаляется из тела (имя
       остаётся в JSON и в `running_header`);
     * `ends_here` и всё остальное не трогается.
+
+    Args:
+        body: Тело полосы в markdown.
+        authors: Поле ``authors`` ответа: ``[{"name", "position", "article", "printed"}]`` — по нему
+            определяется, чья подпись и где напечатана.
+        report: Отчёт пост-обработки — перенесённые и убранные имена.
     """
     paragraphs = _paragraphs(body)
     if not paragraphs:
         return body
+    # Авторы из ответа по ключу имени: блок в тексте сопоставляется с записью и её полями.
     by_name: dict[str, dict] = {normalize_name(a.get("name", "")): a for a in authors if a.get("name")}
 
     def author_of(paragraph: str) -> dict | None:
+        """Запись автора для абзаца `<author>` (или заглушка без привязки); не автор — ``None``."""
         match = _AUTHOR.match(paragraph)
         if match is None or paragraph.startswith("- "):
             return None  # пункт списка (оглавление) — не подпись
@@ -155,6 +206,7 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
                 return author
         return {"name": match.group(1), "article": None, "printed": None}
 
+    # Каждое перемещение сдвигает индексы — после него обход начинается заново, пока правок нет.
     changed = True
     while changed:
         changed = False
@@ -165,7 +217,8 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
             start, end = _author_block(paragraphs, index)
             block = paragraphs[start:end]
             role, printed = author.get("article"), author.get("printed")
-            if role == "continues" and printed == "running_header":
+            # Имя из колонтитула на полосе-продолжении — в теле ему не место.
+            if role == AuthorArticle.CONTINUES and printed == AuthorPrinted.RUNNING_HEADER:
                 del paragraphs[start:end]
                 report.dropped_authors.append(author["name"])
                 changed = True
@@ -176,7 +229,9 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
                 cursor += 1
             before_heading = cursor < len(paragraphs) and _H1.match(paragraphs[cursor]) is not None
             first_in_body = start == 0
-            if before_heading and (role == "starts_here" or (first_in_body and role != "ends_here")):
+            if before_heading and (
+                role == AuthorArticle.STARTS_HERE or (first_in_body and role != AuthorArticle.ENDS_HERE)
+            ):
                 del paragraphs[start:end]
                 heading_at = cursor - len(block)
                 paragraphs[heading_at + 1 : heading_at + 1] = block
@@ -187,7 +242,13 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
 
 
 def rubric_from_heading(body: str, rubrics: list[str], report: StructureReport) -> str:
-    """`## X` непосредственно перед `#`, если X — рубрика из списка, → `<rubric>*X*</rubric>`."""
+    """`## X` непосредственно перед `#`, если X — рубрика из списка, → `<rubric>*X*</rubric>`.
+
+    Args:
+        body: Тело полосы в markdown.
+        rubrics: Рубрики «Содержания» выпуска.
+        report: Отчёт пост-обработки — тексты превращённых заголовков.
+    """
     if not rubrics:
         return body
     paragraphs = _paragraphs(body)
@@ -204,15 +265,22 @@ def rubric_from_heading(body: str, rubrics: list[str], report: StructureReport) 
 
 
 def _rubric_tag(text: str) -> str:
-    return f"<rubric>*{text}*</rubric>"
+    """Абзац рубрики в принятой разметке: тег с курсивом внутри."""
+    return f"<{StructureTag.RUBRIC}>*{text}*</{StructureTag.RUBRIC}>"
 
 
 def _marker_tag(text: str) -> str:
-    return f"<marker>*{text}*</marker>"
+    """Абзац маркера (текст вне потока статьи) в принятой разметке."""
+    return f"<{StructureTag.MARKER}>*{text}*</{StructureTag.MARKER}>"
 
 
 def _expected_rubrics(paragraphs: list[str], articles: list[dict]) -> dict[int, str | None]:
-    """Индекс каждого `#`, совпавшего со статьёй списка → её рубрика по оглавлению (или None)."""
+    """Индекс каждого `#`, совпавшего со статьёй списка → её рубрика по оглавлению (или None).
+
+    Args:
+        paragraphs: Абзацы тела.
+        articles: Статьи оглавления ``[{"title", "rubric"}]``.
+    """
     expected: dict[int, str | None] = {}
     for index, paragraph in enumerate(paragraphs):
         match = _H1.match(paragraph)
@@ -239,6 +307,13 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
       другой → заменяется рубрикой оглавления, напечатанный вариант остаётся `<marker>`-ом
       сразу после `#`.
     Без списка статей ничего не меняется.
+
+    Args:
+        body: Тело полосы в markdown.
+        articles: Статьи оглавления ``[{"title", "authors", "rubric"}]`` — источник истины о рубриках.
+        report: Отчёт пост-обработки — что перенесено, вставлено, заменено, перетегировано.
+        rubrics: Список рубрик выпуска целиком (в дополнение к рубрикам статей) — чтобы тег с
+            рубрикой, у которой на этой полосе нет статьи, не считался «не из оглавления».
     """
     if not articles:
         return body
@@ -328,12 +403,18 @@ def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) ->
 
     На странице-продолжении заголовка статьи нет; если модель начала её с `## <название из
     списка>`, это утечка списка из промпта, а не напечатанный текст (МТС 1991/02, с. 95).
+
+    Args:
+        body: Тело полосы в markdown.
+        titles: Названия статей из оглавления.
+        report: Отчёт пост-обработки — убранные заголовки.
     """
     if not titles:
         return body
     paragraphs = _paragraphs(body)
-    if any(_H1.match(p) for p in paragraphs):
+    if any(_H1.match(p) for p in paragraphs):  # есть `#` — полоса не продолжение, `##` законны
         return body
+    # Смотрим только первые три абзаца: перед утёкшим названием могут стоять рубрика и маркер.
     for index, paragraph in enumerate(paragraphs[:3]):
         match = _H2.match(paragraph)
         if match is not None and title_matches(match.group(1), titles):
@@ -345,13 +426,19 @@ def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) ->
     return body
 
 
-_LATEX = re.compile(r"<latex>.*?</latex>", re.S)
+_LATEX = re.compile(rf"<{FORMULA_TAG}>.*?</{FORMULA_TAG}>", re.S)
 # Голая формула в долларах вне тега: сначала $$…$$, потом $…$ без переносов строк внутри.
 _BARE_MATH = re.compile(r"\$\$[^$]+?\$\$|\$(?!\$)[^$\n]+?\$")
 
 
 def wrap_bare_math(body: str, report: StructureReport) -> str:
-    """Формулы в долларах без тега `<latex>` — обернуть: модель на части полос ставит одни доллары."""
+    """Формулы в долларах без тега `<latex>` — обернуть: модель на части полос ставит одни доллары.
+
+    Args:
+        body: Тело полосы в markdown.
+        report: Отчёт пост-обработки — число обёрнутых формул.
+    """
+    # Текст режется на куски «между уже обёрнутыми формулами»: внутри <latex> доллары не трогаем.
     pieces: list[str] = []
     cursor = 0
     for tagged in _LATEX.finditer(body):
@@ -363,9 +450,16 @@ def wrap_bare_math(body: str, report: StructureReport) -> str:
 
 
 def _wrap_segment(text: str, report: StructureReport) -> str:
+    """Обернуть все голые формулы в куске текста без тегов ``<latex>``.
+
+    Args:
+        text: Кусок тела между уже обёрнутыми формулами.
+        report: Отчёт — счётчик ``wrapped_math``.
+    """
+
     def wrap(match: re.Match) -> str:
         report.wrapped_math += 1
-        return f"<latex>{match.group(0)}</latex>"
+        return f"<{FORMULA_TAG}>{match.group(0)}</{FORMULA_TAG}>"
 
     return _BARE_MATH.sub(wrap, text)
 
@@ -373,8 +467,13 @@ def _wrap_segment(text: str, report: StructureReport) -> str:
 def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) -> tuple[str, StructureReport]:
     """Все правки по порядку: рубрики из `##`, понижение `#`, расстановка авторов, рубрики по оглавлению.
 
-    ``articles`` — ``[{"title", "authors", "rubric"}]`` из оглавления (или просто названия строками).
     Порядок шагов важен: каждый следующий опирается на то, что предыдущий уже привёл в норму.
+
+    Args:
+        body: Тело полосы в markdown из ответа модели (после ``tags_from_edge_words``).
+        articles: Статьи оглавления ``[{"title", "authors", "rubric"}]`` или просто названия строками.
+        rubrics: Рубрики «Содержания» выпуска.
+        authors: Поле ``authors`` ответа модели — привязка подписей к статьям и место печати.
     """
     # Единый вид списка статей: голые строки (тесты, старые списки) → словари с одним «title».
     articles = [{"title": item} if isinstance(item, str) else dict(item) for item in articles]
@@ -401,5 +500,5 @@ def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) ->
     #    расставленные выше, и не ловить доллары внутри уже обёрнутых формул.
     body = wrap_bare_math(body, report)
     # Итог по всем шагам: сколько `<marker>` на полосе (и от модели, и от шага 5).
-    report.markers = body.count("<marker>")
+    report.markers = body.count(f"<{StructureTag.MARKER}>")
     return body, report

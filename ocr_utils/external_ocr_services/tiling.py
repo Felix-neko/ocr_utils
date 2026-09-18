@@ -23,7 +23,7 @@ from __future__ import annotations
 import base64
 import io
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -40,7 +40,16 @@ TILE_OVERLAP = 0.08
 
 @dataclass(frozen=True)
 class TileBox:
-    """Один тайл сетки: позиция в сетке и прямоугольник в пикселях исходника."""
+    """Один тайл сетки: позиция в сетке и прямоугольник в пикселях исходника.
+
+    Args:
+        col: Номер столбца сетки (0 — левый).
+        row: Номер строки сетки (0 — верхняя).
+        left: Левый край тайла в пикселях исходника (с учётом перекрытия).
+        top: Верхний край.
+        right: Правый край (не включается).
+        bottom: Нижний край (не включается).
+    """
 
     col: int
     row: int
@@ -51,12 +60,21 @@ class TileBox:
 
     @property
     def size(self) -> tuple[int, int]:
+        """(ширина, высота) тайла в пикселях исходника."""
         return self.right - self.left, self.bottom - self.top
 
 
 @dataclass(frozen=True)
 class PreparedImage:
-    """Готовый к отправке тайл: JPEG-байты, размер после уменьшения и его место в сетке."""
+    """Готовый к отправке тайл: JPEG-байты, размер после уменьшения и его место в сетке.
+
+    Args:
+        data: Байты JPEG, которые уйдут в запрос.
+        width: Ширина отправляемой картинки, px (после уменьшения).
+        height: Высота отправляемой картинки, px.
+        box: Место тайла в сетке и его прямоугольник в исходнике.
+        mime: MIME-тип для data-URL.
+    """
 
     data: bytes
     width: int
@@ -65,11 +83,56 @@ class PreparedImage:
     mime: str = "image/jpeg"
 
     def data_url(self) -> str:
+        """Картинка как ``data:image/jpeg;base64,…`` — так OpenRouter принимает картинки в ``image_url``."""
         return f"data:{self.mime};base64,{base64.b64encode(self.data).decode('ascii')}"
 
 
+@dataclass(frozen=True)
+class TileSummary:
+    """Один тайл в сводке сетки для .meta.json.
+
+    Args:
+        col: Столбец сетки.
+        row: Строка сетки.
+        src: Прямоугольник в исходнике ``[left, top, right, bottom]``.
+        sent_px: Размер отправленной картинки ``[ширина, высота]``.
+        bytes: Размер JPEG в байтах.
+    """
+
+    col: int
+    row: int
+    src: list[int]
+    sent_px: list[int]
+    bytes: int
+
+
+@dataclass(frozen=True)
+class GridSummary:
+    """Сводка сетки тайлов полосы: сколько столбцов и строк и что за тайлы; пишется в .meta.json.
+
+    Args:
+        ncols: Число столбцов сетки.
+        nrows: Число строк сетки.
+        tiles: Тайлы в порядке отправки (по столбцам, сверху вниз).
+    """
+
+    ncols: int
+    nrows: int
+    tiles: list[TileSummary]
+
+    def as_dict(self) -> dict:
+        """Плоские словари для JSON."""
+        return asdict(self)
+
+
 def grid_shape(width: int, height: int, max_src_tile: int) -> tuple[int, int]:
-    """Число (столбцов, строк) сетки: ``ceil(сторона / шаг)``, не меньше одного."""
+    """Число (столбцов, строк) сетки: ``ceil(сторона / шаг)``, не меньше одного.
+
+    Args:
+        width: Ширина исходника, px.
+        height: Высота исходника, px.
+        max_src_tile: Шаг сетки в пикселях исходника (``--max-src-tile-size``).
+    """
     if max_src_tile <= 0:
         raise ValueError("шаг сетки должен быть положительным")
     return max(1, math.ceil(width / max_src_tile)), max(1, math.ceil(height / max_src_tile))
@@ -79,12 +142,20 @@ def grid(width: int, height: int, max_src_tile: int, overlap: float = TILE_OVERL
     """Тайлы сетки в порядке чтения: по столбцам, внутри столбца сверху вниз.
 
     Перекрытие добавляется только там, где есть сосед (по оси с одним тайлом его нет).
+
+    Args:
+        width: Ширина исходника, px.
+        height: Высота исходника, px.
+        max_src_tile: Шаг сетки в пикселях исходника.
+        overlap: Перекрытие соседей — доля стороны кадра вдоль оси, делится пополам между соседями.
     """
     ncols, nrows = grid_shape(width, height, max_src_tile)
+    # Половина перекрытия с каждой стороны стыка; по оси без соседей — ноль.
     margin_x = int(width * overlap / 2) if ncols > 1 else 0
     margin_y = int(height * overlap / 2) if nrows > 1 else 0
     boxes: list[TileBox] = []
     for col in range(ncols):
+        # Равные доли ширины плюс запас на перекрытие, обрезанный краями кадра.
         left = max(0, int(col * width / ncols) - margin_x)
         right = min(width, int((col + 1) * width / ncols) + margin_x)
         for row in range(nrows):
@@ -95,8 +166,13 @@ def grid(width: int, height: int, max_src_tile: int, overlap: float = TILE_OVERL
 
 
 def load(path: Path) -> Image.Image:
+    """Картинка с диска с учётом EXIF-поворота, полностью декодированная.
+
+    Args:
+        path: Файл полосы (JPEG/PNG/TIFF).
+    """
     image = Image.open(path)
-    image = ImageOps.exif_transpose(image)
+    image = ImageOps.exif_transpose(image)  # повёрнутые в EXIF кадры иначе режутся не по той оси
     image.load()
     return image
 
@@ -104,11 +180,19 @@ def load(path: Path) -> Image.Image:
 def encode(
     image: Image.Image, box: TileBox, max_model_tile: int, quality: int, grayscale: bool = True
 ) -> PreparedImage:
-    """Уменьшить (только вниз), обесцветить и сжать вырезанный тайл."""
+    """Уменьшить (только вниз), обесцветить и сжать вырезанный тайл.
+
+    Args:
+        image: Уже вырезанный тайл (или вся полоса, если тайл один).
+        box: Его место в сетке — уходит в ``PreparedImage`` как есть.
+        max_model_tile: Длинная сторона после уменьшения, px; меньшие картинки не увеличиваются.
+        quality: Качество JPEG (0–100).
+        grayscale: Обесцветить перед сжатием: печать чёрно-белая, цвет только раздувает байты.
+    """
     if grayscale and image.mode != "L":
         image = ImageOps.grayscale(image)
     scale = max_model_tile / max(image.size)
-    if scale < 1.0:
+    if scale < 1.0:  # только вниз: увеличение резкости не добавит, а байтов прибавит
         image = image.resize((round(image.width * scale), round(image.height * scale)), Image.LANCZOS)
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=quality, optimize=True)
@@ -123,10 +207,19 @@ def prepare_tiles(
     grayscale: bool = True,
     overlap: float = TILE_OVERLAP,
 ) -> list[PreparedImage]:
-    """Полоса с диска -> тайлы к отправке, в порядке чтения."""
+    """Полоса с диска -> тайлы к отправке, в порядке чтения.
+
+    Args:
+        path: Файл полосы.
+        max_src_tile: Шаг сетки в пикселях исходника (``--max-src-tile-size``).
+        max_model_tile: Длинная сторона тайла после уменьшения (``--max-model-tile-size``).
+        quality: Качество JPEG тайла (``--quality``).
+        grayscale: Обесцвечивать ли тайлы.
+        overlap: Перекрытие соседних тайлов, доля стороны кадра.
+    """
     image = load(path)
     boxes = grid(image.width, image.height, max_src_tile, overlap)
-    if len(boxes) == 1:
+    if len(boxes) == 1:  # один тайл — без лишнего crop всей картинки
         return [encode(image, boxes[0], max_model_tile, quality, grayscale)]
     return [
         encode(image.crop((box.left, box.top, box.right, box.bottom)), box, max_model_tile, quality, grayscale)
@@ -134,21 +227,25 @@ def prepare_tiles(
     ]
 
 
-def describe(tiles: list[PreparedImage]) -> dict:
-    """Сводка сетки для .meta.json: размеры, число столбцов и строк, прямоугольники."""
+def describe(tiles: list[PreparedImage]) -> GridSummary:
+    """Сводка сетки: число столбцов и строк (для промпта) и тайлы с размерами (для .meta.json).
+
+    Args:
+        tiles: Подготовленные тайлы полосы из ``prepare_tiles``.
+    """
     ncols = 1 + max(tile.box.col for tile in tiles)
     nrows = 1 + max(tile.box.row for tile in tiles)
-    return {
-        "ncols": ncols,
-        "nrows": nrows,
-        "tiles": [
-            {
-                "col": tile.box.col,
-                "row": tile.box.row,
-                "src": [tile.box.left, tile.box.top, tile.box.right, tile.box.bottom],
-                "sent_px": [tile.width, tile.height],
-                "bytes": len(tile.data),
-            }
+    return GridSummary(
+        ncols=ncols,
+        nrows=nrows,
+        tiles=[
+            TileSummary(
+                col=tile.box.col,
+                row=tile.box.row,
+                src=[tile.box.left, tile.box.top, tile.box.right, tile.box.bottom],
+                sent_px=[tile.width, tile.height],
+                bytes=len(tile.data),
+            )
             for tile in tiles
         ],
-    }
+    )

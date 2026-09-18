@@ -242,6 +242,15 @@ Jinja-шаблоны в `prompts/`: `system.md.j2` (правила, ветки �
 
 ## Модули
 
+Закрытые наборы значений — `StrEnum`: `Stage` (page/toc), `TocKind` (none/contents/index),
+`AuthorArticle`, `AuthorPrinted`, `EdgeKind`, `DamageTag`, `StructureTag` в `schema.py`; `JsonMode`,
+`Reasoning` в `models.py`; `SecondPassReason`, `PassChoice` в `ocr.py`; `OnMissedToc` в `pipeline.py`.
+В коде они сравниваются через `is`, а в JSON-схему, файлы выхода и `summary.csv` уходят строковыми
+значениями, так что формат файлов от этого не меняется; строки из старых вызовов приводятся к
+перечислениям в `__post_init__` (`PageJob`, `PipelineParams`). Ключи `.meta.json` остаются строками —
+это внешний формат, по нему строится сводка.
+
+
 | модуль | что делает |
 |---|---|
 | `cli.py` | команды `run`, `models`, `balance` |

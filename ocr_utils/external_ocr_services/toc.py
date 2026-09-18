@@ -14,36 +14,47 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
-from ocr_utils.external_ocr_services.schema import TocArticle, TocPage, TocSection
+from ocr_utils.external_ocr_services.schema import TOC_KINDS_WITH_TOC, TocArticle, TocKind, TocPage, TocSection
 
-KIND_CONTENTS = "contents"
-KIND_INDEX = "index"
-KINDS = (KIND_CONTENTS, KIND_INDEX)
+# Виды оглавления, которые сливаются порознь; порядок — порядок в toc.json / toc.md.
+KINDS = TOC_KINDS_WITH_TOC
 
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def normalize_title(title: str) -> str:
-    """Ключ дедупликации: без регистра, пунктуации и лишних пробелов."""
+    """Ключ дедупликации: без регистра, пунктуации и лишних пробелов.
+
+    Args:
+        title: Название статьи или рубрики как напечатано.
+    """
     return _NON_WORD.sub(" ", title.replace("ё", "е").replace("Ё", "Е")).strip().lower()
 
 
 @dataclass
 class IssueToc:
-    """Слитое оглавление одного вида (contents или index) по всем его полосам выпуска."""
+    """Слитое оглавление одного вида (contents или index) по всем его полосам выпуска.
 
-    kind: str
+    Args:
+        kind: Вид — ``CONTENTS`` или ``INDEX``.
+        sections: Секции по рубрикам в порядке полос, уже слитые (продолжения приклеены).
+        pages: Относительные пути полос оглавления в порядке выпуска.
+        continuations: Сколько раз первая секция полосы была приклеена к предыдущей — для лога и отладки.
+    """
+
+    kind: TocKind
     sections: list[TocSection] = field(default_factory=list)
-    pages: list[str] = field(default_factory=list)  # относительные пути полос в порядке выпуска
-    # Сколько раз первая секция полосы была приклеена к предыдущей — для лога и отладки.
+    pages: list[str] = field(default_factory=list)
     continuations: int = 0
 
     @property
     def articles(self) -> list[TocArticle]:
+        """Все статьи выпуска подряд, без секций."""
         return [article for section in self.sections for article in section.articles]
 
     @property
     def rubrics(self) -> list[str]:
+        """Рубрики выпуска без повторов, в порядке первого появления."""
         seen: dict[str, None] = {}
         for section in self.sections:
             if section.rubric:
@@ -51,19 +62,23 @@ class IssueToc:
         return list(seen)
 
 
-def merge_pages(kind: str, pages: list[tuple[str, TocPage]]) -> IssueToc:
+def merge_pages(kind: TocKind, pages: list[tuple[str, TocPage]]) -> IssueToc:
     """Полосы одного вида в порядке выпуска -> одно оглавление.
 
-    ``pages`` — ``[(относительный путь, TocPage), ...]`` уже отсортированные по положению в
-    выпуске. Первая секция полосы без рубрики при непустом накопленном списке считается
-    продолжением последней секции (флаг ``continues_previous`` модели учитывается, но не
-    обязателен: модель его забывает чаще, чем ставит зря).
+    Первая секция полосы без рубрики при непустом накопленном списке считается продолжением
+    последней секции (флаг ``continues_previous`` модели учитывается, но не обязателен: модель
+    его забывает чаще, чем ставит зря).
+
+    Args:
+        kind: Вид оглавления, к которому относятся все ``pages``.
+        pages: ``[(относительный путь, TocPage), ...]`` уже отсортированные по положению в выпуске.
     """
-    toc = IssueToc(kind=kind)
-    seen_titles: set[str] = set()
+    toc = IssueToc(kind=TocKind(kind))
+    seen_titles: set[str] = set()  # ключи уже взятых названий — перекрытие тайлов даёт повторы
     for rel, page in pages:
         toc.pages.append(rel)
         for index, section in enumerate(page.sections):
+            # Статьи секции без повторов по нормализованному названию.
             articles = []
             for article in section.articles:
                 key = normalize_title(article.title)
@@ -71,10 +86,12 @@ def merge_pages(kind: str, pages: list[tuple[str, TocPage]]) -> IssueToc:
                     continue
                 seen_titles.add(key)
                 articles.append(TocArticle(article.title, list(article.authors), article.page, article.issue))
+            # Первая секция полосы без рубрики — продолжение рубрики с предыдущей полосы.
             if index == 0 and toc.sections and section.rubric is None:
                 toc.sections[-1].articles.extend(articles)
                 toc.continuations += 1
                 continue
+            # Пустая секция без рубрики — ничего не несёт (все статьи были повторами).
             if not articles and section.rubric is None:
                 continue
             toc.sections.append(TocSection(rubric=section.rubric, articles=articles))
@@ -86,6 +103,9 @@ def prompt_lists(toc: IssueToc | None) -> tuple[list[str], list[dict]]:
 
     Рубрика статьи берётся из оглавления — оно источник истины: по ней пост-обработка ставит
     ``<rubric>`` перед ``#`` статьи, где бы маркер рубрики ни был напечатан на полосе.
+
+    Args:
+        toc: Слитое «Содержание» выпуска; ``None`` (нет полос оглавления) — пустые списки.
     """
     if toc is None:
         return [], []
@@ -102,15 +122,25 @@ def prompt_lists(toc: IssueToc | None) -> tuple[list[str], list[dict]]:
 
 
 def toc_hash(rubrics: list[str], articles: list[dict]) -> str:
-    """Отпечаток списков, с которыми распознавалась полоса: сменился список — полоса устарела."""
+    """Отпечаток списков, с которыми распознавалась полоса: сменился список — полоса устарела.
+
+    Args:
+        rubrics: Список рубрик из ``prompt_lists``.
+        articles: Список статей из ``prompt_lists``.
+    """
+    # sort_keys — чтобы порядок ключей в словарях статей не менял отпечаток; 12 hex-знаков хватает.
     payload = json.dumps({"rubrics": rubrics, "articles": articles}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
-def to_dict(tocs: dict[str, IssueToc]) -> dict:
-    """Содержимое ``toc.json`` выпуска: по виду — секции, полосы, счётчики."""
+def to_dict(tocs: dict[TocKind, IssueToc]) -> dict:
+    """Содержимое ``toc.json`` выпуска: по виду — секции, полосы, счётчики.
+
+    Args:
+        tocs: Оглавления выпуска по видам (из ``pipeline.build_issue_toc``).
+    """
     return {
-        kind: {
+        TocKind(kind).value: {
             "pages": toc.pages,
             "continuations": toc.continuations,
             "sections": [asdict(section) for section in toc.sections],
@@ -119,9 +149,13 @@ def to_dict(tocs: dict[str, IssueToc]) -> dict:
     }
 
 
-def to_markdown(tocs: dict[str, IssueToc]) -> str:
-    """Читаемое оглавление выпуска: заголовок по виду, рубрики, «Автор. Название — страница»."""
-    titles = {KIND_CONTENTS: "Содержание выпуска", KIND_INDEX: "Указатель статей за год"}
+def to_markdown(tocs: dict[TocKind, IssueToc]) -> str:
+    """Читаемое оглавление выпуска: заголовок по виду, рубрики, «Автор. Название — страница».
+
+    Args:
+        tocs: Оглавления выпуска по видам.
+    """
+    titles = {TocKind.CONTENTS: "Содержание выпуска", TocKind.INDEX: "Указатель статей за год"}
     lines: list[str] = []
     for kind, toc in tocs.items():
         lines.append(f"# {titles.get(kind, kind)}")
@@ -134,6 +168,7 @@ def to_markdown(tocs: dict[str, IssueToc]) -> str:
                 lines.append("")
             for article in section.articles:
                 authors = ", ".join(author["name"] for author in article.authors if author.get("name"))
+                # «№ 3, 12» в указателе, «12» в содержании, ничего — если номера нет.
                 where = ", ".join(
                     part for part in (f"№ {article.issue}" if article.issue else "", article.page or "") if part
                 )
@@ -143,9 +178,13 @@ def to_markdown(tocs: dict[str, IssueToc]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def from_dict(payload: dict) -> dict[str, IssueToc]:
-    """Обратное чтение ``toc.json`` (для повторного прогона без запроса полос оглавления)."""
-    tocs: dict[str, IssueToc] = {}
+def from_dict(payload: dict) -> dict[TocKind, IssueToc]:
+    """Обратное чтение ``toc.json`` (для повторного прогона без запроса полос оглавления).
+
+    Args:
+        payload: Разобранный ``toc.json`` — то, что вернул ``to_dict``.
+    """
+    tocs: dict[TocKind, IssueToc] = {}
     for kind, raw in payload.items():
         sections = [
             TocSection(
@@ -157,5 +196,7 @@ def from_dict(payload: dict) -> dict[str, IssueToc]:
             )
             for section in raw.get("sections") or []
         ]
-        tocs[kind] = IssueToc(kind, sections, list(raw.get("pages") or []), int(raw.get("continuations") or 0))
+        tocs[TocKind(kind)] = IssueToc(
+            TocKind(kind), sections, list(raw.get("pages") or []), int(raw.get("continuations") or 0)
+        )
     return tocs

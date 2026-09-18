@@ -1,4 +1,8 @@
-"""Команды пакета: ``uv run python -m ocr_utils.external_ocr_services <команда>``."""
+"""Команды пакета: ``uv run python -m ocr_utils.external_ocr_services <команда>``.
+
+Докстринги команд — это их ``--help``, поэтому они короткие; смысл каждого аргумента описан в
+``help=`` соответствующей опции, а сборка параметров прогона прокомментирована в теле ``run``.
+"""
 
 from __future__ import annotations
 
@@ -9,15 +13,22 @@ import click
 
 from ocr_utils.external_ocr_services import models as registry
 from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
+from ocr_utils.external_ocr_services.models import Reasoning
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions
 from ocr_utils.external_ocr_services.pages import flags_from_db, flags_from_lists
-from ocr_utils.external_ocr_services.pipeline import ON_MISSED_CHOICES, PipelineParams, run_pipeline
+from ocr_utils.external_ocr_services.pipeline import OnMissedToc, PipelineParams, run_pipeline
 from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE, DEFAULT_QUALITY
 
 logger = logging.getLogger("ocr_utils.external_ocr_services")
 
 
 def _setup_logging(out_dir: Path | None, level: str) -> None:
+    """Лог в терминал и, если задан ``out_dir``, ещё и в ``run.log`` рядом с выходом.
+
+    Args:
+        out_dir: Корень выхода прогона; ``None`` — только терминал (команды без выхода на диск).
+        level: Имя уровня logging (``INFO``, ``DEBUG`` …); неизвестное — INFO.
+    """
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +111,8 @@ def main(log_level: str) -> None:
 )
 @click.option(
     "--reasoning",
-    type=click.Choice(["off", "low", "medium"]),
+    # NONE («модель параметра не знает») — свойство модели из реестра, из CLI его не задать.
+    type=click.Choice([level.value for level in Reasoning if level is not Reasoning.NONE]),
     default=None,
     help="Переопределить уровень рассуждений из реестра.",
 )
@@ -129,8 +141,8 @@ def main(log_level: str) -> None:
 @click.option("--skip-done", is_flag=True, help="Не запрашивать полосы с готовым .json и тем же списком статей.")
 @click.option(
     "--on-missed-toc",
-    type=click.Choice(ON_MISSED_CHOICES),
-    default="redo",
+    type=click.Choice([mode.value for mode in OnMissedToc]),
+    default=OnMissedToc.REDO.value,
     show_default=True,
     help="Модель нашла оглавление вне базы: redo — перераспознать выпуск с ним (умолчание), ask — спросить в терминале (без терминала = skip), skip — только записать в missed_toc.txt.",
 )
@@ -165,10 +177,13 @@ def run(
 ) -> None:
     """Прогнать папку полос по выпускам: оглавление, потом остальные полосы со списком статей."""
     _setup_logging(out_dir, log_level)
+    # Модель — по короткому имени из реестра; неизвестное имя — понятная ошибка со списком.
     try:
         spec = registry.resolve(model_name)
     except KeyError as error:
         raise click.ClickException(str(error)) from None
+    # Источник тегов оглавления: база разметки (только чтение) → списки toc_pages.txt → ничего
+    # (тогда оглавление ловит только fallback по ответу модели).
     flags = None
     if db_path is not None:
         try:
@@ -182,16 +197,18 @@ def run(
     else:
         logger.warning("ни --db, ни --toc-lists: оглавление ищется только по ответу модели (fallback)")
 
+    # Всё, что относится к одному запросу: тайлы, модель, второй проход, отладочный выход.
     options = RunOptions(
         max_src_tile=max_src_tile_size,
         max_model_tile=max_model_tile_size,
         quality=quality,
-        reasoning=reasoning,
+        reasoning=Reasoning(reasoning) if reasoning is not None else None,
         max_tokens=max_tokens,
         source=source,
         debug_dir=debug_dir,
         second_pass_transcript=second_pass_transcript,
     )
+    # Всё, что относится к прогону целиком: пути, флаги, отбор входа, параллелизм, fallback.
     params = PipelineParams(
         in_dir=in_dir,
         out_dir=out_dir,
@@ -199,20 +216,23 @@ def run(
         flags=flags,
         jobs=max(1, jobs),
         skip_done=skip_done,
-        on_missed_toc=on_missed_toc,
+        on_missed_toc=OnMissedToc(on_missed_toc),
         pages_file=pages_file,
         only_year=only_year,
         only_issue=only_issue,
         limit=limit,
     )
+    # Ключ: --api-key или $OPENROUTER_API_KEY; нет ни того, ни другого — ошибка без запуска.
     try:
         client = OpenRouterClient(api_key_from(api_key), timeout=timeout, attempts=attempts)
     except Exception as error:
         raise click.ClickException(str(error)) from None
+    # FileNotFoundError — полоса из --pages отсутствует на диске: опечатка в списке, а не сбой.
     try:
         stats = run_pipeline(client, spec, params)
     except FileNotFoundError as error:
         raise click.ClickException(str(error)) from None
+    # Итог прогона в терминал (то же есть в run.log): что запросили, что пропустили, почём.
     click.echo(
         f"Выпусков: {stats.issues}, полос: {stats.pages} (оглавление/указатель по базе: {stats.toc_pages}), "
         f"запросов: {stats.requests}, готовых пропущено: {stats.reused}, сбоев: {stats.failed}, "
@@ -228,6 +248,7 @@ def run(
 @main.command("models")
 def models_command() -> None:
     """Реестр моделей со справочными ценами."""
+    # Таблица фиксированной ширины; звёздочка — модель по умолчанию.
     click.echo(f"{'имя':24} {'id':40} {'$/M in':>7} {'$/M out':>8} {'json':12} {'reasoning':9} заметки")
     for spec in registry.MODELS:
         mark = "*" if spec.name == registry.DEFAULT_MODEL else " "
@@ -244,6 +265,7 @@ def balance(api_key: str | None) -> None:
     """Баланс ключа OpenRouter — сверить расход до и после прогона."""
     from ocr_utils.external_ocr_services.client import credits
 
+    # OpenRouter отдаёт «куплено» и «потрачено» за всё время; остаток — их разность.
     data = credits(api_key_from(api_key))
     total, used = float(data.get("total_credits") or 0), float(data.get("total_usage") or 0)
     click.echo(f"куплено ${total:.4f}, потрачено ${used:.4f}, остаток ${total - used:.4f}")

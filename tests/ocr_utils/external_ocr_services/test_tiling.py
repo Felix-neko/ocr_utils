@@ -47,7 +47,8 @@ def test_prepare_tiles_downscales_and_keeps_boxes(tmp_path):
     assert tiles[0].data_url().startswith("data:image/jpeg;base64,")
     assert base64.b64decode(tiles[0].data_url().split(",", 1)[1]) == tiles[0].data
     info = describe(tiles)
-    assert (info["ncols"], info["nrows"]) == (1, 2) and info["tiles"][1]["src"][3] == 3000
+    assert (info.ncols, info.nrows) == (1, 2) and info.tiles[1].src[3] == 3000
+    assert info.as_dict()["tiles"][1]["src"][3] == 3000  # в meta уходит плоский словарь
 
 
 def test_small_image_single_tile_not_upscaled(tmp_path):

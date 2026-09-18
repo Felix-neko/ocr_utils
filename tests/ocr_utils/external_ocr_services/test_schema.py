@@ -5,7 +5,15 @@ import json
 import pytest
 
 from ocr_utils.external_ocr_services.render import to_markdown
-from ocr_utils.external_ocr_services.schema import ParseError, json_schema, parse_json_text, tag_counts
+from ocr_utils.external_ocr_services.schema import (
+    DamageTag,
+    ParseError,
+    Stage,
+    TocKind,
+    json_schema,
+    parse_json_text,
+    tag_counts,
+)
 
 PAGE = {
     "damage": "",
@@ -89,3 +97,18 @@ def test_old_is_toc_field_and_bad_json():
     for text in ("", "не json", '{"page_number": "1"}'):
         with pytest.raises(ParseError):
             parse_json_text(text)
+
+
+def test_enums_serialise_as_plain_strings():
+    """StrEnum в результате и meta уходят в JSON своими значениями — формат файлов не меняется."""
+    result = parse_json_text('{"content_markdown": "<restored>а</restored>б<unknown/>", "toc_kind": "index"}', "toc")
+    assert result.toc_kind is TocKind.INDEX and result.toc_kind == "index"
+    assert json.loads(result.to_json())["toc_kind"] == "index"
+    counts = tag_counts(result.content_markdown)
+    assert counts[DamageTag.RESTORED] == 1 and json.loads(json.dumps(counts)) == {
+        "restored": 1,
+        "fuzzy": 0,
+        "unknown": 1,
+    }
+    assert json_schema(Stage.TOC)["properties"]["toc_kind"]["enum"] == ["none", "contents", "index"]
+    assert json_schema("page") == json_schema(Stage.PAGE)
