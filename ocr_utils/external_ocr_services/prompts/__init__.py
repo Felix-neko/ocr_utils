@@ -56,25 +56,21 @@ def render(template_name: str, **variables: object) -> str:
     return _environment().get_template(template_name).render(**variables).strip() + "\n"
 
 
-def system_prompt(
-    stage: Stage, source: str = "", rubrics: list[str] | None = None, articles: list[dict] | None = None
-) -> str:
-    """Системный промпт этапа — одинаковый для всех полос выпуска, поэтому кэшируется провайдером как префикс.
+def system_prompt(stage: Stage, source: str = "", has_list: bool = False) -> str:
+    """Системный промпт этапа — один на весь пак: без списка статей выпуска, поэтому кэшируется провайдером
+    как префикс между выпусками и годами; общие правила идут первыми, чтобы toc и page делили префикс.
 
     Args:
         stage: ``TOC`` — полоса оглавления или указателя (извлечь структуру); ``PAGE`` — обычная полоса.
         source: Описание издания для первого абзаца; пусто — советская и постсоветская
             экономическая пресса вообще. Без года — иначе префикс не совпадает между выпусками.
-        rubrics: Рубрики «Содержания» выпуска для этапа ``PAGE``; пустой список — общие правила без них.
-        articles: Статьи «Содержания» (``[{"title", "authors": [str], "rubric"}]``) для этапа ``PAGE``.
+        has_list: Есть ли в пользовательском сообщении список статей выпуска (этап ``PAGE``):
+            с ним действуют правила «`#` только из списка», без него — общие правила.
+
+    Returns:
+        Текст системного сообщения.
     """
-    return render(
-        "system.md.j2",
-        stage=Stage(stage),
-        source=source.strip(),
-        rubrics=list(rubrics or []),
-        articles=list(articles or []),
-    )
+    return render("system.md.j2", stage=Stage(stage), source=source.strip(), has_list=bool(has_list))
 
 
 def user_prompt(
@@ -85,19 +81,29 @@ def user_prompt(
     toc_kind: TocKind = TocKind.CONTENTS,
     second_pass: object | None = None,
     max_lines: int = 60,
+    rubrics: list[str] | None = None,
+    articles: list[dict] | None = None,
 ) -> str:
-    """Текст рядом с картинками: раскладка тайлов, фраза про повреждения, задача этапа.
+    """Текст рядом с картинками: фраза про повреждения, задача этапа, список выпуска, раскладка тайлов.
+
+    Порядок блоков — под кэш префикса: константы первыми, список выпуска (меняется от выпуска к
+    выпуску) после них, раскладка тайлов и второй проход (меняются от полосы к полосе) — в конце.
 
     Args:
         ntiles: Сколько картинок приложено к сообщению.
         ncols: Столбцов в сетке тайлов (порядок картинок — по столбцам, сверху вниз).
         nrows: Строк в сетке тайлов.
-        stage: Этап: у ``TOC`` — задача извлечь оглавление, у ``PAGE`` — прочитать полосу.
-        toc_kind: Для этапа ``TOC`` — что это: «Содержание» или годовой указатель (разные подсказки).
+        stage: Этап: у ``TOC`` — задача проверить и извлечь оглавление, у ``PAGE`` — прочитать полосу.
+        toc_kind: Для этапа ``TOC`` — что предположил детектор: «Содержание» или годовой указатель.
         second_pass: Сводка первого прохода (``ocr.SecondPass``: ``damage``, ``edge_words``,
             ``tags``, ``transcript``); с ней вместо нейтральной фразы о повреждениях идёт блок
             «первое чтение нашло…». ``None`` — первый проход.
         max_lines: Сколько строк ``edge_words`` первого прохода показывать второму.
+        rubrics: Рубрики «Содержания» выпуска для этапа ``PAGE``; пусто — списка нет.
+        articles: Статьи «Содержания» (``[{"title", "authors": [str], "rubric"}]``) для этапа ``PAGE``.
+
+    Returns:
+        Текст пользовательского сообщения (без картинок).
     """
     return render(
         "user.md.j2",
@@ -109,4 +115,6 @@ def user_prompt(
         toc_kind=TocKind(toc_kind),
         second_pass=second_pass,
         max_lines=max_lines,
+        rubrics=list(rubrics or []),
+        articles=list(articles or []),
     )

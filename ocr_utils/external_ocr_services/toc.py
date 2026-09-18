@@ -253,3 +253,61 @@ def ensure_toc_block(body: str) -> tuple[str, bool]:
     first, last = hits[0], hits[-1]
     wrapped = paragraphs[:first] + [_TOC_OPEN] + paragraphs[first : last + 1] + [_TOC_CLOSE] + paragraphs[last + 1 :]
     return "\n\n".join(wrapped).rstrip() + "\n", True
+
+
+# Пункт списка с номером страницы в конце — то, что должно стоять в <toc> на каждую статью.
+_TOC_ARTICLE_LINE = re.compile(r"^(- )?.+ — (№ ?\d+[^\d]*)?\d+[.,;\s]*$", re.S)
+# Доля статей объекта ``toc``, ниже которой список в теле считается потерянным и строится заново.
+TOC_BODY_MIN_SHARE = 0.5
+
+
+def render_toc_block(page: TocPage) -> str:
+    """Блок ``<toc>…</toc>`` по структуре ``toc`` одной полосы — в той же разметке, что просит промпт.
+
+    Args:
+        page: Структурированное оглавление полосы из ответа модели.
+
+    Returns:
+        Текст блока: рубрики в ``<rubric_in_toc>``, статьи пунктами «Автор. Название — страница»
+        (в указателе — «№ выпуск, страница»), авторы в ``<author>``.
+    """
+    lines = [_TOC_OPEN, ""]
+    for section in page.sections:
+        if section.rubric:
+            lines += [f"<{StructureTag.RUBRIC_IN_TOC}>*{section.rubric.strip()}*</{StructureTag.RUBRIC_IN_TOC}>", ""]
+        for article in section.articles:
+            names = ", ".join(author["name"] for author in article.authors if author.get("name"))
+            prefix = f"<{StructureTag.AUTHOR}>**{names}**</{StructureTag.AUTHOR}>. " if names else ""
+            where = ", ".join(
+                part for part in (f"№ {article.issue}" if article.issue else "", article.page or "") if part
+            )
+            lines.append(f"- {prefix}{article.title}{' — ' + where if where else ''}")
+        if section.articles:
+            lines.append("")
+    lines.append(_TOC_CLOSE)
+    return "\n".join(lines)
+
+
+def ensure_toc_entries(body: str, page: TocPage) -> tuple[str, bool]:
+    """Если в теле осталось меньше половины статей из ``toc`` — блок ``<toc>`` строится заново по ``toc``.
+
+    Модель изредка выдаёт в теле только рубрики, а статьи кладёт лишь в объект ``toc`` (1966/03,
+    с. 93: 0 пунктов при 20 статьях). Объект — та же транскрипция той же полосы, только
+    структурная, поэтому список из него полный и в той же разметке.
+
+    Args:
+        body: Тело полосы после ``ensure_toc_block`` (тег ``<toc>`` уже есть).
+        page: Структурированное оглавление полосы.
+
+    Returns:
+        ``(тело, перестроен ли блок)``.
+    """
+    expected = sum(len(section.articles) for section in page.sections)
+    if not expected or _TOC_OPEN not in body or _TOC_CLOSE not in body:
+        return body, False
+    start, end = body.index(_TOC_OPEN), body.index(_TOC_CLOSE) + len(_TOC_CLOSE)
+    inside = body[start:end]
+    found = sum(1 for block in re.split(r"\n\s*\n", inside) if _TOC_ARTICLE_LINE.match(block.strip()))
+    if found >= expected * TOC_BODY_MIN_SHARE:
+        return body, False
+    return body[:start] + render_toc_block(page) + body[end:], True

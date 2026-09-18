@@ -97,3 +97,29 @@ def test_ensure_toc_block_wraps_entries_once():
     assert ensure_toc_block("Обычный текст.\n") == ("Обычный текст.\n", False)
     index = "- Иванов И. Название — № 3, 12\n\n- Петров П. Другое — № 4, 5\n"
     assert ensure_toc_block(index)[0].startswith("<toc>\n\n- Иванов")
+
+
+def test_ensure_toc_entries_rebuilds_lost_list():
+    """Тело с одними рубриками при 3 статьях в toc → блок <toc> строится заново по объекту; полный список не трогается."""
+    from ocr_utils.external_ocr_services.schema import TocArticle, TocKind, TocPage, TocSection
+    from ocr_utils.external_ocr_services.toc import ensure_toc_entries, render_toc_block
+
+    page = TocPage(
+        TocKind.INDEX,
+        sections=[
+            TocSection(None, [TocArticle("Первая", [{"name": "И. Иванов", "position": None}], "5", "3")]),
+            TocSection(
+                "ОПЫТ", [TocArticle("Вторая", [], "9", "3"), TocArticle("Третья", [{"name": "П. Петров"}], None, None)]
+            ),
+        ],
+    )
+    lost = "# УКАЗАТЕЛЬ\n\n<toc>\n\n<rubric_in_toc>*ОПЫТ*</rubric_in_toc>\n\n</toc>\n\nРедколлегия.\n"
+    out, rebuilt = ensure_toc_entries(lost, page)
+    assert rebuilt and out.startswith("# УКАЗАТЕЛЬ\n\n<toc>\n\n- <author>**И. Иванов**</author>. Первая — № 3, 5\n\n")
+    assert (
+        "<rubric_in_toc>*ОПЫТ*</rubric_in_toc>\n\n- Вторая — № 3, 9\n- <author>**П. Петров**</author>. Третья\n\n</toc>\n\nРедколлегия."
+        in out
+    )
+    full = "<toc>\n\n- Первая — № 3, 5\n\n- Вторая — № 3, 9\n\n</toc>\n"
+    assert ensure_toc_entries(full, page) == (full, False), "две из трёх — больше половины, список цел"
+    assert render_toc_block(page).count("\n- ") == 3

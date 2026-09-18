@@ -234,9 +234,10 @@ def reasoning_field(spec: ModelSpec, override: Reasoning | None) -> dict | None:
 def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -> tuple[str, str]:
     """(системный, пользовательский) промпты полосы.
 
-    Системный зависит от этапа, издания и списков выпуска — он одинаков для всех полос выпуска,
-    и провайдер кэширует его как префикс (поэтому ``--source`` лучше давать без года).
-    Пользовательский — про эту полосу: сетка тайлов, вид полосы, подсказки второго прохода.
+    Системный зависит только от этапа и издания — он одинаков для всех полос пака, и провайдер
+    кэширует его как префикс между выпусками (поэтому ``--source`` лучше давать без года).
+    Пользовательский — константная часть, затем списки выпуска, затем сетка тайлов и подсказки
+    второго прохода — в порядке «от общего к частному», чтобы префикс совпадал как можно дольше.
 
     Args:
         job: Что распознаём: этап, вид полосы, списки выпуска, год, подсказка второго прохода.
@@ -248,7 +249,9 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
     """
     info: GridSummary = describe(tiles)
     source = options.source.replace("{year}", job.year).strip()
-    system = system_prompt(job.stage, source, list(job.rubrics), [dict(a) for a in job.articles])
+    # Списки выпуска — в пользовательское сообщение: системный промпт остаётся общим для всего пака
+    # и кэшируется провайдером между выпусками; внутри выпуска кэшируется и список.
+    system = system_prompt(job.stage, source, has_list=bool(job.articles))
     user = user_prompt(
         len(tiles),
         info.ncols,
@@ -257,6 +260,8 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
         job.toc_kind,
         second_pass=job.second_pass,
         max_lines=SECOND_PASS_MAX_LINES,
+        rubrics=list(job.rubrics),
+        articles=[dict(a) for a in job.articles],
     )
     return system, user
 
@@ -678,6 +683,10 @@ def recognise_page(
         # первая полоса «Содержания» с шапкой журнала) — доводится кодом по границам элементов.
         result.content_markdown, wrapped = toc_module.ensure_toc_block(result.content_markdown)
         meta["toc_wrapped"] = wrapped
+        # Изредка в теле остаются одни рубрики, а статьи — только в объекте toc: тогда блок
+        # <toc> строится заново по объекту (та же транскрипция, только структурная).
+        result.content_markdown, rebuilt = toc_module.ensure_toc_entries(result.content_markdown, result.toc)
+        meta["toc_rebuilt"] = rebuilt
     if job.stage is Stage.PAGE:
         # `#` только из оглавления, авторы при своей статье, рубрика перед `#` — доводится кодом.
         # Оглавление — источник истины: заголовки не из списка понижаются, утёкшие названия

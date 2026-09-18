@@ -119,8 +119,10 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert (stats.issues, stats.pages, stats.requests, stats.failed, stats.toc_pages) == (1, 4, 4, 0, 1)
     assert fake.stage_of(fake.payloads[0]) == "toc", "оглавление раньше остальных"
-    page_prompts = [p["messages"][0]["content"] for p in fake.payloads[1:]]
+    # Список выпуска — в тексте пользовательского сообщения (первая часть до картинок), не в системном.
+    page_prompts = [p["messages"][1]["content"][0]["text"] for p in fake.payloads[1:]]
     assert all("«Первые шаги» — И. Фетисов" in s and "Rubrics: «Опыт работы»" in s for s in page_prompts)
+    assert all("«Первые шаги»" not in p["messages"][0]["content"] for p in fake.payloads[1:])
     toc = json.loads((params.out_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
     assert [a["title"] for a in toc["contents"]["sections"][0]["articles"]] == ["Первые шаги", "Второй шаг"]
     assert "## Опыт работы" in (params.out_dir / ISSUE / "toc.md").read_text(encoding="utf-8")
@@ -204,7 +206,7 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognises(tmp_path):
     toc = json.loads((params.out_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
     titles = [a["title"] for s in toc["contents"]["sections"] for a in s["articles"]]
     assert titles == ["Первые шаги", "Третий шаг"] and toc["contents"]["continuations"] == 1
-    last_prompts = [p["messages"][0]["content"] for p in fake.payloads[-2:]]
+    last_prompts = [p["messages"][1]["content"][0]["text"] for p in fake.payloads[-2:]]
     assert all("«Третий шаг»" in s for s in last_prompts)
     metas = {
         name: json.loads((params.out_dir / ISSUE / f"{name[:-4]}.meta.json").read_text(encoding="utf-8"))
@@ -278,10 +280,7 @@ def test_payload_deepseek_tiles_and_source_year(tmp_path):
     parts = payload["messages"][1]["content"]
     assert "4 overlapping tiles: 2 column(s) × 2 row(s)" in parts[0]["text"]
     assert [p["type"] for p in parts[1:]] == ["image_url"] * 4 and parts[1]["image_url"]["detail"] == "high"
-    assert (
-        "(this one: журнал «МТС», 1966)" in payload["messages"][0]["content"]
-        and "«Т»" in payload["messages"][0]["content"]
-    )
+    assert "(this one: журнал «МТС», 1966)" in payload["messages"][0]["content"] and "«Т»" in parts[0]["text"]
 
 
 def test_cli_run_with_db_and_toc_lists(tmp_path, monkeypatch):
@@ -407,7 +406,7 @@ def test_toc_page_demoted_when_model_disagrees(tmp_path):
     assert "IMG_0002.jpg" in listed and "IMG_0003.jpg" in listed
     # Список статей в промпте у понижённой полосы — тот же, что у обычной.
     page_payloads = [p for p in fake.payloads if fake.stage_of(p) == "page"]
-    assert len(page_payloads) == 3 and all("«Третья»" in p["messages"][0]["content"] for p in page_payloads)
+    assert len(page_payloads) == 3 and all("«Третья»" in p["messages"][1]["content"][0]["text"] for p in page_payloads)
 
     # Повтор с --skip-done: всё берётся с диска, оглавление то же.
     again = FakeClient(lambda p: (_ for _ in ()).throw(AssertionError("запросов быть не должно")))

@@ -21,15 +21,11 @@ def test_toc_stage_prompt():
 
 
 def test_page_stage_prompt_with_and_without_lists():
+    """Системный промпт этапа page не зависит от выпуска: список статей уходит в пользовательское сообщение."""
     articles = [{"title": "Улучшать методы", "authors": ["И. Фетисов"]}, {"title": "Без автора", "authors": []}]
-    with_lists = system_prompt("page", "", ["Консультация"], articles)
-    assert "KNOWN STRUCTURE OF THIS ISSUE" in with_lists
-    assert "«Улучшать методы» — И. Фетисов" in with_lists and "* «Без автора»\n" in with_lists
-    assert "Rubrics: «Консультация»." in with_lists and "ONLY for a title from the list" in with_lists
-    assert (
-        "separate article with its own author" not in with_lists
-        and "EVERY other heading is `## Подзаголовок`" in with_lists
-    )
+    with_lists = system_prompt("page", "", has_list=True)
+    assert "KNOWN STRUCTURE OF THIS ISSUE" in with_lists and "Улучшать методы" not in with_lists
+    assert "ONLY for a title from the list" in with_lists and "EVERY other heading is `## Подзаголовок`" in with_lists
     assert (
         "starts_here" in with_lists and "running_header" in with_lists and "ONE short sentence in Russian" in with_lists
     )
@@ -39,12 +35,29 @@ def test_page_stage_prompt_with_and_without_lists():
     assert '"toc":' not in with_lists and "Check whether this page is itself a table of contents" in with_lists
     plain = system_prompt("page")
     assert "KNOWN STRUCTURE" not in plain and "Article title → `# Заголовок статьи`" in plain
-    assert "starts_here" in plain and "continues_previous" not in system_prompt("page")
-    assert (
-        "continues_previous" not in with_lists
-    ), "поле полосы убрано: оно подталкивало модель подписывать продолжение названием"
+    assert "starts_here" in plain and "continues_previous" not in plain and "continues_previous" not in with_lists
     assert '"article":' not in system_prompt("toc")
-    assert "journal or a newspaper" in plain and "this one:" not in plain
+    # Список — в пользовательском сообщении, после константных блоков и перед раскладкой тайлов.
+    user = user_prompt(2, 1, 2, rubrics=["Консультация"], articles=articles)
+    assert "KNOWN STRUCTURE OF THIS ISSUE" in user
+    assert "«Улучшать методы» — И. Фетисов" in user and "* «Без автора»\n" in user
+    assert "Rubrics: «Консультация»." in user
+    assert user.index(DEFAULT_DAMAGE_NOTE) < user.index("Transcribe this page.") < user.index("KNOWN STRUCTURE")
+    assert user.index("KNOWN STRUCTURE") < user.index("2 overlapping tiles") < user.index("Apply rule 5 strictly")
+    assert "KNOWN STRUCTURE" not in user_prompt(2, 1, 2) and "KNOWN STRUCTURE" not in user_prompt(1, 1, 1, stage="toc")
+
+
+def test_system_prompts_share_prefix_and_never_depend_on_issue():
+    """Кэш префикса: toc и page совпадают до стадийного правила 6; page с списком и без — до правила 6 тоже."""
+    toc, page, page_plain = (
+        system_prompt("toc", "X"),
+        system_prompt("page", "X", has_list=True),
+        system_prompt("page", "X"),
+    )
+    shared = toc.index("6. Structure (Markdown):")
+    assert toc[:shared] == page[:shared] == page_plain[:shared] and shared > 5000
+    assert "5. Damaged text" in toc[:shared] and "3. Tables, illustrations" in toc[:shared]
+    assert system_prompt("page", "X", has_list=True) == page, "текст детерминирован — иначе кэш не совпадёт"
 
 
 def test_user_prompt_tiles_and_damage_note():
