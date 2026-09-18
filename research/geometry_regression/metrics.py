@@ -17,6 +17,7 @@ from research.geometry_regression.field import estimate_field, field_metrics
 from research.geometry_regression.lines import line_metrics, match_lines
 from research.geometry_regression.regions import lineart_boxes, text_boxes, text_lines
 from research.geometry_regression.render import RENDER_DPI, to_work
+from research.geometry_regression.stretch import glyph_line_metrics
 from research.geometry_regression.strokes import find_strokes, match_strokes, stroke_metrics
 
 
@@ -25,9 +26,9 @@ class Params:
     """Размеры, привязанные к бумаге. Умолчания — для пака-1 (журнальная полоса ~170×260 мм)."""
 
     dpi: float = WORK_DPI
-    # Штрих короче не считается прямым штрихом: дробная черта формулы ≈ 13-25 мм, линейки
-    # таблиц от 30 мм, а у текста длинных прямых кромок нет.
-    stroke_min_mm: float = 8.0
+    # Штрих короче не считается прямым штрихом: дробные черты формул от 5 мм (1966/05 с.70),
+    # линейки таблиц от 30 мм, а у текста прямых кромок такой длины почти нет.
+    stroke_min_mm: float = 4.0
     # Строка короче в попарные метрики не идёт: наклон короткой строки шумит.
     line_min_mm: float = 25.0
 
@@ -39,16 +40,42 @@ class PageMeasure:
     raw: dict = field(default_factory=dict)
 
 
+def _transform_boxes(boxes, warp) -> list:
+    """Рамки из кадра B в кадр A через аффинную часть поля (без поля — как есть)."""
+    if warp is None or not boxes:
+        return list(boxes)
+    out = []
+    for x0, y0, x1, y1 in boxes:
+        corners = warp.transform(np.array([[x0, y0], [x1, y1]], dtype=np.float64))
+        out.append(
+            (
+                int(corners[:, 0].min()),
+                int(corners[:, 1].min()),
+                int(corners[:, 0].max()) + 1,
+                int(corners[:, 1].max()) + 1,
+            )
+        )
+    return out
+
+
+def _inside_any(line, boxes) -> bool:
+    """Центр строки лежит в одной из рамок line art."""
+    return any(x0 <= line.cx < x1 and y0 <= line.cy < y1 for x0, y0, x1, y1 in boxes)
+
+
 def _boxes(items) -> list[list[int]]:
     return [[int(v) for v in box] for box in items]
 
 
 def _scale_culprits(culprits: dict, k: float) -> dict:
-    """Рамки-виновники из другого разрешения — в пиксели рабочей копии."""
-    return {
-        name: {side: tuple(int(round(v * k)) for v in box) for side, box in pair.items()}
-        for name, pair in culprits.items()
-    }
+    """Рамки-виновники (и отрезки групп) из другого разрешения — в пиксели рабочей копии."""
+
+    def scale(value):
+        if value and isinstance(value[0], (list, tuple)):
+            return [[int(round(v * k)) for v in segment] for segment in value]
+        return tuple(int(round(v * k)) for v in value)
+
+    return {name: {side: scale(value) for side, value in pair.items()} for name, pair in culprits.items()}
 
 
 def measure_pair(gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = Params()) -> PageMeasure:
@@ -62,21 +89,36 @@ def measure_pair(gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = 
     lineart = lineart_boxes(b, dpi)
     lines_b, separators_b = text_lines(gray300_b, dpi)
     lines_a, separators_a = text_lines(gray300_a, dpi)
+    # Надписи внутри рисунков (полки шкафа на 1966/01 с.78) — не строки текста: их «выравнивание»
+    # засчитывалось как выигрыш, а на деле это порча чертежа, которую ловят штрихи.
+    lines_b = [line for line in lines_b if not _inside_any(line, lineart)]
     out.metrics.update(field_metrics(warp, lineart, text_boxes(lines_b)))
     out.metrics["lineart_boxes"] = float(len(lineart))
 
-    strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI)
-    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI)
+    # Рамки рисунков даны на копии B; для A они переносятся аффинной частью поля.
+    lineart_a = _transform_boxes(lineart, warp)
+    strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI, lineart, dpi)
+    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, lineart_a, dpi)
     pairs = match_strokes(strokes_b, strokes_a, warp, RENDER_DPI, dpi)
     metrics, culprits = stroke_metrics(strokes_b, strokes_a, pairs, warp.rot_deg if warp else 0.0, RENDER_DPI)
     out.metrics.update(metrics)
     out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
 
-    metrics, culprits = line_metrics(
-        lines_b, lines_a, match_lines(lines_b, lines_a, warp, dpi), params.line_min_mm, dpi
-    )
+    # Пары строк подтверждаются по глифам, и только подтверждённые идут в сводки и выигрыш.
+    line_pairs = match_lines(lines_b, lines_a, warp, dpi)
+    metrics, culprits, verified = glyph_line_metrics(gray300_b, gray300_a, line_pairs, warp, dpi, params.line_min_mm)
     out.metrics.update(metrics)
     out.culprits.update(culprits)
+    out.metrics.update(line_metrics(lines_b, lines_a, verified, dpi))
+
+    # Рамки рисунков даны на копии B; для A они переносятся аффинной частью поля.
+    lineart_a = _transform_boxes(lineart, warp)
+    strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI, lineart, dpi)
+    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, lineart_a, dpi)
+    pairs = match_strokes(strokes_b, strokes_a, warp, RENDER_DPI, dpi)
+    metrics, culprits = stroke_metrics(strokes_b, strokes_a, pairs, warp.rot_deg if warp else 0.0, RENDER_DPI)
+    out.metrics.update(metrics)
+    out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
 
     edges_b = column_edges(lines_b, separators_b, b.shape[1], dpi)
     edges_a = column_edges(lines_a, separators_a, a.shape[1], dpi)

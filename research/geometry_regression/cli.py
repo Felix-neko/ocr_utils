@@ -208,9 +208,11 @@ def run(geo_dir, nogeo_dir, out_dir, jobs, only, pages, limit, skip_done, stroke
             bar.update(len(records))
     write_csv(out_dir / "metrics.csv", rows)
     errors = [r for r in rows if r.error]
-    flagged = sum(1 for r in rows if r.score >= 1.0)
+    bad = sum(1 for r in rows if r.verdict == "bad")
+    mixed = sum(1 for r in rows if r.verdict == "mixed")
     click.echo(
-        f"Готово: {len(rows)} страниц, флагов по порогам в коде: {flagged}, ошибок: {len(errors)}. CSV: {out_dir / 'metrics.csv'}"
+        f"Готово: {len(rows)} страниц, по порогам в коде bad: {bad}, mixed: {mixed}, ошибок: {len(errors)}. "
+        f"CSV: {out_dir / 'metrics.csv'}"
     )
     for row in errors[:10]:
         click.echo(f"  {row.pdf} с.{row.page}: {row.error}")
@@ -220,7 +222,7 @@ def _write_pair(args: tuple) -> str:
     """Одна картинка «было | стало» (в пуле)."""
     import fitz
 
-    geo, nogeo, pdf, page, culprit, field_raw, out_path = args
+    geo, nogeo, pdf, page, culprit, field_raw, out_path, caption = args
     from research.geometry_regression.overlay import pair_image
 
     try:
@@ -245,8 +247,12 @@ def _write_pair(args: tuple) -> str:
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="каталог прогона run (с metrics.csv и cache/)",
 )
-@click.option("--thr", multiple=True, help="перекрытие порога: имя=число")
-@click.option("--min-score", default=1.0, show_default=True, type=float, help="картинки для страниц со score не ниже")
+@click.option("--thr", multiple=True, help="перекрытие порога порчи или выигрыша: имя=число")
+@click.option("--hard", default=2.0, show_default=True, type=float, help="порча не ниже — bad независимо от выигрыша")
+@click.option(
+    "--min-gain", default=1.0, show_default=True, type=float, help="выигрыш не ниже переводит мелкую порчу в mixed"
+)
+@click.option("--min-score", default=1.0, show_default=True, type=float, help="картинки для страниц с порчей не ниже")
 @click.option("--max-score", type=float, help="и не выше (для выборки поясов глазами)")
 @click.option(
     "--pairs-dir", type=click.Path(file_okay=False, path_type=Path), help="куда класть картинки (подпапка на год)"
@@ -260,12 +266,24 @@ def _write_pair(args: tuple) -> str:
 @click.option("--jobs", default=8, show_default=True, type=int)
 @click.option("--list-thresholds", is_flag=True)
 def report(
-    out_dir, thr, min_score, max_score, pairs_dir, md_report, labels, arrows, limit_pairs, jobs, list_thresholds
+    out_dir,
+    thr,
+    hard,
+    min_gain,
+    min_score,
+    max_score,
+    pairs_dir,
+    md_report,
+    labels,
+    arrows,
+    limit_pairs,
+    jobs,
+    list_thresholds,
 ) -> None:
-    """Перефлаговать metrics.csv, собрать сводку и картинки «было | стало»."""
+    """Перефлаговать metrics.csv, собрать сводку и картинки «было | стало» по вердиктам."""
     from tqdm import tqdm
 
-    thresholds = Thresholds.parse(tuple(thr))
+    thresholds = Thresholds.parse(tuple(thr), hard, min_gain, ratio)
     if list_thresholds:
         click.echo(thresholds.describe())
         return
@@ -295,10 +313,14 @@ def report(
             best = max(row.flags, key=row.flags.get)
             culprit = culprits.get(best)
         field_raw = cache.get("raw", {}).get("field") if arrows else None
-        out_path = pairs_dir / row.year / pair_name(row)
+        # Раскладка pairs/<вердикт>/<год>/: сначала по вердикту, чтобы смотреть все bad подряд.
+        out_path = pairs_dir / row.verdict / row.year / pair_name(row)
         geo = str(Path(run_info["geo_dir"]) / f"{row.pdf}.pdf")
         nogeo = str(Path(run_info["nogeo_dir"]) / f"{row.pdf}.pdf")
-        tasks.append((geo, nogeo, row.pdf, row.page, culprit, field_raw, str(out_path)))
+        caption = (
+            f"стало: {row.verdict}, порча {row.score:.2f} ({row.reason}), выигрыш {row.gain:.2f} ({row.gain_reason})"
+        )
+        tasks.append((geo, nogeo, row.pdf, row.page, culprit, field_raw, str(out_path), caption))
     if jobs <= 1 or len(tasks) <= 1:
         outcomes = map(_write_pair, tasks)
     else:

@@ -42,6 +42,9 @@ PEAK_RADIUS_MM = 0.7
 MIN_INK_FRAC = 0.012
 # Меньше стольких тайлов — аффинная подгонка не имеет смысла.
 MIN_TILES = 8
+# Доля тайлов без пары внутри line art считается только по рисунку хотя бы из стольких тайлов
+# (≈ 40×40 мм): виньетка «100 лет» на 1970/04 с.25 — 2 тайла, один без пары — «порча» 0.5.
+MIN_LINEART_TILES = 6
 # Робастная подгонка: итерации IRLS и константа Тьюки в единицах MAD-масштаба; нижняя
 # граница масштаба остатков — полпикселя (точность субпиксельного пика).
 IRLS_ITERS = 10
@@ -298,7 +301,7 @@ def field_metrics(field: Field | None, lineart_boxes: list, text_boxes: list) ->
         "field_lineart_tiles": float(lineart_total),
         "field_resid_lineart_p90_mm": p90(lineart),
         "field_resid_lineart_max_mm": float(lineart.max()) if lineart.size else 0.0,
-        "field_lineart_weak_frac": weak_lineart,
+        "field_lineart_weak_frac": weak_lineart if lineart_total >= MIN_LINEART_TILES else 0.0,
         "field_text_tiles": float(text_total),
         "field_resid_text_p90_mm": p90(text),
         "field_text_weak_frac": weak_text,

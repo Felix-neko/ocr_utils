@@ -42,6 +42,8 @@ class TextLine:
     height: float
     fit: LineFit
     fit_scale: float  # пикселей аппроксимации на пиксель рабочей копии
+    xs: np.ndarray  # центр-линия по своим сгусткам, координаты копии RENDER_DPI
+    ys: np.ndarray
 
     @property
     def cx(self) -> float:
@@ -90,7 +92,7 @@ def text_lines(gray300: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[TextLin
         fit = _fit(sample)
         if fit is not None:
             box = (round(sample.x * k), round(sample.y * k), round(sample.x_end * k), round(sample.y_end * k))
-            lines.append(TextLine(*box, sample.h_line * k, fit, RENDER_DPI / dpi))
+            lines.append(TextLine(*box, sample.h_line * k, fit, RENDER_DPI / dpi, sample.xs, sample.ys))
     separators = [(round(a * k), round(b * k)) for a, b in separators]
     return lines, separators
 

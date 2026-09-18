@@ -29,7 +29,7 @@ def _font(size: int = 20) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
-def _panel(gray: np.ndarray, boxes: list, height: int) -> Image.Image:
+def _panel(gray: np.ndarray, boxes: list, height: int, segments: list | None = None) -> Image.Image:
     image = Image.fromarray(gray).convert("RGB")
     if image.height != height:
         image = image.resize((max(1, round(image.width * height / image.height)), height), Image.LANCZOS)
@@ -40,8 +40,13 @@ def _panel(gray: np.ndarray, boxes: list, height: int) -> Image.Image:
         draw.line([(0, y), (image.width, y)], fill=GRID_COLOUR, width=1)
         draw.line([(x, 0), (x, image.height)], fill=GRID_COLOUR, width=1)
     k = height / gray.shape[0]
-    for x0, y0, x1, y1 in boxes:
-        draw.rectangle([x0 * k - 6, y0 * k - 6, x1 * k + 6, y1 * k + 6], outline=CULPRIT_COLOUR, width=3)
+    if segments:
+        # Группа параллельных штрихов: сами отрезки, а не рамка вокруг всей группы.
+        for x0, y0, x1, y1 in segments:
+            draw.line([(x0 * k, y0 * k), (x1 * k, y1 * k)], fill=CULPRIT_COLOUR, width=4)
+    else:
+        for x0, y0, x1, y1 in boxes:
+            draw.rectangle([x0 * k - 6, y0 * k - 6, x1 * k + 6, y1 * k + 6], outline=CULPRIT_COLOUR, width=3)
     return image
 
 
@@ -80,8 +85,8 @@ def pair_image(
     """
     height = height or before.shape[0]
     panels = [
-        _panel(before, [culprit["b"]] if culprit else [], height),
-        _panel(after, [culprit["a"]] if culprit else [], height),
+        _panel(before, [culprit["b"]] if culprit else [], height, culprit.get("segments_b") if culprit else None),
+        _panel(after, [culprit["a"]] if culprit else [], height, culprit.get("segments_a") if culprit else None),
     ]
     captions = [caption_before, caption_after]
     if field_raw is not None:

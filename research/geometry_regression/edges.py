@@ -123,6 +123,7 @@ def edge_metrics(before: list[Edge], after: list[Edge], dpi: float = WORK_DPI) -
     culprits: dict = {}
     if not pairs:
         metrics["edge_dev_max_delta_mm"] = 0.0
+        metrics["edge_gain_mm"] = 0.0
         return metrics, culprits
     deltas = [
         px_to_mm(b.box[3] - b.box[1], dpi) * (np.sin(np.radians(abs(a.tilt_deg))) - np.sin(np.radians(abs(b.tilt_deg))))
@@ -130,6 +131,7 @@ def edge_metrics(before: list[Edge], after: list[Edge], dpi: float = WORK_DPI) -
     ]
     worst = int(np.argmax(deltas))
     metrics["edge_dev_max_delta_mm"] = float(deltas[worst])
+    metrics["edge_gain_mm"] = float(max(0.0, -min(deltas)))
     metrics["edge_tilt_max_b"] = float(max(abs(b.tilt_deg) for b, _ in pairs))
     metrics["edge_tilt_max_a"] = float(max(abs(a.tilt_deg) for _, a in pairs))
     culprits["edge_dev_max_delta_mm"] = {"b": pairs[worst][0].box, "a": pairs[worst][1].box}

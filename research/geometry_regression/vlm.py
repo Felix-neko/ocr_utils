@@ -44,7 +44,7 @@ from research.geometry_regression.report import PageRow
 
 logger = logging.getLogger(__name__)
 
-VLM_PROMPT_VERSION = 1
+VLM_PROMPT_VERSION = 2
 VARIANTS = ("overlay", "side", "two", "crop")
 DEFAULT_MODEL = "deepseek-v41-flash"
 # Шаг сетки на картинках для модели и размер кропа-виновника (мм).
@@ -54,7 +54,7 @@ CROP_PAD_MM = 8.0
 # Картинка к отправке: длинная сторона и качество JPEG (DeepSeek всё равно ужмёт до ~1300 px).
 MAX_SIDE_PX = 2200
 JPEG_QUALITY = 85
-MAX_TOKENS = 400
+MAX_TOKENS = 900
 # Пояса score классического детектора для выборки.
 BELTS = ((0.0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, float("inf")))
 
@@ -289,6 +289,8 @@ def parse_answer(text: str) -> dict | None:
         return None
     if not isinstance(answer, dict) or "damaged" not in answer:
         return None
+    if isinstance(answer["damaged"], str):
+        answer["damaged"] = answer["damaged"].strip().lower() in ("true", "yes", "да")
     return answer
 
 
@@ -318,7 +320,8 @@ def ask(client: OpenRouterClient, spec: ModelSpec, variant: str, images: list[Im
 
 
 def answer_path(out_dir: Path, variant: str, pdf: str, page: int, repeat: int) -> Path:
-    return out_dir / "vlm" / variant / f"{pdf}_p{page:03d}_r{repeat}.json"
+    """Ответы каждой редакции промпта — в своей папке, чтобы сравнивать редакции между собой."""
+    return out_dir / "vlm" / f"v{VLM_PROMPT_VERSION}" / variant / f"{pdf}_p{page:03d}_r{repeat}.json"
 
 
 def is_done(path: Path) -> bool:
@@ -335,13 +338,14 @@ def is_done(path: Path) -> bool:
 
 
 def load_answers(out_dir: Path) -> list[dict]:
+    """Все ответы всех редакций; ``variant`` — «vN/вариант»."""
     records = []
-    for path in sorted((out_dir / "vlm").glob("*/*.json")):
+    for path in sorted((out_dir / "vlm").glob("v*/*/*.json")):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
             continue
-        record["variant"] = path.parent.name
+        record["variant"] = f"{path.parent.parent.name}/{path.parent.name}"
         records.append(record)
     return records
 

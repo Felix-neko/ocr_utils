@@ -12,7 +12,10 @@ GEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening"
 NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
 
 # Выход прогона — на SSD: JSON на страницу (cache/), metrics.csv, отчёт, картинки pairs/<год>/.
+# Подпапка прогона — версия детектора, чтобы прошлый прогон оставался для сравнения;
+# перекрыть можно переменной окружения: GEOMETRY_RUN_DIR=... ./run_pack1.sh
 GEOMETRY_REGRESSION_ROOT="/mnt/SYSTEM/raw/mts/pack1_geometry_regression"
+GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v7}"
 
 # Эталон: страницы, проверенные глазами (bad — коррекция сделала хуже, good — помогла или не тронула).
 GEOMETRY_LABELS="$(dirname "${BASH_SOURCE[0]}")/labels.csv"

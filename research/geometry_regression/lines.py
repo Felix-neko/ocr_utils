@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 
 from ocr_utils.scan_markup.curved_lines.fitting import page_stats
-from research.geometry_regression import WORK_DPI, mm_to_px, px_to_mm
+from research.geometry_regression import WORK_DPI, px_to_mm
 from research.geometry_regression.field import Field
 from research.geometry_regression.regions import TextLine
 
@@ -56,38 +56,28 @@ def match_lines(
 
 
 def line_metrics(
-    before: list[TextLine],
-    after: list[TextLine],
-    pairs: list[tuple[TextLine, TextLine]],
-    min_len_mm: float,
-    dpi: float = WORK_DPI,
-) -> tuple[dict[str, float], dict]:
-    """Худшие попарные разности по длинным строкам плюс сводки кривизны страницы."""
-    min_len_px = mm_to_px(min_len_mm, dpi)
-    metrics: dict[str, float] = {"lines_b": float(len(before)), "lines_a": float(len(after))}
-    stats_b = page_stats([l.fit for l in before], [l.fit_scale * l.height for l in before])
-    stats_a = page_stats([l.fit for l in after], [l.fit_scale * l.height for l in after])
+    before: list[TextLine], after: list[TextLine], pairs: list[tuple[TextLine, TextLine]], dpi: float = WORK_DPI
+) -> dict[str, float]:
+    """Сводки кривизны страницы по подтверждённым парам строк: контекст и ВЫИГРЫШ.
+
+    Наклон и волну отдельных строк здесь не мерим — это делает ``stretch.glyph_line_metrics``
+    по тем же глифам; сводки же (прогиб p90, разброс наклонов) — по аппроксимациям центр-линий
+    ``line_fit``, как в ``curved_lines``. Выигрыш в мм: прогиб в долях высоты × медианная высота.
+    """
+    metrics: dict[str, float] = {
+        "lines_b": float(len(before)),
+        "lines_a": float(len(after)),
+        "lines_matched": float(len(pairs)),
+    }
+    lines_b = [b for b, _ in pairs]
+    lines_a = [a for _, a in pairs]
+    stats_b = page_stats([l.fit for l in lines_b], [l.fit_scale * l.height for l in lines_b])
+    stats_a = page_stats([l.fit for l in lines_a], [l.fit_scale * l.height for l in lines_a])
     for key in ("sagitta_rel_p90", "slope_spread_deg"):
         metrics[f"text_{key}_b"] = stats_b.get(key, 0.0)
         metrics[f"text_{key}_a"] = stats_a.get(key, 0.0)
         metrics[f"text_{key}_delta"] = stats_a.get(key, 0.0) - stats_b.get(key, 0.0)
-    long = [(b, a) for b, a in pairs if b.length >= min_len_px and a.length >= min_len_px]
-    metrics["lines_matched"] = float(len(pairs))
-    metrics["lines_long_matched"] = float(len(long))
-    culprits: dict = {}
-    if not long:
-        metrics["line_dev_max_delta_mm"] = 0.0
-        metrics["line_wobble_delta_max"] = 0.0
-        return metrics, culprits
-    # Наклон — в мм ухода конца строки от горизонтали (длина × sin): короткий кусок строки под
-    # 1.6° — это 0.7 мм и шум сегментации, заголовок в 100 мм под 0.8° — 1.4 мм и видно глазом.
-    dev = [
-        px_to_mm(b.length, dpi) * (np.sin(np.radians(abs(a.slope_deg))) - np.sin(np.radians(abs(b.slope_deg))))
-        for b, a in long
-    ]
-    wobble = [a.wobble_rel - b.wobble_rel for b, a in long]
-    for name, values in (("line_dev_max_delta_mm", dev), ("line_wobble_delta_max", wobble)):
-        worst = int(np.argmax(values))
-        metrics[name] = float(values[worst])
-        culprits[name] = {"b": long[worst][0].box, "a": long[worst][1].box}
-    return metrics, culprits
+    height_mm = px_to_mm(float(np.median([l.height for l in lines_b])), dpi) if lines_b else 0.0
+    metrics["text_sag_gain_mm"] = max(0.0, -metrics["text_sagitta_rel_p90_delta"]) * height_mm
+    metrics["text_spread_gain_deg"] = max(0.0, -metrics["text_slope_spread_deg_delta"])
+    return metrics

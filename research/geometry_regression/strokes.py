@@ -32,6 +32,22 @@ from research.geometry_regression.field import Field
 
 # LSD на слегка размытом бинарном рендере: без размытия ступеньки бинаризации дробят отрезки.
 BLUR_SIGMA_PX = 2.0
+# Кляксы недосвета у корешка (1966/01 с.91): длинные, но конусные и щербатые; сплошная масса
+# толще 2.5 мм — кайма. Толщина краски меряется поперёк отрезка в нескольких
+# точках: медиана больше ``MAX_INK_MM`` или разброс больше ``MAX_RAGGED`` долей медианы — не штрих.
+MAX_INK_MM = 2.5
+# Вне рисунка толстый штрих — клякса (тень корешка 2 мм на 1976/07 с.92 и 1976/08 с.85);
+# внутри рамки line art допустимы бруски чертежа до ``MAX_INK_MM`` (шкаф на 1966/01 с.78).
+MAX_INK_MM_TEXT = 1.2
+# Толстый штрих ближе этого к левому или правому краю кадра — тень корешка, даже если детектор
+# штриха включил её в «рисунок» (1976/08 с.85: клякса плюс логотип рубрики — одна рамка).
+EDGE_MM = 25.0
+MAX_RAGGED = 0.6
+# Конус: клякса недосвета сужается к концу (1966/01 с.91: 0.15 → 0.7 мм по длине), линейка и
+# линия чертежа ровные; порог — изменение толщины вдоль отрезка в долях медианы.
+MAX_TAPER = 0.7
+INK_PROBE_MM = 5.0
+INK_SAMPLES = 15
 # Склейка коллинеарных кусков: наклонная черта на бинарном рендере — лестница, LSD режет её
 # на 2-3 отрезка (1967/01 с.85). Кандидаты в склейку — от этой длины (мм); склеиваются при
 # близких углах, малом перпендикулярном зазоре и разрыве вдоль не больше ``MERGE_GAP_MM``.
@@ -39,15 +55,25 @@ MERGE_MIN_MM = 4.0
 MERGE_ANGLE_DEG = 4.0
 MERGE_PERP_MM = 0.25
 MERGE_GAP_MM = 1.3
-# Околоосевой отрезок — в пределах этого угла от горизонтали или вертикали.
+# Околоосевой отрезок — в пределах этого угла от горизонтали или вертикали. Для ВЫИГРЫША —
+# строже: наклонные линии чертежа (полки шкафа под 5°, 1966/01 с.78), повёрнутые FineReader
+# к оси, — порча, а не выправленная линейка.
 AXIS_TOL_DEG = 10.0
+GAIN_AXIS_TOL_DEG = 3.0
+# Средний наклон горизонтальных штрихов считается, если их суммарная длина не меньше этого:
+# на нетронутой странице с двумя чёрточками по 5 мм (1967/01 с.17) он давал 0.6° из ничего.
+WMEAN_MIN_TOTAL_MM = 20.0
 # Сопоставление: допуск перпендикулярного расстояния до прямой B′ (мм), по углу и по длине.
 MATCH_PERP_MM = 1.3
 MATCH_ANGLE_DEG = 8.0
 MATCH_LENGTH_FRAC = 0.4
-# Группа параллельных: отрезки B в пределах этого угла от самого длинного; меньше стольких — не группа.
+# Штрихи с уходом конца от оси не меньше этого (мм) обводятся на оверлее все.
+SHOW_DEV_MM = 0.5
+# Группа параллельных: отрезки B от 8 мм в пределах этого угла от самого длинного; меньше
+# стольких — не группа. Короткие штрихи (дробные черты 4-8 мм) в группы не идут: их углы шумят.
 GROUP_TOL_DEG = 1.0
 GROUP_MIN = 3
+GROUP_MIN_MM = 8.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +99,11 @@ class Stroke:
             return 90.0 - a
         return None
 
+    def tilt_from(self, orient: str) -> float:
+        """Отклонение от заданной оси («h»/«v») без допуска — для двойника в A."""
+        a = abs(self.angle_deg)
+        return a if orient == "h" else 90.0 - a
+
     @property
     def box(self) -> tuple[int, int, int, int]:
         return (
@@ -88,8 +119,22 @@ def _wrap(angle: np.ndarray | float):
     return (np.asarray(angle) + 90.0) % 180.0 - 90.0
 
 
-def find_strokes(gray: np.ndarray, min_len_mm: float, dpi: float) -> list[Stroke]:
-    """Отрезки LSD длиной от ``min_len_mm`` на рендере ``gray`` с разрешением ``dpi``."""
+def find_strokes(
+    gray: np.ndarray, min_len_mm: float, dpi: float, lineart_boxes: list | None = None, boxes_dpi: float | None = None
+) -> list[Stroke]:
+    """Отрезки LSD длиной от ``min_len_mm`` на рендере ``gray``; толстые и щербатые кляксы отсеяны.
+
+    Args:
+        gray: серый рендер страницы.
+        min_len_mm: короче — не штрих.
+        dpi: разрешение рендера.
+        lineart_boxes: рамки рисунков ``(x0, y0, x1, y1)`` в пикселях ``boxes_dpi``; внутри них
+            допустимы толстые бруски чертежа, вне — толстый штрих считается кляксой.
+        boxes_dpi: разрешение, в котором заданы рамки (по умолчанию ``dpi``).
+
+    Returns:
+        Штрихи, прошедшие фильтр толщины, щербатости и конуса.
+    """
     detector = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
     blurred = cv2.GaussianBlur(gray, (0, 0), BLUR_SIGMA_PX)
     found = detector.detect(blurred)[0]
@@ -101,7 +146,60 @@ def find_strokes(gray: np.ndarray, min_len_mm: float, dpi: float) -> list[Stroke
     lengths = np.hypot(segments[:, 2] - segments[:, 0], segments[:, 3] - segments[:, 1])
     angles = _wrap(np.degrees(np.arctan2(segments[:, 3] - segments[:, 1], segments[:, 2] - segments[:, 0])))
     min_len = min_len_mm * dpi / 25.4
-    return [Stroke(*segments[i], float(lengths[i]), float(angles[i])) for i in np.nonzero(lengths >= min_len)[0]]
+    ink = gray < 128
+    k = dpi / (boxes_dpi or dpi)
+    boxes = [(x0 * k, y0 * k, x1 * k, y1 * k) for x0, y0, x1, y1 in (lineart_boxes or [])]
+    edge_px = EDGE_MM * dpi / 25.4
+    strokes: list[Stroke] = []
+    for i in np.nonzero(lengths >= min_len)[0]:
+        mx, my = (segments[i][0] + segments[i][2]) / 2.0, (segments[i][1] + segments[i][3]) / 2.0
+        in_lineart = any(x0 <= mx < x1 and y0 <= my < y1 for x0, y0, x1, y1 in boxes)
+        near_edge = mx < edge_px or mx > gray.shape[1] - edge_px
+        thick_ok = MAX_INK_MM if in_lineart and not near_edge else MAX_INK_MM_TEXT
+        if _is_thin(ink, segments[i], dpi, thick_ok):
+            strokes.append(Stroke(*segments[i], float(lengths[i]), float(angles[i])))
+    return strokes
+
+
+def _is_thin(ink: np.ndarray, segment: np.ndarray, dpi: float, max_ink_mm: float = MAX_INK_MM) -> bool:
+    """Толщина краски поперёк отрезка в ``INK_SAMPLES`` точках: тонко и ровно — штрих, иначе клякса."""
+    x0, y0, x1, y1 = segment
+    length = max(1e-6, float(np.hypot(x1 - x0, y1 - y0)))
+    nx, ny = -(y1 - y0) / length, (x1 - x0) / length
+    probe = int(INK_PROBE_MM * dpi / 25.4)
+    h, w = ink.shape
+    widths = []
+    for t in np.linspace(0.1, 0.9, INK_SAMPLES):
+        px, py = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+        offsets = np.arange(-probe, probe + 1)
+        xs = np.clip(np.round(px + nx * offsets).astype(int), 0, w - 1)
+        ys = np.clip(np.round(py + ny * offsets).astype(int), 0, h - 1)
+        profile = ink[ys, xs]
+        # Отрезок LSD лежит на кромке штриха: берём краску, примыкающую к нему (в пределах 2 px).
+        centre = probe
+        near = np.nonzero(profile[centre - 2 : centre + 3])[0]
+        if near.size == 0:
+            continue
+        start = centre - 2 + int(near[0])
+        lo = start
+        while lo > 0 and profile[lo - 1]:
+            lo -= 1
+        hi = start
+        while hi < profile.size - 1 and profile[hi + 1]:
+            hi += 1
+        widths.append(hi - lo + 1)
+    if len(widths) < 3:
+        return True  # краски рядом нет (кромка чужого объекта) — судить не по чему, не отсеиваем
+    widths = np.array(widths, dtype=np.float64)
+    median = float(np.median(widths))
+    thick = median > max_ink_mm * dpi / 25.4
+    # Разброс — межквартильный: пара точек, где линейку пересекает текст или стрелка, не в счёт.
+    ragged = float((np.percentile(widths, 75) - np.percentile(widths, 25)) / max(median, 1.0)) > MAX_RAGGED
+    # Конус — по медиане попарных наклонов (одна стрелка на конце линии его не создаёт).
+    i, j = np.triu_indices(len(widths), 1)
+    slopes = (widths[j] - widths[i]) / (j - i)
+    taper = abs(float(np.median(slopes))) * (len(widths) - 1) / max(median, 1.0) > MAX_TAPER
+    return not (thick or ragged or taper)
 
 
 def _merge_collinear(segments: np.ndarray, dpi: float) -> np.ndarray:
@@ -212,19 +310,36 @@ def stroke_metrics(
     for orient, low, high in (("h", 0.0, AXIS_TOL_DEG), ("v", 90.0 - AXIS_TOL_DEG, 90.0)):
         own = [(b, a) for b, a in pairs if low <= abs(b.angle_deg) <= high and b.axis_tilt is not None]
         key = f"{orient}stroke"
+        metrics[f"{key}_pairs"] = float(len(own))
+        total_mm = px_to_mm(sum(b.length for b, _ in own), dpi)
         metrics[f"{key}_tilt_wmean_b"] = _weighted_tilt([(b.axis_tilt, b.length) for b, _ in own])
-        metrics[f"{key}_tilt_wmean_a"] = _weighted_tilt([(a.axis_tilt or 0.0, a.length) for _, a in own])
-        metrics[f"{key}_tilt_wmean_delta"] = metrics[f"{key}_tilt_wmean_a"] - metrics[f"{key}_tilt_wmean_b"]
+        metrics[f"{key}_tilt_wmean_a"] = _weighted_tilt([(a.tilt_from(orient), a.length) for _, a in own])
+        metrics[f"{key}_tilt_wmean_delta"] = (
+            metrics[f"{key}_tilt_wmean_a"] - metrics[f"{key}_tilt_wmean_b"] if total_mm >= WMEAN_MIN_TOTAL_MM else 0.0
+        )
         if own:
             deltas = [
-                px_to_mm(b.length, dpi) * (np.sin(np.radians(a.axis_tilt or 0.0)) - np.sin(np.radians(b.axis_tilt)))
+                px_to_mm(b.length, dpi) * (np.sin(np.radians(a.tilt_from(orient))) - np.sin(np.radians(b.axis_tilt)))
                 for b, a in own
             ]
             worst = int(np.argmax(deltas))
             metrics[f"{key}_dev_max_delta_mm"] = float(deltas[worst])
-            culprits[f"{key}_dev_max_delta_mm"] = {"b": own[worst][0].box, "a": own[worst][1].box}
+            # На оверлей — все штрихи, ушедшие от оси заметно, не только худший: на странице
+            # с формулами наклоняются все дробные черты (1967/06 с.39).
+            shown = [i for i, d in enumerate(deltas) if d >= SHOW_DEV_MM] or [worst]
+            culprits[f"{key}_dev_max_delta_mm"] = {
+                "b": own[worst][0].box,
+                "a": own[worst][1].box,
+                "segments_b": [[own[i][0].x0, own[i][0].y0, own[i][0].x1, own[i][0].y1] for i in shown],
+                "segments_a": [[own[i][1].x0, own[i][1].y0, own[i][1].x1, own[i][1].y1] for i in shown],
+            }
+            # Выигрыш: линейка, которую коррекция поставила на ось (в мм ухода конца) — только
+            # из тех, что и в B были почти на оси (иначе это повёрнутая линия чертежа).
+            near = [d for d, (b, _) in zip(deltas, own) if b.axis_tilt <= GAIN_AXIS_TOL_DEG]
+            metrics[f"{key}_gain_mm"] = float(max(0.0, -min(near))) if near else 0.0
         else:
             metrics[f"{key}_dev_max_delta_mm"] = 0.0
+            metrics[f"{key}_gain_mm"] = 0.0
 
     # Поворот сверх общего.
     if pairs:
@@ -237,7 +352,10 @@ def stroke_metrics(
     # Параллельность: группы отрезков B по углу вокруг самого длинного, разброс до и после.
     metrics["parallel_groups"] = 0.0
     metrics["parallel_spread_delta_max"] = 0.0
-    if pairs:
+    group_min_px = GROUP_MIN_MM * dpi / 25.4
+    long_pairs = [(b, a) for b, a in pairs if b.length >= group_min_px]
+    if long_pairs:
+        pairs = long_pairs
         ang_b = np.array([b.angle_deg for b, _ in pairs])
         ang_a = np.array([a.angle_deg for _, a in pairs])
         order = np.argsort([-b.length for b, _ in pairs])
@@ -263,8 +381,12 @@ def stroke_metrics(
             ys = [v for i in group for v in (pairs[i][1].y0, pairs[i][1].y1)]
             xb = [v for i in group for v in (pairs[i][0].x0, pairs[i][0].x1)]
             yb = [v for i in group for v in (pairs[i][0].y0, pairs[i][0].y1)]
+            # Рамка — вся группа, но на оверлее рисуются сами отрезки («segments»): рамка
+            # группы накрывает и невредимые линии рядом (1966/06 с.58 — формулы целиком).
             culprits["parallel_spread_delta_max"] = {
                 "b": (int(min(xb)), int(min(yb)), int(max(xb)) + 1, int(max(yb)) + 1),
                 "a": (int(min(xs)), int(min(ys)), int(max(xs)) + 1, int(max(ys)) + 1),
+                "segments_b": [[pairs[i][0].x0, pairs[i][0].y0, pairs[i][0].x1, pairs[i][0].y1] for i in group],
+                "segments_a": [[pairs[i][1].x0, pairs[i][1].y0, pairs[i][1].x1, pairs[i][1].y1] for i in group],
             }
     return metrics, culprits
