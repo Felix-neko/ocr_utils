@@ -14,7 +14,15 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
-from ocr_utils.external_ocr_services.schema import TOC_KINDS_WITH_TOC, TocArticle, TocKind, TocPage, TocSection
+from ocr_utils.external_ocr_services.schema import (
+    TOC_KINDS_WITH_TOC,
+    BlockTag,
+    StructureTag,
+    TocArticle,
+    TocKind,
+    TocPage,
+    TocSection,
+)
 
 # Виды оглавления, которые сливаются порознь; порядок — порядок в toc.json / toc.md.
 KINDS = TOC_KINDS_WITH_TOC
@@ -210,3 +218,38 @@ def from_dict(payload: dict) -> dict[TocKind, IssueToc]:
             TocKind(kind), sections, list(raw.get("pages") or []), int(raw.get("continuations") or 0)
         )
     return tocs
+
+
+# Абзац-элемент оглавления: пункт списка или абзац с автором/названием и номером страницы в конце
+# («… — 5», «… — № 3, 12»), либо рубрика внутри оглавления.
+_TOC_ENTRY = re.compile(
+    rf"^(- )?(<{StructureTag.AUTHOR}>.*?</{StructureTag.AUTHOR}>\.?\s*)?.+ — (№ ?\d+[^\d]*)?\d+[.,;\s]*$|"
+    rf"^<{StructureTag.RUBRIC_IN_TOC}>.*</{StructureTag.RUBRIC_IN_TOC}>\s*$",
+    re.S,
+)
+_TOC_OPEN = f"<{BlockTag.TOC}>"
+_TOC_CLOSE = f"</{BlockTag.TOC}>"
+
+
+def ensure_toc_block(body: str) -> tuple[str, bool]:
+    """Обернуть список оглавления в ``<toc>…</toc>``, если модель забыла тег.
+
+    Границы — первый и последний абзац, похожий на элемент оглавления (пункт «Автор. Название —
+    страница» или ``<rubric_in_toc>``); всё между ними, включая абзацы другого вида, попадает
+    внутрь. Тег уже есть — текст не меняется.
+
+    Args:
+        body: Тело полосы этапа toc в markdown.
+
+    Returns:
+        ``(тело, обёрнуто ли)``: ``True`` — тег добавлен кодом.
+    """
+    if _TOC_OPEN in body:
+        return body, False
+    paragraphs = [block for block in re.split(r"\n\s*\n", body.strip()) if block.strip()]
+    hits = [index for index, paragraph in enumerate(paragraphs) if _TOC_ENTRY.match(paragraph.strip())]
+    if not hits:
+        return body, False
+    first, last = hits[0], hits[-1]
+    wrapped = paragraphs[:first] + [_TOC_OPEN] + paragraphs[first : last + 1] + [_TOC_CLOSE] + paragraphs[last + 1 :]
+    return "\n\n".join(wrapped).rstrip() + "\n", True

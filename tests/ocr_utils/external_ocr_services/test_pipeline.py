@@ -32,9 +32,9 @@ def _answer(toc_kind="none", body="# Заголовок\n\nТекст.", toc=Non
         "running_footer": None,
         "toc_kind": toc_kind,
         "content_markdown": body,
-        "restored": [],
-        "fuzzy": [],
-        "unknown": 0,
+        "supplied": [],
+        "unclear": [],
+        "gap": 0,
         "edge_words": [],
         "notes": "",
     }
@@ -350,3 +350,74 @@ def test_page_stage_moves_author_after_listed_heading(tmp_path):
     )
     assert result.content_markdown.startswith("# Первые шаги\n\n<author>**С. Демидов**</author>")
     assert meta["structure"]["moved_authors"] == ["С. Демидов"] and result.title_in_list is True
+
+
+class DemotingReply:
+    """Ответы для теста понижения: 0001 — настоящее оглавление; 0002 — «не оглавление», toc пустой;
+    0003 — «не оглавление», но одна статья в toc; остальное — обычные полосы."""
+
+    def __init__(self, fake: FakeClient):
+        self.fake = fake
+
+    def __call__(self, payload):
+        if self.fake.stage_of(payload) != "toc":
+            return _answer(title="Обычная")
+        name = self.fake.page_of(payload)
+        if name == "IMG_0002":
+            return _answer("none", "Обычный текст.", {"kind": "contents", "continues_previous": False, "sections": []})
+        if name == "IMG_0003":
+            toc = {
+                "kind": "contents",
+                "continues_previous": False,
+                "sections": [
+                    {"rubric": None, "articles": [{"title": "Третья", "authors": [], "page": "9", "issue": None}]}
+                ],
+            }
+            return _answer("none", "Похоже на список, но не оглавление.", toc)
+        return _toc_answer(["Первые шаги", "Второй шаг"])
+
+
+def test_toc_page_demoted_when_model_disagrees(tmp_path):
+    """Полоса из базы, которую модель не признала оглавлением, идёт ещё и этапом page; её статьи
+    (если есть) всё равно попадают в оглавление; повтор с --skip-done ничего не запрашивает."""
+    _make_pages(tmp_path / "in")
+    fake = FakeClient(lambda p: None)
+    fake.reply = DemotingReply(fake)
+    # Имя полосы из payload не узнать (тайлы одинаковые), поэтому оно берётся по очереди запросов:
+    # этап toc при jobs=1 идёт в порядке 0001, 0002, 0003.
+    order = iter(["IMG_0001", "IMG_0002", "IMG_0003"])
+    fake.page_of = lambda payload: next(order, "IMG_0009")
+    flags = _flags(toc=("IMG_0001", "IMG_0002", "IMG_0003"))
+    params = PipelineParams(
+        tmp_path / "in", tmp_path / "out", RunOptions(second_pass=False), flags, jobs=1, on_missed_toc="skip"
+    )
+    stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
+    # 3 запроса этапа toc + 1 обычная полоса + 2 понижённые этапом page = 6.
+    assert (stats.requests, stats.failed) == (6, 0)
+    assert stats.demoted_toc == [f"{ISSUE}: IMG_0002.jpg, IMG_0003.jpg"]
+    out = tmp_path / "out" / ISSUE
+    toc = json.loads((out / "toc.json").read_text(encoding="utf-8"))
+    titles = [a["title"] for s in toc["contents"]["sections"] for a in s["articles"]]
+    assert titles == ["Первые шаги", "Второй шаг", "Третья"], "статья с понижённой полосы в оглавлении"
+    for stem in ("IMG_0002", "IMG_0003"):
+        meta = json.loads((out / f"{stem}.meta.json").read_text(encoding="utf-8"))
+        assert meta["stage"] == "page" and meta["toc_demoted"] is True and meta["articles_in_prompt"] == 3
+        assert (out / f"{stem}.toc.json").is_file()
+    listed = (tmp_path / "out" / "demoted_toc.txt").read_text(encoding="utf-8")
+    assert "IMG_0002.jpg" in listed and "IMG_0003.jpg" in listed
+    # Список статей в промпте у понижённой полосы — тот же, что у обычной.
+    page_payloads = [p for p in fake.payloads if fake.stage_of(p) == "page"]
+    assert len(page_payloads) == 3 and all("«Третья»" in p["messages"][0]["content"] for p in page_payloads)
+
+    # Повтор с --skip-done: всё берётся с диска, оглавление то же.
+    again = FakeClient(lambda p: (_ for _ in ()).throw(AssertionError("запросов быть не должно")))
+    stats2 = run_pipeline(again, resolve("deepseek-v41-flash"), replace_params(params, skip_done=True))
+    assert stats2.requests == 0 and stats2.reused == 6
+    assert json.loads((out / "toc.json").read_text(encoding="utf-8")) == toc
+
+
+def replace_params(params: PipelineParams, **changes) -> PipelineParams:
+    """Копия параметров с изменёнными полями (dataclasses.replace без импорта в тесте)."""
+    from dataclasses import replace
+
+    return replace(params, **changes)

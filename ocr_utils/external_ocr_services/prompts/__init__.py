@@ -15,7 +15,7 @@ PROMPTS_DIR = Path(__file__).parent
 # Нейтральная фраза про повреждения по умолчанию: правило про теги действует всегда, но без
 # подсказки модель повреждений не ищет, а с завышенной — выдумывает (стенд, разделы 8 и 10).
 # Первая редакция («помечай только то, что видишь») делала модель осторожной: на скрытых
-# корешком буквах она ставила <unknown/> вместо достроенных <restored> (55 против 47 на
+# корешком буквах она ставила пропуск вместо достроенных букв (55 против 47 на
 # IMG_0006_L). Восстановление по контексту нужно обязательно, поэтому фраза требует его явно.
 DEFAULT_DAMAGE_NOTE = (
     "Scans of bound volumes may have letters cut off, squashed or blurred near the binding gutter, and overexposed "
@@ -23,9 +23,9 @@ DEFAULT_DAMAGE_NOTE = (
     "from the image which edge, if any, runs into the gutter (it can be the left or the right one) and where the print "
     "is unreliable. "
     "Wherever letters are hidden, cut off or unreadable, DO reconstruct them from the context and the visible remains "
-    "of the word and mark the reconstructed letters with <restored>; mark visible but unreliable letters with <fuzzy>; "
-    "use <unknown/> only where no confident reconstruction is possible. Do not tag clean print or ordinary "
-    "end-of-line hyphenation."
+    "of the word and mark the reconstructed letters with <supplied>; mark visible but unreliable letters with "
+    "<unclear>; use <gap>▒…</gap> (one ▒ per missing letter, at most 6) only where no confident reconstruction is possible. "
+    "Do not tag clean print or ordinary end-of-line hyphenation."
 )
 
 

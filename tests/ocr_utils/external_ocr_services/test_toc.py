@@ -75,3 +75,25 @@ def test_dict_markdown_roundtrip():
             )
         }
     )
+
+
+def test_ensure_toc_block_wraps_entries_once():
+    """Забытый <toc>: оборачивается отрезок от первого до последнего элемента; готовый тег не трогается."""
+    from ocr_utils.external_ocr_services.toc import ensure_toc_block
+
+    body = (
+        "# Материально-техническое снабжение\n\nОРГАН ГОСКОМИТЕТА\n\n# СОДЕРЖАНИЕ\n\n"
+        "<rubric_in_toc>*РЕШЕНИЯ СЪЕЗДА*</rubric_in_toc>\n\n"
+        "<author>**Христораднов Ю.**</author>. Большие задачи — 3\n\n"
+        "<rubric_in_toc>*ПРОБЛЕМЫ*</rubric_in_toc>\n\n"
+        "- <author>**Колмаков С.**</author>. Система показателей — 11\n\n"
+        "Редакционная коллегия: …\n"
+    )
+    out, wrapped = ensure_toc_block(body)
+    assert wrapped
+    assert out.split("\n\n")[3:5] == ["<toc>", "<rubric_in_toc>*РЕШЕНИЯ СЪЕЗДА*</rubric_in_toc>"]
+    assert "Система показателей — 11\n\n</toc>\n\nРедакционная коллегия" in out
+    assert ensure_toc_block(out) == (out, False)
+    assert ensure_toc_block("Обычный текст.\n") == ("Обычный текст.\n", False)
+    index = "- Иванов И. Название — № 3, 12\n\n- Петров П. Другое — № 4, 5\n"
+    assert ensure_toc_block(index)[0].startswith("<toc>\n\n- Иванов")

@@ -241,6 +241,8 @@ def run(
     click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
     if stats.missed:
         click.echo("ОГЛАВЛЕНИЯ ВНЕ БАЗЫ: " + "; ".join(stats.missed))
+    if stats.demoted_toc:
+        click.echo("В БАЗЕ ОГЛАВЛЕНИЕ, МОДЕЛЬ — НЕТ (см. demoted_toc.txt): " + "; ".join(stats.demoted_toc))
     if stats.redone_issues:
         click.echo("Перераспознаны: " + ", ".join(stats.redone_issues))
 

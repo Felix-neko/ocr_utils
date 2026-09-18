@@ -13,6 +13,8 @@ from ocr_utils.external_ocr_services.schema import (
     json_schema,
     parse_json_text,
     tag_counts,
+    tags_from_edge_words,
+    unbalanced_tags,
 )
 
 PAGE = {
@@ -30,11 +32,11 @@ PAGE = {
     "running_header": None,
     "running_footer": "МТС",
     "toc_kind": "none",
-    "content_markdown": "# О нормах\n\nП р и м е ч а н и е. Текст <fuzzy>и</fuzzy> ещё <unknown/>.",
-    "restored": [],
-    "fuzzy": ["<fuzzy>и</fuzzy>"],
-    "unknown": 1,
-    "edge_words": [{"seen": "ещ", "full": "ещё", "kind": "fuzzy"}],
+    "content_markdown": "# О нормах\n\nП р и м е ч а н и е. Текст <unclear>и</unclear> ещё <gap>▒▒</gap>.",
+    "supplied": [],
+    "unclear": ["<unclear>и</unclear>"],
+    "gap": 1,
+    "edge_words": [{"seen": "ещ", "full": "ещё", "kind": "unclear"}],
     "notes": "",
 }
 
@@ -61,7 +63,8 @@ def test_parse_page_fields_and_unspace():
     ]
     assert not hasattr(result, "continues_previous")
     assert "*Примечание*." in result.content_markdown and result.toc is None
-    assert tag_counts(result.content_markdown) == {"restored": 0, "fuzzy": 1, "unknown": 1}
+    assert tag_counts(result.content_markdown) == {"supplied": 0, "unclear": 1, "gap": 1}
+    assert result.unclear == ["<unclear>и</unclear>"] and result.gap == 1
     md = to_markdown(result)
     assert md.startswith('---\npage_number: "12"') and 'toc_kind: "none"' in md and 'title: "О нормах"' in md
     assert "continues_previous" not in md
@@ -101,14 +104,49 @@ def test_old_is_toc_field_and_bad_json():
 
 def test_enums_serialise_as_plain_strings():
     """StrEnum в результате и meta уходят в JSON своими значениями — формат файлов не меняется."""
-    result = parse_json_text('{"content_markdown": "<restored>а</restored>б<unknown/>", "toc_kind": "index"}', "toc")
+    result = parse_json_text('{"content_markdown": "<supplied>а</supplied>б<gap>▒</gap>", "toc_kind": "index"}', "toc")
     assert result.toc_kind is TocKind.INDEX and result.toc_kind == "index"
     assert json.loads(result.to_json())["toc_kind"] == "index"
     counts = tag_counts(result.content_markdown)
-    assert counts[DamageTag.RESTORED] == 1 and json.loads(json.dumps(counts)) == {
-        "restored": 1,
-        "fuzzy": 0,
-        "unknown": 1,
-    }
+    assert counts[DamageTag.SUPPLIED] == 1 and json.loads(json.dumps(counts)) == {"supplied": 1, "unclear": 0, "gap": 1}
     assert json_schema(Stage.TOC)["properties"]["toc_kind"]["enum"] == ["none", "contents", "index"]
     assert json_schema("page") == json_schema(Stage.PAGE)
+
+
+def test_legacy_damage_tags_and_fields_are_modernised():
+    """Ответ по старой схеме (до v10): теги и поля переводятся в TEI, <unknown/> — в <gap> с заполнителем."""
+    legacy = {
+        "content_markdown": "снабже<restored>ния</restored> пр<fuzzy>е</fuzzy>д <unknown/>ности",
+        "restored": ["снабже<restored>ния</restored>"],
+        "fuzzy": ["пр<fuzzy>е</fuzzy>д"],
+        "unknown": 1,
+        "edge_words": [{"seen": "ности", "full": "<unknown/>ности", "kind": "unknown"}],
+    }
+    result = parse_json_text(json.dumps(legacy, ensure_ascii=False))
+    assert result.content_markdown == "снабже<supplied>ния</supplied> пр<unclear>е</unclear>д <gap>▒▒▒</gap>ности"
+    assert result.supplied == ["снабже<restored>ния</restored>"] and result.unclear and result.gap == 1
+    assert tag_counts(result.content_markdown) == {"supplied": 1, "unclear": 1, "gap": 1}
+    assert unbalanced_tags("<gap>▒</gap> <supplied>а") == ["supplied"]
+
+
+def test_tags_from_edge_words_gap_filler_width():
+    """Пропуск из edge_words: ширина — по заполнителям модели, иначе по разнице длин, иначе три; сторона — как у модели."""
+    body = "Слово предпри и ности и конец."
+    edge = [
+        {"seen": "предпри", "full": "предпри<gap>▒▒▒▒</gap>", "kind": "gap"},
+        {"seen": "ности", "full": "<gap>▒▒▒</gap>ности", "kind": "gap"},
+        {"seen": "кон", "full": "конец", "kind": "hidden"},
+    ]
+    out, inserted = tags_from_edge_words(body, edge)
+    assert inserted == 3
+    assert "предпри<gap>▒▒▒▒</gap>" in out and "<gap>▒▒▒</gap>ности" in out and "кон<supplied>ец</supplied>" in out
+
+
+def test_gap_runaway_detected_and_capped():
+    """Цикл заполнителя: длинный ряд «▒» опознаётся как сбой, а в разобранном тексте режется до потолка."""
+    from ocr_utils.external_ocr_services.schema import GAP_MAX_FILLERS, cap_gap_fillers, is_gap_runaway
+
+    assert is_gap_runaway("x<gap>" + "▒" * 25) and not is_gap_runaway("<gap>▒▒▒▒▒▒</gap>")
+    assert cap_gap_fillers("<gap>" + "▒" * 12 + "</gap>") == "<gap>" + "▒" * GAP_MAX_FILLERS + "</gap>"
+    result = parse_json_text('{"content_markdown": "а<gap>' + "▒" * 9 + '</gap>б"}')
+    assert result.content_markdown == "а<gap>" + "▒" * GAP_MAX_FILLERS + "</gap>б"

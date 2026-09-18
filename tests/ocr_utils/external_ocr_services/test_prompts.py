@@ -7,7 +7,16 @@ def test_toc_stage_prompt():
     text = system_prompt("toc", "журнал «МТС», 1975")
     assert "(this one: журнал «МТС», 1975)" in text
     assert "ONLY `#` heading allowed is the main heading" in text and '"toc": {"kind"' in text
-    assert "KNOWN STRUCTURE" not in text and "<restored>" in text
+    assert "KNOWN STRUCTURE" not in text and "<supplied>" in text and "<gap>▒▒▒▒</gap>" in text
+    # v10: предварительная классификация, список в <toc>, рубрики оглавления своим тегом и полностью.
+    assert "PRELIMINARILY classified" in text and "`<toc>` … `</toc>`" in text
+    assert "<rubric_in_toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric_in_toc>" in text
+    assert "never shortened" in text and "`<rubric>*ОПЫТ РАБОТЫ*</rubric>`" not in text
+    for old in ("<restored>", "<fuzzy>", "<unknown/>", "[картинка"):
+        assert old not in text, old
+    # Картинки трёх видов и сноски — в тегах-обёртках.
+    for tag in ("<schema>", "<photo>", "<line_art>", "<footnote>[^1]:", "ось X", "ось Y"):
+        assert tag in text, tag
 
 
 def test_page_stage_prompt_with_and_without_lists():
@@ -44,4 +53,5 @@ def test_user_prompt_tiles_and_damage_note():
     four = user_prompt(4, 2, 2, stage="toc", toc_kind="index")
     assert "the whole left column before the right one" in four and "ANNUAL INDEX" in four
     one = user_prompt(1, 1, 1, stage="toc")
-    assert "tiles" not in one and "TABLE OF CONTENTS of the issue" in one
+    assert "tiles" not in one and "TABLE OF CONTENTS of the issue" in one and "preliminarily classified" in one
+    assert "<supplied>" in one and "<restored>" not in one

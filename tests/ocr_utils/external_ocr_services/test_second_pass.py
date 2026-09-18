@@ -31,7 +31,7 @@ def _page(damaged=False, damage="", body="Текст.", edge=()):
 def test_trigger_reasons_and_no_damage_text():
     assert second_pass_reason(parse_json_text(_page())) is None
     assert second_pass_reason(parse_json_text(_page(damaged=True, damage="Правый край обрезан"))) == "damaged"
-    assert second_pass_reason(parse_json_text(_page(body="Те<fuzzy>к</fuzzy>ст."))) == "tags"
+    assert second_pass_reason(parse_json_text(_page(body="Те<unclear>к</unclear>ст."))) == "tags"
     assert (
         second_pass_reason(parse_json_text(_page(edge=[{"seen": "а", "full": "аб", "kind": "hidden"}]))) == "edge_words"
     )
@@ -47,24 +47,17 @@ def test_trigger_reasons_and_no_damage_text():
 
 
 def test_choose_final_safeguard():
-    assert choose_final({"restored": 5, "fuzzy": 0, "unknown": 0}, None) == ("pass1", "второй проход сбойнул")
-    assert (
-        choose_final({"restored": 5, "fuzzy": 0, "unknown": 0}, {"restored": 5, "fuzzy": 0, "unknown": 9})[0] == "pass1"
-    )
-    assert (
-        choose_final({"restored": 5, "fuzzy": 0, "unknown": 0}, {"restored": 12, "fuzzy": 0, "unknown": 3})[0]
-        == "pass2"
-    )
-    assert (
-        choose_final({"restored": 0, "fuzzy": 0, "unknown": 0}, {"restored": 0, "fuzzy": 7, "unknown": 0})[0] == "pass2"
-    )
+    assert choose_final({"supplied": 5, "unclear": 0, "gap": 0}, None) == ("pass1", "второй проход сбойнул")
+    assert choose_final({"supplied": 5, "unclear": 0, "gap": 0}, {"supplied": 5, "unclear": 0, "gap": 9})[0] == "pass1"
+    assert choose_final({"supplied": 5, "unclear": 0, "gap": 0}, {"supplied": 12, "unclear": 0, "gap": 3})[0] == "pass2"
+    assert choose_final({"supplied": 0, "unclear": 0, "gap": 0}, {"supplied": 0, "unclear": 7, "gap": 0})[0] == "pass2"
 
 
 def test_second_pass_prompt_block():
     hint = SecondPass(
         "Край обрезан",
-        ({"seen": "снабже", "full": "снабже<restored>ния</restored>", "kind": "hidden"},) * 3,
-        {"restored": 3, "fuzzy": 0, "unknown": 0},
+        ({"seen": "снабже", "full": "снабже<supplied>ния</supplied>", "kind": "hidden"},) * 3,
+        {"supplied": 3, "unclear": 0, "gap": 0},
     )
     text = user_prompt(2, 1, 2, second_pass=hint, max_lines=2)
     assert "A first reading of this page reported damage: «Край обрезан»" in text and "3 reconstructed" in text
@@ -89,27 +82,27 @@ def _run(tmp_path, answers, **options):
 
 def test_two_passes_keep_second_and_record_both(tmp_path):
     first = _page(damaged=True, damage="Правый край обрезан", body="Текст снабже.")
-    second = _page(damaged=True, damage="Правый край обрезан", body="Текст снабже<restored>ния</restored>.")
+    second = _page(damaged=True, damage="Правый край обрезан", body="Текст снабже<supplied>ния</supplied>.")
     fake, meta, result, out, dbg = _run(tmp_path, [first, second])
     assert len(fake.payloads) == 2 and "first reading" in fake.payloads[1]["messages"][1]["content"][0]["text"]
     assert "Its transcription was" not in fake.payloads[1]["messages"][1]["content"][0]["text"]
     assert meta["second_pass"]["chosen"] == "pass2" and meta["second_pass_reason"] == "damaged"
-    assert meta["second_pass"]["pass1_tags"]["restored"] == 0 and meta["second_pass"]["pass2_tags"]["restored"] == 1
-    assert meta["cost_usd"] == 0.002 and "<restored>ния</restored>" in result.content_markdown
-    assert "<restored>" in out.with_suffix(".md").read_text(encoding="utf-8")
+    assert meta["second_pass"]["pass1_tags"]["supplied"] == 0 and meta["second_pass"]["pass2_tags"]["supplied"] == 1
+    assert meta["cost_usd"] == 0.002 and "<supplied>ния</supplied>" in result.content_markdown
+    assert "<supplied>" in out.with_suffix(".md").read_text(encoding="utf-8")
     assert json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))["second_pass_chosen"] == "pass2"
     assert dbg.with_suffix(".pass1.json").is_file() and dbg.with_suffix(".pass2.raw.txt").is_file()
     assert dbg.with_suffix(".raw.txt").is_file() and dbg.with_suffix(".pass2.prompt.txt").is_file()
 
 
 def test_second_pass_with_transcript_and_safeguard(tmp_path):
-    first = _page(damaged=True, damage="Край", body="Текст снабже<restored>ния</restored>.")
-    second = _page(damaged=True, damage="Край", body="Текст снабже<unknown/>.")
+    first = _page(damaged=True, damage="Край", body="Текст снабже<supplied>ния</supplied>.")
+    second = _page(damaged=True, damage="Край", body="Текст снабже<gap>▒▒▒</gap>.")
     fake, meta, result, out, dbg = _run(tmp_path, [first, second], second_pass_transcript=True)
     user = fake.payloads[1]["messages"][1]["content"][0]["text"]
-    assert "<<<\nТекст снабже<restored>ния</restored>." in user and ">>>" in user and "do not copy" in user
-    assert meta["second_pass"]["chosen"] == "pass1" and "unknown" in meta["second_pass"]["why"]
-    assert "<restored>ния</restored>" in out.with_suffix(".md").read_text(encoding="utf-8")
+    assert "<<<\nТекст снабже<supplied>ния</supplied>." in user and ">>>" in user and "do not copy" in user
+    assert meta["second_pass"]["chosen"] == "pass1" and "gap" in meta["second_pass"]["why"]
+    assert "<supplied>ния</supplied>" in out.with_suffix(".md").read_text(encoding="utf-8")
     assert dbg.with_suffix(".pass2.json").is_file()
     assert meta["cost_usd"] == 0.002
 

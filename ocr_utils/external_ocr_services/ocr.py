@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -25,13 +25,17 @@ from ocr_utils.external_ocr_services.client import ChatResponse, OpenRouterClien
 from ocr_utils.external_ocr_services.models import JsonMode, ModelSpec, Reasoning
 from ocr_utils.external_ocr_services.prompts import system_prompt, user_prompt
 from ocr_utils.external_ocr_services import structure
+from ocr_utils.external_ocr_services import toc as toc_module
 from ocr_utils.external_ocr_services.render import to_markdown
 from ocr_utils.external_ocr_services.schema import (
+    FORMULA_TAG,
+    BlockTag,
     DamageTag,
     PageResult,
     ParseError,
     Stage,
     TocKind,
+    is_gap_runaway,
     json_schema,
     parse_json_text,
     tag_counts,
@@ -107,7 +111,7 @@ class SecondPass:
 
     damage: str  # описание повреждения словами (по-русски), как его дал первый проход
     edge_words: tuple[dict, ...]  # затронутые строки: {"line", "text", "kind"}; режутся до SECOND_PASS_MAX_LINES
-    tags: dict  # {"restored": n, "fuzzy": n, "unknown": n}
+    tags: dict  # {DamageTag.SUPPLIED: n, DamageTag.UNCLEAR: n, DamageTag.GAP: n}
     transcript: str | None = None  # полный текст первого прохода, если решено его передавать
 
 
@@ -126,6 +130,9 @@ class PageJob:
     articles: tuple[dict, ...] = ()  # статьи «Содержания»: {"title", "authors", "rubric"}
     toc_hash: str = ""  # отпечаток списков; пишется в meta, по нему is_done узнаёт устаревшую полосу
     second_pass: SecondPass | None = None  # подсказка первого прохода; None — это первый проход
+    # Полоса шла этапом TOC, но модель сочла её не оглавлением, и теперь она идёт этапом PAGE;
+    # пишется в meta (``toc_demoted``), чтобы повтор с --skip-done узнал её без запроса.
+    demoted_from_toc: bool = False
 
     def __post_init__(self) -> None:
         # Строки из старых вызовов и тестов («page», «contents») приводятся к перечислениям, чтобы
@@ -182,8 +189,8 @@ def second_pass_reason(result: PageResult) -> SecondPassReason | None:
 def choose_final(pass1_tags: dict[DamageTag, int], pass2_tags: dict[DamageTag, int] | None) -> tuple[PassChoice, str]:
     """Какой проход оставить: второй, кроме случаев, когда он сбойнул или ушёл в ``<unknown/>``.
 
-    Страховка от вопроса «а не окажется ли в финале unknown там, где первый проход восстановил»:
-    если во втором ``<unknown/>`` больше, а ``<restored>`` не больше, — остаётся первый.
+    Страховка от вопроса «а не окажется ли в финале пропуск там, где первый проход восстановил»:
+    если во втором ``<gap>`` больше, а ``<supplied>`` не больше, — остаётся первый.
     Возвращает выбор и причину словами (пусто, если выбран второй).
 
     Args:
@@ -195,10 +202,10 @@ def choose_final(pass1_tags: dict[DamageTag, int], pass2_tags: dict[DamageTag, i
     """
     if pass2_tags is None:
         return PassChoice.PASS1, "второй проход сбойнул"
-    more_unknown = pass2_tags.get(DamageTag.UNKNOWN, 0) > pass1_tags.get(DamageTag.UNKNOWN, 0)
-    no_more_restored = pass2_tags.get(DamageTag.RESTORED, 0) <= pass1_tags.get(DamageTag.RESTORED, 0)
-    if more_unknown and no_more_restored:
-        return PassChoice.PASS1, "во втором проходе больше <unknown/> без прироста <restored>"
+    more_gaps = pass2_tags.get(DamageTag.GAP, 0) > pass1_tags.get(DamageTag.GAP, 0)
+    no_more_supplied = pass2_tags.get(DamageTag.SUPPLIED, 0) <= pass1_tags.get(DamageTag.SUPPLIED, 0)
+    if more_gaps and no_more_supplied:
+        return PassChoice.PASS1, "во втором проходе больше <gap> без прироста <supplied>"
     return PassChoice.PASS2, ""
 
 
@@ -340,12 +347,16 @@ class OutputPaths:
         md: Тот же результат глазами: YAML-шапка и тело.
         meta: ``.meta.json`` — этап, отпечаток списков, тайлы, токены, цена, ошибки.
         raw: Сырой текст ответа — только при сбое разбора, чтобы не терять оплаченный ответ.
+        toc_json: Результат этапа toc у полосы, которую модель сочла НЕ оглавлением и которая
+            ушла на этап page: её вклад в оглавление выпуска, чтобы повтор с ``--skip-done`` не
+            запрашивал полосу заново.
     """
 
     json: Path
     md: Path
     meta: Path
     raw: Path
+    toc_json: Path
 
 
 @dataclass(frozen=True)
@@ -380,6 +391,7 @@ def output_paths(out_dir: Path, rel: Path) -> OutputPaths:
         md=base.with_suffix(".md"),
         meta=base.with_suffix(".meta.json"),
         raw=base.with_suffix(".raw.txt"),
+        toc_json=base.with_suffix(".toc.json"),
     )
 
 
@@ -433,8 +445,13 @@ def is_done(out_dir: Path, job: PageJob) -> bool:
     # Сбойная полоса (сеть или разбор) сделанной не считается: --skip-done её догонит.
     if meta is None or meta.get("error") or meta.get("parse_error"):
         return False
-    if not output_paths(out_dir, job.rel).json.is_file():
+    paths = output_paths(out_dir, job.rel)
+    if not paths.json.is_file():
         return False
+    # Понижённая полоса: финальные файлы — от этапа page, а её ответ этапа toc лежит рядом в
+    # .toc.json; для задания toc это «сделано», результат читает load_result из .toc.json.
+    if job.stage is Stage.TOC and meta.get("toc_demoted") and meta.get("stage") == Stage.PAGE:
+        return paths.toc_json.is_file()
     # Полоса, распознанная как обычная, а теперь помеченная оглавлением (или наоборот), идёт заново.
     if meta.get("stage") != job.stage:
         return False
@@ -452,11 +469,35 @@ def load_result(out_dir: Path, job: PageJob) -> PageResult | None:
         out_dir: Корень выхода.
         job: Задание на полосу — путь и этап (у ``TOC`` разбирается объект ``toc``).
     """
-    path = output_paths(out_dir, job.rel).json
+    paths = output_paths(out_dir, job.rel)
+    # У понижённой полосы ответ этапа toc лежит отдельно (см. is_done); её .json — уже этап page.
+    meta = read_meta(out_dir, job.rel) or {}
+    path = paths.toc_json if job.stage is Stage.TOC and meta.get("toc_demoted") else paths.json
     try:
         return parse_json_text(path.read_text(encoding="utf-8"), job.stage)
     except (OSError, ParseError):
         return None
+
+
+def save_demoted_toc(out_dir: Path, rel: Path, result: PageResult) -> Path:
+    """Сохранить ответ этапа toc понижённой полосы в ``.toc.json`` рядом с её файлами.
+
+    Полоса дальше идёт этапом page, и её .json/.md/.meta.json перезапишутся; вклад в оглавление
+    выпуска (если модель всё же извлекла статьи) остаётся здесь, и повтор с ``--skip-done`` берёт
+    его без запроса.
+
+    Args:
+        out_dir: Корень выхода.
+        rel: Путь полосы относительно корня входа.
+        result: Разобранный ответ этапа toc.
+
+    Returns:
+        Путь записанного ``.toc.json``.
+    """
+    path = output_paths(out_dir, rel).toc_json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(result.to_json(), encoding="utf-8")
+    return path
 
 
 def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], payload: dict, raw: str | None) -> None:
@@ -516,6 +557,7 @@ def recognise_page(
         "stage": job.stage,
         "toc_kind_expected": job.toc_kind if job.stage is Stage.TOC else None,
         "toc_hash": job.toc_hash,
+        "toc_demoted": job.demoted_from_toc,
         "articles_in_prompt": len(job.articles),
         "second_pass_reason": None,
         "second_pass_chosen": None,
@@ -583,6 +625,15 @@ def recognise_page(
             meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
             logger.warning("%s %s: ответ — эхо response_format, повторяю без режима %s", spec.name, job.rel, json_mode)
             continue
+        # Модель зациклилась на «▒» до потолка токенов — ответ обрезан. При temperature 0 тот же
+        # запрос даст тот же цикл, поэтому повтор идёт в следующем режиме JSON (другой контекст).
+        if json_mode is not JsonMode.NONE and is_gap_runaway(response.text):
+            meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "цикл заполнителя <gap>"})
+            meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
+            logger.warning(
+                "%s %s: ответ зациклился на заполнителе <gap>, повторяю без режима %s", spec.name, job.rel, json_mode
+            )
+            continue
         break
     meta["reasoning_sent"] = not skip_reasoning
     meta["seconds"] = round(time.monotonic() - started, 2)  # с тайлами и всеми повторами, в отличие от latency_s
@@ -622,6 +673,11 @@ def recognise_page(
         # Модель охотнее заполняет список повреждённых строк, чем ставит теги в тексте.
         result.content_markdown, inserted = tags_from_edge_words(result.content_markdown, result.edge_words)
         meta["tags_from_edge_words"] = inserted
+    if job.stage is Stage.TOC and result.toc is not None and result.toc.sections:
+        # Список оглавления должен стоять в <toc>…</toc>; модель тег иногда забывает (1976/12,
+        # первая полоса «Содержания» с шапкой журнала) — доводится кодом по границам элементов.
+        result.content_markdown, wrapped = toc_module.ensure_toc_block(result.content_markdown)
+        meta["toc_wrapped"] = wrapped
     if job.stage is Stage.PAGE:
         # `#` только из оглавления, авторы при своей статье, рубрика перед `#` — доводится кодом.
         # Оглавление — источник истины: заголовки не из списка понижаются, утёкшие названия
@@ -648,13 +704,15 @@ def recognise_page(
         content_chars=len(result.content_markdown),
         has_header=result.running_header is not None,
         tags=tag_counts(result.content_markdown),
-        formulas=result.content_markdown.count("<latex>"),
+        formulas=result.content_markdown.count(f"<{FORMULA_TAG}>"),
+        # Блоки-обёртки: оглавление, картинки трёх видов, сноски — для регрессии «объекты не хуже».
+        blocks={tag: result.content_markdown.count(f"<{tag}>") for tag in BlockTag},
         damaged=result.damaged,
         damage_seen=result.damage,
     )
     if job.stage is Stage.TOC and result.toc is not None:
         meta["toc_articles"] = sum(len(section.articles) for section in result.toc.sections)
-    # Непарный <restored> или <fuzzy> ломает разметку при нарезке; не ошибка, но в meta должно быть видно.
+    # Непарный <supplied>, <unclear> или <gap> ломает разметку при нарезке; не ошибка, но в meta должно быть видно.
     broken = unbalanced_tags(result.content_markdown)
     if broken:
         meta["tag_warning"] = "непарные теги: " + ", ".join(tag.value for tag in broken)
@@ -747,7 +805,7 @@ def recognise_with_second_pass(
     )
     _write_debug_copy(options, job.rel, PassChoice.PASS1, result1)
     # Та же полоса, тот же этап и списки, плюс подсказка; второй проход перезапишет .json/.md/meta.
-    job2 = PageJob(job.rel, job.stage, job.toc_kind, job.year, job.rubrics, job.articles, job.toc_hash, hint)
+    job2 = replace(job, second_pass=hint)
     meta2, result2 = recognise_page(client, spec, in_path, job2, out_dir, options)
     tags2 = tag_counts(result2.content_markdown) if result2 is not None else None
     chosen, why = choose_final(tags1, tags2)

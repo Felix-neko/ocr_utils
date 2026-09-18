@@ -1,8 +1,11 @@
 """Обход пака по выпускам: полосы оглавления -> список статей -> остальные полосы -> fallback.
 
 На выпуск: (1) полосы, помеченные в базе как «Содержание» или указатель, распознаются этапом
-``toc`` и сливаются в оглавление выпуска (``toc.json`` / ``toc.md``); (2) остальные полосы идут
-этапом ``page`` с рубриками и статьями «Содержания» в промпте; (3) если модель на обычной полосе
+``toc`` («предварительно оглавление» — модель решает сама) и сливаются в оглавление выпуска
+(``toc.json`` / ``toc.md``); полоса, которую модель не признала оглавлением, понижается: её
+вклад в оглавление остаётся (``имя.toc.json``), а сама она идёт ещё и этапом ``page``;
+(2) остальные полосы идут этапом ``page`` с рубриками и статьями «Содержания» в промпте;
+(3) если модель на обычной полосе
 увидела оглавление, которого в базе нет (и нет вето ``force_is_not_toc``), — предупреждение и,
 по ``--on-missed-toc``, повтор выпуска: найденные полосы распознаются как оглавление, список
 пересобирается, обычные полосы идут заново (у них меняется ``toc_hash``, готовые с прежним
@@ -39,6 +42,7 @@ from ocr_utils.external_ocr_services.ocr import (
     load_result,
     recognise_page,
     recognise_with_second_pass,
+    save_demoted_toc,
 )
 from ocr_utils.external_ocr_services.pages import PageFlags, flags_for, group_by_issue, list_pages
 from ocr_utils.external_ocr_services.schema import PageResult, Stage, TocKind
@@ -48,6 +52,9 @@ logger = logging.getLogger(__name__)
 # Файл в корне out-dir: полосы, где модель увидела оглавление, а база молчит, — дописывается за
 # каждый выпуск без повтора; человеку на разметку в CVAT.
 MISSED_LIST = "missed_toc.txt"
+# Обратный случай: полосы, помеченные оглавлением в базе, которые модель сочла обычными и которые
+# после этапа toc пошли ещё и этапом page; человеку — снять тег или поставить вето в CVAT.
+DEMOTED_LIST = "demoted_toc.txt"
 # Оглавление выпуска в папке «{год}/{выпуск}» под out-dir: машинный JSON и тот же список глазами.
 TOC_JSON = "toc.json"
 TOC_MD = "toc.md"
@@ -72,6 +79,7 @@ SUMMARY_FIELDS = (
     "stage",
     "toc_kind_expected",
     "toc_hash",
+    "toc_demoted",
     "articles_in_prompt",
     "second_pass_reason",
     "second_pass_chosen",
@@ -135,6 +143,7 @@ class PipelineStats:
     second_pass_kept_first: int = 0  # из них оставлен первый проход (страховка)
     missed: list[str] = field(default_factory=list)  # «выпуск: полосы», где оглавление не в базе
     redone_issues: list[str] = field(default_factory=list)  # выпуски, прошедшие круг повтора
+    demoted_toc: list[str] = field(default_factory=list)  # «выпуск: полосы», которые модель не признала оглавлением
 
 
 def _recognise_one(
@@ -318,6 +327,20 @@ def decide_redo(mode: OnMissedToc, issue_key: str, missed: list[tuple[Path, TocK
     return click.confirm(f"Перераспознать выпуск {issue_key} с этими полосами как оглавлением?", default=False)
 
 
+def _append_demoted(out_dir: Path, issue_key: str, demoted: list[Path]) -> None:
+    """Дописать понижённые полосы в ``demoted_toc.txt`` (файл копится между прогонами, как ``missed_toc.txt``).
+
+    Args:
+        out_dir: Корень выхода — файл лежит в нём.
+        issue_key: Ключ выпуска — в комментарий строки.
+        demoted: Полосы, которые модель не признала оглавлением.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / DEMOTED_LIST).open("a", encoding="utf-8") as handle:
+        for rel in demoted:
+            handle.write(f"{rel.as_posix()}  # в базе оглавление, модель: none, выпуск {issue_key}\n")
+
+
 def _append_missed(out_dir: Path, issue_key: str, missed: list[tuple[Path, TocKind]]) -> None:
     """Дописать полосы с оглавлением вне базы в ``missed_toc.txt`` (файл копится между прогонами).
 
@@ -346,7 +369,9 @@ def run_issue(
     """Один выпуск целиком: этап toc, слияние, этап page, fallback.
 
     Последовательность: (1) полосы, которые база (или ``extra_toc``) считает оглавлением/указателем,
-    распознаются этапом ``toc`` и сливаются в ``toc.json`` / ``toc.md`` выпуска; (2) из «Содержания»
+    распознаются этапом ``toc`` и сливаются в ``toc.json`` / ``toc.md`` выпуска; те из них, что модель
+    не признала оглавлением, понижаются — их вклад в оглавление сохраняется, а сами они идут ещё и
+    этапом ``page`` (``demoted_toc.txt``); (2) из «Содержания»
     берутся рубрики и статьи для промпта, остальные полосы идут этапом ``page``; (3) если модель на
     обычной полосе увидела оглавление, которого в базе нет, — предупреждение и, по
     ``params.on_missed_toc``, один повторный вызов самой себя с этими полосами как оглавлением.
@@ -402,6 +427,21 @@ def run_issue(
     # Слияние ответов по видам в порядке полос выпуска: продолжения списка дописываются к
     # рубрикам предыдущей полосы того же вида. Сбои этапа toc в результатах отсутствуют.
     tocs = build_issue_toc(pages, toc_pages, toc_results)
+    # Полоса пришла как «предварительно оглавление», а модель сказала «не оглавление»: её статьи (если
+    # она их всё же извлекла) уже вошли в слияние выше, а сама полоса дальше идёт этапом page как
+    # обычная. Ответ этапа toc сохраняется в .toc.json — повтор с --skip-done прочтёт его без запроса.
+    demoted = [rel for rel in pages if (result := toc_results.get(rel)) is not None and result.toc_kind is TocKind.NONE]
+    for rel in demoted:
+        save_demoted_toc(params.out_dir, rel, toc_results[rel])
+    if demoted:
+        stats.demoted_toc.append(f"{issue_key}: " + ", ".join(rel.name for rel in demoted))
+        _append_demoted(params.out_dir, issue_key, demoted)
+        logger.warning(
+            "%s: модель не считает оглавлением полосы %s — они пойдут как обычные; проверьте теги в CVAT (см. %s)",
+            issue_key,
+            ", ".join(rel.name for rel in demoted),
+            DEMOTED_LIST,
+        )
     if toc_pages:
         # toc.json (машинный, для повторов и сборки) и toc.md (глазами) в папку выпуска под out-dir.
         _write_issue_toc(params.out_dir, issue_key, tocs)
@@ -422,21 +462,24 @@ def run_issue(
     # совпадении — так после изменившегося оглавления обычные полосы пересчитываются сами.
     digest = toc_module.toc_hash(rubrics, articles)
 
-    # Этап 2: все остальные полосы выпуска, с рубриками и статьями «Содержания» в промпте.
-    regular = [rel for rel in pages if rel not in toc_pages]
+    # Этап 2: все остальные полосы выпуска плюс понижённые, с рубриками и статьями «Содержания» в промпте.
+    regular = [rel for rel in pages if rel not in toc_pages or rel in demoted]
     page_jobs = [
-        PageJob(rel, Stage.PAGE, TocKind.NONE, year, tuple(rubrics), tuple(articles), digest) for rel in regular
+        PageJob(rel, Stage.PAGE, TocKind.NONE, year, tuple(rubrics), tuple(articles), digest, None, rel in demoted)
+        for rel in regular
     ]
     page_results = _recognise_many(client, spec, params, page_jobs, reuse, stats)
 
     # Fallback: обычные полосы, на которых модель увидела оглавление или указатель. Полосы, где
     # человек поставил вето «Не оглавление», не считаются — модель на них ошибается регулярно
-    # (списки литературы, программы, таблицы). Сбои (нет результата) тоже не считаются.
+    # (списки литературы, программы, таблицы). Сбои (нет результата) и понижённые полосы (они
+    # уже прошли этап toc) тоже не считаются.
     missed = [
         (rel, result.toc_kind)
         for rel in regular
         if (result := page_results.get(rel)) is not None
         and result.toc_kind is not TocKind.NONE
+        and rel not in demoted
         and not flags_for(rel, params.flags).force_is_not_toc
     ]
     if not missed:
@@ -586,6 +629,10 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         )
     # Напоминание в самом конце лога, чтобы не потерялось среди строк по полосам: эти теги надо
     # проставить в CVAT независимо от того, был ли повтор выпуска.
+    if stats.demoted_toc:
+        logger.warning(
+            "в базе оглавление, модель — нет (%d выпусков): %s", len(stats.demoted_toc), "; ".join(stats.demoted_toc)
+        )
     if stats.missed:
         logger.warning("оглавления вне базы (%d выпусков): %s", len(stats.missed), "; ".join(stats.missed))
     return stats

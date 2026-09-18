@@ -69,35 +69,57 @@ class AuthorPrinted(StrEnum):
 
 
 class EdgeKind(StrEnum):
-    """Вид повреждения строки в ``edge_words``: буквы скрыты/срезаны (``HIDDEN``), видны, но
-    ненадёжны (``FUZZY``), не восстановимы (``UNKNOWN``)."""
+    """Вид повреждения строки в ``edge_words``: буквы скрыты/срезаны и восстановлены (``HIDDEN``),
+    видны, но ненадёжны (``UNCLEAR``), утрачены без восстановления (``GAP``)."""
 
     HIDDEN = "hidden"
-    FUZZY = "fuzzy"
-    UNKNOWN = "unknown"
+    UNCLEAR = "unclear"
+    GAP = "gap"
 
 
 class DamageTag(StrEnum):
-    """Теги повреждений в тексте: парные ``<restored>…</restored>`` и ``<fuzzy>…</fuzzy>``,
-    одиночный ``<unknown/>``."""
+    """Теги повреждений в тексте по TEI: ``<supplied>`` — буквы не видны, вписаны по контексту;
+    ``<unclear>`` — видны, но прочитаны с сомнением; ``<gap>`` — утрачены, внутри по одному
+    ``GAP_FILLER`` на букву. Все три парные."""
 
-    RESTORED = "restored"
-    FUZZY = "fuzzy"
-    UNKNOWN = "unknown"
+    SUPPLIED = "supplied"
+    UNCLEAR = "unclear"
+    GAP = "gap"
 
 
-# Парные теги повреждений (у ``<unknown/>`` закрывающего нет).
-PAIRED_DAMAGE_TAGS = (DamageTag.RESTORED, DamageTag.FUZZY)
+# Все теги повреждений парные (``<gap>`` тоже: внутри заполнитель по числу утраченных букв).
+PAIRED_DAMAGE_TAGS = tuple(DamageTag)
+# Символ на одну утраченную букву внутри ``<gap>``: в журналах не встречается, виден в любом шрифте.
+GAP_FILLER = "▒"
+# Потолок заполнителей в одном ``<gap>``: модель при temperature 0 может зациклиться на повторе
+# одного символа до потолка токенов (IMG_0008_L: 15 тыс. «▒»), поэтому в промпте — «не больше
+# шести», а в разборе длинные ряды режутся до этого числа.
+GAP_MAX_FILLERS = 6
+# Старые имена тегов и полей (промпты до v10) — чтобы читать прежние .json и ответы по памяти модели.
+LEGACY_DAMAGE_NAMES = {"restored": DamageTag.SUPPLIED, "fuzzy": DamageTag.UNCLEAR, "unknown": DamageTag.GAP}
 
 
 class StructureTag(StrEnum):
-    """Теги структуры: рубрика статьи (только из оглавления), автор, должность и маркер — текстовый
-    элемент вне потока статьи (маркер раздела в углу, девиз, рубрика не из оглавления)."""
+    """Теги структуры: рубрика статьи (только из оглавления), рубрика внутри оглавления, автор,
+    должность и маркер — текстовый элемент вне потока статьи (маркер раздела в углу, девиз, рубрика
+    не из оглавления)."""
 
     RUBRIC = "rubric"
+    RUBRIC_IN_TOC = "rubric_in_toc"
     AUTHOR = "author"
     POSITION = "position"
     MARKER = "marker"
+
+
+class BlockTag(StrEnum):
+    """Теги-обёртки блоков: список оглавления, три вида картинок (block quote с описанием и
+    надписями) и сноска; считаются в meta (``blocks``)."""
+
+    TOC = "toc"
+    SCHEMA = "schema"
+    PHOTO = "photo"
+    LINE_ART = "line_art"
+    FOOTNOTE = "footnote"
 
 
 # Формулы: LaTeX внутри тега, номер формулы снаружи текстом.
@@ -175,9 +197,9 @@ class PageResult:
         damaged: Булев вердикт «на полосе есть повреждённые буквы» — надёжный триггер второго
             прохода (в тексте ``damage`` модель пишет «повреждений не обнаружено» на 4 из 5 чистых).
         damage: Описание повреждений глазами модели (по-русски); пусто — нет.
-        restored: Слова, восстановленные по контексту (то, что стоит в ``<restored>``).
-        fuzzy: Слова с ненадёжными буквами (``<fuzzy>``).
-        unknown: Сколько мест не восстановить (``<unknown/>``).
+        supplied: Слова с буквами, вписанными по контексту (то, что стоит в ``<supplied>``).
+        unclear: Слова с буквами, прочитанными с сомнением (``<unclear>``).
+        gap: Сколько мест утрачено без восстановления (тегов ``<gap>``).
         edge_words: ``[{"seen", "full", "kind": EdgeKind}]`` — записи по повреждённым строкам:
             что видно, полное слово, вид повреждения; по ним ставятся теги, если модель их не поставила.
         toc: Структурированное оглавление полосы — только у этапа ``TOC``, иначе ``None``.
@@ -195,9 +217,9 @@ class PageResult:
     authors: list[dict] = field(default_factory=list)
     damaged: bool = False
     damage: str = ""
-    restored: list[str] = field(default_factory=list)
-    fuzzy: list[str] = field(default_factory=list)
-    unknown: int = 0
+    supplied: list[str] = field(default_factory=list)
+    unclear: list[str] = field(default_factory=list)
+    gap: int = 0
     edge_words: list[dict] = field(default_factory=list)
     toc: TocPage | None = None
 
@@ -317,9 +339,9 @@ def json_schema(stage: Stage = Stage.PAGE) -> dict:
             "description": "contents — the issue's table of contents; index — annual index of articles; none otherwise.",
         },
         "content_markdown": {"type": "string", "description": "Full body of the page as Markdown, per the rules."},
-        "restored": {"type": "array", "items": {"type": "string"}},
-        "fuzzy": {"type": "array", "items": {"type": "string"}},
-        "unknown": {"type": "integer"},
+        "supplied": {"type": "array", "items": {"type": "string"}},
+        "unclear": {"type": "array", "items": {"type": "string"}},
+        "gap": {"type": "integer"},
         "edge_words": {
             "type": "array",
             "items": {
@@ -374,11 +396,8 @@ def unspace_letters(text: str) -> str:
     return _SPACED_WORD.sub(_join_spaced_word, text)
 
 
-_UNKNOWN = re.compile(r"<unknown\s*/>")
-
-
 def tag_counts(text: str) -> dict[DamageTag, int]:
-    """Сколько в тексте пар ``<restored>``, ``<fuzzy>`` и маркеров ``<unknown/>``.
+    """Сколько в тексте пар ``<supplied>``, ``<unclear>`` и ``<gap>``.
 
     Args:
         text: Тело полосы в markdown с тегами.
@@ -386,9 +405,7 @@ def tag_counts(text: str) -> dict[DamageTag, int]:
     Returns:
         ``{DamageTag: число}`` по всем трём тегам, нули включительно.
     """
-    counts = {tag: len(re.findall(rf"<{tag}>.*?</{tag}>", text, re.DOTALL)) for tag in PAIRED_DAMAGE_TAGS}
-    counts[DamageTag.UNKNOWN] = len(_UNKNOWN.findall(text))
-    return counts
+    return {tag: len(re.findall(rf"<{tag}>.*?</{tag}>", text, re.DOTALL)) for tag in PAIRED_DAMAGE_TAGS}
 
 
 def unbalanced_tags(text: str) -> list[DamageTag]:
@@ -510,6 +527,21 @@ def _coerce_toc(payload: object) -> TocPage | None:
     return TocPage(kind=kind, continues_previous=bool(payload.get("continues_previous", False)), sections=sections)
 
 
+def _word_list(payload: dict, key: str, legacy_key: str) -> list[str]:
+    """Список слов из поля ответа; пустое новое поле — из старого имени (ответы до v10).
+
+    Args:
+        payload: Разобранный JSON ответа.
+        key: Имя поля по текущей схеме (``supplied`` / ``unclear``).
+        legacy_key: Прежнее имя (``restored`` / ``fuzzy``).
+
+    Returns:
+        Непустые строки из поля.
+    """
+    items = payload.get(key) or payload.get(legacy_key) or []
+    return [str(item) for item in items if str(item).strip()]
+
+
 def _coerce(payload: dict, stage: Stage) -> PageResult:
     """Разобранный JSON → ``PageResult`` с приведением типов; без ``content_markdown`` — ``ParseError``.
 
@@ -528,7 +560,7 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         toc_kind = TocKind.CONTENTS if payload.get("is_toc") else TocKind.NONE
     title_in_list = payload.get("title_in_list")
     return PageResult(
-        content_markdown=unspace_letters(body),
+        content_markdown=cap_gap_fillers(modernise_tags(unspace_letters(body))),
         page_number=_text_or_none(payload.get("page_number")),
         running_header=_text_or_none(payload.get("running_header")),
         running_footer=_text_or_none(payload.get("running_footer")),
@@ -540,9 +572,9 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         authors=_authors(payload.get("authors"), with_article=True),
         damaged=_damaged(payload),
         damage=str(payload.get("damage") or ""),
-        restored=[str(item) for item in (payload.get("restored") or []) if str(item).strip()],
-        fuzzy=[str(item) for item in (payload.get("fuzzy") or []) if str(item).strip()],
-        unknown=int(payload.get("unknown") or 0),
+        supplied=_word_list(payload, "supplied", "restored"),
+        unclear=_word_list(payload, "unclear", "fuzzy"),
+        gap=int(payload.get("gap") or payload.get("unknown") or 0),
         # Запись без полного слова бесполезна для расстановки тегов — пропускаем.
         edge_words=[item for item in (payload.get("edge_words") or []) if isinstance(item, dict) and item.get("full")],
         toc=_coerce_toc(payload.get("toc")) if Stage(stage) is Stage.TOC else None,
@@ -580,7 +612,81 @@ def parse_json_text(text: str, stage: Stage = Stage.PAGE) -> PageResult:
     raise ParseError(f"невалидный JSON: {last_error}")
 
 
-_TAG_STRIP = re.compile(r"</?(restored|fuzzy)>|<unknown\s*/>")
+# Теги повреждений (новые и прежние) и заполнитель пропуска — чтобы искать в тексте голое слово.
+_TAG_STRIP = re.compile(rf"</?(supplied|unclear|gap|restored|fuzzy)>|<unknown\s*/>|{GAP_FILLER}")
+_LEGACY_TAG = re.compile(r"</?(restored|fuzzy)>|<unknown\s*/>")
+
+
+_LONG_GAP_RUN = re.compile(rf"{GAP_FILLER}{{{GAP_MAX_FILLERS + 1},}}")
+
+
+def cap_gap_fillers(text: str) -> str:
+    """Ряды заполнителей длиннее ``GAP_MAX_FILLERS`` укорачиваются до потолка.
+
+    Args:
+        text: Тело полосы в markdown.
+
+    Returns:
+        Текст, где в каждом ``<gap>`` не больше ``GAP_MAX_FILLERS`` символов ``▒``.
+    """
+    return _LONG_GAP_RUN.sub(GAP_FILLER * GAP_MAX_FILLERS, text)
+
+
+def is_gap_runaway(text: str) -> bool:
+    """Ответ «убежал»: модель зациклилась на заполнителе пропуска и упёрлась в потолок токенов.
+
+    Args:
+        text: Сырой текст ответа модели.
+
+    Returns:
+        ``True``, если в тексте есть ряд из 20 и более ``▒`` подряд — такой ответ обрезан и не разберётся.
+    """
+    return GAP_FILLER * 20 in text
+
+
+def modernise_tags(text: str) -> str:
+    """Теги прежних промптов в тексте → TEI: ``<restored>``→``<supplied>``, ``<fuzzy>``→``<unclear>``,
+    ``<unknown/>``→``<gap>▒▒▒</gap>``; модель иногда пишет их по памяти.
+
+    Args:
+        text: Тело полосы в markdown.
+
+    Returns:
+        Текст только с тегами ``DamageTag``.
+    """
+
+    return _LEGACY_TAG.sub(_modern_tag, text)
+
+
+def _modern_tag(match: re.Match) -> str:
+    """Замена одного прежнего тега на новый (для ``modernise_tags``).
+
+    Args:
+        match: Совпадение ``_LEGACY_TAG``.
+
+    Returns:
+        Новый тег той же роли; ``<unknown/>`` → ``<gap>`` с тремя заполнителями (длина неизвестна).
+    """
+    old = match.group(0)
+    if old.startswith("<unknown"):
+        return f"<{DamageTag.GAP}>{GAP_FILLER * 3}</{DamageTag.GAP}>"
+    closing = old.startswith("</")
+    new = LEGACY_DAMAGE_NAMES[match.group(1)]
+    return f"</{new}>" if closing else f"<{new}>"
+
+
+def _edge_kind(value: object) -> EdgeKind:
+    """Вид повреждения из записи ``edge_words``; прежние имена (``fuzzy``, ``unknown``) и мусор → по умолчанию.
+
+    Args:
+        value: Поле ``kind`` записи.
+
+    Returns:
+        Член ``EdgeKind``; неизвестное значение → ``HIDDEN`` (самый частый случай — корешок).
+    """
+    text = str(value or "").strip().lower()
+    legacy = {"fuzzy": EdgeKind.UNCLEAR, "unknown": EdgeKind.GAP}
+    return _enum_or_none(text, EdgeKind) or legacy.get(text, EdgeKind.HIDDEN)
 
 
 def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
@@ -588,8 +694,9 @@ def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
 
     Модель охотнее заполняет список повреждённых строк, чем ставит теги в тексте. Для записи с
     ``kind=hidden`` невидимая часть — это ``full`` минус видимый фрагмент ``seen`` (с начала или с
-    конца слова); первое вхождение голого ``full`` заменяется на слово с ``<restored>``. ``fuzzy``
-    — то же с ``<fuzzy>``; ``unknown`` — ``seen`` + ``<unknown/>``. Возвращает текст и число вставок.
+    конца слова); первое вхождение голого ``full`` заменяется на слово с ``<supplied>``. ``unclear``
+    — то же с ``<unclear>``; ``gap`` — ``seen`` + ``<gap>`` с заполнителем по числу утраченных букв
+    (сколько ``▒`` написала модель, иначе разница длин, иначе три). Возвращает текст и число вставок.
 
     Args:
         body: Тело полосы в markdown.
@@ -601,26 +708,33 @@ def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
     """
     inserted = 0
     for item in edge_words:
-        # Теги внутри самих записей (модель иногда копирует их из текста) снимаем — ищем голые слова.
-        full = _TAG_STRIP.sub("", str(item.get("full") or "")).strip()
+        # Теги и заполнители внутри самих записей (модель копирует их из текста) снимаем — ищем голые слова.
+        raw_full = str(item.get("full") or "")
+        full = _TAG_STRIP.sub("", raw_full).strip()
         seen = _TAG_STRIP.sub("", str(item.get("seen") or "")).strip()
-        kind = _enum_or_none(item.get("kind") or EdgeKind.HIDDEN, EdgeKind) or EdgeKind.HIDDEN
+        kind = _edge_kind(item.get("kind"))
         # «адми-» → «административные» — обычный перенос, а не срез.
         if not full or full not in body or seen.endswith(("-", "­")):
             continue
         tagged = None
-        if kind is EdgeKind.UNKNOWN:
-            tagged = (seen + "<unknown/>") if full.startswith(seen) else ("<unknown/>" + seen)
+        if kind is EdgeKind.GAP:
+            # Длина пропуска: сколько заполнителей написала модель, иначе разница длин, иначе три.
+            width = min(raw_full.count(GAP_FILLER) or max(len(full) - len(seen), 0) or 3, GAP_MAX_FILLERS)
+            gap = f"<{DamageTag.GAP}>{GAP_FILLER * width}</{DamageTag.GAP}>"
+            # Сторона пропуска: как написала модель (тег или заполнитель в начале full), иначе по
+            # тому, с какого края видимая часть совпадает с полным словом; при равенстве — в конце.
+            gap_first = raw_full.lstrip().startswith((f"<{DamageTag.GAP}>", GAP_FILLER)) or not full.startswith(seen)
+            tagged = (gap + seen) if gap_first else (seen + gap)
         elif seen and full.startswith(seen) and len(full) > len(seen):
             # Видно начало слова — скрыт хвост.
-            tag = DamageTag.RESTORED if kind is EdgeKind.HIDDEN else DamageTag.FUZZY
+            tag = DamageTag.SUPPLIED if kind is EdgeKind.HIDDEN else DamageTag.UNCLEAR
             tagged = f"{seen}<{tag}>{full[len(seen):]}</{tag}>"
         elif seen and full.endswith(seen) and len(full) > len(seen):
             # Видно конец слова — скрыто начало.
-            tag = DamageTag.RESTORED if kind is EdgeKind.HIDDEN else DamageTag.FUZZY
+            tag = DamageTag.SUPPLIED if kind is EdgeKind.HIDDEN else DamageTag.UNCLEAR
             tagged = f"<{tag}>{full[: len(full) - len(seen)]}</{tag}>{seen}"
-        elif kind is EdgeKind.FUZZY:
-            tagged = f"<fuzzy>{full}</fuzzy>"
+        elif kind is EdgeKind.UNCLEAR:
+            tagged = f"<{DamageTag.UNCLEAR}>{full}</{DamageTag.UNCLEAR}>"
         if not tagged:
             continue
         # Целое слово, не внутри другого и не внутри тега.
@@ -630,7 +744,7 @@ def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
             continue
         # Уже помечено моделью — не дублируем.
         before = body[max(0, match.start() - 12) : match.start()]
-        if "<restored>" in before or "<fuzzy>" in before or "<unknown" in before:
+        if any(f"<{tag}>" in before for tag in DamageTag):
             continue
         body = body[: match.start()] + tagged + body[match.end() :]
         inserted += 1
