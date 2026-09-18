@@ -132,6 +132,9 @@ def grid_shape(width: int, height: int, max_src_tile: int) -> tuple[int, int]:
         width: Ширина исходника, px.
         height: Высота исходника, px.
         max_src_tile: Шаг сетки в пикселях исходника (``--max-src-tile-size``).
+
+    Returns:
+        ``(столбцов, строк)``, каждое не меньше 1.
     """
     if max_src_tile <= 0:
         raise ValueError("шаг сетки должен быть положительным")
@@ -148,6 +151,9 @@ def grid(width: int, height: int, max_src_tile: int, overlap: float = TILE_OVERL
         height: Высота исходника, px.
         max_src_tile: Шаг сетки в пикселях исходника.
         overlap: Перекрытие соседей — доля стороны кадра вдоль оси, делится пополам между соседями.
+
+    Returns:
+        Прямоугольники тайлов в порядке отправки: по столбцам слева направо, внутри столбца сверху вниз.
     """
     ncols, nrows = grid_shape(width, height, max_src_tile)
     # Половина перекрытия с каждой стороны стыка; по оси без соседей — ноль.
@@ -216,6 +222,9 @@ def prepare_tiles(
         quality: Качество JPEG тайла (``--quality``).
         grayscale: Обесцвечивать ли тайлы.
         overlap: Перекрытие соседних тайлов, доля стороны кадра.
+
+    Returns:
+        Готовые к отправке тайлы (JPEG-байты и место в сетке) в порядке чтения.
     """
     image = load(path)
     boxes = grid(image.width, image.height, max_src_tile, overlap)

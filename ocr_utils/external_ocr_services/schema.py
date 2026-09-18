@@ -288,6 +288,10 @@ def json_schema(stage: Stage = Stage.PAGE) -> dict:
 
     Args:
         stage: ``PAGE`` — поля обычной полосы; ``TOC`` — те же плюс объект ``toc``.
+
+    Returns:
+        JSON-схема объекта ответа (``type: object`` с ``properties``/``required``), годная и для
+        ``response_format`` строгого режима, и для описания в промпте.
     """
     stage = Stage(stage)  # строка из старого вызова → член перечисления; чужое значение — ValueError
     properties: dict = {
@@ -341,22 +345,33 @@ def json_schema(stage: Stage = Stage.PAGE) -> dict:
 _SPACED_WORD = re.compile(r"(?<![А-ЯЁа-яёA-Za-z])([А-ЯЁа-яёA-Za-z](?: [А-ЯЁа-яёA-Za-z]){2,})(?![А-ЯЁа-яёA-Za-z])")
 
 
+def _join_spaced_word(match: re.Match) -> str:
+    """Замена для одного слова вразрядку: буквы склеены, курсив — если слово ещё не выделено.
+
+    Args:
+        match: Совпадение ``_SPACED_WORD``; исходная строка — ``match.string``.
+
+    Returns:
+        ``*Слово*`` или просто ``Слово``, если перед ним уже стоит ``*`` или ``_``.
+    """
+    word = match.group(1).replace(" ", "")
+    # Слово уже внутри курсива/жирного — второй раз звёздочки не ставим.
+    before = match.string[max(0, match.start() - 2) : match.start()]
+    if before.endswith(("*", "_")):
+        return word
+    return f"*{word}*"
+
+
 def unspace_letters(text: str) -> str:
     """Склеить слова, набранные вразрядку, и выделить их курсивом: «П р и м е ч а н и е» → «*Примечание*».
 
     Args:
         text: Тело полосы в markdown.
+
+    Returns:
+        Тот же текст со склеенными словами; остальное без изменений.
     """
-
-    def join(match: re.Match) -> str:
-        word = match.group(1).replace(" ", "")
-        # Слово уже внутри курсива/жирного — второй раз звёздочки не ставим.
-        before = text[max(0, match.start() - 2) : match.start()]
-        if before.endswith(("*", "_")):
-            return word
-        return f"*{word}*"
-
-    return _SPACED_WORD.sub(join, text)
+    return _SPACED_WORD.sub(_join_spaced_word, text)
 
 
 _UNKNOWN = re.compile(r"<unknown\s*/>")
@@ -367,6 +382,9 @@ def tag_counts(text: str) -> dict[DamageTag, int]:
 
     Args:
         text: Тело полосы в markdown с тегами.
+
+    Returns:
+        ``{DamageTag: число}`` по всем трём тегам, нули включительно.
     """
     counts = {tag: len(re.findall(rf"<{tag}>.*?</{tag}>", text, re.DOTALL)) for tag in PAIRED_DAMAGE_TAGS}
     counts[DamageTag.UNKNOWN] = len(_UNKNOWN.findall(text))
@@ -378,6 +396,9 @@ def unbalanced_tags(text: str) -> list[DamageTag]:
 
     Args:
         text: Тело полосы в markdown с тегами.
+
+    Returns:
+        Теги с непарными скобками; пустой список — разметка цела.
     """
     return [tag for tag in PAIRED_DAMAGE_TAGS if text.count(f"<{tag}>") != text.count(f"</{tag}>")]
 
@@ -534,6 +555,10 @@ def parse_json_text(text: str, stage: Stage = Stage.PAGE) -> PageResult:
     Args:
         text: Сырой текст ответа модели (или содержимое сохранённого ``.json``).
         stage: Этап, по схеме которого разбирать (у ``TOC`` есть объект ``toc``).
+
+    Returns:
+        ``PageResult`` с приведёнными типами; ни один кандидат не разобрался — ``ParseError``
+        с текстом последней ошибки.
     """
     if not text or not text.strip():
         raise ParseError("пустой ответ")
@@ -569,6 +594,10 @@ def tags_from_edge_words(body: str, edge_words: list[dict]) -> tuple[str, int]:
     Args:
         body: Тело полосы в markdown.
         edge_words: Записи ``{"seen", "full", "kind"}`` из ответа модели.
+
+    Returns:
+        ``(тело с расставленными тегами, число вставок)``; число уходит в meta
+        (``tags_from_edge_words``), чтобы видеть, сколько тегов поставил код, а не модель.
     """
     inserted = 0
     for item in edge_words:

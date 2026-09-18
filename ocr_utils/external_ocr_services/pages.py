@@ -100,6 +100,9 @@ def list_pages(
         only_year: Оставить только полосы этого годового комплекта (первая папка пути).
         only_issue: Оставить только полосы этого выпуска (вторая папка пути).
         limit: Взять первые N полос после всех отборов — для проб.
+
+    Returns:
+        Относительные пути полос, отсортированные (год → выпуск → имя файла).
     """
     if pages_file is not None:
         rels = read_page_list(pages_file)
@@ -146,6 +149,9 @@ def flags_from_db(db_path: Path, pack_name: str) -> dict[str, PageFlags]:
     Args:
         db_path: Файл SQLite базы разметки (обычно ``pack1_reviewed.sqlite``).
         pack_name: Имя пака в базе (``packs.name``); нет такого — ``LookupError`` с перечнем паков.
+
+    Returns:
+        ``{page_key: PageFlags}`` по всем полосам пака; пак без полос — ``LookupError``.
     """
     factory = open_db(db_path, create=False)
     with factory() as session:
@@ -201,6 +207,9 @@ def flags_for(rel: Path, table: dict[str, PageFlags] | None) -> PageFlags:
     Args:
         rel: Путь полосы относительно корня входа.
         table: Таблица флагов из ``flags_from_db`` / ``flags_from_lists``; ``None`` — источника нет.
+
+    Returns:
+        Флаги полосы; ``UNKNOWN`` (``known=False``, все флаги пустые), если записи нет.
     """
     if table is None:
         return UNKNOWN

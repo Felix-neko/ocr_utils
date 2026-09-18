@@ -23,6 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 import click
@@ -136,6 +137,29 @@ class PipelineStats:
     redone_issues: list[str] = field(default_factory=list)  # выпуски, прошедшие круг повтора
 
 
+def _recognise_one(
+    client: OpenRouterClient, spec: ModelSpec, params: PipelineParams, job: PageJob
+) -> tuple[PageJob, dict, PageResult | None]:
+    """Одна полоса в потоке пула: первый проход и, если полоса повреждена, второй.
+
+    Args:
+        client: Клиент OpenRouter, общий на прогон.
+        spec: Модель из реестра.
+        params: Параметры прогона: корни входа/выхода и настройки запроса (``options``).
+        job: Задание на полосу.
+
+    Returns:
+        ``(job, meta, result)``: то же задание (чтобы сопоставить ответ пула с полосой), meta
+        полосы как записана в ``.meta.json`` и разобранный результат — ``None`` при сбое сети или
+        разбора (причина — в ``meta["error"]`` / ``meta["parse_error"]``).
+    """
+    # Второй проход (по умолчанию включён) — обёртка над recognise_page: та же полоса ещё раз
+    # с подсказками первого ответа, если модель сочла её повреждённой; выбор финала — внутри.
+    recognise = recognise_with_second_pass if params.options.second_pass else recognise_page
+    meta, result = recognise(client, spec, params.in_dir / job.rel, job, params.out_dir, params.options)
+    return job, meta, result
+
+
 def _recognise_many(
     client: OpenRouterClient,
     spec: ModelSpec,
@@ -146,8 +170,7 @@ def _recognise_many(
 ) -> dict[Path, PageResult | None]:
     """Полосы пачкой в пуле потоков; готовые (по ``is_done``) не запрашиваются, если ``reuse``.
 
-    Возвращает результат каждой полосы из ``jobs``: ``None`` у сбойных, чтобы вызывающий отличал
-    «сбой» от «полосы не было». Файлы выхода пишет сам ``recognise_*`` — здесь только счётчики и лог.
+    Файлы выхода пишет сам ``recognise_*`` — здесь только счётчики и лог.
 
     Args:
         client: Клиент OpenRouter, общий на прогон.
@@ -156,6 +179,10 @@ def _recognise_many(
         jobs: Задания на полосы одного этапа (у всех одинаковые списки выпуска).
         reuse: Брать ли готовые результаты с диска вместо запроса (``--skip-done`` или круг повтора).
         stats: Счётчики прогона — сюда прибавляются запросы, повторы, сбои, стоимость.
+
+    Returns:
+        Результат каждой полосы из ``jobs`` по её относительному пути: ``None`` у сбойных, чтобы
+        вызывающий отличал «сбой» от «полосы не было» (такой ключ отсутствует).
     """
     results: dict[Path, PageResult | None] = {}
     todo: list[PageJob] = []
@@ -171,15 +198,9 @@ def _recognise_many(
     if not todo:
         return results
 
-    def work(job: PageJob) -> tuple[PageJob, dict, PageResult | None]:
-        # Второй проход (по умолчанию включён) — обёртка над recognise_page: та же полоса ещё раз
-        # с подсказками первого ответа, если модель сочла её повреждённой; выбор финала — внутри.
-        recognise = recognise_with_second_pass if params.options.second_pass else recognise_page
-        meta, result = recognise(client, spec, params.in_dir / job.rel, job, params.out_dir, params.options)
-        return job, meta, result
-
     # Пул потоков, не процессов: работа — ожидание сети, GIL не мешает; тайлы режутся в потоке
     # перед запросом. pool.map отдаёт результаты в порядке очереди, счётчики правятся в одном потоке.
+    work = partial(_recognise_one, client, spec, params)
     with ThreadPoolExecutor(max_workers=max(1, params.jobs)) as pool:
         for job, meta, result in pool.map(work, todo):
             stats.requests += 1
@@ -220,6 +241,9 @@ def build_issue_toc(
         pages: Все полосы выпуска по порядку имён — задаёт порядок слияния.
         toc_pages: Полосы этапа toc → их вид (``CONTENTS`` / ``INDEX``).
         results: Результаты этапа toc по полосам; ``None`` — сбой.
+
+    Returns:
+        Слитые оглавления по видам; вид без единой удачной полосы в словаре отсутствует.
     """
     tocs: dict[TocKind, toc_module.IssueToc] = {}
     for kind in toc_module.KINDS:
@@ -266,6 +290,10 @@ def decide_redo(mode: OnMissedToc, issue_key: str, missed: list[tuple[Path, TocK
         mode: Режим из ``--on-missed-toc``.
         issue_key: Ключ выпуска — для лога и вопроса.
         missed: Полосы, где модель увидела оглавление, с видом по её мнению.
+
+    Returns:
+        ``True`` — выпуск надо перераспознать с этими полосами как оглавлением; ``False`` — только
+        записать их в ``missed_toc.txt``.
     """
     # Строки вида «  1966/03/IMG_0012.jpg  # contents» — тот же формат, что у toc_pages.txt
     # (там имя без папки выпуска), чтобы переносить в списки --toc-lists без правки.
@@ -441,6 +469,9 @@ def collect_meta(out_dir: Path) -> list[dict]:
 
     Args:
         out_dir: Корень выхода; обходится рекурсивно.
+
+    Returns:
+        Список meta-словарей (по одному на полосу) в порядке путей; битые файлы пропущены.
     """
     rows: list[dict] = []
     # Битый или недописанный meta (прогон прервали на записи) — предупреждение, не остановка:
@@ -459,6 +490,9 @@ def write_summary(out_dir: Path, rows: list[dict]) -> Path:
     Args:
         out_dir: Корень выхода — файл лежит в нём.
         rows: Meta всех полос из ``collect_meta``.
+
+    Returns:
+        Путь к записанному ``summary.csv``.
     """
     path = out_dir / "summary.csv"
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -479,6 +513,10 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         client: Клиент OpenRouter, общий на прогон.
         spec: Модель из реестра.
         params: Параметры прогона из CLI: пути, флаги полос, отбор входа, параллелизм, fallback.
+
+    Returns:
+        Счётчики прогона (``PipelineStats``): выпуски, полосы, запросы, сбои, стоимость, список
+        оглавлений вне базы — то, что CLI печатает в итоговых строках.
     """
     stats = PipelineStats()
     # Отбор входа: обход in-dir или файл --pages, затем --only-year/--only-issue и --limit.

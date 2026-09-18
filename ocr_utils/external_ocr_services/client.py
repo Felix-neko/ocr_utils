@@ -137,6 +137,10 @@ def adapt_reasoning(reasoning: dict | None) -> dict | None:
 
     Args:
         reasoning: Поле ``reasoning`` payload в форме HTTP API; ``None`` — не слать.
+
+    Returns:
+        Словарь для аргумента ``reasoning`` SDK (только ``effort`` / ``summary``) или ``None``, если
+        слать нечего.
     """
     if reasoning is None:
         return None
@@ -223,6 +227,9 @@ class OpenRouterClient:
         Args:
             payload: Тело запроса в форме HTTP API (``ocr.build_payload``): ``model``, ``messages``,
                 ``temperature``, ``max_tokens``, ``provider``, ``response_format``, ``reasoning``.
+
+        Returns:
+            ``ChatResponse`` удачной попытки; исчерпаны попытки или ошибка без ретрая — ``OpenRouterError``.
         """
         kwargs = self._kwargs(payload)
         started = time.monotonic()
@@ -324,6 +331,9 @@ def credits(api_key: str, timeout: float = 30.0) -> dict:
     Args:
         api_key: Ключ OpenRouter.
         timeout: Таймаут запроса, с.
+
+    Returns:
+        ``{"total_credits": куплено, "total_usage": потрачено}`` в долларах за всё время ключа.
     """
     sdk = OpenRouter(api_key=api_key, timeout_ms=int(timeout * 1000), retry_config=_NO_SDK_RETRIES)
     data = sdk.credits.get_credits().data

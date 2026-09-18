@@ -67,6 +67,9 @@ def is_format_echo(text: str) -> bool:
 
     Args:
         text: Сырой текст ответа модели.
+
+    Returns:
+        ``True`` — это эхо (короткий объект с ``"type"`` и без ``content_markdown``), запрос надо повторить.
     """
     body = text.strip()
     return len(body) < 80 and body.startswith("{") and '"type"' in body and "content_markdown" not in body
@@ -163,6 +166,9 @@ def second_pass_reason(result: PageResult) -> SecondPassReason | None:
 
     Args:
         result: Разобранный ответ первого прохода.
+
+    Returns:
+        Причина второго прохода или ``None`` — полоса чистая, второго прохода не будет.
     """
     if result.damaged:
         return SecondPassReason.DAMAGED
@@ -183,6 +189,9 @@ def choose_final(pass1_tags: dict[DamageTag, int], pass2_tags: dict[DamageTag, i
     Args:
         pass1_tags: Счётчики тегов повреждений первого прохода (``schema.tag_counts``).
         pass2_tags: То же для второго; ``None`` — второй проход сбойнул.
+
+    Returns:
+        ``(выбор, причина)``: ``PASS2`` с пустой причиной или ``PASS1`` с объяснением, почему второй отвергнут.
     """
     if pass2_tags is None:
         return PassChoice.PASS1, "второй проход сбойнул"
@@ -199,6 +208,10 @@ def reasoning_field(spec: ModelSpec, override: Reasoning | None) -> dict | None:
     Args:
         spec: Модель из реестра — её уровень по умолчанию и знает ли она параметр вообще.
         override: Уровень из ``--reasoning``; ``None`` — взять из реестра.
+
+    Returns:
+        ``{"effort": …}`` для поля ``reasoning`` запроса (``"none"`` выключает thinking) или ``None`` —
+        поле не слать (модель его не знает).
     """
     level = Reasoning(override) if override is not None else spec.reasoning
     # «none» в реестре значит «модель параметра не знает»: слать нельзя даже по просьбе из CLI.
@@ -222,6 +235,9 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
         job: Что распознаём: этап, вид полосы, списки выпуска, год, подсказка второго прохода.
         tiles: Подготовленные тайлы — из них берётся форма сетки для описания раскладки картинок.
         options: Настройки прогона — описание издания (``source``).
+
+    Returns:
+        ``(системный промпт, пользовательский промпт)`` — готовые тексты сообщений.
     """
     info: GridSummary = describe(tiles)
     source = options.source.replace("{year}", job.year).strip()
@@ -255,6 +271,11 @@ def build_payload(
         job: Полоса, этап и списки выпуска — для промптов и схемы ответа.
         json_mode: Режим JSON этой попытки (цепочка запасных ходов перебирает их по очереди).
         skip_reasoning: Не слать поле ``reasoning`` (провайдер его отверг на прошлой попытке).
+
+    Returns:
+        Словарь в форме HTTP API OpenRouter: ``model``, ``messages`` (system + user с картинками),
+        ``temperature``, ``max_tokens`` и, если заданы, ``response_format``, ``reasoning``, ``provider``.
+        Клиент переводит его в аргументы SDK.
     """
     system, user = prompts_for(job, tiles, options)
     # Сообщение пользователя: сначала текст, затем тайлы в порядке сетки (столбцами) как data-URL.
@@ -302,6 +323,9 @@ def _fallback_chain(spec: ModelSpec) -> list[JsonMode]:
 
     Args:
         spec: Модель из реестра — с её ``json_mode`` цепочка начинается.
+
+    Returns:
+        Режимы для перебора по порядку, первый — из реестра.
     """
     chain = list(JsonMode)  # порядок объявления: от строгого к простому
     return chain[chain.index(spec.json_mode) :]
@@ -401,6 +425,9 @@ def is_done(out_dir: Path, job: PageJob) -> bool:
     Args:
         out_dir: Корень выхода.
         job: Задание на полосу: этап, вид оглавления и отпечаток списков, с которыми сравнивается meta.
+
+    Returns:
+        ``True`` — полосу можно взять с диска и не запрашивать.
     """
     meta = read_meta(out_dir, job.rel)
     # Сбойная полоса (сеть или разбор) сделанной не считается: --skip-done её догонит.
@@ -474,6 +501,11 @@ def recognise_page(
         job: Задание: путь, этап, вид оглавления, списки выпуска, подсказка второго прохода.
         out_dir: Корень выхода; файлы полосы лягут под ``out_dir / job.rel`` без суффикса.
         options: Настройки запроса: тайлы, потолок токенов, рассуждения, описание издания, debug-dir.
+
+    Returns:
+        ``(meta, result)``: meta — то, что записано в ``.meta.json`` (этап, тайлы, провайдер, токены,
+        цена, ``structure``, ошибки); result — разобранный ответ или ``None`` при сбое (причина в
+        ``meta["error"]`` / ``meta["parse_error"]``).
     """
     paths = output_paths(out_dir, job.rel)
     paths.meta.parent.mkdir(parents=True, exist_ok=True)
@@ -689,6 +721,11 @@ def recognise_with_second_pass(
         out_dir: Корень выхода — финал перезаписывает файлы полосы целиком.
         options: Настройки прогона: ``second_pass`` (выключается только в тестах),
             ``second_pass_transcript`` (слать ли текст первого прохода), debug-dir.
+
+    Returns:
+        ``(meta, result)`` выбранного прохода, как у :func:`recognise_page`; при втором проходе в meta
+        добавлены ``second_pass`` (подробности), ``second_pass_reason``, ``second_pass_chosen`` и
+        ``cost_usd`` — сумма обоих запросов.
     """
     # Первый проход — обычный запрос; его выход уже лежит под out-dir.
     meta1, result1 = recognise_page(client, spec, in_path, job, out_dir, options)

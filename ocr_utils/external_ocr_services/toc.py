@@ -72,6 +72,9 @@ def merge_pages(kind: TocKind, pages: list[tuple[str, TocPage]]) -> IssueToc:
     Args:
         kind: Вид оглавления, к которому относятся все ``pages``.
         pages: ``[(относительный путь, TocPage), ...]`` уже отсортированные по положению в выпуске.
+
+    Returns:
+        ``IssueToc`` со слитыми секциями, списком полос и числом приклеенных продолжений.
     """
     toc = IssueToc(kind=TocKind(kind))
     seen_titles: set[str] = set()  # ключи уже взятых названий — перекрытие тайлов даёт повторы
@@ -106,6 +109,10 @@ def prompt_lists(toc: IssueToc | None) -> tuple[list[str], list[dict]]:
 
     Args:
         toc: Слитое «Содержание» выпуска; ``None`` (нет полос оглавления) — пустые списки.
+
+    Returns:
+        ``(рубрики, статьи)``: рубрики без повторов в порядке появления; статьи —
+        ``[{"title", "authors": [имена], "rubric"}]`` в порядке оглавления.
     """
     if toc is None:
         return [], []
@@ -127,6 +134,9 @@ def toc_hash(rubrics: list[str], articles: list[dict]) -> str:
     Args:
         rubrics: Список рубрик из ``prompt_lists``.
         articles: Список статей из ``prompt_lists``.
+
+    Returns:
+        12 hex-знаков SHA-1 от JSON списков; пустые списки тоже дают устойчивый отпечаток.
     """
     # sort_keys — чтобы порядок ключей в словарях статей не менял отпечаток; 12 hex-знаков хватает.
     payload = json.dumps({"rubrics": rubrics, "articles": articles}, ensure_ascii=False, sort_keys=True)

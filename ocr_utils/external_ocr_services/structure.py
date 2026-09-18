@@ -87,6 +87,10 @@ def title_matches(heading: str, titles: list[str]) -> bool:
     Args:
         heading: Заголовок (или рубрика) как напечатан на полосе.
         titles: Названия из оглавления, с которыми сверяем.
+
+    Returns:
+        ``True``, если нормализованный заголовок равен одному из названий, входит в него (или
+        оно в заголовок) либо похож на него по ``difflib`` не меньше чем на ``TITLE_MATCH_RATIO``.
     """
     key = normalize_title(heading)
     if not key:
@@ -161,6 +165,9 @@ def _author_block(paragraphs: list[str], index: int) -> tuple[int, int]:
     Args:
         paragraphs: Абзацы тела.
         index: Индекс абзаца с ``<author>``.
+
+    Returns:
+        ``(start, end)`` — срез ``paragraphs[start:end]`` с блоком; ``end`` не включается.
     """
     end = index + 1
     while end < len(paragraphs) and _POSITION.match(paragraphs[end]):
@@ -192,26 +199,12 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
     # Авторы из ответа по ключу имени: блок в тексте сопоставляется с записью и её полями.
     by_name: dict[str, dict] = {normalize_name(a.get("name", "")): a for a in authors if a.get("name")}
 
-    def author_of(paragraph: str) -> dict | None:
-        """Запись автора для абзаца `<author>` (или заглушка без привязки); не автор — ``None``."""
-        match = _AUTHOR.match(paragraph)
-        if match is None or paragraph.startswith("- "):
-            return None  # пункт списка (оглавление) — не подпись
-        key = normalize_name(match.group(1))
-        if key in by_name:
-            return by_name[key]
-        # Несколько имён в одном теге или имя с должностью после запятой.
-        for name, author in by_name.items():
-            if name and name in key:
-                return author
-        return {"name": match.group(1), "article": None, "printed": None}
-
     # Каждое перемещение сдвигает индексы — после него обход начинается заново, пока правок нет.
     changed = True
     while changed:
         changed = False
         for index, paragraph in enumerate(paragraphs):
-            author = author_of(paragraph)
+            author = _author_of(paragraph, by_name)
             if author is None:
                 continue
             start, end = _author_block(paragraphs, index)
@@ -239,6 +232,31 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
                 changed = True
                 break
     return _join(paragraphs)
+
+
+def _author_of(paragraph: str, by_name: dict[str, dict]) -> dict | None:
+    """Запись автора из ответа для абзаца ``<author>``.
+
+    Args:
+        paragraph: Абзац тела.
+        by_name: Записи ``authors`` ответа по ключу ``normalize_name``.
+
+    Returns:
+        Запись ``{"name", "position", "article", "printed"}`` из ответа; для имени, которого в
+        ответе нет, — заглушка без привязки (``article``/``printed`` = ``None``); ``None`` — абзац
+        не подпись автора (нет тега или это пункт списка оглавления).
+    """
+    match = _AUTHOR.match(paragraph)
+    if match is None or paragraph.startswith("- "):
+        return None  # пункт списка (оглавление) — не подпись
+    key = normalize_name(match.group(1))
+    if key in by_name:
+        return by_name[key]
+    # Несколько имён в одном теге или имя с должностью после запятой.
+    for name, author in by_name.items():
+        if name and name in key:
+            return author
+    return {"name": match.group(1), "article": None, "printed": None}
 
 
 def rubric_from_heading(body: str, rubrics: list[str], report: StructureReport) -> str:
@@ -280,6 +298,10 @@ def _expected_rubrics(paragraphs: list[str], articles: list[dict]) -> dict[int, 
     Args:
         paragraphs: Абзацы тела.
         articles: Статьи оглавления ``[{"title", "rubric"}]``.
+
+    Returns:
+        ``{индекс абзаца с "#": рубрика}``; ``None`` — статья в оглавлении без рубрики. `#`, не
+        совпавших ни с одной статьёй, в словаре нет.
     """
     expected: dict[int, str | None] = {}
     for index, paragraph in enumerate(paragraphs):
@@ -291,6 +313,30 @@ def _expected_rubrics(paragraphs: list[str], articles: list[dict]) -> dict[int, 
                 expected[index] = article.get("rubric") or None
                 break
     return expected
+
+
+def _is_stray_rubric(paragraphs: list[str], expected: dict[int, str | None], index: int) -> bool:
+    """«Бесхозный» ли тег ``<rubric>``: не перед `#` — или перед `#` статьи с другой рубрикой.
+
+    Маркер между двумя статьями относится к той, чья рубрика по оглавлению совпадает с его текстом.
+
+    Args:
+        paragraphs: Абзацы тела.
+        expected: Рубрики по оглавлению для каждого `#` (``_expected_rubrics``).
+        index: Индекс проверяемого абзаца.
+
+    Returns:
+        ``True`` — тег надо переносить к своей статье или превращать в ``<marker>``; ``False`` —
+        абзац не рубрика или рубрика стоит на своём месте.
+    """
+    match = _RUBRIC.match(paragraphs[index])
+    if match is None:
+        return False
+    following = index + 1
+    if following >= len(paragraphs) or _H1.match(paragraphs[following]) is None:
+        return True
+    expected_here = expected.get(following)
+    return bool(expected_here) and not title_matches(match.group(1), [expected_here])
 
 
 def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubrics: list[str] | None = None) -> str:
@@ -331,20 +377,7 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
 
     # 2. Рубрики не перед `#` — к своей статье или в маркеры. С конца, чтобы индексы не плыли.
     expected = _expected_rubrics(paragraphs, articles)
-
-    # «Бесхозный» тег: не перед `#` — или перед `#` статьи с другой рубрикой по оглавлению
-    # (маркер между двумя статьями относится к той, чья рубрика совпадает).
-    def stray(index: int) -> bool:
-        match = _RUBRIC.match(paragraphs[index])
-        if match is None:
-            return False
-        following = index + 1
-        if following >= len(paragraphs) or _H1.match(paragraphs[following]) is None:
-            return True
-        expected_here = expected.get(following)
-        return bool(expected_here) and not title_matches(match.group(1), [expected_here])
-
-    strays = [index for index in range(len(paragraphs)) if stray(index)]
+    strays = [index for index in range(len(paragraphs)) if _is_stray_rubric(paragraphs, expected, index)]
     for index in reversed(strays):
         text = _RUBRIC.match(paragraphs[index]).group(1)
         targets = [h for h, rubric in expected.items() if rubric and title_matches(text, [rubric])]
@@ -455,13 +488,13 @@ def _wrap_segment(text: str, report: StructureReport) -> str:
     Args:
         text: Кусок тела между уже обёрнутыми формулами.
         report: Отчёт — счётчик ``wrapped_math``.
+
+    Returns:
+        Тот же кусок, где каждая ``$…$`` / ``$$…$$`` обёрнута в ``<latex>…</latex>``.
     """
-
-    def wrap(match: re.Match) -> str:
-        report.wrapped_math += 1
-        return f"<{FORMULA_TAG}>{match.group(0)}</{FORMULA_TAG}>"
-
-    return _BARE_MATH.sub(wrap, text)
+    formulas = _BARE_MATH.findall(text)
+    report.wrapped_math += len(formulas)
+    return _BARE_MATH.sub(rf"<{FORMULA_TAG}>\g<0></{FORMULA_TAG}>", text)
 
 
 def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) -> tuple[str, StructureReport]:
@@ -474,6 +507,10 @@ def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) ->
         articles: Статьи оглавления ``[{"title", "authors", "rubric"}]`` или просто названия строками.
         rubrics: Рубрики «Содержания» выпуска.
         authors: Поле ``authors`` ответа модели — привязка подписей к статьям и место печати.
+
+    Returns:
+        ``(тело после всех правок, отчёт)``; отчёт уходит в ``meta["structure"]``, а его
+        ``title_in_list`` — в ``PageResult``.
     """
     # Единый вид списка статей: голые строки (тесты, старые списки) → словари с одним «title».
     articles = [{"title": item} if isinstance(item, str) else dict(item) for item in articles]
