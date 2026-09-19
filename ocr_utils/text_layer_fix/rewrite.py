@@ -397,6 +397,19 @@ def image_digest(doc: fitz.Document, xref: int) -> str:
     return hashlib.md5(doc.xref_stream_raw(xref)).hexdigest()
 
 
+def pixels_digest(doc: fitz.Document, xref: int) -> str:
+    """md5 декодированных пикселей картинки — когда сырые байты пересжаты (Flate при ``deflate=True``), а сам растр цел."""
+    pixmap = fitz.Pixmap(doc, xref)
+    return hashlib.md5(bytes([pixmap.width, pixmap.height & 255, pixmap.n]) + pixmap.samples).hexdigest()
+
+
+def same_image(before: fitz.Document, before_xref: int, after: fitz.Document, after_xref: int) -> bool:
+    """Та же ли картинка: сначала по сырым байтам (JBIG2 не пересжимается), иначе по пикселям."""
+    if image_digest(before, before_xref) == image_digest(after, after_xref):
+        return True
+    return pixels_digest(before, before_xref) == pixels_digest(after, after_xref)
+
+
 def _char_index(page: fitz.Page) -> dict[tuple[int, int], list[tuple[float, float, str]]]:
     """Символы страницы по сетке начал (как в ``text_layer``), для посимвольной сверки."""
     index: dict[tuple[int, int], list[tuple[float, float, str]]] = {}
@@ -465,7 +478,7 @@ def verify_page(
     if image_xref is not None:
         try:
             after_xref = image_xref if after_image_xref is None else after_image_xref
-            report.image_changed = image_digest(before.parent, image_xref) != image_digest(after.parent, after_xref)
+            report.image_changed = not same_image(before.parent, image_xref, after.parent, after_xref)
         except Exception as error:  # noqa: BLE001
             report.notes.append(f"md5 картинки не сверен: {error}")
     return report

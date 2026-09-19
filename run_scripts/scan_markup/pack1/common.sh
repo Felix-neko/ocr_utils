@@ -60,13 +60,17 @@ PDF_ROOT="/mnt/SYSTEM/raw/mts/pack1_pdf"
 FULL_PDF_DIR="$PDF_ROOT/full_intermediate_pdfs"
 PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
 
-# Куда FineReader кладёт распознанное. Полные — с бинаризацией И распрямлением строк,
-# PAGES_WITH_PICS_ONLY — с бинаризацией, но БЕЗ распрямления: геометрия страницы там
-# должна остаться прежней, иначе иллюстрации некуда возвращать.
-FULL_RECOGNIZED_DIR="$PDF_ROOT/full_recognized"
-PICS_ONLY_RECOGNIZED_DIR="$PDF_ROOT/pages_with_pics_only_recognized"
+# Куда FineReader положил распознанное: два прогона по одним полным промежуточным PDF —
+# с коррекцией геометрии (перекос, искажение строк, трапеция) и без неё. Без коррекции
+# геометрия страницы = скан + поля, только туда можно точно вернуть иллюстрации. Финальный
+# PDF собирается постранично из обоих (run_scripts/final_pdfs).
+GEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening"
+NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
 
+# Финальные PDF (все выпуски в одной папке, {год}_{выпуск}.pdf) и рабочий каталог сборщика
+# (JSON анализа на страницу, CSV, превью) — SSD.
 FINAL_PDF_DIR="$PDF_ROOT/final_pdfs"
+FINAL_WORK_DIR="/mnt/SYSTEM/raw/mts/pack1_final_pdfs_work"
 
 # Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
 # невелики и живут ровно до выбора параметров.

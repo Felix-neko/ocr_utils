@@ -103,6 +103,22 @@ def inserts_for(payload: dict, to_pt: fitz.Matrix) -> tuple[list[Insert], int]:
     return inserts, skipped
 
 
+def has_edits(payload: dict) -> bool:
+    """Есть ли в JSON страницы хоть одна правка: слово на удаление/усечение или принятое чтение.
+
+    Дешёвая проверка до разбора слоя (0,3 с на страницу): на большинстве страниц править нечего.
+
+    Args:
+        payload: JSON страницы.
+
+    Returns:
+        ``True``, если план правок будет непустым.
+    """
+    if any(w.get("verdict") in (Verdict.DELETE.value, Verdict.SANITIZE.value) for w in payload.get("words", ())):
+        return True
+    return any(r.get("accepted") and r.get("text") for r in payload.get("readings", {}).values())
+
+
 def plan_page_edits(page: fitz.Page, pdf: pikepdf.Pdf | None, payload: dict) -> PageEdits:
     """План правок страницы: слова по MCID из свежего разбора слоя и вставки по чтениям.
 

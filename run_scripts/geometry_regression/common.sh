@@ -6,10 +6,7 @@
 # Пути пака и PDF_ROOT — из общего файла разметки.
 source "$(dirname "${BASH_SOURCE[0]}")/../scan_markup/pack1/common.sh"
 
-# Два прогона FineReader по одним и тем же промежуточным PDF (SSD, читаются по разу на страницу):
-# с коррекцией геометрии (перекос, искажение строк, трапеция) и без неё.
-GEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening"
-NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
+# Два прогона FineReader (GEO_PDF_DIR / NOGEO_PDF_DIR) — из common.sh пака.
 
 # Выход прогона — на SSD: JSON на страницу (cache/), metrics.csv, отчёт, картинки pairs/<год>/.
 # Подпапка прогона — версия детектора, чтобы прошлый прогон оставался для сравнения;

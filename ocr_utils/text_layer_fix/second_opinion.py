@@ -39,8 +39,8 @@ class SuryaStats:
 
 
 def _needs_opinion(reading: dict) -> bool:
-    """Зона идёт на второе мнение, если чтение не принято или принято неуверенно."""
-    if reading.get("rotate_cw") == 0:
+    """Зона идёт на второе мнение, если чтение не принято или принято неуверенно; повторно — нет."""
+    if reading.get("rotate_cw") == 0 or "text_surya" in reading:
         return False
     return not reading.get("accepted") or float(reading.get("confidence", 0.0)) < surya.RELIABLE_CONFIDENCE
 
