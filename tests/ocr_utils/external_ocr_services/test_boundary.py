@@ -15,6 +15,7 @@ from ocr_utils.external_ocr_services.boundary import (
     DoubtReason,
     JoinKind,
     Seam,
+    VerdictStatus,
     apply_verdict,
     decide_boundary,
     doubt_reason,
@@ -111,23 +112,28 @@ def test_parse_and_apply_verdict():
     # Одно слово: последний токен хвоста и первый головы заменяются словом модели.
     tail, head = "плакаты были направлена", "ны на смотр."
     decision = decide_boundary(tail, head, morph)  # эвристика уже дала «направлены»
-    same, changed = apply_verdict(tail, head, verdict, decision)
-    assert not changed and same is decision, "модель подтвердила эвристику"
+    same, status = apply_verdict(tail, head, verdict, decision)
+    assert status is VerdictStatus.CONFIRMED and same is decision, "модель подтвердила эвристику"
     verdict.joined = "направлено"
-    other, changed = apply_verdict(tail, head, verdict, decision)
-    assert changed and other.kind is JoinKind.MODEL and other.text == "плакаты были направлено на смотр."
-    assert other.text[other.head_start :] == " на смотр." or other.text[other.head_start :].startswith("но")
-    # Не одно слово, но модель прочла слова иначе — подставляются, сшивка через пробел.
-    verdict = BoundaryVerdict(tail_word="были", head_word="ны", same_word=False)
-    kept, changed = apply_verdict("плакаты были", "ны на смотр.", verdict, None)
-    assert not changed and kept is None, "слова те же — менять нечего"
-    verdict = BoundaryVerdict(tail_word="был", head_word="он", same_word=False)
-    fixed, changed = apply_verdict("плакаты был", "ны на смотр.", verdict, None)
-    assert changed and fixed.text == "плакаты был он на смотр." and fixed.kind is JoinKind.MODEL
+    other, status = apply_verdict(tail, head, verdict, decision)
+    assert status is VerdictStatus.REWRITTEN and other.kind is JoinKind.MODEL
+    assert other.text == "плакаты были направлено на смотр."
+    # Не одно слово: слова те же — подтверждение сшивки через пробел; слова прочитаны иначе — подстановка.
+    verdict = BoundaryVerdict(tail_word="почтой", head_word="затрачивается", same_word=False)
+    kept, status = apply_verdict("заказа почтой", "затрачивается несколько дней.", verdict, None)
+    assert status is VerdictStatus.CONFIRMED and kept is None
+    verdict = BoundaryVerdict(tail_word="почтой", head_word="затрачивается", same_word=False)
+    fixed, status = apply_verdict("заказа почтой", "затрачиваетсся несколько дней.", verdict, None)
+    assert status is VerdictStatus.REWRITTEN and fixed.text == "заказа почтой затрачивается несколько дней."
+    assert fixed.kind is JoinKind.MODEL and fixed.text[fixed.head_start :].startswith("затрачивается")
+    # Модель прочла чужую строку (подпись к рисунку): слова не похожи на слова стыка — отклоняется.
+    stray = BoundaryVerdict(tail_word="кабеля", head_word="нием", same_word=False)
+    assert apply_verdict("с соответствующим сокращением", "нием затрат.", stray, None) == (None, VerdictStatus.REJECTED)
     # Битый ответ или теги на стыке — эвристика остаётся.
-    assert apply_verdict(tail, head, BoundaryVerdict(error="сбой"), decision) == (decision, False)
+    assert apply_verdict(tail, head, BoundaryVerdict(error="сбой"), decision) == (decision, VerdictStatus.ERROR)
     tagged = "плакаты были <supplied>направлена</supplied>"
-    assert apply_verdict(tagged, head, BoundaryVerdict(same_word=True, joined="направлены"), None) == (None, False)
+    rejected = apply_verdict(tagged, head, BoundaryVerdict(same_word=True, joined="направлены"), None)
+    assert rejected == (None, VerdictStatus.REJECTED)
 
 
 class _Reply:
@@ -198,34 +204,30 @@ def test_assemble_with_checker_applies_verdict_and_records(tmp_path):
         _page_image(in_dir / ISSUE / f"{name}.jpg")
     _page(tmp_path, "IMG_0001", "плакаты были направлена")
     _page(tmp_path, "IMG_0002", "ны на заключительный смотр. Конец без точки")
-    _page(tmp_path, "IMG_0003", "ыыы продолжение.")
+    _page(tmp_path, "IMG_0003", "продолжениее дальше.")  # опечатка транскрипции — слово вне словаря
     answer = (
         '{"seams": [{"seam": 1, "tail_word": "направле-", "head_word": "ны", "same_word": true, "joined": "направлены"}, '
-        '{"seam": 2, "tail_word": "точки", "head_word": "и", "same_word": false, "joined": ""}]}'
+        '{"seam": 2, "tail_word": "точки", "head_word": "продолжение", "same_word": false, "joined": ""}]}'
     )
     fake = FakeClient(_Reply(answer))
     checker = BoundaryChecker(fake, resolve("deepseek-v41-flash"), in_dir, tmp_path / "cache")
     assembly = assemble_issue(tmp_path, ISSUE, issue_pages(tmp_path, ISSUE), checker=checker)
     assert len(fake.payloads) == 1, "оба сомнительных стыка — одним запросом"
     assert "были направлены на заключительный смотр." in assembly.text
-    assert "Конец без точки и продолжение." in assembly.text, "модель прочла «ыыы» как «и»"
+    assert "Конец без точки продолжение дальше." in assembly.text, "модель прочла слово без опечатки"
     first, second = assembly.joins
-    assert (
-        first.kind is JoinKind.DUPLICATE and first.reason is DoubtReason.DUPLICATE and first.model["confirmed"] is True
-    )
-    assert (
-        second.kind is JoinKind.MODEL
-        and second.reason is DoubtReason.FRAGMENT_HEAD
-        and second.model["head_word"] == "и"
-    )
+    assert first.kind is JoinKind.DUPLICATE and first.reason is DoubtReason.DUPLICATE
+    assert first.model["status"] == "confirmed"
+    assert second.kind is JoinKind.MODEL and second.reason is DoubtReason.FRAGMENT_HEAD
+    assert second.model["head_word"] == "продолжение" and second.model["status"] == "rewritten"
     assert assembly.checked.requests == 1 and assembly.checked.cost_usd == 0.001
     sidecar = assembly.as_dict()
     assert sidecar["joins"][1]["reason"] == "fragment_head" and sidecar["checked"]["requests"] == 1
-    # Смещение третьей полосы — начало слова модели «и».
-    assert assembly.text[assembly.pages[2].offset :].startswith("и продолжение.")
-    # Без checker — только эвристики: «ыыы» остаётся, записей о проверке нет, запросов нет.
+    # Смещение третьей полосы — начало слова модели.
+    assert assembly.text[assembly.pages[2].offset :].startswith("продолжение дальше.")
+    # Без checker — только эвристики: опечатка остаётся, записей о проверке нет, запросов нет.
     plain = assemble_issue(tmp_path, ISSUE, issue_pages(tmp_path, ISSUE))
-    assert "ыыы продолжение." in plain.text and all(j.reason is None for j in plain.joins)
+    assert "продолжениее дальше." in plain.text and all(j.reason is None for j in plain.joins)
     # Выпуск без сомнительных стыков — запроса нет.
     _page(tmp_path, "IMG_0001", "плакаты были направлены")
     _page(tmp_path, "IMG_0002", "на заключительный смотр. Конец без точки")
@@ -274,7 +276,7 @@ def test_run_pipeline_checks_boundaries_once_per_issue(tmp_path):
     text = (tmp_path / "out" / "1966" / "03.md").read_text(encoding="utf-8")
     assert "были направлены на смотр." in text
     sidecar = json.loads((tmp_path / "out" / "1966" / "03.pages.json").read_text(encoding="utf-8"))
-    assert sidecar["joins"][0]["reason"] == "duplicate" and sidecar["joins"][0]["model"]["confirmed"] is True
+    assert sidecar["joins"][0]["reason"] == "duplicate" and sidecar["joins"][0]["model"]["status"] == "confirmed"
     assert (tmp_path / "cache" / ISSUE / "_boundaries").is_dir()
     # Без проверки — запроса по стыкам нет, эвристика та же.
     fake.payloads.clear()

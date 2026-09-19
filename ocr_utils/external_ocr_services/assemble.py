@@ -321,12 +321,20 @@ def _assemble_pass(
             reason = doubt_reason(tail, head, decision, morph) if collect_doubts or verdicts is not None else None
             model: dict | None = None
             if reason is not None and collect_doubts:
-                result.seams.append(Seam(seam_index, Path(previous.rel), Path(page.rel), tail, head, reason))
+                # Плавающие блоки между хвостом и краем полосы (или краем и головой): полоска строк
+                # для модели берётся шире, и она предупреждается, что нужная строка не у края.
+                tail_floating = tail_index < len(blocks) - 1
+                head_floating = head_index > 0
+                result.seams.append(
+                    Seam(
+                        seam_index, Path(previous.rel), Path(page.rel), tail, head, reason, tail_floating, head_floating
+                    )
+                )
             if reason is not None and verdicts is not None and seam_index in verdicts:
                 # Вердикт модели ложится поверх эвристики (или подтверждает её).
                 verdict = verdicts[seam_index]
-                decision, changed = apply_verdict(tail, head, verdict, decision)
-                model = {**verdict.as_dict(), "confirmed": not changed and verdict.error is None}
+                decision, status = apply_verdict(tail, head, verdict, decision)
+                model = {**verdict.as_dict(), "status": status.value}
             if decision is not None:
                 blocks[tail_index] = _Block(decision.text, True)
                 start = (tail_index, decision.head_start)

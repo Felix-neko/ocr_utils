@@ -1,10 +1,14 @@
 {#- Пользовательское сообщение проверки стыков выпуска. Переменные: seams — список
-    {number, page_before, page_after, tail, head, reason}: номер стыка, имена полос, конец
-    транскрипции полосы N (последние ~200 знаков), начало транскрипции полосы N+1, причина сомнения
-    (подсказка модели, где смотреть). После текста идут картинки: по две на стык в том же порядке. -#}
+    {number, page_before, page_after, tail, head, reason, tail_floating, head_floating}: номер стыка,
+    имена полос, конец транскрипции полосы N (последние ~200 знаков), начало транскрипции полосы N+1,
+    причина сомнения (подсказка модели, где смотреть), есть ли у края полосы плавающие блоки (тогда
+    полоска шире и модель предупреждена). После текста идут картинки: по две на стык в том же порядке. -#}
 {{ seams | length }} seam(s) to verify. Images follow the text, two per seam in the same order: images 1–2 belong to seam 1, 3–4 to seam 2, and so on.
 {% for seam in seams %}
 Seam {{ seam.number }} ({{ seam.page_before }} → {{ seam.page_after }}); why it is checked: {{ seam.reason }}.
+{% if seam.tail_floating %}Note: the bottom of image {{ seam.number * 2 - 1 }} is a figure caption, footnote or table; the running text ends ABOVE it — find the line that ends like the transcribed end below.
+{% endif %}{% if seam.head_floating %}Note: the top of image {{ seam.number * 2 }} is a figure, caption, footnote or table; the running text starts BELOW it — find the line that starts like the transcribed start below.
+{% endif -%}
 Transcribed end of page N (may have completed the last word): «{{ seam.tail }}»
 Transcribed start of page N+1 (may have completed the first word): «{{ seam.head }}»
 {% endfor %}

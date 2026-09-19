@@ -56,6 +56,10 @@ BOUNDARY_PAGE = "_boundaries"  # псевдополоса выпуска в кэ
 BOUNDARY_MAX_TOKENS = 400  # ответ на один стык — короткий JSON из двух строк и двух слов
 BATCH_MAX_SEAMS = 10  # стыков в одном запросе; больше — ещё запрос (на выпуск обычно единицы)
 STRIP_LINES = 3  # сколько последних/первых строк уходит в полоску
+# Если между хвостом и краем полосы стоят плавающие блоки (подпись к рисунку, сноска, таблица),
+# нужная строка выше — берётся больше строк, а модель предупреждается (1966/03, IMG_0121_2R: три
+# последние строки — подпись к чертежу, и модель читала её вместо текста).
+STRIP_LINES_EXTENDED = 12
 STRIP_MAX_SIDE = 2200  # длинная сторона полоски после уменьшения — как у тайлов полос
 FALLBACK_FRACTION = 0.12  # доля высоты полосы, если строки по проекции не нашлись
 SNIPPET_CHARS = 200  # сколько знаков хвоста и головы показывать модели текстом
@@ -99,6 +103,17 @@ class DoubtReason(StrEnum):
     FRAGMENT_TAIL = "fragment_tail"  # хвост кончается несловарным токеном без знака конца перед строчной головой
     COMPOUND_UNKNOWN = "compound_unknown"  # дефис на границе оставлен, но дефисной формы целиком словарь не знает
     DUPLICATE = "duplicate"  # сработала эвристика дубля — текст изменён, модель подтверждает
+
+
+class VerdictStatus(StrEnum):
+    """Что стало с вердиктом модели на стыке (``model.status`` в sidecar)."""
+
+    REWRITTEN = "rewritten"  # стык переписан по вердикту
+    CONFIRMED = "confirmed"  # вердикт совпал с эвристикой, текст не менялся
+    REJECTED = (
+        "rejected"  # вердикт непригоден: слова модели не похожи на слова стыка (читала чужую строку) или не слова
+    )
+    ERROR = "error"  # запрос или разбор ответа не удался
 
 
 @dataclass(frozen=True)
@@ -303,7 +318,9 @@ class Strip:
     lines: int  # сколько строк по проекции попало (0 — запасной вырез по доле высоты)
 
 
-def _crop_box(gray: np.ndarray, bands: list[tuple[int, int]], at_bottom: bool) -> tuple[tuple[int, int, int, int], int]:
+def _crop_box(
+    gray: np.ndarray, bands: list[tuple[int, int]], at_bottom: bool, lines: int = STRIP_LINES
+) -> tuple[tuple[int, int, int, int], int]:
     """Прямоугольник полоски: последние (или первые) ``STRIP_LINES`` строк с запасом в полстроки и
     обрезкой по чернилам по ширине; без строк — доля высоты с края.
 
@@ -311,12 +328,13 @@ def _crop_box(gray: np.ndarray, bands: list[tuple[int, int]], at_bottom: bool) -
         gray: Серая полоса.
         bands: Строки по :func:`text_line_bands`.
         at_bottom: Хвост (низ полосы) или голова (верх).
+        lines: Сколько строк брать.
 
     Returns:
         ``((left, top, right, bottom), число строк)``.
     """
     height, width = gray.shape[:2]
-    chosen = bands[-STRIP_LINES:] if at_bottom else bands[:STRIP_LINES]
+    chosen = bands[-lines:] if at_bottom else bands[:lines]
     if not chosen:
         band = int(height * FALLBACK_FRACTION)
         box = (0, height - band, width, height) if at_bottom else (0, 0, width, band)
@@ -334,18 +352,19 @@ def _crop_box(gray: np.ndarray, bands: list[tuple[int, int]], at_bottom: bool) -
     return (left, top, right, bottom), len(chosen)
 
 
-def strip_of(path: Path, at_bottom: bool, quality: int = DEFAULT_QUALITY) -> Strip:
+def strip_of(path: Path, at_bottom: bool, quality: int = DEFAULT_QUALITY, lines: int = STRIP_LINES) -> Strip:
     """Полоска последних (``at_bottom``) или первых строк полосы.
 
     Args:
         path: Файл полосы.
         at_bottom: Низ (хвост) или верх (голова).
         quality: Качество JPEG.
+        lines: Сколько строк брать (``STRIP_LINES_EXTENDED`` — когда у края плавающие блоки).
     """
     with Image.open(path) as image:
         gray_image = ImageOps.grayscale(image)
     gray = np.asarray(gray_image)
-    (left, top, right, bottom), lines = _crop_box(gray, text_line_bands(gray), at_bottom)
+    (left, top, right, bottom), lines = _crop_box(gray, text_line_bands(gray), at_bottom, lines)
     crop = gray_image.crop((left, top, right, bottom))
     prepared = encode(crop, TileBox(0, 0, left, top, right, bottom), STRIP_MAX_SIDE, quality)
     return Strip(prepared, (left, top, right, bottom), lines)
@@ -432,6 +451,8 @@ class Seam:
     tail: str  # хвост (абзац целиком)
     head: str  # голова
     reason: DoubtReason
+    tail_floating: bool = False  # после хвоста до края полосы A есть плавающие блоки (подпись, сноска, таблица)
+    head_floating: bool = False  # перед головой от края полосы B есть плавающие блоки
 
 
 def parse_verdicts(text: str) -> dict[int, BoundaryVerdict]:
@@ -522,6 +543,8 @@ class BoundaryChecker:
                 "tail": " ".join(_strip(seam.tail).split())[-SNIPPET_CHARS:],
                 "head": " ".join(_strip(seam.head).split())[:SNIPPET_CHARS],
                 "reason": seam.reason.value.replace("_", " "),
+                "tail_floating": seam.tail_floating,
+                "head_floating": seam.head_floating,
             }
             for position, seam in enumerate(seams, 1)
         ]
@@ -568,7 +591,17 @@ class BoundaryChecker:
             if path_a is None or path_b is None:
                 logger.warning("стык %s → %s: нет файла полосы во входе, проверка пропущена", seam.rel_a, seam.rel_b)
                 continue
-            usable.append((seam, (strip_of(path_a, True, self.quality), strip_of(path_b, False, self.quality))))
+            tail_lines = STRIP_LINES_EXTENDED if seam.tail_floating else STRIP_LINES
+            head_lines = STRIP_LINES_EXTENDED if seam.head_floating else STRIP_LINES
+            usable.append(
+                (
+                    seam,
+                    (
+                        strip_of(path_a, True, self.quality, tail_lines),
+                        strip_of(path_b, False, self.quality, head_lines),
+                    ),
+                )
+            )
         for start in range(0, len(usable), BATCH_MAX_SEAMS):
             batch = usable[start : start + BATCH_MAX_SEAMS]
             verdicts.update(self._request(issue_key, [seam for seam, _ in batch], [strips for _, strips in batch]))
@@ -666,9 +699,30 @@ class BoundaryChecker:
         return result
 
 
+def _resembles(model_word: str, seam_word: str) -> bool:
+    """Похоже ли слово модели на слово транскрипции: одно — начало другого (без дефиса), или общее
+    начало от четырёх букв; так отсекается вердикт по чужой строке («кабеля» против «сокращением»).
+
+    Args:
+        model_word: Слово из ответа модели (может кончаться дефисом).
+        seam_word: Токен транскрипции на стыке.
+    """
+    a, b = model_word.rstrip("-").lower(), seam_word.rstrip("-").lower()
+    if not a or not b:
+        return False
+    if a.startswith(b) or b.startswith(a):
+        return True
+    common = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        common += 1
+    return common >= 4
+
+
 def apply_verdict(
     tail: str, head: str, verdict: BoundaryVerdict, decision: BoundaryDecision | None
-) -> tuple[BoundaryDecision | None, bool]:
+) -> tuple[BoundaryDecision | None, VerdictStatus]:
     """Положить вердикт модели на стык.
 
     Args:
@@ -678,23 +732,28 @@ def apply_verdict(
         decision: Решение эвристик (может быть ``None``).
 
     Returns:
-        ``(решение, изменено)``: новое решение вида ``MODEL``, если модель переписала стык; иначе
-        решение эвристик как есть и ``False`` (модель подтвердила или её ответ непригоден).
+        ``(решение, статус)``: новое решение вида ``MODEL`` и ``REWRITTEN``, если модель переписала
+        стык; иначе решение эвристик как есть и ``CONFIRMED`` (вердикт совпал), ``REJECTED`` (вердикт
+        непригоден) или ``ERROR``.
     """
     if verdict.error:
-        return decision, False
+        return decision, VerdictStatus.ERROR
     tail_text, head_text = tail.rstrip(), head.lstrip()
     last, first = _LAST_TOKEN.search(tail_text), _FIRST_TOKEN.match(head_text)
     if not (last and first) or _DAMAGE_TAGS.search(last.group(0)) or _DAMAGE_TAGS.search(first.group(0)):
-        return decision, False
+        return decision, VerdictStatus.REJECTED
     tail_word, head_word, joined = (
         verdict.tail_word.strip('«»" '),
         verdict.head_word.strip('«»" '),
         verdict.joined.strip('«»" '),
     )
+    # Модель могла прочитать не ту строку (подпись к рисунку вместо текста над ним): её слова
+    # должны быть похожи на слова транскрипции на стыке, иначе вердикт не применяется.
+    if not _resembles(tail_word, last.group(1)) or not _resembles(head_word, first.group(1)):
+        return decision, VerdictStatus.REJECTED
     if verdict.same_word or (tail_word.endswith("-") and joined):
         if not joined or not _WORD_ONLY.match(joined):
-            return decision, False
+            return decision, VerdictStatus.REJECTED
         # Одно слово: последний токен хвоста и первый токен головы заменяются на слово модели.
         prefix = tail_text[: last.start()]
         rest = head_text[first.end() :]
@@ -705,17 +764,23 @@ def apply_verdict(
         )
         current = decision.text if decision is not None else None
         if current == text:
-            return decision, False
-        return BoundaryDecision(text, len(prefix) + inner, JoinKind.MODEL, f"{tail_word}|{head_word}→{joined}"), True
+            return decision, VerdictStatus.CONFIRMED
+        word = f"{tail_word}|{head_word}→{joined}"
+        return BoundaryDecision(text, len(prefix) + inner, JoinKind.MODEL, word), VerdictStatus.REWRITTEN
     # Не одно слово: модель могла прочесть слова на стыке иначе, чем транскрипция; подставляем их
     # и сшиваем через пробел, если голова строчная.
     if not (_WORD_ONLY.match(tail_word) and _WORD_ONLY.match(head_word)):
-        return decision, False
+        return decision, VerdictStatus.REJECTED
     new_tail = tail_text[: last.start()] + tail_word if tail_word.lower() != last.group(1).lower() else tail_text
     new_head = head_word + head_text[first.end() :] if head_word.lower() != first.group(1).lower() else head_text
     if new_tail == tail_text and new_head == head_text:
-        return decision, False
+        # Слова те же; «не одно слово» согласуется с эвристикой, если та не склеивала слово.
+        agreed = decision is None or decision.kind in (JoinKind.PARAGRAPH, JoinKind.NONE)
+        return decision, VerdictStatus.CONFIRMED if agreed else VerdictStatus.REJECTED
     stem = new_tail + " "
     if not _CONTINUATION_START.match(_strip(new_head)):
-        return decision, False
-    return BoundaryDecision(stem + new_head, len(stem), JoinKind.MODEL, f"{tail_word}|{head_word}"), True
+        return decision, VerdictStatus.REJECTED
+    return (
+        BoundaryDecision(stem + new_head, len(stem), JoinKind.MODEL, f"{tail_word}|{head_word}"),
+        VerdictStatus.REWRITTEN,
+    )
