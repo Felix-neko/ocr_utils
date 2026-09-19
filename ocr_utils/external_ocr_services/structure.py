@@ -81,7 +81,7 @@ class StructureReport:
 _FENCE_LINE = re.compile(r"^[ \t]*```")
 
 
-def _paragraphs(body: str) -> list[str]:
+def paragraphs_of(body: str) -> list[str]:
     """Тело как список абзацев (разделитель — пустая строка); переносы внутри абзаца сохраняются.
 
     Fenced-блок иллюстрации (``…``` … ```…``) — всегда один абзац, даже если модель оставила внутри
@@ -108,11 +108,11 @@ def _paragraphs(body: str) -> list[str]:
     return [block for block in paragraphs if block.strip()]
 
 
-def _join(paragraphs: list[str]) -> str:
+def join_paragraphs(paragraphs: list[str]) -> str:
     """Обратно в текст: абзацы через пустую строку, один перевод строки в конце.
 
     Args:
-        paragraphs: Абзацы из ``_paragraphs`` после правок.
+        paragraphs: Абзацы из ``paragraphs_of`` после правок.
     """
     return "\n\n".join(paragraphs).rstrip() + "\n"
 
@@ -186,7 +186,7 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
             определяется, чья подпись и где напечатана.
         report: Отчёт пост-обработки — перенесённые и убранные имена.
     """
-    paragraphs = _paragraphs(body)
+    paragraphs = paragraphs_of(body)
     if not paragraphs:
         return body
     # Авторы из ответа по ключу имени: блок в тексте сопоставляется с записью и её полями.
@@ -224,7 +224,7 @@ def place_authors(body: str, authors: list[dict], report: StructureReport) -> st
                 report.moved_authors.append(author["name"])
                 changed = True
                 break
-    return _join(paragraphs)
+    return join_paragraphs(paragraphs)
 
 
 def _author_of(paragraph: str, by_name: dict[str, dict]) -> dict | None:
@@ -262,7 +262,7 @@ def rubric_from_heading(body: str, rubrics: list[str], report: StructureReport) 
     """
     if not rubrics:
         return body
-    paragraphs = _paragraphs(body)
+    paragraphs = paragraphs_of(body)
     keys = {normalize_title(r) for r in rubrics if r}
     for index in range(len(paragraphs) - 1):
         match = _H2.match(paragraphs[index])
@@ -272,7 +272,7 @@ def rubric_from_heading(body: str, rubrics: list[str], report: StructureReport) 
         if normalize_title(text) in keys or title_matches(text, list(rubrics)):
             paragraphs[index] = f"<rubric>*{text}*</rubric>"
             report.rubrics_from_headings.append(text)
-    return _join(paragraphs)
+    return join_paragraphs(paragraphs)
 
 
 def _rubric_tag(text: str) -> str:
@@ -356,7 +356,7 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
     """
     if not articles:
         return body
-    paragraphs = _paragraphs(body)
+    paragraphs = paragraphs_of(body)
     if not paragraphs:
         return body
     known = [article["rubric"] for article in articles if article.get("rubric")] + [r for r in (rubrics or []) if r]
@@ -421,7 +421,7 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
             paragraphs[index - 1] = _rubric_tag(rubric)
             paragraphs.insert(index + 1, _marker_tag(printed))
             report.rubrics_replaced.append(printed)
-    return _join(paragraphs)
+    return join_paragraphs(paragraphs)
 
 
 def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) -> str:
@@ -437,7 +437,7 @@ def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) ->
     """
     if not titles:
         return body
-    paragraphs = _paragraphs(body)
+    paragraphs = paragraphs_of(body)
     if any(_H1.match(p) for p in paragraphs):  # есть `#` — полоса не продолжение, `##` законны
         return body
     # Смотрим только первые три абзаца: перед утёкшим названием могут стоять рубрика и маркер.
@@ -446,7 +446,7 @@ def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) ->
         if match is not None and title_matches(match.group(1), titles):
             del paragraphs[index]
             report.dropped_headings.append(match.group(1))
-            return _join(paragraphs)
+            return join_paragraphs(paragraphs)
         if not (_RUBRIC.match(paragraph) or _MARKER.match(paragraph)):
             break
     return body

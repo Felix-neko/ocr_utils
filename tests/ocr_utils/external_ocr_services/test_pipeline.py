@@ -152,6 +152,11 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
     summary = (params.out_dir / "summary.csv").read_text(encoding="utf-8")
     assert summary.count("\n") == 5 and "cached_tokens" in summary.splitlines()[0] and ",900," in summary
     assert not (params.out_dir / "missed_toc.txt").exists()
+    # Выпуск собран в один markdown рядом с папкой полос, sidecar — привязка полос.
+    issue_md = (params.out_dir / "1966" / "03.md").read_text(encoding="utf-8")
+    assert issue_md.startswith('---\nyear: "1966"') and issue_md.count("## Заголовок") == 3
+    sidecar = json.loads((params.out_dir / "1966" / "03.pages.json").read_text(encoding="utf-8"))
+    assert [p["file"] for p in sidecar["pages"]] == [f"{ISSUE}/{name[:-4]}" for name in PAGES]
 
     # Повтор с --skip-done ничего не шлёт, а слитое оглавление читается из готовых .json.
     before = len(fake.payloads)
@@ -413,10 +418,15 @@ def test_cli_run_with_db_and_toc_lists(tmp_path, monkeypatch):
             "skip",
             "--jobs",
             "1",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--no-assemble",
         ],
     )
     assert result.exit_code == 0, result.output
     assert "Выпусков: 1, полос: 4 (оглавление/указатель по базе: 1), запросов: 4" in result.output
+    assert "из кэша запросов: 0" in result.output and (tmp_path / "cache" / ISSUE / "IMG_0001").is_dir()
+    assert not (tmp_path / "out" / "1966" / "03.md").exists(), "--no-assemble"
     assert fake.stage_of(fake.payloads[0]) == "toc"
     assert "Второй проход" not in result.output, "по умолчанию второго прохода нет — и строки о нём тоже"
     summary = (tmp_path / "out" / "summary.csv").read_text(encoding="utf-8")

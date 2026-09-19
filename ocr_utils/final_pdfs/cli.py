@@ -289,6 +289,7 @@ def main(log_level: str) -> None:
 @click.option(
     "--assemble/--no-assemble", default=True, show_default=True, help="стадия C; --no-assemble — только анализ и surya"
 )
+@click.option("--reassemble", is_flag=True, help="пересобрать готовые PDF, не пересчитывая анализ (JSON из кэша)")
 def run(
     geo_dir,
     nogeo_dir,
@@ -320,6 +321,7 @@ def run(
     insert_font,
     preview_pages,
     assemble,
+    reassemble,
 ) -> None:
     """Собрать финальные PDF выпусков (анализ → surya → сборка)."""
     plans = load_plans(db, pack_name, only_year=only_year, only_issue=only_issue)
@@ -367,7 +369,7 @@ def run(
         jpeg_quality=jpeg_quality,
         descreen_sigma_mm=descreen_sigma_mm,
         font_path=insert_font,
-        skip_done=skip_done,
+        skip_done=skip_done and not reassemble,
         preview_pages=preview_pages,
     )
     click.echo(f"Стадия C: сборка выпусков, воркеров {assemble_jobs}")

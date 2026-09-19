@@ -25,3 +25,17 @@ def test_numbers_without_letters_by_confidence() -> None:
 def test_words_need_letters_and_confidence() -> None:
     assert acceptable("Поставщики", 0.7)[0]
     assert not acceptable("Поставщики", 0.5)[0]
+
+
+def test_surya_hallucination_filter() -> None:
+    from ocr_utils.text_layer_fix.second_opinion import hallucination_reason
+
+    assert hallucination_reason("and special to") == "латиница без кириллицы"
+    assert hallucination_reason("THE PERSON NAMED IN")
+    assert hallucination_reason("35 35 35 35 35 35 31") == "повторяющиеся токены"
+    assert hallucination_reason("Million (1997) (1997) (1997) (1997) (1997)")
+    # Настоящий текст, числа и короткие обозначения проходят.
+    assert hallucination_reason("Наименование материалов") is None
+    assert hallucination_reason("24 000") is None
+    assert hallucination_reason("кг") is None
+    assert hallucination_reason("ГОСТ 12") is None

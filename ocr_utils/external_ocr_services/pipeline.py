@@ -35,6 +35,7 @@ from pathlib import Path
 import click
 
 from ocr_utils.external_ocr_services import toc as toc_module
+from ocr_utils.external_ocr_services.assemble import assemble_issue, log_assembly, write_issue
 from ocr_utils.external_ocr_services.client import OpenRouterClient
 from ocr_utils.external_ocr_services.models import ModelSpec
 from ocr_utils.external_ocr_services.ocr import (
@@ -147,6 +148,8 @@ SUMMARY_FIELDS = (
     "cost_usd",
     "latency_s",
     "attempts",
+    "cache_hit",
+    "cache_entry",
     "page_number",
     "toc_kind",
     "title",
@@ -178,6 +181,9 @@ class PipelineParams:
     only_year: str | None = None  # --only-year / --only-issue: отбор по первым папкам пути
     only_issue: str | None = None
     limit: int | None = None  # --limit: первые N полос после отбора, для проб
+    # После каждого выпуска собирать его в один markdown (`assemble.py`): `{год}/{выпуск}.md` и
+    # sidecar `.pages.json` рядом с папкой полос. Выключается ``--no-assemble``.
+    assemble: bool = True
 
     def __post_init__(self) -> None:
         # Строка из старых вызовов («redo») → перечисление; чужое значение падает сразу.
@@ -194,7 +200,8 @@ class PipelineStats:
     requests: int = 0  # полос, ушедших в сеть (второй проход — та же полоса, не второй запрос)
     reused: int = 0  # полос, взятых готовыми с диска (--skip-done или круг повтора)
     failed: int = 0  # полос без результата: сбой сети, не разобранный JSON, исчерпаны попытки
-    cost_usd: float = 0.0  # сумма cost_usd по meta запрошенных полос (оба прохода, без эха формата)
+    cost_usd: float = 0.0  # сумма cost_usd по meta запрошенных полос (оба прохода, без эха формата и без кэша)
+    cache_hits: int = 0  # полос, чей финальный ответ взят из кэша запросов (--cache-dir), сеть не тратилась
     toc_pages: int = 0  # полос, которые база (или списки) считает оглавлением/указателем
     unknown_pages: int = 0  # полос без записи в базе
     second_passes: int = 0  # полос, ушедших во второй проход
@@ -224,6 +231,7 @@ class PipelineStats:
             reused=self.reused + other.reused,
             failed=self.failed + other.failed,
             cost_usd=self.cost_usd + other.cost_usd,
+            cache_hits=self.cache_hits + other.cache_hits,
             toc_pages=self.toc_pages + other.toc_pages,
             unknown_pages=self.unknown_pages + other.unknown_pages,
             second_passes=self.second_passes + other.second_passes,
@@ -300,8 +308,12 @@ def _recognize_many(
         for job, meta, result in pool.map(work, todo):
             stats.requests += 1
             # cost_usd в meta — сумма обоих проходов по удачным ответам; выброшенные ответы (эхо
-            # response_format) лежат отдельно в cost_usd_wasted и в итог не входят.
-            stats.cost_usd += float(meta.get("cost_usd") or 0.0)
+            # response_format) лежат отдельно в cost_usd_wasted и в итог не входят. Ответ из кэша
+            # запросов денег не стоил: в meta цена историческая, в итог прогона не идёт.
+            if meta.get("cache_hit"):
+                stats.cache_hits += 1
+            else:
+                stats.cost_usd += float(meta.get("cost_usd") or 0.0)
             # Второй проход был — есть причина; какой проход ушёл в финал, пишет second_pass_chosen.
             if meta.get("second_pass_reason"):
                 stats.second_passes += 1
@@ -313,10 +325,11 @@ def _recognize_many(
             if result is None:
                 stats.failed += 1
             logger.info(
-                "%s [%s] %s: %s tok → %s tok, $%s, %.0f с",
+                "%s [%s] %s%s: %s tok → %s tok, $%s, %.0f с",
                 job.rel,
                 job.stage,
                 status,
+                " (из кэша)" if meta.get("cache_hit") else "",
                 meta.get("prompt_tokens", "-"),
                 meta.get("completion_tokens", "-"),
                 meta.get("cost_usd", "-"),
@@ -810,6 +823,10 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     for issue_key, pages in groups.items():
         # Весь цикл выпуска: полосы оглавления → toc.json → остальные полосы со списком → fallback.
         stats = stats + run_issue(client, spec, params, issue_key, pages)
+        # Выпуск целиком в один markdown — по готовым .json с диска, после круга повтора, если он был.
+        if params.assemble:
+            assembly = assemble_issue(params.out_dir, issue_key, pages, join_hyphens=params.options.join_hyphens)
+            log_assembly(assembly, write_issue(params.out_dir, assembly))
     # Сводка строится по ВСЕМ .meta.json под out-dir, а не по этому прогону: с --skip-done прогон
     # видел только недоделанные полосы, а summary.csv должен описывать папку целиком.
     rows = collect_meta(params.out_dir)
@@ -828,13 +845,14 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     # Итог именно этого прогона (в отличие от summary.csv): что запросили, что пропустили, сколько
     # это стоило. Полосы с запросом без результата — «сбои», их можно догнать повтором с --skip-done.
     logger.info(
-        "готово за %.0f с: выпусков %d, полос %d, запросов %d (готовых пропущено %d), сбоев %d, "
+        "готово за %.0f с: выпусков %d, полос %d, запросов %d (готовых пропущено %d, из кэша запросов %d), сбоев %d, "
         "стоимость $%.4f, сводка %s",
         time.monotonic() - started,
         stats.issues,
         stats.pages,
         stats.requests,
         stats.reused,
+        stats.cache_hits,
         stats.failed,
         stats.cost_usd,
         summary,

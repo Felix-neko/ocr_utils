@@ -6,7 +6,9 @@
 вообще без response_format; отвергнутый параметр ``reasoning`` убирается и запрос повторяется.
 
 Готовность полосы определяется по .meta.json и отпечатку списков (``toc_hash``): полоса,
-распознанная с другим списком статей, считается устаревшей и идёт заново.
+распознанная с другим списком статей, считается устаревшей и идёт заново. Ниже этого уровня —
+кэш запросов (``cache.py``, ``RunOptions.cache_dir``): перед каждым обращением к модели ищется
+ответ на такой же payload, и попадание обходится без сети.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ocr_utils.external_ocr_services import PROMPT_VERSION
+from ocr_utils.external_ocr_services.cache import CacheVerdict, cache_for, entry_dir, request_key
 from ocr_utils.external_ocr_services.client import ChatResponse, OpenRouterClient, OpenRouterError
 from ocr_utils.external_ocr_services.models import JsonMode, ModelSpec, Reasoning
 from ocr_utils.external_ocr_services.hyphen_join import default_morph, join_broken_hyphens
@@ -99,6 +102,10 @@ class RunOptions:
     # Описание издания для промпта; «{year}» подставляется годом выпуска.
     source: str = ""
     debug_dir: Path | None = None  # сырые ответы, промпты и отправленные тайлы
+    # Кэш запросов (``--cache-dir``, cache.py): каждый запрос к модели — своя папка с промптами и
+    # ответом; тот же запрос (по хэшу payload с хэшами тайлов) второй раз в сеть не идёт, а берётся
+    # с диска. None — без кэша.
+    cache_dir: Path | None = None
     # Второй проход по полосе, которую первый проход счёл повреждённой: подсказка собирается из
     # его же ответа (описание, затронутые строки, счётчики). По умолчанию ВЫКЛЮЧЕН (``--second-pass``
     # включает): на МТС 1991/02 он то чинил первый проход, то портил — снимал теги с достроек, не
@@ -544,6 +551,92 @@ def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], 
         paths.raw.write_text(raw, encoding="utf-8")
 
 
+def _verdict(json_mode: JsonMode, text: str) -> CacheVerdict:
+    """Годен ли ответ или цепочка откатов идёт дальше: эхо ``response_format``, цикл заполнителя.
+
+    Без режима JSON повторять уже не в чем, поэтому такие ответы считаются годными и идут в разбор.
+
+    Args:
+        json_mode: Режим JSON попытки, давшей ответ.
+        text: Сырой текст ответа.
+    """
+    if json_mode is JsonMode.NONE:
+        return CacheVerdict.OK
+    if is_format_echo(text):
+        return CacheVerdict.FORMAT_ECHO
+    if is_gap_runaway(text):
+        return CacheVerdict.GAP_RUNAWAY
+    return CacheVerdict.OK
+
+
+def _chat_cached(
+    client: OpenRouterClient,
+    spec: ModelSpec,
+    options: RunOptions,
+    job: PageJob,
+    json_mode: JsonMode,
+    payload: dict,
+    tiles: list[PreparedImage],
+    meta: dict,
+) -> tuple[ChatResponse, CacheVerdict]:
+    """Ответ на payload: из кэша, если такой запрос уже задавали, иначе от модели с записью в кэш.
+
+    Без ``options.cache_dir`` — просто ``client.chat``. Сетевая ошибка пробрасывается наружу, как у
+    клиента, но перед этим дописывается в ``errors.jsonl`` папки полосы в кэше.
+
+    Args:
+        client: Клиент OpenRouter.
+        spec: Модель — имя и id в ``request.json``.
+        options: Настройки прогона — откуда ``cache_dir``.
+        job: Полоса и этап — для папки записи и контекста в ``request.json``.
+        json_mode: Режим JSON этой попытки — часть имени папки.
+        payload: Тело запроса с картинками.
+        tiles: Тайлы — их раскладка пишется в ``request.json``.
+        meta: Meta полосы; сюда ставятся ``cache_hit`` и ``cache_entry`` (по последнему вызову — он
+            и даёт ответ, который идёт в разбор).
+
+    Returns:
+        ``(ответ, вердикт)``: вердикт — как ответ оценён (``_verdict``), у записи из кэша — тот, что
+        был вынесен при записи.
+    """
+    if options.cache_dir is None:
+        response = client.chat(payload)
+        return response, _verdict(json_mode, response.text)
+    cache = cache_for(options.cache_dir)
+    key = request_key(payload)
+    entry = entry_dir(options.cache_dir, job.rel, job.stage.value, json_mode.value, key, job.second_pass is not None)
+    meta["cache_entry"] = entry.relative_to(options.cache_dir).as_posix()
+    cached = cache.lookup(entry)
+    if cached is not None:
+        meta["cache_hit"] = True
+        logger.info("%s [%s]: ответ из кэша %s (%s)", job.rel, job.stage, entry.name, cached.verdict)
+        return cached.response, cached.verdict
+    meta["cache_hit"] = False
+    try:
+        response = client.chat(payload)
+    except OpenRouterError as error:
+        cache.record_error(entry, str(error), error.body)
+        raise
+    verdict = _verdict(json_mode, response.text)
+    request_info = {
+        "page": job.rel.as_posix(),
+        "stage": job.stage.value,
+        "toc_kind_expected": job.toc_kind.value if job.stage is Stage.TOC else None,
+        "toc_hash": job.toc_hash,
+        "toc_demoted": job.demoted_from_toc,
+        "second_pass": job.second_pass is not None,
+        "articles_in_prompt": len(job.articles),
+        "json_mode": json_mode.value,
+        "prompt_version": PROMPT_VERSION,
+        "model": spec.name,
+        "openrouter_id": spec.openrouter_id,
+        "tiling": describe(tiles).as_dict(),
+        "key": key,
+    }
+    cache.store(entry, request_info, payload, response, verdict)
+    return response, verdict
+
+
 def recognize_page(
     client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, out_dir: Path, options: RunOptions
 ) -> tuple[dict, PageResult | None]:
@@ -611,7 +704,8 @@ def recognize_page(
     for json_mode in chain:
         payload = build_payload(spec, tiles, options, job, json_mode, skip_reasoning)
         try:
-            response = client.chat(payload)  # внутри — свои повторы по сети и 5xx/429
+            # Из кэша, если такой запрос уже был; иначе в сеть (внутри — свои повторы по 5xx/429).
+            response, verdict = _chat_cached(client, spec, options, job, json_mode, payload, tiles, meta)
         except OpenRouterError as error:
             meta.setdefault("fallbacks", []).append(
                 {"json_mode": json_mode, "error": str(error), "body": error.body[:300]}
@@ -622,7 +716,7 @@ def recognize_page(
                 skip_reasoning = True
                 try:
                     payload = build_payload(spec, tiles, options, job, json_mode, True)
-                    response = client.chat(payload)
+                    response, verdict = _chat_cached(client, spec, options, job, json_mode, payload, tiles, meta)
                 except OpenRouterError as again:
                     meta["fallbacks"].append({"json_mode": json_mode, "error": str(again), "body": again.body[:300]})
                     error = again
@@ -639,14 +733,14 @@ def recognize_page(
         meta["json_mode_used"] = json_mode
         # Ответ пришёл, но это {"type": "json_object"} вместо страницы: деньги за него потрачены
         # зря (считаем отдельно), запрос уходит ещё раз в следующем, более простом режиме.
-        if json_mode is not JsonMode.NONE and is_format_echo(response.text):
+        if verdict is CacheVerdict.FORMAT_ECHO:
             meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "эхо response_format"})
             meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
             logger.warning("%s %s: ответ — эхо response_format, повторяю без режима %s", spec.name, job.rel, json_mode)
             continue
         # Модель зациклилась на «▒» до потолка токенов — ответ обрезан. При temperature 0 тот же
         # запрос даст тот же цикл, поэтому повтор идёт в следующем режиме JSON (другой контекст).
-        if json_mode is not JsonMode.NONE and is_gap_runaway(response.text):
+        if verdict is CacheVerdict.GAP_RUNAWAY:
             meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "цикл заполнителя <gap>"})
             meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
             logger.warning(

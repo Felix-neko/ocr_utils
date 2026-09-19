@@ -258,11 +258,11 @@ def test_case_insensitive_titles_and_rubrics_from_list():
 
 def test_fenced_illustration_block_is_one_paragraph():
     """Fenced-блок с пустой строкой внутри не рвётся на абзацы, и рубрика/автор не встают внутрь него."""
-    from ocr_utils.external_ocr_services.structure import _paragraphs
+    from ocr_utils.external_ocr_services.structure import paragraphs_of
 
     body = (
         "```\n[графика]\nсхема\n\nнадпись: А\n```\n\n# Фильм о снабжении\n\n<author>**И. Иванов**</author>\n\nТекст.\n"
     )
-    assert _paragraphs(body)[0] == "```\n[графика]\nсхема\n\nнадпись: А\n```"
+    assert paragraphs_of(body)[0] == "```\n[графика]\nсхема\n\nнадпись: А\n```"
     out, _ = apply(body, [{"title": "Фильм о снабжении", "rubric": "Кино"}], ["Кино"], [])
     assert out.startswith("```\n[графика]\nсхема\n\nнадпись: А\n```\n\n<rubric>*Кино*</rubric>\n\n# Фильм о снабжении")

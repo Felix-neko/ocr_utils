@@ -30,12 +30,19 @@ from enum import StrEnum
 from functools import lru_cache
 
 # Дефис между двумя кириллическими кусками от двух букв, не часть более длинной цепочки
-# («научно-производственно-технический» не трогаем); теги внутри слова допускаются.
+# («научно-производственно-технический» не трогаем); теги внутри слова допускаются. После дефиса
+# может стоять один перевод строки («за-\nдолженность»: модель оставила строку как напечатано) —
+# при склейке он уходит вместе с дефисом.
 _TAG = r"(?:</?(?:supplied|unclear)>)*"
 HYPHENATED = re.compile(
-    rf"(?<![\w-])(?P<a>{_TAG}[а-яёА-ЯЁ]{{2,}}(?:{_TAG}[а-яёА-ЯЁ]+)*{_TAG})-(?P<b>{_TAG}[а-яё]{{2,}}(?:{_TAG}[а-яё]+)*{_TAG})(?![\w-])"
+    rf"(?<![\w-])(?P<a>{_TAG}[а-яёА-ЯЁ]{{2,}}(?:{_TAG}[а-яёА-ЯЁ]+)*{_TAG})-\n?(?P<b>{_TAG}[а-яё]{{2,}}(?:{_TAG}[а-яё]+)*{_TAG})(?![\w-])"
 )
 _STRIP_TAGS = re.compile(r"</?(?:supplied|unclear)>")
+# Граница полос: хвост абзаца — половина слова с дефисом на конце (закрывающие теги могут стоять и
+# до дефиса, и после: «<supplied>снаб-</supplied>»), голова следующего — строчное продолжение с
+# возможными открывающими тегами перед ним.
+PAGE_TAIL = re.compile(rf"(?<![\w-])(?P<a>{_TAG}[а-яёА-ЯЁ]{{2,}}(?:{_TAG}[а-яё]+)*{_TAG})-(?P<tail_tags>{_TAG})\s*$")
+PAGE_HEAD = re.compile(rf"^(?P<head_tags>{_TAG})(?P<b>[а-яё]{{2,}}(?:{_TAG}[а-яё]+)*{_TAG})(?![\w-])")
 
 
 class MorphBackend(StrEnum):
@@ -180,3 +187,45 @@ def join_broken_hyphens(text: str, morph: Morph, rule: JoinRule = JoinRule.E) ->
     """
     replacer = _Replacer(morph, rule)
     return HYPHENATED.sub(replacer, text), replacer.report
+
+
+@dataclass(frozen=True)
+class BoundaryJoin:
+    """Итог склейки слова, разорванного границей полос: сшитый абзац и что с дефисом сделано."""
+
+    text: str  # хвост предыдущей полосы + голова следующей одним абзацем
+    word: str  # слово как было напечатано, без тегов: «снаб-жения»
+    joined: bool  # True — дефис-перенос убран; False — составное слово, дефис оставлен
+    head_start: int  # смещение в ``text``, с которого начинается голова (её первый символ или тег)
+
+
+def join_across_boundary(tail: str, head: str, morph: Morph, rule: JoinRule = JoinRule.E) -> BoundaryJoin | None:
+    """Сшить два абзаца по слову, разорванному переносом на границе полос.
+
+    Половины проверяются словарём без тегов (:func:`should_join`), а в тексте убирается только дефис
+    (и пробельный хвост абзаца): теги повреждений остаются там, где стояли, поэтому
+    ``<supplied>снаб-</supplied>`` + ``жения`` → ``<supplied>снаб</supplied>жения``. Если словарь слитной
+    формы не знает (составное «торгово-» + «экономических»), абзацы всё равно сшиваются — без пробела,
+    с дефисом.
+
+    Args:
+        tail: Последний абзац предыдущей полосы.
+        head: Первый абзац следующей полосы.
+        morph: Анализатор.
+        rule: Правило склейки.
+
+    Returns:
+        :class:`BoundaryJoin` или ``None``, если хвост не кончается половиной слова с дефисом либо
+        голова не начинается со строчного продолжения.
+    """
+    tail_match = PAGE_TAIL.search(tail)
+    head_match = PAGE_HEAD.match(head)
+    if tail_match is None or head_match is None:
+        return None
+    a_raw, b_raw = tail_match.group("a"), head_match.group("b")
+    a, b = _STRIP_TAGS.sub("", a_raw), _STRIP_TAGS.sub("", b_raw)
+    joined = should_join(a, b, morph, rule)
+    hyphen = "" if joined else "-"
+    stem = tail[: tail_match.start()] + a_raw + hyphen + tail_match.group("tail_tags")
+    text = stem + head_match.group("head_tags") + b_raw + head[head_match.end() :]
+    return BoundaryJoin(text, f"{a}-{b}", joined, len(stem))

@@ -12,6 +12,14 @@ from pathlib import Path
 import click
 
 from ocr_utils.external_ocr_services import models as registry
+from ocr_utils.external_ocr_services.assemble import (
+    JoinKind,
+    assemble_issue,
+    issue_pages,
+    list_issues,
+    log_assembly,
+    write_issue,
+)
 from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
 from ocr_utils.external_ocr_services.models import Reasoning
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions
@@ -66,6 +74,13 @@ def main(log_level: str) -> None:
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="Сырые ответы, промпты и отправленные тайлы.",
+)
+@click.option(
+    "--cache-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Кэш запросов: каждый запрос к модели — своя папка с промптами и ответом; тот же запрос второй раз "
+    "берётся с диска, а не из сети (README, «Кэш запросов»).",
 )
 @click.option(
     "--db",
@@ -153,6 +168,12 @@ def main(log_level: str) -> None:
 @click.option("--limit", type=int, default=None, help="Взять только первые N полос.")
 @click.option("--skip-done", is_flag=True, help="Не запрашивать полосы с готовым .json и тем же списком статей.")
 @click.option(
+    "--assemble/--no-assemble",
+    default=True,
+    show_default=True,
+    help="После каждого выпуска собирать его в один markdown ({год}/{выпуск}.md и .pages.json рядом с папкой полос).",
+)
+@click.option(
     "--on-missed-toc",
     type=click.Choice([mode.value for mode in OnMissedToc]),
     default=OnMissedToc.REDO.value,
@@ -172,6 +193,7 @@ def run(
     in_dir: Path,
     out_dir: Path,
     debug_dir: Path | None,
+    cache_dir: Path | None,
     db_path: Path | None,
     pack_name: str | None,
     toc_lists: Path | None,
@@ -193,6 +215,7 @@ def run(
     pages_file: Path | None,
     limit: int | None,
     skip_done: bool,
+    assemble: bool,
     on_missed_toc: str,
     redo_scope: str,
     api_key: str | None,
@@ -229,6 +252,7 @@ def run(
         max_tokens=max_tokens,
         source=source,
         debug_dir=debug_dir,
+        cache_dir=cache_dir,
         second_pass=second_pass,
         second_pass_transcript=second_pass_transcript,
         join_hyphens=join_hyphens,
@@ -241,6 +265,7 @@ def run(
         flags=flags,
         jobs=max(1, jobs),
         skip_done=skip_done,
+        assemble=assemble,
         on_missed_toc=OnMissedToc(on_missed_toc),
         redo_scope=RedoScope(redo_scope),
         pages_file=pages_file,
@@ -261,8 +286,8 @@ def run(
     # Итог прогона в терминал (то же есть в run.log): что запросили, что пропустили, почём.
     click.echo(
         f"Выпусков: {stats.issues}, полос: {stats.pages} (оглавление/указатель по базе: {stats.toc_pages}), "
-        f"запросов: {stats.requests}, готовых пропущено: {stats.reused}, сбоев: {stats.failed}, "
-        f"стоимость ${stats.cost_usd:.4f}."
+        f"запросов: {stats.requests}, готовых пропущено: {stats.reused}, из кэша запросов: {stats.cache_hits}, "
+        f"сбоев: {stats.failed}, стоимость ${stats.cost_usd:.4f}."
     )
     if second_pass:
         click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
@@ -272,6 +297,59 @@ def run(
         click.echo("В БАЗЕ ОГЛАВЛЕНИЕ, МОДЕЛЬ — НЕТ (см. demoted_toc.txt): " + "; ".join(stats.demoted_toc))
     if stats.redone_issues:
         click.echo("Перераспознаны: " + ", ".join(stats.redone_issues))
+
+
+@main.command("assemble")
+@click.option(
+    "--out-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Выход прогона run: {год}/{выпуск}/{полоса}.json; сюда же ложатся {год}/{выпуск}.md и .pages.json.",
+)
+@click.option("--only-year", default=None, help="Только этот годовой комплект.")
+@click.option("--only-issue", default=None, help="Только этот выпуск (имя папки).")
+@click.option(
+    "--join-hyphens/--no-join-hyphens",
+    default=True,
+    show_default=True,
+    help="Сшивать слова с переносом на границе полос по словарю pymorphy3.",
+)
+@click.option(
+    "--join-paragraphs/--no-join-paragraphs",
+    default=True,
+    show_default=True,
+    help="Сшивать оборванное на границе полос предложение в один абзац.",
+)
+@click.option("--log-level", default="INFO", show_default=True)
+def assemble_command(
+    out_dir: Path,
+    only_year: str | None,
+    only_issue: str | None,
+    join_hyphens: bool,
+    join_paragraphs: bool,
+    log_level: str,
+) -> None:
+    """Собрать выпуски в один markdown каждый из готовых .json полос — без запросов к модели."""
+    _setup_logging(out_dir, log_level)
+    keys = list_issues(out_dir, only_year, only_issue)
+    if not keys:
+        raise click.ClickException(f"в {out_dir} нет выпусков с готовыми .json полос")
+    # Каждый выпуск — по своим .json в порядке имён файлов; итоги в лог и в терминал одной строкой.
+    totals = {kind: 0 for kind in JoinKind}
+    missing = 0
+    for key in keys:
+        assembly = assemble_issue(
+            out_dir, key, issue_pages(out_dir, key), join_hyphens=join_hyphens, join_paragraphs_across=join_paragraphs
+        )
+        log_assembly(assembly, write_issue(out_dir, assembly))
+        for kind in JoinKind:
+            totals[kind] += assembly.count(kind)
+        missing += len(assembly.missing)
+    click.echo(
+        f"Выпусков собрано: {len(keys)}; переносов через границу: {totals[JoinKind.HYPHEN]} "
+        f"(составных {totals[JoinKind.COMPOUND]}, дублей половины {totals[JoinKind.DUPLICATE]}), "
+        f"абзацев сшито: {totals[JoinKind.PARAGRAPH]}, полос без результата: {missing}."
+    )
 
 
 @main.command("models")

@@ -10,6 +10,7 @@ from ocr_utils.external_ocr_services.hyphen_join import (
     Morph,
     MorphBackend,
     default_morph,
+    join_across_boundary,
     join_broken_hyphens,
     should_join,
 )
@@ -41,6 +42,39 @@ def test_rule_e_joins_breaks_and_keeps_compounds():
         should_join("кре", "диты", morph, JoinRule.E) is True
         and should_join("Мифи", "нанц", morph, JoinRule.E) is False
     )
+
+
+def test_tags_around_hyphen_and_line_break_inside_word():
+    morph = default_morph()
+    # Закрывающий тег между половиной и дефисом, тег вокруг первой половины, тег после дефиса:
+    # заменяется только дефис, теги остаются на своих местах.
+    cases = {
+        "<supplied>кре</supplied>-диты": "<supplied>кре</supplied>диты",
+        "кре-</supplied>диты": "кре</supplied>диты",
+        "<unclear>кре-</unclear><supplied>ди</supplied>ты": "<unclear>кре</unclear><supplied>ди</supplied>ты",
+        "за-\nдолженность": "задолженность",
+        "торгово-\nэкономических": "торгово-\nэкономических",
+    }
+    for source, expected in cases.items():
+        out, _ = join_broken_hyphens(source, morph)
+        assert out == expected, source
+
+
+def test_join_across_boundary_keeps_tags_and_compounds():
+    morph = default_morph()
+    joined = join_across_boundary("форму <supplied>снаб-</supplied>", "жения (транзитную).", morph)
+    assert joined is not None and joined.joined and joined.word == "снаб-жения"
+    assert joined.text == "форму <supplied>снаб</supplied>жения (транзитную)."
+    assert joined.text[joined.head_start :] == "жения (транзитную)."
+    joined = join_across_boundary("форму снаб-  ", "<unclear>жения</unclear> и", morph)
+    assert joined is not None and joined.text == "форму снаб<unclear>жения</unclear> и"
+    assert joined.text[joined.head_start :] == "<unclear>жения</unclear> и"
+    compound = join_across_boundary("связи торгово-", "экономических стран.", morph)
+    assert compound is not None and not compound.joined and compound.text == "связи торгово-экономических стран."
+    # Не слово с переносом: нет дефиса, голова с прописной, дефис после цифры.
+    assert join_across_boundary("связи торгово", "экономических", morph) is None
+    assert join_across_boundary("связи снаб-", "Жения", morph) is None
+    assert join_across_boundary("в 1966-", "1967 гг.", morph) is None
 
 
 def test_mawo_backend_is_optional():

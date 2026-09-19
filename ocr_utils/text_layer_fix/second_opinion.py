@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,37 @@ from ocr_utils.text_layer_fix.cache import load_page, save_page
 from ocr_utils.text_layer_fix.ocr import TABLE_KINDS, acceptable
 from ocr_utils.text_layer_fix.raster import page_raster, render_gray
 from ocr_utils.text_layer_fix.zones import rotate_crop
+
+
+# Латиница без единой кириллической буквы от этого числа букв — выдумка: в русском журнале
+# повёрнутый текст латиницей не встречается (на паке-1 66 таких «чтений» из 514 принятых:
+# «and special to», «THE PERSON NAMED IN»), а фильтр ``rotated_text`` считает только буквы без
+# кириллических двойников и такое пропускает.
+LATIN_ONLY_MIN_LETTERS = 3
+# Ряд одинаковых чисел («35 35 35 …», «8 8 8 8 8») — зацикливание; фильтр ``rotated_text``
+# смотрит только на токены с буквами.
+REPEAT_MIN_TOKENS = 5
+REPEAT_DISTINCT_SHARE = 0.5
+
+_LATIN = re.compile(r"[A-Za-z]")
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+
+
+def hallucination_reason(text: str) -> str | None:
+    """Почему ответ surya для слоя — выдумка, или ``None``.
+
+    Args:
+        text: Ответ surya после нормализации двойников (``surya.cyrillic``).
+
+    Returns:
+        Причина отказа или ``None``, если ответ похож на настоящий текст.
+    """
+    if len(_LATIN.findall(text)) >= LATIN_ONLY_MIN_LETTERS and not _CYRILLIC.search(text):
+        return "латиница без кириллицы"
+    tokens = text.split()
+    if len(tokens) >= REPEAT_MIN_TOKENS and len(set(tokens)) <= REPEAT_DISTINCT_SHARE * len(tokens):
+        return "повторяющиеся токены"
+    return None
 
 
 @dataclass
@@ -114,8 +146,12 @@ def revise(pages: list[tuple[Path, Path]], batch: int = surya.DEFAULT_BATCH) -> 
                 why,
             )
             if accepted:
-                stats.accepted += 1
                 text = surya.cyrillic(answer.text)
+                why_fake = hallucination_reason(text)
+                if why_fake:
+                    entry["surya_note"] = why_fake
+                    continue
+                stats.accepted += 1
                 ok, reason = acceptable(text, answer.confidence)
                 # У surya пороги свои: её 0.5–0.6 на курсивном бланке — верные чтения.
                 if not ok and answer.confidence >= surya.SURYA_MIN_CONFIDENCE and reason.startswith("уверенность"):

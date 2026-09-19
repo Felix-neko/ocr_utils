@@ -1,4 +1,3 @@
-
 from ocr_utils.geometry_regression.strokes import find_strokes, match_strokes, stroke_metrics
 from tests.ocr_utils.geometry_regression.synthetic import add_rules, binarize, text_page
 
