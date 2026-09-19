@@ -49,6 +49,7 @@ class CacheVerdict(StrEnum):
     OK = "ok"  # ответ разбирается как страница
     FORMAT_ECHO = "format_echo"  # ``{"type": "json_object"}`` вместо страницы — запрос повторён без режима
     GAP_RUNAWAY = "gap_runaway"  # модель зациклилась на «▒» до потолка токенов — запрос повторён в другом режиме
+    TRUNCATED = "truncated"  # ответ упёрся в потолок токенов (finish_reason length: цикл `\u00a0` и т. п.) — повтор в другом режиме
 
 
 @dataclass(frozen=True)

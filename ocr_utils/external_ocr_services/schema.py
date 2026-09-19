@@ -19,6 +19,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
+from ocr_utils.external_ocr_services.masking import HTML_TAGS, sanitize
 
 
 class Stage(StrEnum):
@@ -256,6 +257,9 @@ class PageResult:
     edge_words: list[dict] = field(default_factory=list)
     toc: TocPage | None = None
     messages: list[str] = field(default_factory=list)
+    # Что замаскировано в теле при разборе (masking.MaskReport.as_dict): чужие теги, невидимые символы,
+    # экранированные `*`/`_`; пусто — тело было чистым. Уходит в meta и summary.csv.
+    masked: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
         """Все поля как JSON (StrEnum сериализуются своими строковыми значениями); indent=1 — читаемый diff."""
@@ -647,8 +651,13 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         # Старое булево поле стенда — на случай, если модель ответила по памяти.
         toc_kind = TocKind.CONTENTS if payload.get("is_toc") else TocKind.NONE
     title_in_list = payload.get("title_in_list")
+    # Нормализация тегов и старых форматов, затем маскирование мусора (чужие теги, невидимые символы,
+    # одиночные `*`/`_`) — всё, что читается через parse_json_text, чистое; повтор ничего не меняет.
+    body = expand_gaps(modernize_illustrations(modernize_tags(normalize_tags(unspace_letters(body)))))
+    body, mask_report = sanitize(body, MARKDOWN_TAGS)
     return PageResult(
-        content_markdown=expand_gaps(modernize_illustrations(modernize_tags(normalize_tags(unspace_letters(body))))),
+        content_markdown=body,
+        masked=mask_report.as_dict(),
         page_number=_text_or_none(payload.get("page_number")),
         running_header=_text_or_none(payload.get("running_header")),
         running_footer=_text_or_none(payload.get("running_footer")),
@@ -786,6 +795,11 @@ def is_gap_runaway(text: str) -> bool:
 # Кириллические омоглифы латинских букв в именах тегов: модель пишет ``<тoc>`` / ``<тоc>`` / ``< toc>``
 # (1966/03 с. 93: 48 из 60 ответов), и тег перестаёт быть тегом.
 _HOMOGLYPHS = str.maketrans("аеорсухАЕОРСУХТт", "aeopcyxAEOPCYXTt")
+# Белый список для маскирования: свои теги разметки плюс HTML таблиц; всё остальное в угловых скобках
+# после нормализации — мусор модели (`<a>`, `<span>`), маскируется в `&lt;…&gt;`.
+MARKDOWN_TAGS = (
+    frozenset(tag.value for enum in (DamageTag, StructureTag, BlockTag) for tag in enum) | {FORMULA_TAG} | HTML_TAGS
+)
 _KNOWN_TAGS = (
     {tag.value for enum in (DamageTag, StructureTag, BlockTag) for tag in enum}
     | {FORMULA_TAG}

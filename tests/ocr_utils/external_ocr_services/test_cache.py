@@ -156,3 +156,37 @@ def test_network_error_is_not_cached_but_logged(tmp_path):
     ok = FakeClient(lambda p: _answer())
     meta2, result2 = recognize_page(ok, spec, tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", options)
     assert result2 is not None and meta2["cache_hit"] is False and len(ok.payloads) == 1
+
+
+def test_truncated_response_goes_to_next_mode_even_from_cache(tmp_path):
+    """Ответ с finish_reason length (цикл до потолка токенов) — повтор в следующем режиме; вердикт
+    пересчитывается и для записи кэша, так что старая запись «ok» с оборванным текстом не зацикливает полосу."""
+    from ocr_utils.external_ocr_services.client import ChatResponse
+
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0002.jpg"
+    spec = resolve("deepseek-v41-flash")
+    truncated = '{"content_markdown": "текст \\u00a0\\u00a0\\u00a0\\u00a0\\u'
+    answers = [truncated, _answer()]
+
+    class LengthClient(FakeClient):
+        def chat(self, payload):
+            response = super().chat(payload)
+            if response.text == truncated:
+                response.finish_reason = "length"
+            return response
+
+    fake = LengthClient(lambda p: answers.pop(0))
+    options = RunOptions(cache_dir=tmp_path / "cache")
+    meta, result = recognize_page(fake, spec, tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", options)
+    assert result is not None and meta["json_mode_used"] == "none" and len(fake.payloads) == 2
+    assert meta["fallbacks"][0]["error"] == "ответ оборван по потолку токенов"
+    entries = {p.name.split(".")[1]: p for p in (tmp_path / "cache" / ISSUE / "IMG_0002").iterdir()}
+    stored = json.loads((entries["json_object"] / RESPONSE_FILE).read_text(encoding="utf-8"))
+    assert stored["verdict"] == CacheVerdict.TRUNCATED
+    # Запись помечена «ok» (старый формат), но finish_reason length — при повторе всё равно уходит дальше по цепочке.
+    stored["verdict"] = "ok"
+    (entries["json_object"] / RESPONSE_FILE).write_text(json.dumps(stored), encoding="utf-8")
+    again = FakeClient(lambda p: (_ for _ in ()).throw(AssertionError("оба ответа в кэше")))
+    meta2, result2 = recognize_page(again, spec, tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", options)
+    assert result2 is not None and meta2["cache_hit"] is True and meta2["json_mode_used"] == "none"

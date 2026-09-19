@@ -568,21 +568,27 @@ def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], 
         paths.raw.write_text(raw, encoding="utf-8")
 
 
-def _verdict(json_mode: JsonMode, text: str) -> CacheVerdict:
-    """Годен ли ответ или цепочка откатов идёт дальше: эхо ``response_format``, цикл заполнителя.
+def _verdict(json_mode: JsonMode, response: ChatResponse) -> CacheVerdict:
+    """Годен ли ответ или цепочка откатов идёт дальше: эхо ``response_format``, цикл заполнителя, обрыв.
 
     Без режима JSON повторять уже не в чем, поэтому такие ответы считаются годными и идут в разбор.
+    Обрыв (``finish_reason == "length"``): модель упёрлась в потолок токенов — обычно зацикленный
+    повтор (1974/08 IMG_0082_1L: `\u00a0` до потолка, JSON оборван на середине escape); при
+    ``temperature 0`` тот же режим даст тот же цикл, повтор идёт в следующем режиме. Вердикт
+    считается заново и для ответа из кэша — записанный при сохранении только справочный.
 
     Args:
         json_mode: Режим JSON попытки, давшей ответ.
-        text: Сырой текст ответа.
+        response: Ответ модели (текст и причина остановки).
     """
     if json_mode is JsonMode.NONE:
         return CacheVerdict.OK
-    if is_format_echo(text):
+    if is_format_echo(response.text):
         return CacheVerdict.FORMAT_ECHO
-    if is_gap_runaway(text):
+    if is_gap_runaway(response.text):
         return CacheVerdict.GAP_RUNAWAY
+    if response.finish_reason == "length":
+        return CacheVerdict.TRUNCATED
     return CacheVerdict.OK
 
 
@@ -618,7 +624,7 @@ def _chat_cached(
     """
     if options.cache_dir is None:
         response = client.chat(payload)
-        return response, _verdict(json_mode, response.text)
+        return response, _verdict(json_mode, response)
     cache = cache_for(options.cache_dir)
     key = request_key(payload)
     entry = entry_dir(options.cache_dir, job.rel, job.stage.value, json_mode.value, key, job.second_pass is not None)
@@ -627,14 +633,14 @@ def _chat_cached(
     if cached is not None:
         meta["cache_hit"] = True
         logger.info("%s [%s]: ответ из кэша %s (%s)", job.rel, job.stage, entry.name, cached.verdict)
-        return cached.response, cached.verdict
+        return cached.response, _verdict(json_mode, cached.response)
     meta["cache_hit"] = False
     try:
         response = client.chat(payload)
     except OpenRouterError as error:
         cache.record_error(entry, str(error), error.body)
         raise
-    verdict = _verdict(json_mode, response.text)
+    verdict = _verdict(json_mode, response)
     request_info = {
         "page": job.rel.as_posix(),
         "stage": job.stage.value,
@@ -764,6 +770,17 @@ def recognize_page(
                 "%s %s: ответ зациклился на заполнителе <gap>, повторяю без режима %s", spec.name, job.rel, json_mode
             )
             continue
+        # Ответ упёрся в потолок токенов (finish_reason length) — JSON оборван, обычно из-за цикла;
+        # повтор в следующем режиме, как и при цикле заполнителя.
+        if verdict is CacheVerdict.TRUNCATED:
+            meta.setdefault("fallbacks", []).append(
+                {"json_mode": json_mode, "error": "ответ оборван по потолку токенов"}
+            )
+            meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
+            logger.warning(
+                "%s %s: ответ оборван по потолку токенов, повторяю без режима %s", spec.name, job.rel, json_mode
+            )
+            continue
         break
     meta["reasoning_sent"] = not skip_reasoning
     meta["seconds"] = round(time.monotonic() - started, 2)  # с тайлами и всеми повторами, в отличие от latency_s
@@ -799,6 +816,8 @@ def recognize_page(
         paths.raw.write_text(response.text, encoding="utf-8")
         write_meta(paths.meta, meta)
         return meta, None
+    if result.masked:  # мусор модели, замаскированный при разборе (masking.py) — для сводки
+        meta["masked"] = result.masked
     if result.edge_words:
         # Продолжение переноса, объявленное «восстановленным» («ва-» → «ва<supplied>л</supplied>ютных»),
         # — не повреждение: тег снимается, буквы остаются.
