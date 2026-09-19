@@ -91,15 +91,15 @@ def test_ensure_toc_block_wraps_entries_once():
 
     body = (
         "# Материально-техническое снабжение\n\nОРГАН ГОСКОМИТЕТА\n\n# СОДЕРЖАНИЕ\n\n"
-        "<rubric-in-toc>*РЕШЕНИЯ СЪЕЗДА*</rubric-in-toc>\n\n"
+        "<rubricintoc>*РЕШЕНИЯ СЪЕЗДА*</rubricintoc>\n\n"
         "<author>**Христораднов Ю.**</author>. Большие задачи — 3\n\n"
-        "<rubric-in-toc>*ПРОБЛЕМЫ*</rubric-in-toc>\n\n"
+        "<rubricintoc>*ПРОБЛЕМЫ*</rubricintoc>\n\n"
         "- <author>**Колмаков С.**</author>. Система показателей — 11\n\n"
         "Редакционная коллегия: …\n"
     )
     out, wrapped = ensure_toc_block(body)
     assert wrapped
-    assert out.split("\n\n")[3:5] == ["<toc>", "<rubric-in-toc>*РЕШЕНИЯ СЪЕЗДА*</rubric-in-toc>"]
+    assert out.split("\n\n")[3:5] == ["<toc>", "<rubricintoc>*РЕШЕНИЯ СЪЕЗДА*</rubricintoc>"]
     assert "Система показателей — 11\n\n</toc>\n\nРедакционная коллегия" in out
     assert ensure_toc_block(out) == (out, False)
     assert ensure_toc_block("Обычный текст.\n") == ("Обычный текст.\n", False)
@@ -136,7 +136,7 @@ def test_parse_toc_block_entries_and_rubrics():
 
     body = (
         "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги — 1\n\n"
-        "<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n"
+        "<rubricintoc>*ОПЫТ РАБОТЫ*</rubricintoc>\n\n"
         "- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
         "- Семинар по совершенствованию — № 3, 92\n- Указатель — № 12, с. 94\n- В указателе — 5, 49\n"
         "- Информация — №№ 1, 2, 4\n- Новые книги № 1, с. 28; № 2, с. 20\n\nЛишний абзац.\n\n</toc>\n\nРедколлегия.\n"
@@ -169,7 +169,7 @@ def test_reconcile_toc_body_without_entries_is_rebuilt():
     """Тело с одними рубриками при 3 статьях в toc → все три «не было в теле», блок построен по toc."""
     from ocr_utils.external_ocr_services.toc import reconcile_toc
 
-    lost = "# СОДЕРЖАНИЕ\n\n<toc>\n\n<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n</toc>\n\nРедколлегия.\n"
+    lost = "# СОДЕРЖАНИЕ\n\n<toc>\n\n<rubricintoc>*ОПЫТ РАБОТЫ*</rubricintoc>\n\n</toc>\n\nРедколлегия.\n"
     body, page, check = reconcile_toc(lost, _page())
     assert check.rebuilt and len(check.missing_in_body) == 3 and check.missing_in_toc == []
     assert "в теле не было 3 статей из toc" in check.message() and "построен заново" in check.message()
@@ -177,7 +177,7 @@ def test_reconcile_toc_body_without_entries_is_rebuilt():
         "# СОДЕРЖАНИЕ\n\n<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги работы по-новому — 1\n\n"
     )
     assert (
-        "<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        "<rubricintoc>*ОПЫТ РАБОТЫ*</rubricintoc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
         in body
     )
     assert body.endswith("— 63\n\n</toc>\n\nРедколлегия.\n") and sum(len(s.articles) for s in page.sections) == 3
@@ -189,7 +189,7 @@ def test_reconcile_toc_extra_body_entry_goes_to_toc_section():
 
     body = (
         "<toc>\n\n- <author>**В. Тычинин**</author>. Первые шаги работы по-новому — 1\n\n"
-        "<rubric-in-toc>*Опыт работы*</rubric-in-toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
+        "<rubricintoc>*Опыт работы*</rubricintoc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n"
         "- <author>**С. Финкель**</author>. Затраты и рентабельность — 63\n"
         "- <author>**П. Шейн**</author>. Планирование потребности — 76\n\n</toc>\n"
     )
@@ -211,7 +211,7 @@ def test_reconcile_toc_matching_bodies_untouched():
 
     body = (
         "<toc>\n\n<author>**В. Тычинин**</author>. первые шаги работы\nпо-новому — 1\n\n"
-        "<rubric-in-toc>*ОПЫТ РАБОТЫ*</rubric-in-toc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n\n"
+        "<rubricintoc>*ОПЫТ РАБОТЫ*</rubricintoc>\n\n- <author>**И. Комаровский, М. Кругман**</author>. Развивать связи — 37\n\n"
         "- <author>**С. Финкель**</author>. ЗАТРАТЫ И РЕНТАБЕЛЬНОСТЬ — 63\n\n</toc>\n"
     )
     out, page, check = reconcile_toc(body, _page())

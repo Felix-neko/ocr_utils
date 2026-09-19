@@ -339,6 +339,22 @@ def test_ask_without_tty_behaves_like_skip(tmp_path, monkeypatch):
     assert stats.missed and not stats.redone_issues and (params.out_dir / "missed_toc.txt").is_file()
 
 
+def test_page_from_older_prompt_is_not_done(tmp_path):
+    """Полоса, распознанная промптом другой версии, устарела — --skip-done её не пропускает."""
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0002.jpg"
+    fake = FakeClient(lambda p: _answer())
+    recognize_page(
+        fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", RunOptions()
+    )
+    assert is_done(tmp_path / "out", PageJob(rel))
+    meta_path = tmp_path / "out" / ISSUE / "IMG_0002.meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["prompt_version"] = meta["prompt_version"] - 1
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert not is_done(tmp_path / "out", PageJob(rel))
+
+
 def test_request_and_parse_failures_are_not_done(tmp_path):
     _make_pages(tmp_path / "in")
     rel = Path(ISSUE) / "IMG_0002.jpg"

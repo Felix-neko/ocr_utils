@@ -471,7 +471,7 @@ def read_meta(out_dir: Path, rel: Path) -> dict | None:
 
 
 def is_done(out_dir: Path, job: PageJob) -> bool:
-    """Сделано = .json на месте, .meta.json без ошибки, тот же этап и тот же отпечаток списков.
+    """Сделано = .json на месте, .meta.json без ошибки, та же версия промпта, тот же этап и тот же отпечаток списков.
 
     Args:
         out_dir: Корень выхода.
@@ -486,6 +486,10 @@ def is_done(out_dir: Path, job: PageJob) -> bool:
         return False
     paths = output_paths(out_dir, job.rel)
     if not paths.json.is_file():
+        return False
+    # Полоса, распознанная промптом другой версии, устарела: разметка и теги могли измениться
+    # (v18: <rubricintoc>, рубрика только напечатанная); кэш запросов её всё равно не найдёт.
+    if meta.get("prompt_version") != PROMPT_VERSION:
         return False
     # Понижённая полоса: финальные файлы — от этапа page, а её ответ этапа toc лежит рядом в
     # .toc.json; для задания toc это «сделано», результат читает load_result из .toc.json.
@@ -827,7 +831,12 @@ def recognize_page(
         # с полос-продолжений снимаются, рубрики подтягиваются к `#`, чужие — в <marker>.
         titles = [article["title"] for article in job.articles if article.get("title")]
         result.content_markdown, report = structure.apply(
-            result.content_markdown, [dict(article) for article in job.articles], list(job.rubrics), result.authors
+            result.content_markdown,
+            [dict(article) for article in job.articles],
+            list(job.rubrics),
+            result.authors,
+            result.running_header,
+            result.running_footer,
         )
         meta["structure"] = report.as_dict()  # что именно доводка переставила — для проверки глазами
         # title_in_list модель проставляет сама; при непустом списке вердикт кода точнее.

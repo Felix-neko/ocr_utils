@@ -16,7 +16,7 @@ def test_toc_stage_prompt():
         1, 1, 1, stage="toc", toc_kind="index"
     )
     assert "two are independent transcriptions" in text, "тело не сокращать из-за объекта toc (v13)"
-    assert "<rubric-in-toc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubric-in-toc>" in text
+    assert "<rubricintoc>*ОПЫТ РАБОТЫ ТЕРРИТОРИАЛЬНЫХ УПРАВЛЕНИЙ*</rubricintoc>" in text
     assert "never shortened" in text and "`<rubric>*ОПЫТ РАБОТЫ*</rubric>`" not in text
     for old in ("<restored>", "<fuzzy>", "<unknown/>", "[картинка"):
         assert old not in text, old
@@ -24,7 +24,15 @@ def test_toc_stage_prompt():
     # имена тегов без подчёркиваний; сноски — в теге.
     for piece in ("[блок-схема]", "[фотография]", "[графика]", "<footnote>[^1]:", "ось X", "ось Y", "```"):
         assert piece in text, piece
-    for old in ("<schema>", "<photo>", "<line_art>", "<rubric_in_toc>", "> [", "block quote wrapped"):
+    for old in (
+        "<schema>",
+        "<photo>",
+        "<line_art>",
+        "<rubric_in_toc>",
+        "<rubric-in-toc>",
+        "> [",
+        "block quote wrapped",
+    ):
         assert old not in text, old
     # Нет напечатанного номера страницы — не повреждение (v15).
     assert "NOT damage" in text and "null when no page number is printed" in text

@@ -38,9 +38,10 @@ class StructureReport:
         dropped_authors: Имена из колонтитула на полосе-продолжении, убранные из тела.
         rubrics_from_headings: Тексты ``##`` перед ``#``, оказавшиеся рубриками из списка и ставшие ``<rubric>``.
         moved_rubrics: Рубрики (и маркеры с текстом рубрики), перенесённые к ``#`` своей статьи.
-        rubrics_from_toc: Рубрики, вставленные перед ``#`` из оглавления, потому что на полосе их не было.
         rubrics_replaced: Напечатанные варианты, заменённые рубрикой из оглавления (сами стали ``<marker>``).
         markers_from_rubrics: Тексты ``<rubric>`` не из оглавления, перетегированные в ``<marker>``.
+        header_rubrics_dropped: ``<rubric>``/``<marker>`` с текстом колонтитула полосы, убранные из тела
+            (рубрика напечатана только в колонтитуле; она остаётся в поле ``running_header``).
         markers: Сколько ``<marker>`` в итоге (и от модели, и от пост-обработки).
         dropped_headings: ``##`` в начале полосы-продолжения с названием из списка — утечка промпта, убраны.
         wrapped_math: Сколько формул в голых долларах обёрнуто в ``<latex>``.
@@ -52,9 +53,9 @@ class StructureReport:
     dropped_authors: list[str] = field(default_factory=list)
     rubrics_from_headings: list[str] = field(default_factory=list)
     moved_rubrics: list[str] = field(default_factory=list)
-    rubrics_from_toc: list[str] = field(default_factory=list)
     rubrics_replaced: list[str] = field(default_factory=list)
     markers_from_rubrics: list[str] = field(default_factory=list)
+    header_rubrics_dropped: list[str] = field(default_factory=list)
     markers: int = 0
     dropped_headings: list[str] = field(default_factory=list)
     wrapped_math: int = 0
@@ -68,9 +69,9 @@ class StructureReport:
             "dropped_authors": self.dropped_authors,
             "rubrics_from_headings": self.rubrics_from_headings,
             "moved_rubrics": self.moved_rubrics,
-            "rubrics_from_toc": self.rubrics_from_toc,
             "rubrics_replaced": self.rubrics_replaced,
             "markers_from_rubrics": self.markers_from_rubrics,
+            "header_rubrics_dropped": self.header_rubrics_dropped,
             "markers": self.markers,
             "dropped_headings": self.dropped_headings,
             "wrapped_math": self.wrapped_math,
@@ -342,9 +343,9 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
     * `<rubric>` с текстом не из оглавления → `<marker>` на месте (страховка от промпта);
     * `<rubric>` из оглавления не перед `#` → переносится перед `#` статьи с той же рубрикой на
       этой полосе; такой статьи нет (продолжение) → `<marker>` на месте;
-    * перед `#` с известной рубрикой нет тега → вставляется из оглавления; тег есть, но текст
-      другой → заменяется рубрикой оглавления, напечатанный вариант остаётся `<marker>`-ом
-      сразу после `#`.
+    * перед `#` с известной рубрикой тег есть, но текст другой → заменяется рубрикой оглавления,
+      напечатанный вариант остаётся `<marker>`-ом сразу после `#`; тега и маркера нет — рубрика
+      не напечатана, ничего не вставляется (рубрика статьи известна из toc.json).
     Без списка статей ничего не меняется.
 
     Args:
@@ -413,9 +414,9 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
                     index -= 1
                 paragraphs.insert(index, _rubric_tag(text))
                 report.moved_rubrics.append(text)
-            else:
-                paragraphs.insert(index, _rubric_tag(rubric))
-                report.rubrics_from_toc.append(rubric)
+            # Ни тега, ни маркера с текстом рубрики на полосе нет — рубрика не напечатана, ничего не
+            # вставляется: до 19.09.2026 сюда подставлялась рубрика из оглавления, и `<rubric>`
+            # вставал над каждой статьёй (0120_1L 1976/12); рубрика статьи и так есть в toc.json.
         elif not title_matches(match.group(1), [rubric]):
             printed = match.group(1)
             paragraphs[index - 1] = _rubric_tag(rubric)
@@ -490,7 +491,40 @@ def _wrap_segment(text: str, report: StructureReport) -> str:
     return _BARE_MATH.sub(rf"<{FORMULA_TAG}>\g<0></{FORMULA_TAG}>", text)
 
 
-def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) -> tuple[str, StructureReport]:
+def drop_header_rubrics(body: str, headers: list[str | None], report: StructureReport) -> str:
+    """Убрать `<rubric>`/`<marker>` с текстом колонтитула: рубрика напечатана только в колонтитуле.
+
+    В МТС рубрика на полосе-начале статьи часто стоит только курсивом в колонтитуле («Проблемы,
+    суждения, поиск» над заголовком, 0190_1L 1976/12); модель кладёт её и в ``running_header``, и
+    тегом в тело — тогда `<rubric>` встаёт над статьёй без напечатанной рубрики. Настоящая шапка
+    рубрики (крупная, с буквицей, 0070_2R) в колонтитул не попадает, её тег остаётся.
+
+    Args:
+        body: Тело полосы.
+        headers: ``running_header`` и ``running_footer`` ответа (``None`` — нет).
+        report: Отчёт — убранные тексты в ``header_rubrics_dropped``.
+    """
+    names = [normalize_title(header) for header in headers if header]
+    if not names:
+        return body
+    kept = []
+    for paragraph in paragraphs_of(body):
+        match = _RUBRIC.match(paragraph) or _MARKER_TEXT.match(paragraph)
+        if match is not None and normalize_title(match.group(1)) in names:
+            report.header_rubrics_dropped.append(match.group(1))
+            continue
+        kept.append(paragraph)
+    return join_paragraphs(kept)
+
+
+def apply(
+    body: str,
+    articles: list,
+    rubrics: list[str],
+    authors: list[dict],
+    running_header: str | None = None,
+    running_footer: str | None = None,
+) -> tuple[str, StructureReport]:
     """Все правки по порядку: рубрики из `##`, понижение `#`, расстановка авторов, рубрики по оглавлению.
 
     Порядок шагов важен: каждый следующий опирается на то, что предыдущий уже привёл в норму.
@@ -500,6 +534,8 @@ def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) ->
         articles: Статьи оглавления ``[{"title", "authors", "rubric"}]`` или просто названия строками.
         rubrics: Рубрики «Содержания» выпуска.
         authors: Поле ``authors`` ответа модели — привязка подписей к статьям и место печати.
+        running_header: Колонтитул сверху из ответа модели — тег с его текстом из тела убирается.
+        running_footer: Колонтитул снизу — то же.
 
     Returns:
         ``(тело после всех правок, отчёт)``; отчёт уходит в ``meta["structure"]``, а его
@@ -525,6 +561,7 @@ def apply(body: str, articles: list, rubrics: list[str], authors: list[dict]) ->
     body = place_authors(body, authors, report)
     # 5. Рубрики по оглавлению: маркер, напечатанный где угодно на полосе, подтягивается к `#`
     #    своей статьи; недостающая вставляется из списка; рубрика не из списка → `<marker>`.
+    body = drop_header_rubrics(body, [running_header, running_footer], report)
     body = place_rubrics(body, articles, report, rubrics)
     # 6. Формулы в голых долларах → `<latex>…</latex>`; последним, чтобы не трогать теги,
     #    расставленные выше, и не ловить доллары внутри уже обёрнутых формул.

@@ -125,9 +125,9 @@ def test_apply_all_and_report():
         "dropped_authors": [],
         "rubrics_from_headings": [],
         "moved_rubrics": [],
-        "rubrics_from_toc": [],
         "rubrics_replaced": [],
         "markers_from_rubrics": [],
+        "header_rubrics_dropped": [],
         "markers": 0,
         "dropped_headings": [],
         "wrapped_math": 0,
@@ -159,26 +159,23 @@ def test_rubric_marker_at_page_bottom_moves_before_its_heading():
     report = StructureReport()
     out = place_rubrics(body, ARTICLES, report, RUBRICS)
     assert out == "<rubric>*Экономика и право*</rubric>\n\n# Как бороться с рыночной стихией?\n\nТекст.\n\nЕщё текст.\n"
-    assert report.moved_rubrics == ["Экономика и право"] and not report.rubrics_from_toc
+    assert report.moved_rubrics == ["Экономика и право"]
     assert place_rubrics(out, ARTICLES, StructureReport(), RUBRICS) == out, "идемпотентно"
 
 
-def test_rubric_inserted_from_toc_and_printed_variant_replaced():
+def test_rubric_not_inserted_when_not_printed_and_printed_variant_replaced():
+    """Рубрика не напечатана (ни тега, ни маркера) — ничего не вставляется: до 19.09.2026 рубрика из
+    оглавления вставала над каждой статьёй (0120_1L 1976/12)."""
     body = "# Собственность и оплата труда\n\nТекст.\n"
     report = StructureReport()
     out = place_rubrics(body, ARTICLES, report, RUBRICS)
-    assert out.startswith("<rubric>*Проблемы и суждения*</rubric>\n\n# Собственность")
-    assert report.rubrics_from_toc == ["Проблемы и суждения"]
+    assert out == body and "rubrics_from_toc" not in report.as_dict()
     # Напечатанный маркер не той рубрики: остаётся маркером на месте, а рубрика статьи приходит из оглавления.
     printed = "<rubric>*Проблемы и суждения*</rubric>\n\n# Как бороться с рыночной стихией?\n\nТекст.\n"
     report = StructureReport()
     out = place_rubrics(printed, ARTICLES, report, RUBRICS)
-    assert out.split("\n\n")[:3] == [
-        "<marker>*Проблемы и суждения*</marker>",
-        "<rubric>*Экономика и право*</rubric>",
-        "# Как бороться с рыночной стихией?",
-    ]
-    assert report.markers_from_rubrics == ["Проблемы и суждения"] and report.rubrics_from_toc == ["Экономика и право"]
+    assert out.split("\n\n")[:2] == ["<marker>*Проблемы и суждения*</marker>", "# Как бороться с рыночной стихией?"]
+    assert report.markers_from_rubrics == ["Проблемы и суждения"] and "Экономика и право" not in out
 
 
 def test_rubric_on_continuation_page_and_unknown_rubric_become_markers():
@@ -206,8 +203,9 @@ def test_two_articles_on_page_get_their_own_rubrics():
     out = place_rubrics(body, ARTICLES, report, RUBRICS)
     parts = out.split("\n\n")
     assert parts[0] == "<rubric>*Экономика и право*</rubric>" and parts[1].startswith("# Как бороться")
-    assert parts[3] == "<rubric>*Проблемы и суждения*</rubric>" and parts[4].startswith("# Собственность")
-    assert report.moved_rubrics == ["Экономика и право"] and report.rubrics_from_toc == ["Проблемы и суждения"]
+    # У второй статьи рубрика не напечатана — тег не вставляется.
+    assert parts[3].startswith("# Собственность") and "Проблемы и суждения" not in out
+    assert report.moved_rubrics == ["Экономика и право"]
 
 
 def test_marker_with_toc_rubric_text_becomes_the_rubric():
@@ -215,7 +213,7 @@ def test_marker_with_toc_rubric_text_becomes_the_rubric():
     report = StructureReport()
     out = place_rubrics(body, ARTICLES, report, RUBRICS)
     assert out == "<rubric>*Проблемы и суждения*</rubric>\n\n# Собственность и оплата труда\n\nТекст.\n"
-    assert report.moved_rubrics == ["Проблемы и суждения"] and not report.rubrics_from_toc and "<marker>" not in out
+    assert report.moved_rubrics == ["Проблемы и суждения"] and "<marker>" not in out
 
 
 def test_leaked_title_on_continuation_page_is_dropped():
@@ -264,5 +262,23 @@ def test_fenced_illustration_block_is_one_paragraph():
         "```\n[графика]\nсхема\n\nнадпись: А\n```\n\n# Фильм о снабжении\n\n<author>**И. Иванов**</author>\n\nТекст.\n"
     )
     assert paragraphs_of(body)[0] == "```\n[графика]\nсхема\n\nнадпись: А\n```"
-    out, _ = apply(body, [{"title": "Фильм о снабжении", "rubric": "Кино"}], ["Кино"], [])
+    body_with_marker = "<marker>*Кино*</marker>\n\n" + body
+    out, _ = apply(body_with_marker, [{"title": "Фильм о снабжении", "rubric": "Кино"}], ["Кино"], [])
     assert out.startswith("```\n[графика]\nсхема\n\nнадпись: А\n```\n\n<rubric>*Кино*</rubric>\n\n# Фильм о снабжении")
+
+
+def test_rubric_equal_to_running_header_is_dropped():
+    """Рубрика только в колонтитуле (0190_1L 1976/12): модель пишет её и в running_header, и тегом в тело."""
+    from ocr_utils.external_ocr_services.structure import drop_header_rubrics
+
+    body = "<rubric>*ПРОБЛЕМЫ И СУЖДЕНИЯ*</rubric>\n\n# Собственность и оплата труда\n\nТекст.\n"
+    out, report = apply(body, ARTICLES, RUBRICS, [], running_header="Проблемы и суждения")
+    assert out == "# Собственность и оплата труда\n\nТекст.\n" and report.header_rubrics_dropped == [
+        "ПРОБЛЕМЫ И СУЖДЕНИЯ"
+    ]
+    # Маркер с текстом колонтитула снизу — тоже; без колонтитулов и при другом тексте — не трогается.
+    marker = "# Собственность и оплата труда\n\nТекст.\n\n<marker>*Информация*</marker>\n"
+    report = StructureReport()
+    assert drop_header_rubrics(marker, [None, "Информация"], report) == "# Собственность и оплата труда\n\nТекст.\n"
+    assert drop_header_rubrics(body, [None, None], StructureReport()) == body
+    assert drop_header_rubrics(body, ["Письма читателей", None], StructureReport()) == body

@@ -184,3 +184,39 @@ def test_assemble_command_lists_issues_and_writes_files(tmp_path):
     # голова строчная, а дефис остаётся как есть).
     result = CliRunner().invoke(cli.main, ["assemble", "--out-dir", str(tmp_path), "--no-join-hyphens"])
     assert result.exit_code == 0 and "снаб- жения" in (tmp_path / "1966" / "03.md").read_text(encoding="utf-8")
+
+
+def test_author_tags_spaced_and_offsets_kept(tmp_path):
+    """Одинарные переводы у тегов автора удваиваются в тексте выпуска, смещения полос остаются верными."""
+    _page(
+        tmp_path,
+        "IMG_0001",
+        "# Статья\n\n<author>**И. Иванов**</author>\n<position>*инженер*</position>\n\nТекст без точки",
+    )
+    _page(tmp_path, "IMG_0002", "продолжение.\n<author>**П. Петров**</author>\nещё текст.")
+    assembly = _assemble(tmp_path)
+    assert (
+        "# Статья\n\n<author>**И. Иванов**</author>\n\n<position>*инженер*</position>\n\nТекст без точки продолжение."
+        in assembly.text
+    )
+    assert assembly.text.endswith("продолжение.\n\n<author>**П. Петров**</author>\n\nещё текст.\n")
+    assert _page_text(assembly, 1).startswith("продолжение.")
+
+
+def test_repeated_rubric_dropped_but_alternation_kept(tmp_path):
+    """Одинаковая <rubric> подряд (через контент) убирается, начало полосы переезжает на следующий блок; A → B → A остаётся."""
+    _page(tmp_path, "IMG_0001", "<rubric>*ОПЫТ РАБОТЫ*</rubric>\n\n# Первая\n\nТекст первой.")
+    _page(tmp_path, "IMG_0002", "<rubric>*Опыт работы*</rubric>\n\n# Вторая\n\nТекст второй.")
+    _page(tmp_path, "IMG_0003", "<rubric>*ПИСЬМА*</rubric>\n\n# Третья\n\nТекст третьей.")
+    _page(tmp_path, "IMG_0004", "<rubric>*ОПЫТ РАБОТЫ*</rubric>\n\n# Четвёртая\n\nТекст.")
+    assembly = _assemble(tmp_path)
+    text = assembly.text
+    assert text.count("<rubric>") == 3 and "Текст первой.\n\n# Вторая" in text, "повтор через контент убран"
+    assert "<rubric>*ПИСЬМА*</rubric>\n\n# Третья" in text and text.endswith(
+        "<rubric>*ОПЫТ РАБОТЫ*</rubric>\n\n# Четвёртая\n\nТекст.\n"
+    )
+    assert assembly.repeated_rubrics == [{"rubric": "Опыт работы", "page": "1966/03/IMG_0002"}]
+    assert _page_text(assembly, 1).startswith("# Вторая") and _page_text(assembly, 3).startswith(
+        "<rubric>*ОПЫТ РАБОТЫ*"
+    )
+    assert assembly.as_dict()["repeated_rubrics"] == assembly.repeated_rubrics

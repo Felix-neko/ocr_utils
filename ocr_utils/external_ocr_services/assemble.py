@@ -44,9 +44,10 @@ from ocr_utils.external_ocr_services.boundary import (
 )
 from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, default_morph
 from ocr_utils.external_ocr_services.ocr import output_paths, read_meta
-from ocr_utils.external_ocr_services.render import _yaml_value
+from ocr_utils.external_ocr_services.render import _yaml_value, space_author_tags
 from ocr_utils.external_ocr_services.schema import BlockTag, DamageTag, ParseError, Stage, StructureTag, parse_json_text
-from ocr_utils.external_ocr_services.structure import join_paragraphs, paragraphs_of
+from ocr_utils.external_ocr_services.structure import _RUBRIC, join_paragraphs, paragraphs_of
+from ocr_utils.external_ocr_services.toc import normalize_title
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ class IssueAssembly:
     joins: list[JoinRecord] = field(default_factory=list)
     missing: list[dict] = field(default_factory=list)  # {"file", "reason"}
     checked: CheckerStats = field(default_factory=CheckerStats)  # запросы к модели по стыкам этого выпуска
+    repeated_rubrics: list[dict] = field(default_factory=list)  # убранные повторы <rubric>: {"rubric", "page"}
 
     def count(self, kind: JoinKind) -> int:
         """Сколько склеек данного вида.
@@ -143,6 +145,7 @@ class IssueAssembly:
             "missing": self.missing,
             "counts": {kind.value: self.count(kind) for kind in JoinKind},
             "checked": vars(self.checked),
+            "repeated_rubrics": self.repeated_rubrics,
         }
 
 
@@ -389,18 +392,83 @@ def assemble_issue(
     if checker is not None and result.seams:
         verdicts = checker.check_issue(issue_key, result.seams)
         result = _assemble_pass(bodies, morph, rule, join_paragraphs_across, False, verdicts)
+    repeated = drop_repeated_rubrics(result)
     header = _header(issue_key, len(result.pages), len(result.missing))
-    body = join_paragraphs([block.text for block in result.blocks]) if result.blocks else ""
+    # Переводы строк у тегов автора удваиваются в самом конце — по ним же режется на абзацы выше.
+    texts = [space_author_tags(block.text) for block in result.blocks]
+    body = join_paragraphs(texts) if texts else ""
     text = header + body
-    # Смещения: накопленная длина абзацев до нужного плюс смещение внутри него.
+    # Смещения: накопленная длина абзацев до нужного плюс смещение внутри него (внутреннее —
+    # по тому же преобразованию префикса блока, чтобы удвоения перед головой учлись).
     offsets = [len(header)]
-    for block in result.blocks:
-        offsets.append(offsets[-1] + len(block.text) + 2)  # «\n\n» между абзацами
+    for block_text in texts:
+        offsets.append(offsets[-1] + len(block_text) + 2)  # «\n\n» между абзацами
     for entry, (index, inner) in zip(result.pages, result.starts):
-        entry.offset = offsets[index] + inner if index < len(result.blocks) else len(text)
+        if index < len(result.blocks):
+            entry.offset = offsets[index] + len(space_author_tags(result.blocks[index].text[:inner]))
+        else:
+            entry.offset = len(text)
         entry.line = text.count("\n", 0, entry.offset) + 1
     checked = checker.stats - checker_start if checker is not None else CheckerStats()
-    return IssueAssembly(issue_key, text, result.pages, result.joins, result.missing, checked)
+    return IssueAssembly(issue_key, text, result.pages, result.joins, result.missing, checked, repeated)
+
+
+def drop_repeated_rubrics(result: _Pass) -> list[dict]:
+    """Убрать повтор `<rubric>` с тем же текстом, что у предыдущей встреченной, — в тексте выпуска подряд
+    (хотя бы и через другой контент) две одинаковые рубрики идти не могут; чередование A → B → A остаётся.
+
+    Модель пишет рубрику из списка статей над каждой статьёй раздела (0280_1L 1976/12: напечатана
+    шапка «Резервы — на службу…», а в теге — рубрика раздела из списка), и в целиковом тексте
+    рубрика раздела повторялась бы перед каждой статьёй. Начала полос, попавшие на убранный блок,
+    переезжают на следующий блок.
+
+    Args:
+        result: Итог прохода сборки; ``blocks`` и ``starts`` правятся на месте.
+
+    Returns:
+        Убранные рубрики: ``[{"rubric", "page"}]`` — текст и полоса, где стоял повтор.
+    """
+    dropped: list[dict] = []
+    keep: list[bool] = []
+    last: str | None = None
+    for block in result.blocks:
+        match = _RUBRIC.match(block.text)
+        if match is None:
+            keep.append(True)
+            continue
+        name = normalize_title(match.group(1))
+        keep.append(name != last)
+        last = name
+    if all(keep):
+        return dropped
+    # Новые индексы блоков: убранный блок указывает на следующий уцелевший (начало полосы — туда же).
+    new_index: list[int] = []
+    survivors = 0
+    for kept in keep:
+        new_index.append(survivors)
+        survivors += kept
+    for index, (block, kept) in enumerate(zip(result.blocks, keep)):
+        if not kept:
+            dropped.append({"rubric": _RUBRIC.match(block.text).group(1), "page": _page_of_block(result, index)})
+    result.starts = [
+        (new_index[index], inner if index < len(keep) and keep[index] else 0) for index, inner in result.starts
+    ]
+    result.blocks = [block for block, kept in zip(result.blocks, keep) if kept]
+    return dropped
+
+
+def _page_of_block(result: _Pass, index: int) -> str:
+    """Полоса, которой принадлежит блок с данным индексом (последняя полоса, начавшаяся не позже него).
+
+    Args:
+        result: Итог прохода сборки.
+        index: Индекс блока в ``result.blocks``.
+    """
+    file = result.pages[0].file if result.pages else ""
+    for entry, (start, _) in zip(result.pages, result.starts):
+        if start <= index:
+            file = entry.file
+    return file
 
 
 def _header(issue_key: str, pages: int, missing: int) -> str:
@@ -502,7 +570,8 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
     """
     logger.info(
         "выпуск %s собран: %d полос, переносов через границу %d (составных %d, дублей половины %d), "
-        "абзацев сшито %d, стыков проверено моделью %d (из кэша %d, переписано %d, сбоев %d, $%.4f), пропущено %d → %s",
+        "абзацев сшито %d, стыков проверено моделью %d (из кэша %d, переписано %d, сбоев %d, $%.4f), "
+        "повторов рубрик убрано %d, пропущено %d → %s",
         assembly.issue,
         len(assembly.pages),
         assembly.count(JoinKind.HYPHEN),
@@ -514,6 +583,7 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
         assembly.count(JoinKind.MODEL),
         assembly.checked.errors,
         assembly.checked.cost_usd,
+        len(assembly.repeated_rubrics),
         len(assembly.missing),
         path,
     )

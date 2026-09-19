@@ -108,7 +108,9 @@ class StructureTag(StrEnum):
     не из оглавления)."""
 
     RUBRIC = "rubric"
-    RUBRIC_IN_TOC = "rubric-in-toc"  # через дефис: имя с «_» вьюер markdown в PyCharm не прячет
+    RUBRIC_IN_TOC = (
+        "rubricintoc"  # слитно: имена с «_» и «-» вьюер markdown в PyCharm не прячет (v15 — дефис, v18 — слитно)
+    )
     AUTHOR = "author"
     POSITION = "position"
     MARKER = "marker"
@@ -142,8 +144,11 @@ LEGACY_ILLUSTRATION_TAGS = {
     "photo": IllustrationKind.PHOTO,
     "line_art": IllustrationKind.LINE_ART,
 }
-# Старые имена тегов структуры (до v15, с подчёркиванием) → новые.
-LEGACY_TAG_NAMES = {"rubric_in_toc": StructureTag.RUBRIC_IN_TOC.value}
+# Старые имена тегов структуры (до v15 с подчёркиванием, v15–v17 через дефис) → новое слитное.
+LEGACY_TAG_NAMES = {
+    "rubric_in_toc": StructureTag.RUBRIC_IN_TOC.value,
+    "rubric-in-toc": StructureTag.RUBRIC_IN_TOC.value,
+}
 
 
 # Формулы: LaTeX внутри тега, номер формулы снаружи текстом.
@@ -803,7 +808,7 @@ def _normalize_tag(match: re.Match) -> str:
     latin = name.translate(_HOMOGLYPHS)
     if latin not in _KNOWN_TAGS:
         return match.group(0)
-    # Старое имя с подчёркиванием (``rubric_in_toc``) → новое через дефис.
+    # Старые имена (``rubric_in_toc``, ``rubric-in-toc``) → новое слитное.
     latin = LEGACY_TAG_NAMES.get(latin, latin)
     return f"<{'/' if closing.strip() else ''}{latin}{'/' if selfclose else ''}>"
 

@@ -1,10 +1,47 @@
-"""Разложить PageResult в .md: YAML-шапка с полями полосы и тело в markdown."""
+"""Разложить PageResult в .md: YAML-шапка с полями полосы и тело в markdown; переводы строк у тегов автора."""
 
 from __future__ import annotations
 
 import json
+import re
 
-from ocr_utils.external_ocr_services.schema import PageResult
+from ocr_utils.external_ocr_services.schema import PageResult, StructureTag
+
+# Теги автора и должности: подряд идущие строки `<author>…</author>` / `<position>…</position>`,
+# разделённые одинарным переводом строки, вьюер markdown склеивает в одну строку.
+_AUTHOR_TAG = re.compile(rf"</?(?:{StructureTag.AUTHOR}|{StructureTag.POSITION})>")
+
+
+def space_author_tags(text: str) -> str:
+    """Удвоить одинарный перевод строки перед `<author>`/`<position>` и после `</author>`/`</position>`.
+
+    Один проход слева направо по уже изменённому тексту: двойной перевод строки не трогается, и
+    если удвоение у предыдущего тега сделало перевод у соседнего двойным, второй раз он не
+    удваивается; любой другой символ рядом с тегом (в том числе пробел) не трогается. Идемпотентно.
+
+    Args:
+        text: Тело полосы или блок выпуска в markdown.
+
+    Returns:
+        Текст с пустой строкой между соседними тегами автора и должности.
+    """
+    parts: list[str] = []
+    position = 0
+    for match in _AUTHOR_TAG.finditer(text):
+        parts.append(text[position : match.start()])
+        current = "".join(parts)  # что уже собрано — чтобы видеть удвоение у предыдущего тега
+        if not match.group(0).startswith("</") and current.endswith("\n") and not current.endswith("\n\n"):
+            parts.append("\n")
+        parts.append(match.group(0))
+        position = match.end()
+        if (
+            match.group(0).startswith("</")
+            and text.startswith("\n", position)
+            and not text.startswith("\n\n", position)
+        ):
+            parts.append("\n")
+    parts.append(text[position:])
+    return "".join(parts)
 
 
 def _yaml_value(value: object) -> str:
@@ -44,4 +81,4 @@ def to_markdown(result: PageResult) -> str:
     if result.messages:
         head.append(f"messages: {json.dumps(result.messages, ensure_ascii=False)}")
     head += ["---", ""]
-    return "\n".join(head) + result.content_markdown.rstrip() + "\n"
+    return "\n".join(head) + space_author_tags(result.content_markdown.rstrip()) + "\n"

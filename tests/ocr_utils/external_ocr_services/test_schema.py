@@ -227,13 +227,13 @@ def test_tag_homoglyphs_and_spaces_normalized():
 
 
 def test_legacy_tag_names_and_hyphen_tags_normalized():
-    """v15: <rubric_in_toc> старых ответов → <rubric-in-toc>; имя с дефисом узнаётся и чистится от омоглифов."""
+    """v15: <rubric_in_toc> старых ответов → <rubricintoc>; имя с дефисом узнаётся и чистится от омоглифов."""
     from ocr_utils.external_ocr_services.schema import normalize_tags
 
-    assert normalize_tags("<rubric_in_toc>*А*</rubric_in_toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
-    assert normalize_tags("< rubric-in-toc >*А*</ rubriс-in-toc>") == "<rubric-in-toc>*А*</rubric-in-toc>"
+    assert normalize_tags("<rubric_in_toc>*А*</rubric_in_toc>") == "<rubricintoc>*А*</rubricintoc>"
+    assert normalize_tags("< rubric-in-toc >*А*</ rubriс-in-toc>") == "<rubricintoc>*А*</rubricintoc>"
     result = parse_json_text('{"content_markdown": "<rubric_in_toc>*А*</rubric_in_toc>"}')
-    assert result.content_markdown == "<rubric-in-toc>*А*</rubric-in-toc>"
+    assert result.content_markdown == "<rubricintoc>*А*</rubricintoc>"
 
 
 LEGACY_ILLUSTRATIONS = """Текст.
