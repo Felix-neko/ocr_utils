@@ -60,6 +60,17 @@ def test_tags_around_hyphen_and_line_break_inside_word():
         assert out == expected, source
 
 
+def test_long_word_without_hyphen_is_linear():
+    """37-буквенное слово без дефиса вешало прогон 1976/12: вложенный квантификатор в регулярке."""
+    import time
+
+    body = "Трест «Красноярскинструментподшипникснабсбыт» и Красноярскэлектроприборснабсбытсбытснабжениеснаб " * 3
+    started = time.monotonic()
+    out, report = join_broken_hyphens(body, default_morph())
+    assert time.monotonic() - started < 1.0 and out == body and not report.joined
+    assert join_across_boundary(body, "жения", default_morph()) is None
+
+
 def test_join_across_boundary_keeps_tags_and_compounds():
     morph = default_morph()
     joined = join_across_boundary("форму <supplied>снаб-</supplied>", "жения (транзитную).", morph)
