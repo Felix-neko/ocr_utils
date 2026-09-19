@@ -813,6 +813,11 @@ def recognize_page(
     result.content_markdown, dropped = drop_duplicate_supplied(result.content_markdown)
     if dropped:
         meta["duplicate_supplied_dropped"] = dropped
+    if job.stage is Stage.TOC and result.toc is not None and result.toc.continues_previous:
+        # Полоса-продолжение списка: `#` на ней — переписанный колонтитул («Указатель статей»), убирается.
+        result.content_markdown, dropped_headings = toc_module.drop_continuation_headings(result.content_markdown)
+        if dropped_headings:
+            meta["continuation_headings_dropped"] = dropped_headings
     if job.stage is Stage.TOC and result.toc is not None and result.toc.sections:
         # Блок <toc>…</toc> вокруг списка ставит код по границам элементов: модель его не просят
         # (тег она искажала — «< toc>», «<тoc>»); написанный ею по памяти тег нормализован разбором.

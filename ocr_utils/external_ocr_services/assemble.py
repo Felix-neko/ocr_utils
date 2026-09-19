@@ -125,6 +125,7 @@ class IssueAssembly:
     missing: list[dict] = field(default_factory=list)  # {"file", "reason"}
     checked: CheckerStats = field(default_factory=CheckerStats)  # запросы к модели по стыкам этого выпуска
     repeated_rubrics: list[dict] = field(default_factory=list)  # убранные повторы <rubric>: {"rubric", "page"}
+    toc_merged: list[dict] = field(default_factory=list)  # слитые блоки <toc> полос-продолжений: {"after", "before"}
 
     def count(self, kind: JoinKind) -> int:
         """Сколько склеек данного вида.
@@ -146,6 +147,7 @@ class IssueAssembly:
             "counts": {kind.value: self.count(kind) for kind in JoinKind},
             "checked": vars(self.checked),
             "repeated_rubrics": self.repeated_rubrics,
+            "toc_merged": self.toc_merged,
         }
 
 
@@ -170,6 +172,7 @@ class _PageBody:
     stage: str = Stage.PAGE.value
     blocks: list[_Block] = field(default_factory=list)
     reason: str | None = None  # не None — полосы нет, в текст идёт комментарий
+    toc_continues: bool = False  # полоса-продолжение оглавления/указателя (``toc.continues_previous`` этапа toc)
 
 
 def _is_plain(paragraph: str) -> bool:
@@ -236,7 +239,8 @@ def _read_page(out_dir: Path, rel: Path) -> _PageBody:
         result = parse_json_text(paths.json.read_text(encoding="utf-8"), stage)
     except (ParseError, OSError) as error:
         return _PageBody(file, rel, reason=f".json не читается: {error}")
-    return _PageBody(file, rel, result.page_number, stage.value, _blocks_of(result.content_markdown))
+    continues = stage is Stage.TOC and result.toc is not None and bool(result.toc.continues_previous)
+    return _PageBody(file, rel, result.page_number, stage.value, _blocks_of(result.content_markdown), None, continues)
 
 
 def _tail_index(blocks: list[_Block], first: int) -> int | None:
@@ -279,6 +283,7 @@ class _Pass:
     joins: list[JoinRecord] = field(default_factory=list)
     missing: list[dict] = field(default_factory=list)
     seams: list[Seam] = field(default_factory=list)  # сомнительные стыки — на проверку моделью
+    toc_merged: list[dict] = field(default_factory=list)  # слитые блоки <toc> соседних полос: {"after", "before"}
 
 
 def _assemble_pass(
@@ -313,6 +318,20 @@ def _assemble_pass(
         if page.reason is not None:
             result.missing.append({"file": page.file, "reason": page.reason})
             page_blocks = [_Block(f"<!-- полоса {page.file} не распознана: {page.reason} -->", False)]
+        # Полоса-продолжение оглавления/указателя: её `<toc>` продолжает блок предыдущей полосы —
+        # закрывающий `</toc>` предыдущей и открывающий `<toc>` этой убираются, список идёт одним блоком.
+        if (
+            previous is not None
+            and page.toc_continues
+            and previous.stage == Stage.TOC.value
+            and blocks
+            and blocks[-1].text.strip() == f"</{BlockTag.TOC}>"
+            and page_blocks
+            and page_blocks[0].text.strip() == f"<{BlockTag.TOC}>"
+        ):
+            blocks.pop()
+            page_blocks = page_blocks[1:]
+            result.toc_merged.append({"after": previous.file, "before": page.file})
         first = len(blocks)
         start = (first, 0)
         tail_index = _tail_index(blocks, previous_first) if previous is not None and blocks else None
@@ -410,7 +429,9 @@ def assemble_issue(
             entry.offset = len(text)
         entry.line = text.count("\n", 0, entry.offset) + 1
     checked = checker.stats - checker_start if checker is not None else CheckerStats()
-    return IssueAssembly(issue_key, text, result.pages, result.joins, result.missing, checked, repeated)
+    return IssueAssembly(
+        issue_key, text, result.pages, result.joins, result.missing, checked, repeated, result.toc_merged
+    )
 
 
 def drop_repeated_rubrics(result: _Pass) -> list[dict]:
@@ -571,7 +592,7 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
     logger.info(
         "выпуск %s собран: %d полос, переносов через границу %d (составных %d, дублей половины %d), "
         "абзацев сшито %d, стыков проверено моделью %d (из кэша %d, переписано %d, сбоев %d, $%.4f), "
-        "повторов рубрик убрано %d, пропущено %d → %s",
+        "повторов рубрик убрано %d, блоков toc слито %d, пропущено %d → %s",
         assembly.issue,
         len(assembly.pages),
         assembly.count(JoinKind.HYPHEN),
@@ -584,6 +605,7 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
         assembly.checked.errors,
         assembly.checked.cost_usd,
         len(assembly.repeated_rubrics),
+        len(assembly.toc_merged),
         len(assembly.missing),
         path,
     )

@@ -310,6 +310,33 @@ def _split_where(where: str) -> tuple[str | None, str | None]:
     return None, numbers[0]
 
 
+_H1_LINE = re.compile(r"^# ")
+
+
+def drop_continuation_headings(body: str) -> tuple[str, list[str]]:
+    """Убрать `#` с полосы-продолжения оглавления/указателя: по промпту его там быть не может.
+
+    Модель на продолжениях годового указателя пишет `# Указатель статей` (1976/12: 4 полосы из 5) —
+    это колонтитул, он же лежит в ``running_header``; в теле такой заголовок дублировал бы
+    колонтитул перед каждым куском списка. Убираются только заголовки первого уровня.
+
+    Args:
+        body: Тело полосы (``toc.continues_previous`` истинно).
+
+    Returns:
+        ``(тело без `#`-абзацев, убранные тексты заголовков)``.
+    """
+    kept, dropped = [], []
+    for paragraph in body.strip().split("\n\n"):
+        if _H1_LINE.match(paragraph):
+            dropped.append(paragraph[2:].strip())
+        else:
+            kept.append(paragraph)
+    if not dropped:
+        return body, []
+    return "\n\n".join(kept).rstrip() + "\n", dropped
+
+
 def ensure_toc_block(body: str) -> tuple[str, bool]:
     """Обернуть список оглавления в ``<toc>…</toc>`` — это основной путь: промпт тег не просит.
 

@@ -339,6 +339,26 @@ def test_ask_without_tty_behaves_like_skip(tmp_path, monkeypatch):
     assert stats.missed and not stats.redone_issues and (params.out_dir / "missed_toc.txt").is_file()
 
 
+def test_continuation_toc_page_loses_h1(tmp_path):
+    """Полоса-продолжение указателя: `# Указатель статей` — переписанный колонтитул, убирается из тела."""
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0001.jpg"
+    spec = resolve("deepseek-v41-flash")
+    for continues, expected in ((True, False), (False, True)):
+        toc = {
+            "kind": "index",
+            "continues_previous": continues,
+            "sections": [{"rubric": None, "articles": [{"title": "Первая", "authors": [], "page": "5", "issue": "1"}]}],
+        }
+        fake = FakeClient(lambda p: _answer("index", "# Указатель статей\n\n- Первая — № 1, 5", toc))
+        out_dir = tmp_path / ("cont" if continues else "first")
+        meta, result = recognize_page(
+            fake, spec, tmp_path / "in" / rel, PageJob(rel, "toc", "index"), out_dir, RunOptions()
+        )
+        assert ("# Указатель статей" in result.content_markdown) is expected
+        assert (meta.get("continuation_headings_dropped") == ["Указатель статей"]) is not expected
+
+
 def test_page_from_older_prompt_is_not_done(tmp_path):
     """Полоса, распознанная промптом другой версии, устарела — --skip-done её не пропускает."""
     _make_pages(tmp_path / "in")

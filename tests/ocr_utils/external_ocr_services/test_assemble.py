@@ -9,17 +9,30 @@ from click.testing import CliRunner
 
 from ocr_utils.external_ocr_services import cli
 from ocr_utils.external_ocr_services.assemble import JoinKind, assemble_issue, issue_pages, list_issues, write_issue
-from ocr_utils.external_ocr_services.schema import PageResult, Stage
+from ocr_utils.external_ocr_services.schema import PageResult, Stage, TocKind, TocPage
 
 ISSUE = "1966/03"
 
 
-def _page(out_dir: Path, stem: str, body: str, page_number: str | None = None, stage: Stage = Stage.PAGE) -> Path:
-    """Готовая полоса на диске: .json как пишет recognize_page и meta без ошибки."""
+def _page(
+    out_dir: Path,
+    stem: str,
+    body: str,
+    page_number: str | None = None,
+    stage: Stage = Stage.PAGE,
+    toc_continues: bool | None = None,
+) -> Path:
+    """Готовая полоса на диске: .json как пишет recognize_page и meta без ошибки.
+
+    ``toc_continues`` — объект ``toc`` этапа toc с ``continues_previous`` (``None`` — объекта нет).
+    """
     base = out_dir / ISSUE / stem
     base.parent.mkdir(parents=True, exist_ok=True)
+    toc = None
+    if toc_continues is not None:
+        toc = TocPage(kind=TocKind.INDEX, continues_previous=toc_continues, sections=[])
     base.with_suffix(".json").write_text(
-        PageResult(content_markdown=body, page_number=page_number).to_json(), encoding="utf-8"
+        PageResult(content_markdown=body, page_number=page_number, toc=toc).to_json(), encoding="utf-8"
     )
     base.with_suffix(".meta.json").write_text(
         json.dumps({"page": f"{ISSUE}/{stem}.jpg", "stage": stage.value, "error": None, "parse_error": None}),
@@ -220,3 +233,29 @@ def test_repeated_rubric_dropped_but_alternation_kept(tmp_path):
         "<rubric>*ОПЫТ РАБОТЫ*"
     )
     assert assembly.as_dict()["repeated_rubrics"] == assembly.repeated_rubrics
+
+
+def test_toc_blocks_of_continuation_pages_are_merged(tmp_path):
+    """Указатель на трёх полосах: блоки <toc> продолжений сливаются с первым, обычная полоса следом — нет."""
+    _page(
+        tmp_path,
+        "IMG_0001",
+        "# Указатель статей за год\n\n<toc>\n\n- А. Первая — 1\n\n</toc>",
+        stage=Stage.TOC,
+        toc_continues=False,
+    )
+    _page(tmp_path, "IMG_0002", "<toc>\n\n- Б. Вторая — 2\n\n</toc>", stage=Stage.TOC, toc_continues=True)
+    _page(tmp_path, "IMG_0003", "<toc>\n\n- В. Третья — 3\n\n</toc>", stage=Stage.TOC, toc_continues=True)
+    _page(tmp_path, "IMG_0004", "Обычная полоса без точки")
+    _page(tmp_path, "IMG_0005", "<toc>\n\n- Г. Другой список — 4\n\n</toc>", stage=Stage.TOC, toc_continues=False)
+    assembly = _assemble(tmp_path)
+    text = assembly.text
+    assert text.count("<toc>") == 2 and text.count("</toc>") == 2
+    assert "- А. Первая — 1\n\n- Б. Вторая — 2\n\n- В. Третья — 3\n\n</toc>\n\nОбычная полоса" in text
+    assert assembly.toc_merged == [
+        {"after": "1966/03/IMG_0001", "before": "1966/03/IMG_0002"},
+        {"after": "1966/03/IMG_0002", "before": "1966/03/IMG_0003"},
+    ]
+    assert _page_text(assembly, 1).startswith("- Б. Вторая") and _page_text(assembly, 2).startswith("- В. Третья")
+    assert not assembly.joins, "строки списка не сшиваются с обычной полосой"
+    assert assembly.as_dict()["toc_merged"] == assembly.toc_merged

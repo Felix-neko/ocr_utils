@@ -231,3 +231,12 @@ def test_dedup_ignores_case_and_damage_tags():
     )
     toc = merge_pages("contents", [("a.jpg", first), ("b.jpg", second)])
     assert [a.title for a in toc.articles] == ["Выгоден прокат техники"]
+
+
+def test_drop_continuation_headings_removes_only_h1():
+    from ocr_utils.external_ocr_services.toc import drop_continuation_headings
+
+    body = "# Указатель статей\n\n- А. Первая — 1\n\n## Раздел\n\nТекст.\n"
+    out, dropped = drop_continuation_headings(body)
+    assert out == "- А. Первая — 1\n\n## Раздел\n\nТекст.\n" and dropped == ["Указатель статей"]
+    assert drop_continuation_headings(out) == (out, [])
