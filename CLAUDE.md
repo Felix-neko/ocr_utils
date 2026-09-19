@@ -24,7 +24,10 @@
 | `db` | Схема SQLite-базы разметки (пак → год → выпуск → полоса → области/маски/точки), открытие с дописыванием колонок, идемпотентная запись, миграции | `python -m ocr_utils.db.migrate` |
 | `scan_markup` | Разметка пака: растр, таблицы, схемы, печати → CVAT → SQLite; внутри `toc`, `orientation`, `curved_lines`, `table_detection` | `python -m ocr_utils.scan_markup <команда>` |
 | `scan_cleanup` | Закрас разметки из CVAT (LaMa) и размытие фона по паку | `python -m ocr_utils.scan_cleanup` |
-| `pdf_utils` | Промежуточные и финальные PDF под FineReader, сбор заострённых копий | `python -m ocr_utils.pdf_utils` |
+| `pdf_utils` | Промежуточные PDF под FineReader, сбор и сверка заострённых копий, JPEG-примитивы | `python -m ocr_utils.pdf_utils.intermediate_pdfs` |
+| `final_pdfs` | Финальные PDF выпуска из двух прогонов FineReader: источник страницы (растр в базе, детектор геометрии), правка слоя, иллюстрации JPEG верхним слоем, снятие образов-фигур FineReader; стадии анализ → surya → сборка со сверкой | `python -m ocr_utils.final_pdfs run` |
+| `geometry_regression` | Ядро детектора «FineReader ухудшил геометрию»: метрики пары страниц «с коррекцией / без», пороги, вердикт bad/mixed/ok, кэш с пересчётом при промахе | библиотека (`cache.verdict_for_page`) |
+| `text_layer_fix` | Ядро правки текстового слоя FineReader: разбор потока до слов и глифов, зоны повёрнутого и пропущенного прямого текста, tesseract/surya, удаление россыпи и вставка невидимого текста, сверка | библиотека (постранично из `final_pdfs`) |
 | `defocus_detection` | Расфокус по папке RAF-превью: ранжирование, зональный | `python -m ocr_utils.defocus_detection` |
 | `show_through_detection` | Просвечивающая бумага | `python -m ocr_utils.show_through_detection` |
 | `line_art_detection` | Крупный штриховой рисунок и формулы в бинаризованных PDF | `python -m ocr_utils.line_art_detection` |
@@ -39,8 +42,8 @@
 | `experimental` | Новый функционал внешнего OCR до переноса в основные пакеты: склейка переносов по словарю, полосы 1×N, подсказки из детектора корешка, короткий промпт; стенд `scripts/replay_page.py` | библиотека |
 | `legacy` | Помойка: не поддерживается, без тестов | — |
 | `research/external_ocr_models` | Полоса → размеченный markdown через VLM (OpenRouter), промпты v1–v13 | `python -m research.external_ocr_models` |
-| `research/geometry_regression` | Страницы, где коррекция геометрии FineReader сделала хуже: пары PDF «с/без», поле смещений, штрихи, строки, кромки; картинки «было \| стало» | `python -m research.geometry_regression run\|report` |
-| `research/text_layer_fix` | Текстовый слой финальных PDF: зоны повёрнутого текста на растре страницы (ячейки таблиц, подписи на line art, отдельный), удаление россыпи FineReader по словам, чтение tesseract/surya и вставка невидимого повёрнутого текста; сверка копий, оверлеи | `python -m research.text_layer_fix survey\|run\|fix\|overlay\|eval-lineart` |
+| `research/geometry_regression` | Стенд детектора порчи геометрии (ядро — в `ocr_utils/geometry_regression`): прогон по паку, сводки и пороги, картинки «было \| стало», регрессия на эталоне, пробник VLM | `python -m research.geometry_regression run\|report\|regress` |
+| `research/text_layer_fix` | Стенд правки текстового слоя (ядро — в `ocr_utils/text_layer_fix`): обзор слоя по паку, выборки, оверлеи, оценка источников line art, сравнение с LLM | `python -m research.text_layer_fix survey\|run\|fix\|overlay\|eval-lineart` |
 | `research/legacy/table_processing` | Стенд исследования таблиц; живой код переехал в `scan_markup` | заморожено |
 | `scripts/` | Разовые утилиты; `gen_module_map.py` — генератор карты, `search_sessions.py` — поиск по прошлым сессиям Claude | — |
 | `run_scripts/<пакет>/` | Готовые прогоны с числами в шапке, `source common.sh` | — |

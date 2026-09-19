@@ -38,9 +38,12 @@
 | `PDF_ROOT` | `/mnt/SYSTEM/raw/mts/pack1_pdf` | Промежуточные и распознанные PDF, по паку (не по годам — одно задание FineReader вместо одиннадцати) | SYSTEM |
 | `FULL_PDF_DIR` | `$PDF_ROOT/full_intermediate_pdfs` | Полные промежуточные PDF под FineReader | SYSTEM |
 | `PICS_ONLY_PDF_DIR` | `$PDF_ROOT/intermediate_pdfs_pages_with_pics_only` | Только полосы с растром | SYSTEM |
-| `FULL_RECOGNIZED_DIR` | `$PDF_ROOT/full_recognized` | FineReader: бинаризация **и** распрямление строк | SYSTEM |
-| `PICS_ONLY_RECOGNIZED_DIR` | `$PDF_ROOT/pages_with_pics_only_recognized` | FineReader: бинаризация **без** распрямления (геометрия нужна, чтобы вернуть иллюстрации) | SYSTEM |
-| `FINAL_PDF_DIR` | `$PDF_ROOT/final_pdfs` | Финальные PDF | SYSTEM |
+| `GEO_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_no_bg_brightening` | FineReader по полным промежуточным PDF: бинаризация **и** коррекция геометрии | SYSTEM |
+| `NOGEO_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction` | То же **без** коррекции геометрии: образ страницы = полоса + поля пиксель в пиксель, сюда возвращаются иллюстрации | SYSTEM |
+| `FINAL_PDF_DIR` | `$PDF_ROOT/final_pdfs` | Финальные PDF, `{год}_{выпуск}.pdf`, все в одной папке | SYSTEM |
+| `FINAL_WORK_DIR` | `/mnt/SYSTEM/raw/mts/pack1_final_pdfs_work` | Рабочий каталог сборщика: `pages/<pdf>/pNNNN.json` (анализ страницы: источник, зоны, вердикты, чтения), `analysis.csv`, `pages.csv`, `summary.csv`, `preview/` | SYSTEM |
+| — | `/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v12` | Прогон детектора порчи геометрии: `cache/<pdf>/pNNN.json`, `metrics.csv`; сборщик читает кэш и дописывает промахи | SYSTEM |
+| — | `/mnt/SYSTEM/raw/mts/pack1_text_layer_fix/pack1_v1` | Исследование текстового слоя по выборке 1050 стр.: кэш, CSV, оверлеи, исправленные копии | SYSTEM |
 | `FINEREADER_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_brightened_bg` | Текстовый слой FineReader как прокси-эталон для внешнего OCR (страница i = i-я полоса по сортировке имён) | SYSTEM |
 | `RECOGNIZED_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_no_bg_brightening` | Распознанные PDF для привязки DOCX → скан | SYSTEM |
 | `DOCX_DIR` | `$PDF_ROOT/docx_форматированный_текст` | Выгрузка FineReader в DOCX. **Номера страниц DOCX ≠ страницам PDF**: привязка только по редким токенам через текстовый слой PDF | SYSTEM |
