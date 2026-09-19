@@ -21,7 +21,7 @@ import pikepdf
 from ocr_utils.text_layer_fix.cache import load_page
 from ocr_utils.text_layer_fix.classify import Verdict
 from ocr_utils.text_layer_fix.raster import page_raster
-from ocr_utils.text_layer_fix.rewrite import Insert, InsertFont, VerifyReport, apply_edits, verify_page
+from ocr_utils.text_layer_fix.rewrite import Insert, InsertFont, VerifyReport, apply_edits, refit_target, verify_page
 from ocr_utils.text_layer_fix.text_layer import Word, load_layer, page_content
 
 
@@ -33,6 +33,7 @@ class PageFix:
     blanked: int = 0
     trimmed: int = 0
     inserted: int = 0
+    refitted: int = 0
     skipped_duplicates: int = 0
     verify: VerifyReport = field(default_factory=VerifyReport)
     error: str = ""
@@ -45,6 +46,7 @@ class PageEdits:
     blanks: list[Word] = field(default_factory=list)  # слова DELETE
     trims: dict[int, tuple[Word, tuple[int, ...]]] = field(default_factory=dict)  # SANITIZE: слово и глифы
     kept: list[Word] = field(default_factory=list)  # всё остальное — должно остаться на месте
+    refits: dict[int, tuple[Word, fitz.Rect]] = field(default_factory=dict)  # ужать в границу обрезанной страницы
     inserts: list[Insert] = field(default_factory=list)  # своё чтение зон
     skipped_duplicates: int = 0  # зон не вписано из-за повёрнутого слова FineReader
     raw: bytes = b""  # поток содержимого страницы-источника до правок
@@ -53,7 +55,7 @@ class PageEdits:
     @property
     def empty(self) -> bool:
         """Правок нет — страницу можно не трогать."""
-        return not (self.blanks or self.trims or self.inserts)
+        return not (self.blanks or self.trims or self.inserts or self.refits)
 
 
 def load_cache(cache_dir: Path, pdf_name: str) -> dict[int, dict]:
@@ -119,30 +121,36 @@ def has_edits(payload: dict) -> bool:
     return any(r.get("accepted") and r.get("text") for r in payload.get("readings", {}).values())
 
 
-def plan_page_edits(page: fitz.Page, pdf: pikepdf.Pdf | None, payload: dict) -> PageEdits:
+def plan_page_edits(
+    page: fitz.Page, pdf: pikepdf.Pdf | None, payload: dict, crop: fitz.Rect | None = None
+) -> PageEdits:
     """План правок страницы: слова по MCID из свежего разбора слоя и вставки по чтениям.
 
     Args:
         page: Страница ИСХОДНОГО (нетронутого) документа.
         pdf: Тот же документ, открытый pikepdf (метрики шрифтов); ``None`` — ширины по умолчанию.
         payload: JSON страницы из кэша.
+        crop: Рамка, до которой страница будет обрезана после правки (fitz); слова, вылезающие
+            за неё, ужимаются внутрь (``refits``) и в ``kept`` не попадают.
 
     Returns:
         :class:`PageEdits`; слова, которых в свежем разборе нет, пропускаются.
     """
     layer = load_layer(page, pdf)
-    by_mcid = {w.mcid: w for w in layer.words if w.mcid is not None}
     edits = PageEdits(raw=page_content(page))
-    for record in payload["words"]:
-        word = by_mcid.get(record["mcid"])
-        if word is None:
-            continue
-        verdict = Verdict(record["verdict"])
+    verdicts = {record["mcid"]: record for record in payload.get("words", ())}
+    for word in layer.words:
+        record = verdicts.get(word.mcid) if word.mcid is not None else None
+        verdict = Verdict(record["verdict"]) if record else Verdict.KEEP
         if verdict == Verdict.DELETE:
             edits.blanks.append(word)
-        elif verdict == Verdict.SANITIZE and record["keep_glyphs"]:
+            continue
+        if verdict == Verdict.SANITIZE and record and record["keep_glyphs"]:
             edits.trims[id(word)] = (word, tuple(record["keep_glyphs"]))
-        else:
+        target = refit_target(word.bbox, crop) if crop is not None else None
+        if target is not None:
+            edits.refits[id(word)] = (word, target)
+        elif verdict != Verdict.SANITIZE:
             edits.kept.append(word)
     raster = page_raster(page)
     edits.inserts, edits.skipped_duplicates = inserts_for(payload, raster.to_pt())
@@ -165,13 +173,18 @@ def apply_page_edits(doc: fitz.Document, index: int, edits: PageEdits, font: Ins
     fix = PageFix(index, skipped_duplicates=edits.skipped_duplicates)
     if edits.empty:
         return fix
-    stats = apply_edits(doc, index, edits.raw, edits.blanks, edits.trims, edits.inserts, font)
-    fix.blanked, fix.trimmed, fix.inserted = stats.blanked, stats.trimmed, stats.inserted
+    stats = apply_edits(doc, index, edits.raw, edits.blanks, edits.trims, edits.inserts, font, edits.refits)
+    fix.blanked, fix.trimmed, fix.inserted, fix.refitted = stats.blanked, stats.trimmed, stats.inserted, stats.refitted
     return fix
 
 
 def verify_saved(
-    source_page: fitz.Page, saved_page: fitz.Page, edits: PageEdits, saved_main_xref: int | None
+    source_page: fitz.Page,
+    saved_page: fitz.Page,
+    edits: PageEdits,
+    saved_main_xref: int | None,
+    font: InsertFont | None = None,
+    crop: fitz.Rect | None = None,
 ) -> VerifyReport:
     """Сверить сохранённую страницу с планом: оставленное на месте, удалённого нет, вставки ищутся.
 
@@ -181,12 +194,26 @@ def verify_saved(
         edits: План правок.
         saved_main_xref: xref основного образа в сохранённом файле для md5-сверки; ``None`` —
             образ не сверять (например, он снят намеренно).
+        font: Шрифт вставок (поиск первой строки в той же укладке).
+        crop: Рамка, до которой страница обрезана (координаты копии сдвинуты на её начало).
 
     Returns:
         Отчёт сверки.
     """
     image_xref = edits.main_xref if saved_main_xref is not None else None
-    return verify_page(source_page, saved_page, edits.kept, edits.blanks, edits.inserts, image_xref, saved_main_xref)
+    shift = (-crop.x0, -crop.y0) if crop is not None else (0.0, 0.0)
+    return verify_page(
+        source_page,
+        saved_page,
+        edits.kept,
+        edits.blanks,
+        edits.inserts,
+        image_xref,
+        saved_main_xref,
+        font=font,
+        shift=shift,
+        refits=list(edits.refits.values()),
+    )
 
 
 def fix_pdf(src: Path, cache: dict[int, dict], out_path: Path, font: InsertFont | None = None) -> list[PageFix]:
@@ -223,7 +250,7 @@ def fix_pdf(src: Path, cache: dict[int, dict], out_path: Path, font: InsertFont 
     by_page = {fix.page: fix for fix in fixes}
     for index, edits in planned.items():
         try:
-            by_page[index].verify = verify_saved(original[index], saved[index], edits, edits.main_xref)
+            by_page[index].verify = verify_saved(original[index], saved[index], edits, edits.main_xref, font)
         except Exception as error:  # noqa: BLE001
             by_page[index].error = f"сверка: {type(error).__name__}: {error}"
     return fixes

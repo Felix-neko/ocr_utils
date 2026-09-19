@@ -31,7 +31,7 @@ from pathlib import Path
 import fitz
 from fontTools.ttLib import TTFont
 
-from ocr_utils.text_layer_fix.text_layer import Matrix, Word, apply, page_matrix
+from ocr_utils.text_layer_fix.text_layer import Glyph, Matrix, Word, apply, multiply, page_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,13 @@ LINE_HEIGHT = 1.15
 
 # Невидимый текст: режим 3 — без заливки и обводки.
 INVISIBLE_RENDER_MODE = 3
+
+# Шаг перебора кегля при укладке слов в зону, pt.
+FONT_STEP_PT = 0.25
+
+# Слово слоя, вылезшее за обрезанную страницу, ужимается в границу, но не меньше стольких pt по
+# каждой стороне: иначе оно выпадет из извлечения (rawdict не видит глифы за CropBox).
+MIN_REFIT_PT = 2.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,7 @@ class EditStats:
     trimmed: int = 0
     inserted: int = 0
     inserted_lines: int = 0
+    refitted: int = 0  # слов ужато в границу обрезанной страницы
     skipped_inserts: list[str] = field(default_factory=list)
 
 
@@ -248,6 +256,49 @@ def fit_fontsize(font: InsertFont, lines: list[str], length_pt: float, thickness
     return max(MIN_FONT_PT, min(MAX_FONT_PT, by_length, by_height))
 
 
+def wrap_lines(font: InsertFont, text: str, length_pt: float, thickness_pt: float) -> tuple[list[str], float]:
+    """Уложить слова текста в зону с переносом по словам, выбрав наибольший кегль, при котором всё
+    помещается и по длине строк, и по толщине зоны.
+
+    Строки, как их отдал OCR, не сохраняются: текст режется на слова заново. Слово длиннее зоны
+    идёт своей строкой (её ужмёт растяжение в :func:`text_object`).
+
+    Args:
+        font: Шрифт вставки.
+        text: Текст (переводы строк — как пробелы).
+        length_pt: Длина зоны вдоль строки, pt.
+        thickness_pt: Толщина зоны поперёк строк, pt.
+
+    Returns:
+        Строки и кегль; пустой текст — ``([], 0.0)``.
+    """
+    words = text.split()
+    if not words:
+        return [], 0.0
+    fontsize = MAX_FONT_PT
+    while True:
+        lines = _wrap_at(font, words, length_pt, fontsize)
+        if len(lines) * LINE_HEIGHT * fontsize <= thickness_pt or fontsize <= MIN_FONT_PT:
+            return lines, max(MIN_FONT_PT, fontsize)
+        fontsize = max(MIN_FONT_PT, fontsize - FONT_STEP_PT)
+
+
+def _wrap_at(font: InsertFont, words: list[str], length_pt: float, fontsize: float) -> list[str]:
+    """Жадная укладка слов в строки не длиннее ``length_pt`` при данном кегле."""
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}" if current else word
+        if current and font.length(candidate, fontsize) > length_pt:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
 def _frame(
     rect: fitz.Rect, rotate_cw: int
 ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], float, float]:
@@ -284,11 +335,13 @@ def text_object(insert: Insert, font: InsertFont, resource: str, to_fitz: Matrix
     Returns:
         Байты ``BT … ET``, число строк и выбранный кегль.
     """
-    lines = [line.strip() for line in insert.text.split("\n") if line.strip()]
+    origin, along, down, length, thickness = _frame(insert.rect, insert.rotate_cw)
+    if insert.fontsize:
+        lines, fontsize = _wrap_at(font, insert.text.split(), length, insert.fontsize), insert.fontsize
+    else:
+        lines, fontsize = wrap_lines(font, insert.text, length, thickness)
     if not lines:
         return b"", 0, 0.0
-    origin, along, down, length, thickness = _frame(insert.rect, insert.rotate_cw)
-    fontsize = insert.fontsize or fit_fontsize(font, lines, length, thickness)
     line_step = fontsize * LINE_HEIGHT
     # Если строк по толщине помещается меньше, чем есть, сжимаем шаг, но не кегль: пусть лучше
     # строки перекроются в невидимом слое, чем текст выйдет за зону и наедет на соседей.
@@ -323,6 +376,152 @@ def text_object(insert: Insert, font: InsertFont, resource: str, to_fitz: Matrix
     return b"".join(parts), len(lines), fontsize
 
 
+# --- Подгонка слов под обрезанную страницу -------------------------------------------------
+
+
+def refit_target(bbox: fitz.Rect, crop: fitz.Rect, min_pt: float = MIN_REFIT_PT) -> "fitz.Rect | None":
+    """Куда ужать рамку слова, чтобы она легла внутрь обрезанной страницы.
+
+    Args:
+        bbox: Рамка слова (fitz, координаты исходной страницы).
+        crop: Рамка обрезанной страницы в тех же координатах.
+        min_pt: Наименьшая сторона результата, pt.
+
+    Returns:
+        ``None`` — слово целиком внутри, трогать не надо; иначе пересечение рамок, расширенное
+        внутрь страницы до ``min_pt`` по каждой стороне; слово целиком снаружи — полоска у
+        ближайшего края.
+    """
+    if bbox.is_empty or crop.contains(bbox):
+        return None
+    x0, x1 = max(bbox.x0, crop.x0), min(bbox.x1, crop.x1)
+    y0, y1 = max(bbox.y0, crop.y0), min(bbox.y1, crop.y1)
+    x0, x1 = _widen(x0, x1, crop.x0, crop.x1, min_pt)
+    y0, y1 = _widen(y0, y1, crop.y0, crop.y1, min_pt)
+    return fitz.Rect(x0, y0, x1, y1)
+
+
+def _widen(low: float, high: float, bound_low: float, bound_high: float, min_size: float) -> tuple[float, float]:
+    """Отрезок ``[low, high]`` (возможно вырожденный или вывернутый) → не короче ``min_size`` внутри границ."""
+    min_size = min(min_size, bound_high - bound_low)
+    if high < low:  # пересечения нет: к ближайшему краю (отрезок целиком до нижней или за верхней границей)
+        edge = bound_low if high < bound_low else bound_high
+        low = high = edge
+    if high - low < min_size:
+        center = (low + high) / 2
+        low, high = center - min_size / 2, center + min_size / 2
+        if low < bound_low:
+            low, high = bound_low, bound_low + min_size
+        if high > bound_high:
+            low, high = bound_high - min_size, bound_high
+    return low, high
+
+
+def _mat2(m: Matrix) -> tuple[float, float, float, float]:
+    return m[0], m[1], m[2], m[3]
+
+
+def _mul2(
+    p: tuple[float, float, float, float], q: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    """Произведение линейных частей в соглашении PDF (строка-вектор: ``v · p · q``)."""
+    a, b, c, d = p
+    e, f, g, h = q
+    return a * e + b * g, a * f + b * h, c * e + d * g, c * f + d * h
+
+
+def refit_text_object(word: Word, target: fitz.Rect, to_fitz: Matrix, keep: "tuple[int, ...] | None" = None) -> bytes:
+    """Пересобрать ``BT … ET`` слова так, чтобы его рамка легла в ``target``.
+
+    Отображение «рамка слова → target» — осевое (масштаб по x и y плюс перенос) в координатах
+    fitz; оно переводится в пространство текстового объекта через CTM слова и матрицу страницы,
+    так что кегль, растяжение и порядок глифов не меняются — меняются только ``Tm`` и ``Td``.
+
+    Args:
+        word: Разобранное слово (нужны ``bbox``, ``ctm``, ``glyphs``).
+        target: Куда положить рамку слова (fitz).
+        to_fitz: Матрица «PDF → fitz» страницы.
+        keep: Индексы оставляемых глифов (усечение); ``None`` — все.
+
+    Returns:
+        Байты нового текстового объекта; пустая строка, если глифов нет.
+    """
+    glyphs = word.glyphs if keep is None else [word.glyphs[i] for i in sorted(set(keep)) if 0 <= i < len(word.glyphs)]
+    bbox = word.bbox
+    if not glyphs or bbox.is_empty:
+        return b""
+    sx = target.width / bbox.width if bbox.width > 1e-9 else 1.0
+    sy = target.height / bbox.height if bbox.height > 1e-9 else 1.0
+    # Точка текстового пространства → fitz: сначала CTM слова, потом матрица страницы.
+    user_to_fitz = multiply(word.ctm, to_fitz)
+    fitz_to_user = _invert(user_to_fitz)
+
+    def to_user(fx: float, fy: float) -> tuple[float, float]:
+        return apply(fitz_to_user, fx, fy)
+
+    # Линейная часть отображения в пространстве текста: L⁻¹ · S · L (строка-вектор).
+    lin = _mat2(user_to_fitz)
+    scale_user = _mul2(_mul2(lin, (sx, 0.0, 0.0, sy)), _mat2(fitz_to_user))
+    a, b, c, d = word.matrix
+    a2, b2 = a * scale_user[0] + b * scale_user[2], a * scale_user[1] + b * scale_user[3]
+    c2, d2 = c * scale_user[0] + d * scale_user[2], c * scale_user[1] + d * scale_user[3]
+    det = a2 * d2 - b2 * c2
+
+    def mapped(glyph: Glyph) -> tuple[float, float]:
+        """Новое начало глифа в текстовом пространстве: через fitz, где отображение осевое."""
+        fx, fy = apply(user_to_fitz, *glyph.origin_text)
+        return to_user(target.x0 + (fx - bbox.x0) * sx, target.y0 + (fy - bbox.y0) * sy)
+
+    parts = [b"BT ", word.state_ops.strip(), b" "]
+    first = mapped(glyphs[0])
+    parts += [
+        _fmt(a2),
+        b" ",
+        _fmt(b2),
+        b" ",
+        _fmt(c2),
+        b" ",
+        _fmt(d2),
+        b" ",
+        _fmt(first[0]),
+        b" ",
+        _fmt(first[1]),
+        b" Tm ",
+    ]
+    previous = first
+    for number, glyph in enumerate(glyphs):
+        if number:
+            current = mapped(glyph)
+            dx, dy = current[0] - previous[0], current[1] - previous[1]
+            if abs(det) > 1e-9:
+                tx, ty = (dx * d2 - dy * c2) / det, (dy * a2 - dx * b2) / det
+            else:
+                tx, ty = dx, dy
+            parts += [_fmt(tx), b" ", _fmt(ty), b" Td "]
+            previous = current
+        parts += [_hex_string([glyph.code]), b"Tj "]
+    parts.append(b"ET")
+    return b"".join(parts)
+
+
+def refit_edits(
+    refits: dict[int, tuple[Word, fitz.Rect]],
+    to_fitz: Matrix,
+    trims: "dict[int, tuple[Word, tuple[int, ...]]] | None" = None,
+) -> list[tuple[int, int, bytes]]:
+    """Правки «пересобрать слово в новую рамку» (диапазоны — в исходном потоке); усечённые слова
+    пересобираются из оставленных глифов."""
+    edits: list[tuple[int, int, bytes]] = []
+    for key, (word, target) in refits.items():
+        if not word.text_ranges:
+            continue
+        keep = trims[key][1] if trims and key in trims else None
+        start, _ = word.text_ranges[0]
+        _, end = word.text_ranges[-1]
+        edits.append((start, end, refit_text_object(word, target, to_fitz, keep)))
+    return edits
+
+
 # --- Применение и проверка ----------------------------------------------------------------
 
 
@@ -334,6 +533,7 @@ def apply_edits(
     trims: dict[int, tuple[Word, tuple[int, ...]]],
     inserts: list[Insert],
     font: "InsertFont | None" = None,
+    refits: "dict[int, tuple[Word, fitz.Rect]] | None" = None,
 ) -> EditStats:
     """Записать правки в поток содержимого страницы документа (документ — открытая копия).
 
@@ -345,6 +545,8 @@ def apply_edits(
         trims: Слова на усечение (см. :func:`trim_words`).
         inserts: Вставки.
         font: Шрифт вставок; None — Noto Sans по умолчанию.
+        refits: Слова, которые надо ужать в новую рамку (``id(слова) → (слово, рамка fitz)``), —
+            для страниц, обрезаемых после правки; слово и в ``trims`` — усекается и ужимается.
 
     Returns:
         Статистика правок.
@@ -354,10 +556,12 @@ def apply_edits(
     xrefs = page.get_contents()
     if len(xrefs) != 1:
         raise ValueError(f"страница {page_index}: потоков содержимого {len(xrefs)}, ожидается один")
+    refits = refits or {}
     # Все правки — одним проходом по ИСХОДНОМУ потоку: диапазоны слов посчитаны по нему, и
     # после первой же вырезки они бы поплыли (замер: усечение после удалений теряло соседние слова).
-    edited = _splice(raw, blank_edits(blanks) + trim_edits(trims))
-    stats.blanked, stats.trimmed = len(blanks), len(trims)
+    plain_trims = {key: value for key, value in trims.items() if key not in refits}
+    edited = _splice(raw, blank_edits(blanks) + trim_edits(plain_trims) + refit_edits(refits, page_matrix(page), trims))
+    stats.blanked, stats.trimmed, stats.refitted = len(blanks), len(trims), len(refits)
     if inserts:
         font = font or InsertFont()
         resource = font.ensure_resource(page)
@@ -384,12 +588,19 @@ class VerifyReport:
     kept_missing: int = 0  # слов KEEP не нашлось на прежнем месте
     deleted_remaining: int = 0  # удалённых слов всё ещё видно в извлечении
     inserts_missing: int = 0  # вставок не находит поиск
+    refits_missing: int = 0  # ужатых слов не находит поиск в их новой рамке
     image_changed: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not (self.kept_missing or self.deleted_remaining or self.inserts_missing or self.image_changed)
+        return not (
+            self.kept_missing
+            or self.deleted_remaining
+            or self.inserts_missing
+            or self.refits_missing
+            or self.image_changed
+        )
 
 
 def image_digest(doc: fitz.Document, xref: int) -> str:
@@ -410,24 +621,40 @@ def same_image(before: fitz.Document, before_xref: int, after: fitz.Document, af
     return pixels_digest(before, before_xref) == pixels_digest(after, after_xref)
 
 
-def _char_index(page: fitz.Page) -> dict[tuple[int, int], list[tuple[float, float, str]]]:
-    """Символы страницы по сетке начал (как в ``text_layer``), для посимвольной сверки."""
-    index: dict[tuple[int, int], list[tuple[float, float, str]]] = {}
+def _char_index(page: fitz.Page) -> dict[tuple[int, int], list[tuple[float, float, str, str]]]:
+    """Символы страницы по сетке начал (как в ``text_layer``), для посимвольной сверки: (x, y, символ, шрифт)."""
+    index: dict[tuple[int, int], list[tuple[float, float, str, str]]] = {}
     for block in page.get_text("rawdict", flags=0)["blocks"]:
         for line in block.get("lines", []):
             for span in line.get("spans", []):
                 for char in span.get("chars", []):
                     x, y = char["origin"]
-                    index.setdefault((int(math.floor(x)), int(math.floor(y))), []).append((x, y, char["c"]))
+                    index.setdefault((int(math.floor(x)), int(math.floor(y))), []).append(
+                        (x, y, char["c"], span["font"])
+                    )
     return index
 
 
-def _glyph_present(index: dict, glyph_origin: tuple[float, float], char: str, tolerance: float = 0.35) -> bool:
+def _font_key(name: str) -> str:
+    """Имя шрифта без пробелов и дефисов в нижнем регистре: fitz зовёт шрифт «Noto Sans Regular», rawdict — «NotoSans-Regular»."""
+    return name.replace(" ", "").replace("-", "").lower()
+
+
+def _glyph_present(
+    index: dict, glyph_origin: tuple[float, float], char: str, tolerance: float = 0.35, ignore_font: "str | None" = None
+) -> bool:
+    """Есть ли на странице такой символ с началом в ``tolerance`` pt от ожидаемого.
+
+    ``ignore_font`` — символы этого шрифта не считаются (свои вставки: они ложатся туда же, где
+    стояла удалённая россыпь, и та же буква на том же месте — не «неудалённое» слово).
+    """
     gx, gy = glyph_origin
     cx, cy = int(math.floor(gx)), int(math.floor(gy))
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
-            for x, y, c in index.get((cx + dx, cy + dy), ()):
+            for x, y, c, font_name in index.get((cx + dx, cy + dy), ()):
+                if ignore_font and _font_key(font_name) == ignore_font:
+                    continue
                 if c == char and math.hypot(x - gx, y - gy) <= tolerance:
                     return True
     return False
@@ -441,6 +668,9 @@ def verify_page(
     inserts: list[Insert],
     image_xref: "int | None" = None,
     after_image_xref: "int | None" = None,
+    font: "InsertFont | None" = None,
+    shift: tuple[float, float] = (0.0, 0.0),
+    refits: "list[tuple[Word, fitz.Rect]] | None" = None,
 ) -> VerifyReport:
     """Сверить страницу-копию с ожиданиями (посимвольно, по началам глифов).
 
@@ -453,28 +683,50 @@ def verify_page(
         image_xref: Картинка страницы в исходном документе для сверки md5; ``None`` — не сверять.
         after_image_xref: Та же картинка в копии, если её xref отличается (страница скопирована в
             новый документ); по умолчанию тот же xref, что и ``image_xref``.
+        font: Шрифт вставок — чтобы искать первую строку в той же укладке (:func:`wrap_lines`);
+            без него ищется первое слово.
+        shift: На сколько сдвинуты координаты копии относительно исходной страницы (fitz):
+            у обрезанной страницы — минус начало CropBox.
+        refits: Ужатые слова с новыми рамками: каждое должно находиться поиском в своей рамке.
 
     Returns:
         Отчёт сверки.
     """
     report = VerifyReport()
     index = _char_index(after)
+    dx, dy = shift
     for word in kept:
         glyphs = [g for g in word.glyphs if g.char and not g.char.isspace()]
-        if glyphs and not all(_glyph_present(index, g.origin, g.char) for g in glyphs):
+        if glyphs and not all(_glyph_present(index, (g.origin[0] + dx, g.origin[1] + dy), g.char) for g in glyphs):
             report.kept_missing += 1
+    own_font = _font_key(font.fitz_font.name) if font is not None else None
     for word in deleted:
         glyphs = [g for g in word.glyphs if g.char and not g.char.isspace()]
-        if glyphs and any(_glyph_present(index, g.origin, g.char) for g in glyphs):
+        if glyphs and any(
+            _glyph_present(index, (g.origin[0] + dx, g.origin[1] + dy), g.char, ignore_font=own_font) for g in glyphs
+        ):
             report.deleted_remaining += 1
     for insert in inserts:
-        first = next((line.strip() for line in insert.text.split("\n") if line.strip()), "")
+        if font is not None:
+            _, _, _, length, thickness = _frame(insert.rect, insert.rotate_cw)
+            lines, _ = wrap_lines(font, insert.text, length, thickness)
+            first = lines[0] if lines else ""
+        else:
+            first = next(iter(insert.text.split()), "")
         if not first:
             continue
-        hits = after.search_for(first)
-        if not any(hit.intersects(insert.rect) for hit in hits):
+        rect = insert.rect + (dx, dy, dx, dy)
+        if not any(hit.intersects(rect) for hit in after.search_for(first)):
             report.inserts_missing += 1
             report.notes.append(f"не найдена вставка «{first[:30]}»")
+    for word, target in refits or ():
+        text = word.text.strip()
+        if not text:
+            continue
+        rect = target + (dx, dy, dx, dy)
+        if not any(hit.intersects(rect) for hit in after.search_for(text)):
+            report.refits_missing += 1
+            report.notes.append(f"не найдено ужатое слово «{text[:30]}»")
     if image_xref is not None:
         try:
             after_xref = image_xref if after_image_xref is None else after_image_xref

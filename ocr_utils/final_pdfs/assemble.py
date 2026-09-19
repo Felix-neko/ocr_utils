@@ -24,6 +24,7 @@ from ocr_utils.final_pdfs.pictures import (
     DEFAULT_JPEG_QUALITY,
     DEFAULT_PICTURE_DPI,
     PictureJpeg,
+    crop_page,
     figures_under,
     insert_picture,
     placement_rect,
@@ -71,7 +72,9 @@ class PageRecord:
     blanked: int = 0
     trimmed: int = 0
     inserted: int = 0
+    refitted: int = 0  # слов слоя ужато в границу обрезанной страницы
     skipped_duplicates: int = 0
+    cropped: bool = False  # страница обрезана до полосы (полностраничный растр)
     verify_ok: bool = True
     verify_notes: str = ""
     error: str = ""
@@ -93,8 +96,10 @@ class IssueResult:
     pages_nogeo: int = 0
     pictures: int = 0
     figures_removed: int = 0
+    cropped: int = 0
     blanked: int = 0
     inserted: int = 0
+    refitted: int = 0
     verify_failures: int = 0
     page_errors: int = 0
     bytes_in_geo: int = 0
@@ -116,6 +121,7 @@ class _PageWork:
     source: PageSource
     edits: PageEdits | None = None
     image_removed: bool = False  # основной образ снят (полностраничный растр)
+    crop: fitz.Rect | None = None  # до чего обрезана страница (координаты исходной страницы)
     pictures: list[tuple[PictureJpeg, fitz.Rect]] = field(default_factory=list)
 
 
@@ -188,21 +194,11 @@ def _build(
             out.insert_pdf(source_doc, from_page=index, to_page=index)
             out_page = out[index]
             work = _PageWork(index, source)
-            # 1. Текстовый слой — на нетронутой странице-источнике план, на копии применение.
-            if not payload.get("error") and has_edits(payload):
-                try:
-                    work.edits = plan_page_edits(source_doc[index], source_pk, payload)
-                    fix = apply_page_edits(out, index, work.edits, font)
-                    record.blanked, record.trimmed = fix.blanked, fix.trimmed
-                    record.inserted, record.skipped_duplicates = fix.inserted, fix.skipped_duplicates
-                except Exception as error:  # noqa: BLE001 — слой не правим, страница остаётся как у FineReader
-                    logger.warning("%s с.%d: слой не исправлен: %s", plan.full_pdf_name, index + 1, error)
-                    record.error = f"слой: {type(error).__name__}: {error}"
-                    work.edits = None
-            elif payload.get("error"):
-                record.error = f"анализ: {payload['error']}"
-            # 2–4. Иллюстрации: сверка геометрии, снятие фигур, вставка JPEG.
             page_plan = plan.pages[index]
+            # 0. Иллюстрации готовятся заранее: полностраничная означает обрезку страницы до полосы,
+            #    а обрезку должен знать план правок слоя (слова за границей ужимаются внутрь).
+            pictures: list[PictureJpeg] = []
+            rects: list[fitz.Rect] = []
             if page_plan.pictures:
                 if source is not PageSource.NOGEO:
                     raise RuntimeError(f"с.{index + 1}: растр, а источник {source.value}")
@@ -215,13 +211,33 @@ def _build(
                     params.descreen_sigma_mm,
                 )
                 rects = [placement_rect(p.rect_px, params.margins, page_plan.dpi) for p in pictures]
-                full_page = any(p.full_page for p in pictures)
+                if any(p.full_page for p in pictures):
+                    work.crop = placement_rect((0, 0, *page_plan.file_size), params.margins, page_plan.dpi)
+            # 1. Текстовый слой — на нетронутой странице-источнике план, на копии применение.
+            if not payload.get("error") and (has_edits(payload) or work.crop is not None):
+                try:
+                    work.edits = plan_page_edits(source_doc[index], source_pk, payload, work.crop)
+                    fix = apply_page_edits(out, index, work.edits, font)
+                    record.blanked, record.trimmed, record.refitted = fix.blanked, fix.trimmed, fix.refitted
+                    record.inserted, record.skipped_duplicates = fix.inserted, fix.skipped_duplicates
+                except Exception as error:  # noqa: BLE001 — слой не правим, страница остаётся как у FineReader
+                    logger.warning("%s с.%d: слой не исправлен: %s", plan.full_pdf_name, index + 1, error)
+                    record.error = f"слой: {type(error).__name__}: {error}"
+                    work.edits = None
+            elif payload.get("error"):
+                record.error = f"анализ: {payload['error']}"
+            # 2–4. Иллюстрации: снятие фигур FineReader, вставка JPEG, обрезка обложки до полосы.
+            if pictures:
+                full_page = work.crop is not None
                 xrefs = figures_under(out_page, rects, full_page)
                 record.figures_removed = remove_images(out, out_page, xrefs)
                 work.image_removed = full_page
                 for picture, rect in zip(pictures, rects):
                     insert_picture(out, out_page, picture, rect)
                     work.pictures.append((picture, rect))
+                if work.crop is not None:
+                    crop_page(out_page, work.crop)
+                    record.cropped = True
             works.append(work)
             result.records.append(record)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -241,6 +257,7 @@ def _verify(
     result: IssueResult,
 ) -> None:
     """Сверить сохранённый файл: слой по плану, иллюстрации на месте, число страниц."""
+    font = InsertFont(params.font_path)
     with fitz.open(str(out_path)) as saved, fitz.open(str(pair.geo)) as geo, fitz.open(str(pair.nogeo)) as nogeo:
         if len(saved) != pair.pages:
             raise RuntimeError(f"в сохранённом файле {len(saved)} страниц вместо {pair.pages}")
@@ -250,11 +267,12 @@ def _verify(
             notes: list[str] = []
             if work.edits is not None:
                 main_xref = None if work.image_removed else _main_image_xref(saved_page)
-                report = verify_saved(docs[work.source][work.index], saved_page, work.edits, main_xref)
+                report = verify_saved(docs[work.source][work.index], saved_page, work.edits, main_xref, font, work.crop)
                 if not report.ok:
                     notes.append(
                         f"слой: не на месте {report.kept_missing}, не удалено {report.deleted_remaining}, "
-                        f"не найдено вставок {report.inserts_missing}, образ изменён {report.image_changed}"
+                        f"не найдено вставок {report.inserts_missing}, ужатых {report.refits_missing}, "
+                        f"образ изменён {report.image_changed}"
                     )
                 notes.extend(report.notes)
             notes.extend(_verify_pictures(saved, saved_page, work))
@@ -267,8 +285,10 @@ def _verify(
                 result.page_errors += 1
             result.pictures += len(work.pictures)
             result.figures_removed += record.figures_removed
+            result.cropped += int(record.cropped)
             result.blanked += record.blanked
             result.inserted += record.inserted
+            result.refitted += record.refitted
             if work.source is PageSource.GEO:
                 result.pages_geo += 1
             else:
@@ -288,7 +308,16 @@ def _verify_pictures(doc: fitz.Document, page: fitz.Page, work: _PageWork) -> li
     """Каждая иллюстрация — DCT-образ нужной цветности на своём месте; снятые образы отсутствуют."""
     notes: list[str] = []
     infos = page.get_image_info(xrefs=True)
+    shift = (-work.crop.x0, -work.crop.y0, -work.crop.x0, -work.crop.y0) if work.crop is not None else (0, 0, 0, 0)
+    if work.crop is not None and (
+        abs(page.rect.width - work.crop.width) > RECT_TOLERANCE_PT
+        or abs(page.rect.height - work.crop.height) > RECT_TOLERANCE_PT
+    ):
+        notes.append(
+            f"страница обрезана до {tuple(round(v) for v in page.rect)}, ожидалось {work.crop.width:.0f}×{work.crop.height:.0f}"
+        )
     for picture, rect in work.pictures:
+        rect = rect + shift
         found = False
         for info in infos:
             box = fitz.Rect(info["bbox"])
@@ -336,22 +365,30 @@ PAGE_FIELDS = list(PageRecord.__dataclass_fields__)
 ISSUE_FIELDS = [f for f in IssueResult.__dataclass_fields__ if f != "records"]
 
 
-def write_pages_csv(path: Path, results: list[IssueResult]) -> None:
-    """``pages.csv``: строка на страницу всех собранных выпусков."""
+def merge_csv(path: Path, fields: list[str], rows: list[dict], key: tuple[str, ...]) -> None:
+    """Записать CSV, сохранив строки прошлых запусков по другим выпускам: прогон по одному выпуску
+    (``--only-issue``) не должен стирать сводку по паку. Строки с теми же ключами заменяются."""
+    old: dict[tuple, dict] = {}
+    if path.is_file():
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                old[tuple(row.get(k, "") for k in key)] = row
+    for row in rows:
+        old[tuple(str(row[k]) for k in key)] = {k: row.get(k, "") for k in fields}
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=PAGE_FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for result in results:
-            for record in result.records:
-                writer.writerow(record.to_row())
+        for _, row in sorted(old.items()):
+            writer.writerow({k: row.get(k, "") for k in fields})
+
+
+def write_pages_csv(path: Path, results: list[IssueResult]) -> None:
+    """``pages.csv``: строка на страницу; выпуски прошлых запусков сохраняются, пропущенные (``skipped``) не трогаются."""
+    rows = [record.to_row() for result in results for record in result.records]
+    merge_csv(path, PAGE_FIELDS, rows, ("pdf", "page"))
 
 
 def write_summary_csv(path: Path, results: list[IssueResult]) -> None:
-    """``summary.csv``: строка на выпуск."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=ISSUE_FIELDS)
-        writer.writeheader()
-        for result in results:
-            writer.writerow(result.to_row())
+    """``summary.csv``: строка на выпуск; выпуски прошлых запусков сохраняются."""
+    merge_csv(path, ISSUE_FIELDS, [r.to_row() for r in results if r.status != "skipped"], ("pdf",))

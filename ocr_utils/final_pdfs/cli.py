@@ -7,7 +7,6 @@ JSON анализа и готовые PDF при ``--skip-done`` не перес
 
 from __future__ import annotations
 
-import csv
 import logging
 import multiprocessing
 import os
@@ -26,6 +25,7 @@ from ocr_utils.final_pdfs.analysis import (
 from ocr_utils.final_pdfs.assemble import (
     AssembleParams,
     IssueResult,
+    merge_csv,
     assemble_issue,
     write_pages_csv,
     write_summary_csv,
@@ -179,13 +179,8 @@ def _assemble_one(task: tuple[IssuePlan, IssuePair, AssembleParams]) -> IssueRes
 
 
 def write_analysis_csv(path: Path, rows: list[PageAnalysis]) -> None:
-    """``analysis.csv``: строка на страницу после стадии A."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(PageAnalysis.__dataclass_fields__))
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row.to_row())
+    """``analysis.csv``: строка на страницу после стадии A; страницы прошлых запусков сохраняются."""
+    merge_csv(path, list(PageAnalysis.__dataclass_fields__), [row.to_row() for row in rows], ("pdf", "page"))
 
 
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))

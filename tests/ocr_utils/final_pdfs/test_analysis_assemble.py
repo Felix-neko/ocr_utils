@@ -71,9 +71,16 @@ def test_assemble_places_pictures_and_verifies(pack) -> None:
         pix = doc[1].get_pixmap(dpi=600, clip=fitz.Rect(center.x - 1, center.y - 1, center.x + 1, center.y + 1))
         r, g, b = pix.pixel(0, 0)[:3]
         assert abs(r - g) < 8 and abs(g - b) < 8  # серый
-        # Обложка: только JPEG, бинарного образа нет.
+        # Обложка: только JPEG, бинарного образа нет; страница обрезана до полосы, JPEG во всю страницу.
         infos = doc[2].get_image_info(xrefs=True)
         assert len(infos) == 1 and infos[0]["cs-name"] == "DeviceRGB"
+        cover = doc[2]
+        assert abs(cover.rect.width - 400 * scale) < 0.01 and abs(cover.rect.height - 600 * scale) < 0.01
+        assert fitz.Rect(infos[0]["bbox"]).x0 < 0.01 and abs(fitz.Rect(infos[0]["bbox"]).x1 - cover.rect.width) < 0.01
+        corner = cover.get_pixmap(dpi=600, clip=fitz.Rect(0, 0, 1, 1)).pixel(0, 0)[:3]
+        assert corner[0] > 150 and corner[1] < 80  # красная заливка полосы, а не белое поле
+        assert result.cropped == 1 and result.records[2].cropped and not result.records[1].cropped
+        assert abs(doc[1].rect.width - (400 + 2 * MARGINS.x_px) * scale) < 0.01
         # Повёрнутая полоса: врезка лежит по повёрнутой рамке.
         placed = plan.pages[3].placed_pictures()[0]
         expect = (

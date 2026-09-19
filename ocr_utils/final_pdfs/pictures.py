@@ -107,6 +107,11 @@ def render_pictures(
         )
     result: list[PictureJpeg] = []
     for picture in page_plan.placed_pictures():
+        full_page = is_full_page(picture, width, height)
+        if full_page:
+            # Обложка: страница будет обрезана до полосы, и JPEG должен покрыть её целиком —
+            # режем всю полосу, а не рамку региона (та бывает на пару пикселей меньше).
+            picture = PicturePlan(0, 0, width, height, picture.kind)
         part = crop(image, picture.rect)
         if picture.gray and part.ndim == 3:
             part = cv2.cvtColor(part, cv2.COLOR_RGB2GRAY)
@@ -119,7 +124,7 @@ def render_pictures(
                 width=part.shape[1],
                 height=part.shape[0],
                 kind=picture.kind,
-                full_page=is_full_page(picture, width, height),
+                full_page=full_page,
             )
         )
     return result
@@ -230,3 +235,15 @@ def insert_picture(doc: fitz.Document, page: fitz.Page, picture: PictureJpeg, re
     # говорит просмотрщику «один канал» / «три канала».
     doc.xref_set_key(xref, "ColorSpace", "/DeviceGray" if picture.gray else "/DeviceRGB")
     return xref
+
+
+def crop_page(page: fitz.Page, rect: fitz.Rect) -> None:
+    """Обрезать страницу до рамки: MediaBox = рамка (CropBox по умолчанию равен ему — полей нет
+    ни в одном просмотрщике).
+
+    Args:
+        page: Страница.
+        rect: Рамка в координатах fitz страницы (y вниз); ``set_mediabox`` ждёт координаты PDF,
+            поэтому рамка переводится обратной матрицей страницы.
+    """
+    page.set_mediabox(rect * ~page.transformation_matrix)
