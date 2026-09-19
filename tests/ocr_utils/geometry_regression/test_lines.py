@@ -1,7 +1,7 @@
-from research.geometry_regression.edges import column_edges, edge_metrics
-from research.geometry_regression.lines import line_metrics, match_lines
-from research.geometry_regression.regions import text_lines
-from tests.research.geometry_regression.synthetic import binarize, text_page, wave_region
+from ocr_utils.geometry_regression.edges import column_edges, edge_metrics
+from ocr_utils.geometry_regression.lines import line_metrics, match_lines
+from ocr_utils.geometry_regression.regions import text_lines
+from tests.ocr_utils.geometry_regression.synthetic import binarize, text_page, wave_region
 
 
 def test_waved_line_raises_wobble():
@@ -12,7 +12,7 @@ def test_waved_line_raises_wobble():
     lines_a, _ = text_lines(after)
     pairs = match_lines(lines_b, lines_a, None)
     assert len(pairs) >= 30
-    from research.geometry_regression.stretch import glyph_line_metrics
+    from ocr_utils.geometry_regression.stretch import glyph_line_metrics
 
     metrics, culprits, _ = glyph_line_metrics(before, after, pairs, None, 150.0, 25.0)
     assert metrics["line_glyph_wobble_max"] > 0.05
@@ -36,7 +36,7 @@ def test_stretched_heading_gives_wedge_in_mm():
     import cv2
     import numpy as np
 
-    from research.geometry_regression.stretch import glyph_line_metrics
+    from ocr_utils.geometry_regression.stretch import glyph_line_metrics
 
     page = text_page(lines=12, font_px=90, x0=200)  # крупный кегль: строки заведомо выше 4 мм
     before = binarize(page)
@@ -68,8 +68,8 @@ def test_columns_are_found_under_full_width_heading():
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
 
-    from research.geometry_regression.regions import column_spans
-    from tests.research.geometry_regression.synthetic import FONT_PATH, WORDS
+    from ocr_utils.geometry_regression.regions import column_spans
+    from tests.ocr_utils.geometry_regression.synthetic import FONT_PATH, WORDS
 
     image = Image.new("L", (2000, 3000), 255)
     draw = ImageDraw.Draw(image)

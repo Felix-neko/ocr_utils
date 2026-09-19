@@ -1,6 +1,6 @@
 # Страницы, где коррекция геометрии FineReader сделала хуже
 
-Зачем — в докстринге `__init__.py`. Коротко: два прогона FineReader по одним промежуточным PDF
+Ядро детектора (метрики, пороги, кэш) — `ocr_utils/geometry_regression`; здесь стенд. Зачем — в докстринге `ocr_utils/geometry_regression/__init__.py`. Коротко: два прогона FineReader по одним промежуточным PDF
 (с коррекцией геометрии и без), детектор сравнивает одну и ту же страницу попарно и отдаёт
 score «стало хуже» с причиной, а также картинки «было | стало» для проверки глазами.
 
@@ -16,13 +16,13 @@ while kill -0 "$PID" 2>/dev/null; do sleep 30; done
 ./run_scripts/geometry_regression/run_report.sh --thr line_dev_max_delta_mm=1.2 --min-score 1.3
 
 # регрессия на эталоне: вердикты прошлого прогона против текущего кода
-uv run python -m research.geometry_regression regress --geo-dir … --nogeo-dir … \
+uv run python -m ocr_utils.geometry_regression regress --geo-dir … --nogeo-dir … \
     --labels research/geometry_regression/validation/pack1 --old-dir …/pack1_v7 --md-report …
 
 # проба на одном выпуске и нескольких страницах
-uv run python -m research.geometry_regression run --geo-dir … --nogeo-dir … --out-dir … \
+uv run python -m ocr_utils.geometry_regression run --geo-dir … --nogeo-dir … --out-dir … \
     --only full_1967_01 --pages 38,80,85 --jobs 4
-uv run python -m research.geometry_regression report --out-dir … --list-thresholds
+uv run python -m ocr_utils.geometry_regression report --out-dir … --list-thresholds
 ```
 
 ## Что лежит в выходе

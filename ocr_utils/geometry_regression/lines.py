@@ -12,9 +12,9 @@ from __future__ import annotations
 import numpy as np
 
 from ocr_utils.scan_markup.curved_lines.fitting import page_stats
-from research.geometry_regression import WORK_DPI, px_to_mm
-from research.geometry_regression.field import Field
-from research.geometry_regression.regions import TextLine
+from ocr_utils.geometry_regression import WORK_DPI, px_to_mm
+from ocr_utils.geometry_regression.field import Field
+from ocr_utils.geometry_regression.regions import TextLine
 
 # Сопоставление: допуск по центру строки в долях её высоты (не меньше 0.7 мм) и минимальное
 # перекрытие по x — В ДОЛЯХ ДЛИННОЙ строки: иначе строке, распавшейся в A на куски по широким

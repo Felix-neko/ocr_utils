@@ -11,16 +11,16 @@ import json
 import logging
 import multiprocessing
 import os
-import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
 import click
 
-from research.geometry_regression import VERSION
-from research.geometry_regression.metrics import Params, measure_pair
-from research.geometry_regression.render import PdfPair, pair_pdfs, render_gray, to_work
+from ocr_utils.geometry_regression import VERSION
+from ocr_utils.geometry_regression.cache import cache_path, load_page_cache, measure_page, save_page_cache
+from ocr_utils.geometry_regression.metrics import Params
+from ocr_utils.geometry_regression.render import PdfPair, pair_pdfs, render_gray, to_work
 from research.geometry_regression.report import (
     PageRow,
     load_labels,
@@ -30,7 +30,7 @@ from research.geometry_regression.report import (
     reflag,
     write_csv,
 )
-from research.geometry_regression.scoring import Thresholds
+from ocr_utils.geometry_regression.scoring import Thresholds
 
 logger = logging.getLogger("research.geometry_regression")
 
@@ -49,10 +49,6 @@ def _init_worker() -> None:
     threadpoolctl.threadpool_limits(1)
 
 
-def cache_path(out_dir: Path, pdf: str, page: int) -> Path:
-    return out_dir / "cache" / pdf / f"p{page:03d}.json"
-
-
 def _measure_chunk(args: tuple) -> list[dict]:
     """Одна пачка страниц одного выпуска; возвращает записи для CSV."""
     import fitz
@@ -67,28 +63,13 @@ def _measure_chunk(args: tuple) -> list[dict]:
             path = cache_path(out_dir, pair.name, page)
             record = {"pdf": pair.name, "page": page, "metrics": {}, "error": ""}
             try:
-                if skip_done and path.is_file():
-                    cached = json.loads(path.read_text(encoding="utf-8"))
-                    if cached.get("version") == VERSION and "metrics" in cached:
-                        record["metrics"] = cached["metrics"]
-                        results.append(record)
-                        continue
-                started = time.time()
-                measure = measure_pair(render_gray(nogeo, page - 1), render_gray(geo, page - 1), params)
-                measure.metrics["seconds"] = round(time.time() - started, 2)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
-                    json.dumps(
-                        {
-                            "version": VERSION,
-                            "metrics": measure.metrics,
-                            "culprits": measure.culprits,
-                            "raw": measure.raw,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
+                cached = load_page_cache(path) if skip_done else None
+                if cached is not None:
+                    record["metrics"] = cached["metrics"]
+                    results.append(record)
+                    continue
+                measure = measure_page(geo, nogeo, page, params)
+                save_page_cache(path, measure)
                 record["metrics"] = measure.metrics
             except Exception as error:  # страница не должна валить прогон
                 record["error"] = f"{type(error).__name__}: {error}"
@@ -587,7 +568,7 @@ def regress(geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, 
     hits_old = hits_new = 0
     for (pdf, page), (label, _) in sorted(label_map.items()):
         with fitz.open(nogeo_dir / f"{pdf}.pdf") as nogeo, fitz.open(geo_dir / f"{pdf}.pdf") as geo:
-            measure = measure_pair(render_gray(nogeo, page - 1), render_gray(geo, page - 1), params)
+            measure = measure_page(geo, nogeo, page, params)
         new = thresholds.apply(measure.metrics)
         old = old_rows.get((pdf, page))
         ok_new = (new.verdict == "bad") == (label == "bad")

@@ -1,7 +1,6 @@
-import numpy as np
 
-from research.geometry_regression.strokes import find_strokes, match_strokes, stroke_metrics
-from tests.research.geometry_regression.synthetic import add_rules, binarize, text_page
+from ocr_utils.geometry_regression.strokes import find_strokes, match_strokes, stroke_metrics
+from tests.ocr_utils.geometry_regression.synthetic import add_rules, binarize, text_page
 
 RULES = [(300, 2500, 1500, 2500), (300, 2700, 1500, 2700), (1600, 400, 1600, 2600)]  # вертикаль в 34 мм от края
 

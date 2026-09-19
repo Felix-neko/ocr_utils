@@ -19,9 +19,9 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from research.geometry_regression import px_to_mm
-from research.geometry_regression.field import Field
-from research.geometry_regression.strokes import Stroke
+from ocr_utils.geometry_regression import px_to_mm
+from ocr_utils.geometry_regression.field import Field
+from ocr_utils.geometry_regression.strokes import Stroke
 
 # Линия короче — не мерится: сагитта короткой линии тонет в шуме толщины краски.
 BEND_MIN_MM = 50.0

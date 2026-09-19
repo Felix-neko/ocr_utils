@@ -1,9 +1,9 @@
 import cv2
 import numpy as np
 
-from research.geometry_regression.bend import bend_metrics
-from research.geometry_regression.strokes import find_strokes
-from tests.research.geometry_regression.synthetic import add_rules, binarize, text_page
+from ocr_utils.geometry_regression.bend import bend_metrics
+from ocr_utils.geometry_regression.strokes import find_strokes
+from tests.ocr_utils.geometry_regression.synthetic import add_rules, binarize, text_page
 
 RULE = (300, 2500, 1500, 2500)  # линейка 100 мм при 300 dpi
 

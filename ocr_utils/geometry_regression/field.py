@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 from scipy.spatial import cKDTree
 
-from research.geometry_regression import WORK_DPI, mm_to_px, px_to_mm
+from ocr_utils.geometry_regression import WORK_DPI, mm_to_px, px_to_mm
 
 # Сетка тайлов: 27 мм (160 px при 150 dpi) — 5-6 строк корпуса, хватает для острого пика.
 TILE_MM = 27.0

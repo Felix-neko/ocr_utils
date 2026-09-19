@@ -37,7 +37,7 @@ from PIL import Image, ImageDraw
 
 from ocr_utils.external_ocr_services.client import OpenRouterClient
 from ocr_utils.external_ocr_services.models import ModelSpec
-from research.geometry_regression import mm_to_px
+from ocr_utils.geometry_regression import mm_to_px
 from research.geometry_regression.overlay import pair_image
 from research.geometry_regression.prompts import render
 from research.geometry_regression.report import PageRow

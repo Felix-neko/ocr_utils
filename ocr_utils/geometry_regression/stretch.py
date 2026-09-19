@@ -28,10 +28,10 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from research.geometry_regression import mm_to_px, px_to_mm
-from research.geometry_regression.field import Field
-from research.geometry_regression.regions import TextLine
-from research.geometry_regression.render import RENDER_DPI
+from ocr_utils.geometry_regression import mm_to_px, px_to_mm
+from ocr_utils.geometry_regression.field import Field
+from ocr_utils.geometry_regression.regions import TextLine
+from ocr_utils.geometry_regression.render import RENDER_DPI
 
 # Кусок строки вдоль x (мм) и минимальное число найденных кусков, чтобы пара строк считалась
 # подтверждённой (идёт в сводки страницы).

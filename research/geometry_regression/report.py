@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from research.geometry_regression.scoring import DEFAULT_THRESHOLDS, UNFORGIVABLE, Thresholds, Verdict
+from ocr_utils.geometry_regression.scoring import DEFAULT_THRESHOLDS, UNFORGIVABLE, Thresholds, Verdict
 
 FIXED_FIELDS = ("pdf", "year", "page", "verdict", "score", "reason", "gain", "gain_reason", "flags", "error")
 

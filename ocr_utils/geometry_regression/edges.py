@@ -14,8 +14,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from research.geometry_regression import WORK_DPI, mm_to_px, px_to_mm
-from research.geometry_regression.regions import TextLine
+from ocr_utils.geometry_regression import WORK_DPI, mm_to_px, px_to_mm
+from ocr_utils.geometry_regression.regions import TextLine
 
 # Строк у кромки меньше — наклон не считается.
 MIN_EDGE_LINES = 8

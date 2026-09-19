@@ -11,15 +11,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from research.geometry_regression import WORK_DPI
-from research.geometry_regression.bend import bend_metrics
-from research.geometry_regression.edges import column_edges, edge_metrics
-from research.geometry_regression.field import estimate_field, field_metrics
-from research.geometry_regression.lines import line_metrics, match_lines
-from research.geometry_regression.regions import lineart_boxes, text_boxes, text_lines
-from research.geometry_regression.render import RENDER_DPI, to_work
-from research.geometry_regression.stretch import glyph_line_metrics
-from research.geometry_regression.strokes import LOGO_TOP_FRAC, find_strokes, match_strokes, stroke_metrics
+from ocr_utils.geometry_regression import WORK_DPI
+from ocr_utils.geometry_regression.bend import bend_metrics
+from ocr_utils.geometry_regression.edges import column_edges, edge_metrics
+from ocr_utils.geometry_regression.field import estimate_field, field_metrics
+from ocr_utils.geometry_regression.lines import line_metrics, match_lines
+from ocr_utils.geometry_regression.regions import lineart_boxes, text_boxes, text_lines
+from ocr_utils.geometry_regression.render import RENDER_DPI, to_work
+from ocr_utils.geometry_regression.stretch import glyph_line_metrics
+from ocr_utils.geometry_regression.strokes import LOGO_TOP_FRAC, find_strokes, match_strokes, stroke_metrics
 
 
 @dataclass(frozen=True)

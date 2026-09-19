@@ -15,7 +15,7 @@ import cv2
 import fitz
 import numpy as np
 
-from research.geometry_regression import WORK_DPI
+from ocr_utils.geometry_regression import WORK_DPI
 
 # Рендер идёт при 300 dpi (нужен ``line_fit``: центр-линии он берёт с копии 300 dpi),
 # рабочая копия 150 dpi делается из него усреднением.

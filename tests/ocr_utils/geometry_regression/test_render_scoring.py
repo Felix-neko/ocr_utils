@@ -1,8 +1,8 @@
 import fitz
 import pytest
 
-from research.geometry_regression.render import pair_pdfs
-from research.geometry_regression.scoring import Thresholds
+from ocr_utils.geometry_regression.render import pair_pdfs
+from ocr_utils.geometry_regression.scoring import Thresholds
 
 
 def _pdf(path, pages: int) -> None:

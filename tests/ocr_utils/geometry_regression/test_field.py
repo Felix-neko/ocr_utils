@@ -1,8 +1,8 @@
 import numpy as np
 
-from research.geometry_regression.field import estimate_field, field_metrics, robust_affine
-from research.geometry_regression.render import to_work
-from tests.research.geometry_regression.synthetic import binarize, rotate, text_page, wave_region
+from ocr_utils.geometry_regression.field import estimate_field, field_metrics, robust_affine
+from ocr_utils.geometry_regression.render import to_work
+from tests.ocr_utils.geometry_regression.synthetic import binarize, rotate, text_page, wave_region
 
 
 def test_robust_affine_ignores_outliers():

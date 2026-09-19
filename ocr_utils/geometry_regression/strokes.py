@@ -27,8 +27,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from research.geometry_regression import px_to_mm
-from research.geometry_regression.field import Field
+from ocr_utils.geometry_regression import px_to_mm
+from ocr_utils.geometry_regression.field import Field
 
 # LSD на слегка размытом бинарном рендере: без размытия ступеньки бинаризации дробят отрезки.
 BLUR_SIGMA_PX = 2.0
