@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -717,7 +718,9 @@ def _resembles(model_word: str, seam_word: str) -> bool:
         if x != y:
             break
         common += 1
-    return common >= 4
+    # Короткая половина с опечаткой транскрипции («ритым» против «ритным», 1968/12) — общее начало
+    # короче четырёх букв, но слова почти совпадают: считаем по сходству строк.
+    return common >= 4 or SequenceMatcher(None, a, b).ratio() >= 0.8
 
 
 def apply_verdict(

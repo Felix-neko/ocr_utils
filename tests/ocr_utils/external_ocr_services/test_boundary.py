@@ -126,6 +126,10 @@ def test_parse_and_apply_verdict():
     fixed, status = apply_verdict("заказа почтой", "затрачиваетсся несколько дней.", verdict, None)
     assert status is VerdictStatus.REWRITTEN and fixed.text == "заказа почтой затрачивается несколько дней."
     assert fixed.kind is JoinKind.MODEL and fixed.text[fixed.head_start :].startswith("затрачивается")
+    # Опечатка транскрипции в короткой половине («ритым» ↔ «ритным»): слова похожи, вердикт применяется.
+    typo = BoundaryVerdict(tail_word="малогаба-", head_word="ритным", same_word=True, joined="малогабаритным")
+    fixed, status = apply_verdict("для малогаба-", "ритым контейнеров.", typo, None)
+    assert status is VerdictStatus.REWRITTEN and fixed.text == "для малогабаритным контейнеров."
     # Модель прочла чужую строку (подпись к рисунку): слова не похожи на слова стыка — отклоняется.
     stray = BoundaryVerdict(tail_word="кабеля", head_word="нием", same_word=False)
     assert apply_verdict("с соответствующим сокращением", "нием затрат.", stray, None) == (None, VerdictStatus.REJECTED)
