@@ -61,3 +61,30 @@ def test_stretched_heading_gives_wedge_in_mm():
     same, _, _ = glyph_line_metrics(before, before, match_lines(lines_b, lines_b, None), None, 150.0, 25.0)
     assert same["line_stretch_mm_max"] < 0.1
     assert same["line_tilt_dev_max_mm"] < 0.1 and same["line_glyph_wobble_max"] < 0.01
+
+
+def test_columns_are_found_under_full_width_heading():
+    """Межколонник по лентам: заголовок на всю ширину его не ломает, строки получают номера колонок."""
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    from research.geometry_regression.regions import column_spans
+    from tests.research.geometry_regression.synthetic import FONT_PATH, WORDS
+
+    image = Image.new("L", (2000, 3000), 255)
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype(FONT_PATH, 40)
+    big = ImageFont.truetype(FONT_PATH, 80)
+    draw.text((200, 200), "ЗАГОЛОВОК НА ВСЮ ШИРИНУ СТРАНИЦЫ", fill=0, font=big)
+    rng = np.random.default_rng(1)
+    for column_x in (200, 1080):
+        y = 500
+        for _ in range(30):
+            draw.text((column_x, y), " ".join(rng.choice(WORDS, size=5))[:34], fill=0, font=font)
+            y += 64
+    page = binarize(np.asarray(image))
+    lines, separators = text_lines(page)
+    columns = column_spans(separators, 1000)
+    assert len(columns) == 2, (columns, separators)
+    assert sum(1 for line in lines if line.column == 0) >= 20 and sum(1 for line in lines if line.column == 1) >= 20
+    assert any(line.column == -1 for line in lines)  # заголовок через межколонник

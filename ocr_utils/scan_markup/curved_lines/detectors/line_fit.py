@@ -70,6 +70,12 @@ LINK_HEIGHT_RATIO = 1.6
 # не меньше SEPARATOR_MIN_PX.
 SEPARATOR_FRAC = 0.12
 SEPARATOR_MIN_PX = 10
+# Межколонники по лентам высоты (``column_separators_banded``): заголовок или подпись на всю
+# ширину перекрывает пустую полосу, и по профилю всей страницы межколонник пропадает
+# (1976/02 с.84 в geometry_regression). Лента — BAND_PX по высоте (40 мм при 150 dpi) с шагом
+# в половину; межколонник страницы — полоса, пустая не меньше чем в BAND_SHARE лент с текстом.
+BAND_PX = 236
+BAND_SHARE = 0.6
 
 # Окно медианного сглаживания центр-линии, в высотах строки (на копии 300 dpi).
 SMOOTH_HEIGHTS = 2.0
@@ -120,6 +126,49 @@ def column_separators(smeared: np.ndarray) -> list[tuple[int, int]]:
             start = None
     if start is not None and smeared.shape[1] - start >= SEPARATOR_MIN_PX:
         separators.append((start, smeared.shape[1]))
+    return separators
+
+
+def column_separators_banded(smeared: np.ndarray) -> list[tuple[int, int]]:
+    """Межколонники по лентам высоты: полоса пуста в большинстве лент с текстом.
+
+    В отличие от :func:`column_separators`, заголовок на всю ширину страницы межколонник не
+    ломает: он занимает одну-две ленты, а колонки — остальные. Ленты без краски (поля,
+    пустой низ) в голосовании не участвуют.
+
+    Args:
+        smeared: маска строк после горизонтального смыкания (как для ``column_separators``).
+
+    Returns:
+        Полосы ``(x0, x1)`` по всей высоте страницы — межколонники и поля.
+    """
+    height, width = smeared.shape
+    if height <= BAND_PX:
+        return column_separators(smeared)
+    votes = np.zeros(width, dtype=np.int32)
+    bands = 0
+    for y0 in range(0, height - BAND_PX + 1, BAND_PX // 2):
+        band = smeared[y0 : y0 + BAND_PX]
+        profile = band.sum(axis=0).astype(np.float64)
+        positive = profile[profile > 0]
+        if positive.size < width * 0.1:  # лента почти без краски — не голосует
+            continue
+        bands += 1
+        votes += profile < SEPARATOR_FRAC * float(np.median(positive))
+    if bands == 0:
+        return [(0, width)]
+    empty = votes >= max(1, int(np.ceil(BAND_SHARE * bands)))
+    separators: list[tuple[int, int]] = []
+    start = None
+    for x, flag in enumerate(empty):
+        if flag and start is None:
+            start = x
+        if not flag and start is not None:
+            if x - start >= SEPARATOR_MIN_PX:
+                separators.append((start, x))
+            start = None
+    if start is not None and width - start >= SEPARATOR_MIN_PX:
+        separators.append((start, width))
     return separators
 
 
@@ -209,13 +258,22 @@ class LineSample:
     weights: np.ndarray
 
 
-def line_samples(frame: Frame) -> tuple[list[LineSample], list[tuple[int, int]]]:
-    """Строки полосы (RLSA + сборка кусков) с центр-линиями и межколонники."""
+def line_samples(frame: Frame, banded: bool = False) -> tuple[list[LineSample], list[tuple[int, int]]]:
+    """Строки полосы (RLSA + сборка кусков) с центр-линиями и межколонники.
+
+    Args:
+        frame: подготовленный кадр с копиями 150 и 300 dpi.
+        banded: искать межколонники по лентам высоты (``column_separators_banded``), а не по
+            профилю всей страницы; для ``curved_lines`` остаётся прежний способ.
+
+    Returns:
+        Строки и полосы-межколонники ``(x0, x1)`` на копии 150 dpi.
+    """
     gray150, gray300 = frame.gray150, frame.gray300
     threshold, _ = cv2.threshold(gray150, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     mask150 = glyph_mask(gray150)
     smeared, labels, stats = _line_blobs(mask150)
-    separators = column_separators(smeared)
+    separators = column_separators_banded(smeared) if banded else column_separators(smeared)
     ink300 = gray300 <= threshold
     samples: list[LineSample] = []
     for span in link_spans(stats, separators):

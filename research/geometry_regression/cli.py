@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing
+import os
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
@@ -122,6 +123,45 @@ def main(log_level: str) -> None:
     _setup_logging(log_level)
 
 
+def physical_cpu_count() -> int:
+    """Число физических ядер машины (без SMT-потоков); без psutil — логических.
+
+    Returns:
+        Целое ≥ 1.
+    """
+    try:
+        import psutil
+
+        return psutil.cpu_count(logical=False) or os.cpu_count() or 1
+    except ImportError:
+        return os.cpu_count() or 1
+
+
+def effective_jobs(jobs: int, reserve_cpu_cores: int) -> int:
+    """Сколько воркеров запускать, чтобы оставить машине ``reserve_cpu_cores`` физических ядер.
+
+    Args:
+        jobs: Запрошенное число воркеров (``--jobs``).
+        reserve_cpu_cores: Сколько физических ядер не трогать (``--reserve-cpu-cores``); 0 — как просили.
+
+    Returns:
+        ``min(jobs, ядер − резерв)``, но не меньше одного воркера.
+    """
+    if reserve_cpu_cores <= 0:
+        return max(1, jobs)
+    allowed = physical_cpu_count() - reserve_cpu_cores
+    chosen = max(1, min(jobs, allowed))
+    if chosen < jobs:
+        logger.info(
+            "воркеров %d вместо %d: из %d физических ядер %d зарезервированы",
+            chosen,
+            jobs,
+            physical_cpu_count(),
+            reserve_cpu_cores,
+        )
+    return chosen
+
+
 @main.command()
 @click.option(
     "--geo-dir",
@@ -137,6 +177,13 @@ def main(log_level: str) -> None:
 )
 @click.option("--out-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--jobs", default=16, show_default=True, type=int, help="воркеров; задача упирается в CPU")
+@click.option(
+    "--reserve-cpu-cores",
+    default=0,
+    show_default=True,
+    type=int,
+    help="столько физических ядер оставить машине: воркеров будет не больше (ядер − N), чтобы прогон не забирал всё",
+)
 @click.option("--only", multiple=True, help="подстрока имени PDF (можно несколько)")
 @click.option("--pages", help="страницы для пробы: 1,5-9 (с единицы)")
 @click.option("--limit", type=int, help="не больше стольких PDF")
@@ -155,10 +202,13 @@ def main(log_level: str) -> None:
     type=float,
     help="минимальная длина строки в попарных метриках",
 )
-def run(geo_dir, nogeo_dir, out_dir, jobs, only, pages, limit, skip_done, stroke_min_mm, line_min_mm) -> None:
+def run(
+    geo_dir, nogeo_dir, out_dir, jobs, reserve_cpu_cores, only, pages, limit, skip_done, stroke_min_mm, line_min_mm
+) -> None:
     """Померить все пары страниц → JSON на страницу и metrics.csv."""
     from tqdm import tqdm
 
+    jobs = effective_jobs(jobs, reserve_cpu_cores)
     pairs, notes = pair_pdfs(geo_dir, nogeo_dir)
     if only:
         pairs = [p for p in pairs if any(sub in p.name for sub in only)]
@@ -248,18 +298,19 @@ def _write_pair(args: tuple) -> str:
     help="каталог прогона run (с metrics.csv и cache/)",
 )
 @click.option("--thr", multiple=True, help="перекрытие порога порчи или выигрыша: имя=число")
-@click.option("--hard", default=2.0, show_default=True, type=float, help="порча не ниже — bad независимо от выигрыша")
-@click.option(
-    "--min-gain", default=1.0, show_default=True, type=float, help="выигрыш не ниже переводит мелкую порчу в mixed"
-)
+@click.option("--hard", default=5.0, show_default=True, type=float, help="порча не ниже — bad независимо от выигрыша")
+@click.option("--min-gain", default=1.0, show_default=True, type=float, help="выигрыш ниже — порча не прощается")
+@click.option("--ratio", default=0.75, show_default=True, type=float, help="порча не ниже этой доли выигрыша — bad")
 @click.option("--min-score", default=1.0, show_default=True, type=float, help="картинки для страниц с порчей не ниже")
 @click.option("--max-score", type=float, help="и не выше (для выборки поясов глазами)")
 @click.option(
-    "--pairs-dir", type=click.Path(file_okay=False, path_type=Path), help="куда класть картинки (подпапка на год)"
+    "--pairs-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="куда класть картинки (pairs/<вердикт>/<год>/)",
 )
 @click.option("--md-report", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
-    "--labels", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="эталон pdf,page,label,note"
+    "--labels", type=click.Path(exists=True, path_type=Path), help="папка валидации с fr_correction_{bad,good}.csv"
 )
 @click.option("--arrows/--no-arrows", default=False, show_default=True, help="третья панель со стрелками поля")
 @click.option("--limit-pairs", type=int, help="не больше стольких картинок (по убыванию score)")
@@ -270,6 +321,7 @@ def report(
     thr,
     hard,
     min_gain,
+    ratio,
     min_score,
     max_score,
     pairs_dir,
@@ -351,7 +403,7 @@ def _load_probe_pages(out_dir: Path, thr: tuple[str, ...], labels: Path | None):
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="каталог прогона run",
 )
-@click.option("--labels", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--labels", type=click.Path(exists=True, path_type=Path))
 @click.option("--thr", multiple=True, help="пороги классики для поясов: имя=число")
 @click.option("--variants", default=",".join(("overlay", "side", "two", "crop")), show_default=True)
 @click.option("--repeats", default=2, show_default=True, type=int)
@@ -495,7 +547,7 @@ def _store_answer(future, probe, variant, repeat, path: Path, spent: float, done
 
 @main.command("vlm-report")
 @click.option("--out-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("--labels", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--labels", type=click.Path(exists=True, path_type=Path))
 @click.option("--md-report", type=click.Path(dir_okay=False, path_type=Path))
 def vlm_report(out_dir, labels, md_report) -> None:
     """Сводка ответов VLM: согласие с эталоном и между повторами, цена."""
@@ -508,3 +560,52 @@ def vlm_report(out_dir, labels, md_report) -> None:
         md_report.write_text(text, encoding="utf-8")
         click.echo(f"Отчёт: {md_report}")
     click.echo("\n".join(text.splitlines()[:12]))
+
+
+@main.command()
+@click.option("--geo-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--nogeo-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--labels", required=True, type=click.Path(exists=True, path_type=Path), help="папка валидации")
+@click.option(
+    "--old-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="прошлый прогон: его metrics_flagged.csv — старые вердикты",
+)
+@click.option("--md-report", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--thr", multiple=True, help="перекрытие порога: имя=число")
+@click.option("--stroke-min-mm", default=Params.stroke_min_mm, show_default=True, type=float)
+@click.option("--line-min-mm", default=Params.line_min_mm, show_default=True, type=float)
+def regress(geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, line_min_mm) -> None:
+    """Регрессия на эталоне: вердикты прошлого прогона против текущего кода, страница за страницей."""
+    import fitz
+
+    label_map = load_labels(labels)
+    old_rows = {r.key: r for r in read_csv(old_dir / "metrics_flagged.csv")} if old_dir else {}
+    thresholds = Thresholds.parse(tuple(thr))
+    params = Params(stroke_min_mm=stroke_min_mm, line_min_mm=line_min_mm)
+    lines = ["| страница | метка | старое (вердикт, порча, выигрыш) | новое | итог |", "|---|---|---|---|---|"]
+    hits_old = hits_new = 0
+    for (pdf, page), (label, _) in sorted(label_map.items()):
+        with fitz.open(nogeo_dir / f"{pdf}.pdf") as nogeo, fitz.open(geo_dir / f"{pdf}.pdf") as geo:
+            measure = measure_pair(render_gray(nogeo, page - 1), render_gray(geo, page - 1), params)
+        new = thresholds.apply(measure.metrics)
+        old = old_rows.get((pdf, page))
+        ok_new = (new.verdict == "bad") == (label == "bad")
+        ok_old = old is not None and (old.verdict == "bad") == (label == "bad")
+        hits_new += ok_new
+        hits_old += ok_old
+        mark = "верно" if ok_new else "**мимо**"
+        if old is not None and ok_new and not ok_old:
+            mark = "исправлено"
+        if old is not None and ok_old and not ok_new:
+            mark = "**регрессия**"
+        old_text = f"{old.verdict} {old.score:.2f} {old.reason} / {old.gain:.2f}" if old is not None else "—"
+        line = f"| {pdf} с.{page} | {label} | {old_text} | {new.verdict} {new.score:.2f} {new.reason} / {new.gain:.2f} | {mark} |"
+        lines.append(line)
+        click.echo(line)
+    total = len(label_map)
+    summary = f"Верно: старое — {hits_old} из {total}, новое — {hits_new} из {total}."
+    click.echo(summary)
+    if md_report:
+        md_report.parent.mkdir(parents=True, exist_ok=True)
+        md_report.write_text("# Регрессия на эталоне\n\n" + "\n".join(lines) + f"\n\n{summary}\n", encoding="utf-8")

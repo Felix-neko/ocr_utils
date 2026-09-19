@@ -8,9 +8,12 @@
 
 set -euo pipefail
 set -m
-trap 'kill -- -$$' EXIT INT TERM
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+trap 'kill -- -$$ 2>/dev/null' EXIT INT TERM
+# Абсолютный путь до sourcing: common.sh пака (через common.sh направления) сам делает cd в корень
+# репо, после чего относительный dirname указывал бы мимо.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+cd "$SCRIPT_DIR/../.."
 
 JOBS=8  # рендер пар: упирается в диск меньше, чем в CPU, но картинок сотни, не тысячи
 

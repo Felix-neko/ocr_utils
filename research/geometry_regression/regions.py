@@ -44,6 +44,7 @@ class TextLine:
     fit_scale: float  # пикселей аппроксимации на пиксель рабочей копии
     xs: np.ndarray  # центр-линия по своим сгусткам, координаты копии RENDER_DPI
     ys: np.ndarray
+    column: int = 0  # номер колонки, в которой лежит строка (0 — первая); через межколонник — −1
 
     @property
     def cx(self) -> float:
@@ -83,18 +84,62 @@ def lineart_boxes(gray: np.ndarray, dpi: float = WORK_DPI) -> list[Box]:
 
 
 def text_lines(gray300: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[TextLine], list[tuple[int, int]]]:
-    """Строки с аппроксимациями и межколонники, приведённые к пикселям рабочей копии ``dpi``."""
+    """Строки с аппроксимациями и межколонники, приведённые к пикселям рабочей копии ``dpi``.
+
+    Args:
+        gray300: серый рендер страницы в ``RENDER_DPI``.
+        dpi: разрешение рабочей копии, в котором отдаются боксы.
+
+    Returns:
+        Строки (с номером колонки) и межколонники ``(x0, x1)`` — по лентам высоты, чтобы
+        заголовок на всю ширину их не ломал.
+    """
     frame = frame_from_gray(gray300, RENDER_DPI, "page", Path("page"))
-    samples, separators = line_samples(frame)
+    samples, separators = line_samples(frame, banded=True)
     k = dpi / LINE_FIT_BOX_DPI
+    separators = [(round(a * k), round(b * k)) for a, b in separators]
+    columns = column_spans(separators, round(gray300.shape[1] * dpi / RENDER_DPI), dpi)
     lines: list[TextLine] = []
     for sample in samples:
         fit = _fit(sample)
         if fit is not None:
             box = (round(sample.x * k), round(sample.y * k), round(sample.x_end * k), round(sample.y_end * k))
-            lines.append(TextLine(*box, sample.h_line * k, fit, RENDER_DPI / dpi, sample.xs, sample.ys))
-    separators = [(round(a * k), round(b * k)) for a, b in separators]
+            lines.append(
+                TextLine(*box, sample.h_line * k, fit, RENDER_DPI / dpi, sample.xs, sample.ys, column_of(box, columns))
+            )
     return lines, separators
+
+
+# Уже этого (мм) колонка не бывает: пустые полосы внутри узкой врезки курсивом (1970/04 с.32 в A)
+# сливаются с соседями, иначе номера колонок в A и B расходятся.
+MIN_COLUMN_MM = 20.0
+
+
+def column_spans(separators: list[tuple[int, int]], width: int, dpi: float = WORK_DPI) -> list[tuple[int, int]]:
+    """Колонки ``(x0, x1)`` — промежутки между межколонниками (поля по краям — тоже межколонники).
+
+    Промежуток уже ``MIN_COLUMN_MM`` колонкой не считается и присоединяется к соседу.
+    """
+    bounds = [0] + [x for pair in separators for x in pair] + [width]
+    spans = [(bounds[i], bounds[i + 1]) for i in range(0, len(bounds), 2) if bounds[i + 1] > bounds[i]]
+    min_px = MIN_COLUMN_MM * dpi / 25.4
+    merged: list[tuple[int, int]] = []
+    for x0, x1 in spans:
+        if merged and (x1 - x0 < min_px or merged[-1][1] - merged[-1][0] < min_px):
+            merged[-1] = (merged[-1][0], x1)
+        else:
+            merged.append((x0, x1))
+    return merged
+
+
+def column_of(box: Box, columns: list[tuple[int, int]]) -> int:
+    """Номер колонки, в которой строка лежит целиком (допуск по краям 5 % ширины колонки); через межколонник — −1."""
+    x0, _, x1, _ = box
+    for index, (c0, c1) in enumerate(columns):
+        pad = 0.05 * (c1 - c0)
+        if x0 >= c0 - pad and x1 <= c1 + pad:
+            return index
+    return -1
 
 
 def text_boxes(lines: list[TextLine]) -> list[Box]:

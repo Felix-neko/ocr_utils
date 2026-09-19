@@ -15,7 +15,8 @@ NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correcti
 # Подпапка прогона — версия детектора, чтобы прошлый прогон оставался для сравнения;
 # перекрыть можно переменной окружения: GEOMETRY_RUN_DIR=... ./run_pack1.sh
 GEOMETRY_REGRESSION_ROOT="/mnt/SYSTEM/raw/mts/pack1_geometry_regression"
-GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v7}"
+GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v10}"
 
-# Эталон: страницы, проверенные глазами (bad — коррекция сделала хуже, good — помогла или не тронула).
-GEOMETRY_LABELS="$(dirname "${BASH_SOURCE[0]}")/labels.csv"
+# Эталон: папка валидации с fr_correction_bad.csv и fr_correction_good.csv (TSV, вердикты
+# пользователя по картинкам «было | стало»); пополнять именно их.
+GEOMETRY_LABELS="$(dirname "${BASH_SOURCE[0]}")/../../research/geometry_regression/validation/pack1"

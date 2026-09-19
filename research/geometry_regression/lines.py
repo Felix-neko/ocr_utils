@@ -22,6 +22,14 @@ from research.geometry_regression.regions import TextLine
 MATCH_DY_HEIGHTS = 0.7
 MATCH_DY_MIN_MM = 0.7
 MIN_OVERLAP = 0.75
+# Меньше стольких пар в колонке — выигрыш по ней не считается (сводка по 3 строкам — шум).
+MIN_COLUMN_LINES = 8
+# Строка, бокс которой заходит на соседнюю строку той же колонки глубже этой доли высоты
+# соседней, — две слипшиеся строки (перенос с хвостом соседней, 1976/02 с.84); в пары не идёт.
+# По одной высоте судить нельзя: крупный заголовок втрое выше корпуса и ни с кем не слипся.
+MAX_NEIGHBOUR_OVERLAP = 0.25
+# Наклон слипшейся строки отличается от наклона перекрытого соседа не меньше чем на это.
+MERGED_SLOPE_DIFF_DEG = 1.2
 
 
 def match_lines(
@@ -36,11 +44,17 @@ def match_lines(
     pairs: list[tuple[TextLine, TextLine]] = []
     taken: set[int] = set()
     dy_min = MATCH_DY_MIN_MM * dpi / 25.4
-    for line, (_, my), dx in zip(before, moved, shift_x):
+    merged = _merged_lines(before)
+    for line, (mx, my), dx in zip(before, moved, shift_x):
+        if id(line) in merged:
+            continue
         tolerance = max(dy_min, MATCH_DY_HEIGHTS * line.height)
         best, best_dy = None, tolerance
         for j, other in enumerate(after):
-            if j in taken:
+            # Только внутри одной колонки — по перекрытию боксов по x после переноса полем, а не
+            # по номерам: межколонники в A и B могут разойтись (трапеция убрана, врезка курсивом).
+            # Строка через межколонник (column −1) спаривается только с такой же.
+            if j in taken or (line.column < 0) != (other.column < 0):
                 continue
             dy = abs(other.cy - my)
             if dy >= best_dy:
@@ -53,6 +67,30 @@ def match_lines(
             taken.add(best)
             pairs.append((line, after[best]))
     return pairs
+
+
+def _merged_lines(lines: list[TextLine]) -> set[int]:
+    """Строки, слипшиеся с соседней по вертикали в той же колонке.
+
+    Слипшаяся строка (перенос с хвостом соседней, 1976/02 с.84) выше соседей и перекрывает
+    их боксом, а её центр-линия наклонена НЕ так, как у перекрытого соседа: хвост тянет её
+    в сторону. Косые строки блока (1968/05 с.55, которые FineReader потом выпрямил) тоже
+    высокие и перекрывают соседей, но наклонены с ними одинаково.
+    """
+    merged: set[int] = set()
+    for line in lines:
+        for other in lines:
+            if other is line or other.column != line.column:
+                continue
+            if other.x0 >= line.x1 or other.x1 <= line.x0:
+                continue
+            overlap = min(line.y1, other.y1) - max(line.y0, other.y0)
+            if overlap <= MAX_NEIGHBOUR_OVERLAP * (other.y1 - other.y0) or (line.y1 - line.y0) <= (other.y1 - other.y0):
+                continue
+            if abs(line.slope_deg - other.slope_deg) > MERGED_SLOPE_DIFF_DEG:
+                merged.add(id(line))
+                break
+    return merged
 
 
 def line_metrics(
@@ -69,15 +107,38 @@ def line_metrics(
         "lines_a": float(len(after)),
         "lines_matched": float(len(pairs)),
     }
+    # Сводки по странице целиком — контекст; выигрыш — по колонкам, берётся лучшая: ровная
+    # левая колонка не должна размывать распрямлённую правую (1976/02 с.84).
+    page = _stats_pair(pairs, dpi)
+    for key in ("sagitta_rel_p90", "slope_spread_deg"):
+        metrics[f"text_{key}_b"] = page[f"{key}_b"]
+        metrics[f"text_{key}_a"] = page[f"{key}_a"]
+        metrics[f"text_{key}_delta"] = page[f"{key}_a"] - page[f"{key}_b"]
+    columns = sorted({b.column for b, _ in pairs})
+    best_sag, best_spread = 0.0, 0.0
+    for column in columns:
+        own = [(b, a) for b, a in pairs if b.column == column]
+        if len(own) < MIN_COLUMN_LINES:
+            continue
+        stats = _stats_pair(own, dpi)
+        best_sag = max(best_sag, (stats["sagitta_rel_p90_b"] - stats["sagitta_rel_p90_a"]) * stats["height_mm"])
+        best_spread = max(best_spread, stats["slope_spread_deg_b"] - stats["slope_spread_deg_a"])
+    metrics["text_sag_gain_mm"] = best_sag
+    metrics["text_spread_gain_deg"] = best_spread
+    metrics["text_columns"] = float(len(columns))
+    return metrics
+
+
+def _stats_pair(pairs: list[tuple[TextLine, TextLine]], dpi: float) -> dict[str, float]:
+    """Прогиб p90 и разброс наклонов по парам строк, для B и A, плюс медианная высота строки в мм."""
     lines_b = [b for b, _ in pairs]
     lines_a = [a for _, a in pairs]
     stats_b = page_stats([l.fit for l in lines_b], [l.fit_scale * l.height for l in lines_b])
     stats_a = page_stats([l.fit for l in lines_a], [l.fit_scale * l.height for l in lines_a])
-    for key in ("sagitta_rel_p90", "slope_spread_deg"):
-        metrics[f"text_{key}_b"] = stats_b.get(key, 0.0)
-        metrics[f"text_{key}_a"] = stats_a.get(key, 0.0)
-        metrics[f"text_{key}_delta"] = stats_a.get(key, 0.0) - stats_b.get(key, 0.0)
-    height_mm = px_to_mm(float(np.median([l.height for l in lines_b])), dpi) if lines_b else 0.0
-    metrics["text_sag_gain_mm"] = max(0.0, -metrics["text_sagitta_rel_p90_delta"]) * height_mm
-    metrics["text_spread_gain_deg"] = max(0.0, -metrics["text_slope_spread_deg_delta"])
-    return metrics
+    return {
+        "sagitta_rel_p90_b": stats_b.get("sagitta_rel_p90", 0.0),
+        "sagitta_rel_p90_a": stats_a.get("sagitta_rel_p90", 0.0),
+        "slope_spread_deg_b": stats_b.get("slope_spread_deg", 0.0),
+        "slope_spread_deg_a": stats_a.get("slope_spread_deg", 0.0),
+        "height_mm": px_to_mm(float(np.median([l.height for l in lines_b])), dpi) if lines_b else 0.0,
+    }

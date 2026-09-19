@@ -12,13 +12,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from research.geometry_regression import WORK_DPI
+from research.geometry_regression.bend import bend_metrics
 from research.geometry_regression.edges import column_edges, edge_metrics
 from research.geometry_regression.field import estimate_field, field_metrics
 from research.geometry_regression.lines import line_metrics, match_lines
 from research.geometry_regression.regions import lineart_boxes, text_boxes, text_lines
 from research.geometry_regression.render import RENDER_DPI, to_work
 from research.geometry_regression.stretch import glyph_line_metrics
-from research.geometry_regression.strokes import find_strokes, match_strokes, stroke_metrics
+from research.geometry_regression.strokes import LOGO_TOP_FRAC, find_strokes, match_strokes, stroke_metrics
 
 
 @dataclass(frozen=True)
@@ -92,15 +93,24 @@ def measure_pair(gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = 
     # Надписи внутри рисунков (полки шкафа на 1966/01 с.78) — не строки текста: их «выравнивание»
     # засчитывалось как выигрыш, а на деле это порча чертежа, которую ловят штрихи.
     lines_b = [line for line in lines_b if not _inside_any(line, lineart)]
-    out.metrics.update(field_metrics(warp, lineart, text_boxes(lines_b)))
+    # Логотип рубрики (рисунок с центром в шапке) в долю тайлов без пары не идёт: FineReader
+    # двигает его отдельно от текста (1973/07 с.67 — логотип на месте, текст ниже на 3 мм),
+    # аффинный прогноз мимо, все его тайлы «без пары» — а сам логотип цел.
+    top = LOGO_TOP_FRAC * b.shape[0]
+    lineart_body = [box for box in lineart if (box[1] + box[3]) / 2.0 >= top]
+    out.metrics.update(field_metrics(warp, lineart_body, text_boxes(lines_b)))
     out.metrics["lineart_boxes"] = float(len(lineart))
 
     # Рамки рисунков даны на копии B; для A они переносятся аффинной частью поля.
     lineart_a = _transform_boxes(lineart, warp)
     strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI, lineart, dpi)
-    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, lineart_a, dpi)
+    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, lineart_a, dpi, drop_lone=False)
     pairs = match_strokes(strokes_b, strokes_a, warp, RENDER_DPI, dpi)
     metrics, culprits = stroke_metrics(strokes_b, strokes_a, pairs, warp.rot_deg if warp else 0.0, RENDER_DPI)
+    out.metrics.update(metrics)
+    out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
+    # Изгиб длинных линий — по краске вдоль штриха B и той же линии в A, без пар LSD.
+    metrics, culprits = bend_metrics(gray300_b, gray300_a, strokes_b, warp, RENDER_DPI, dpi)
     out.metrics.update(metrics)
     out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
 
@@ -110,15 +120,6 @@ def measure_pair(gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = 
     out.metrics.update(metrics)
     out.culprits.update(culprits)
     out.metrics.update(line_metrics(lines_b, lines_a, verified, dpi))
-
-    # Рамки рисунков даны на копии B; для A они переносятся аффинной частью поля.
-    lineart_a = _transform_boxes(lineart, warp)
-    strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI, lineart, dpi)
-    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, lineart_a, dpi)
-    pairs = match_strokes(strokes_b, strokes_a, warp, RENDER_DPI, dpi)
-    metrics, culprits = stroke_metrics(strokes_b, strokes_a, pairs, warp.rot_deg if warp else 0.0, RENDER_DPI)
-    out.metrics.update(metrics)
-    out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
 
     edges_b = column_edges(lines_b, separators_b, b.shape[1], dpi)
     edges_a = column_edges(lines_a, separators_a, a.shape[1], dpi)

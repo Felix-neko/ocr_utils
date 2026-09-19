@@ -45,6 +45,10 @@ MIN_CHUNK_COVERAGE = 0.4
 # Короткие заголовки рубрик (15-25 мм) идут только в ВЫИГРЫШ по наклону, в градусах: рубрика
 # «ИНФОРМАЦИЯ» на 1968/02 с.92 выровнялась, но по длине в мм выигрыша не набирала.
 GAIN_MIN_LENGTH_MM = 15.0
+# Честная пара: длины строк B и A совпадают не хуже этой доли, и все найденные куски лежат в
+# боксе A (с припуском в высоту строки). Иначе строка в A распалась на куски и куски B
+# цепляются за соседнюю строку — ложная «волна» (1968/08 с.86).
+MIN_LENGTH_MATCH = 0.85
 # Растяжение меряется только по высоким строкам: на корпусе 1 % масштаба меньше полупикселя.
 STRETCH_MIN_HEIGHT_MM = 4.0
 STRETCH_MIN_LENGTH_MM = 40.0
@@ -146,6 +150,23 @@ def _resid(xs: np.ndarray, ys: np.ndarray) -> float:
     return float(np.sqrt(np.mean((ys - np.polyval(np.polyfit(xs, ys, 1), xs)) ** 2)))
 
 
+def _chunks_inside(chunks: list[Chunk], line_b: TextLine, line_a: TextLine, field: Field | None, dpi: float) -> bool:
+    """Все найденные куски лежат в боксе строки A по вертикали (припуск — высота строки)."""
+    k = RENDER_DPI / dpi
+    corner = np.array([[line_b.x0, line_b.y0]], dtype=np.float64)
+    moved = (field.transform(corner)[0] if field is not None else corner[0]) * k
+    shift_y = moved[1] - line_b.y0 * k
+    # Припуск — две высоты: у сильно изогнутой строки B куски после распрямления законно
+    # уходят за бокс A на высоту строки (1968/05 с.55).
+    y_lo, y_hi = (line_a.y0 - 2 * line_a.height) * k, (line_a.y1 + 2 * line_a.height) * k
+    for chunk in chunks:
+        # dy куска — сдвиг относительно предсказанного места; предсказанное = строка B + сдвиг поля.
+        y_found = line_b.cy * k + shift_y + chunk.dy
+        if not y_lo <= y_found <= y_hi:
+            return False
+    return True
+
+
 def _tilt_gain_deg(metrics: dict[str, float], chunks: list[Chunk], line_b: TextLine) -> None:
     """Выигрыш по наклону короткой строки в градусах — в ``metrics["line_tilt_gain_deg"]``."""
     xs = np.array([c.x for c in chunks])
@@ -185,19 +206,22 @@ def glyph_line_metrics(
     for line_b, line_a in pairs:
         if line_b.length < gain_min_len:
             continue
+        if min(line_b.length, line_a.length) < MIN_LENGTH_MATCH * max(line_b.length, line_a.length):
+            continue
         want_scale = line_b.height >= stretch_h and line_b.length >= stretch_len
         chunks = line_chunks(ink_b, ink_a, line_b, field, dpi, want_scale)
-        if len(chunks) < MIN_CHUNKS:
+        if len(chunks) < MIN_CHUNKS or not _chunks_inside(chunks, line_b, line_a, field, dpi):
             continue
         possible = max(1, int(line_b.length * k) // mm_to_px(CHUNK_MM, RENDER_DPI))
         covered = len(chunks) >= MIN_CHUNKS_METRIC and len(chunks) / possible >= MIN_CHUNK_COVERAGE
+        # Пара подтверждена (идёт в сводки и выигрыш) уже при MIN_CHUNKS кусках; в попарные
+        # метрики самой строки — только длинная и хорошо покрытая.
+        verified.append((line_b, line_a))
+        metrics["lines_verified"] += 1.0
         if line_b.length < min_len or not covered:
-            # Короткая или плохо покрытая строка: только выигрыш по наклону в градусах.
             if covered:
                 _tilt_gain_deg(metrics, chunks, line_b)
             continue
-        verified.append((line_b, line_a))
-        metrics["lines_verified"] += 1.0
         xs = np.array([c.x for c in chunks])
         dys = np.array([c.dy for c in chunks])
         cy_b = np.interp(xs, line_b.xs, line_b.ys)  # положение строки B на середине куска

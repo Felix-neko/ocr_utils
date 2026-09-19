@@ -122,9 +122,33 @@ def reflag(rows: list[PageRow], thresholds: Thresholds) -> None:
             row.apply(thresholds.apply(row.metrics))
 
 
+# Файлы эталона в папке валидации: имя → метка страниц в нём.
+LABEL_FILES = {"fr_correction_bad.csv": "bad", "fr_correction_good.csv": "good"}
+
+
 def load_labels(path: Path) -> dict[tuple[str, int], tuple[str, str]]:
-    """Эталон ``pdf,page,label,note`` → {(pdf, page): (label, note)}."""
-    labels = {}
+    """Эталон → ``{(pdf, page): (label, note)}``.
+
+    ``path`` — папка валидации (``research/geometry_regression/validation/pack1``) с TSV
+    ``fr_correction_bad.csv`` и ``fr_correction_good.csv`` вида ``название<TAB>путь<TAB>аннотация``,
+    где название — ``full_ГГГГ_НН с.N``. Для совместимости принимается и старый CSV
+    ``pdf,page,label,note`` одним файлом.
+    """
+    labels: dict[tuple[str, int], tuple[str, str]] = {}
+    if path.is_dir():
+        for name, label in LABEL_FILES.items():
+            file = path / name
+            if not file.is_file():
+                continue
+            with file.open(newline="", encoding="utf-8") as handle:
+                reader = csv.reader(handle, delimiter="\t")
+                next(reader, None)
+                for row in reader:
+                    if not row or not row[0].strip():
+                        continue
+                    pdf, _, page = row[0].partition(" с.")
+                    labels[(pdf.strip(), int(page))] = (label, row[2].strip() if len(row) > 2 else "")
+        return labels
     with path.open(newline="", encoding="utf-8") as handle:
         for record in csv.DictReader(handle):
             labels[(record["pdf"], int(record["page"]))] = (record["label"], record.get("note", ""))
