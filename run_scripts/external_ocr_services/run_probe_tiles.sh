@@ -18,6 +18,7 @@ uv run python -m ocr_utils.external_ocr_services run \
     --in-dir "$SHARPENED_DIR" \
     --out-dir "$PROBE_ROOT/out" \
     --debug-dir "$PROBE_ROOT/debug" \
+    --cache-dir "$PROBE_ROOT/cache" \
     --db "$DB_REVIEWED" \
     --pack-name "$PACK_NAME" \
     --pages "$LIST" \
@@ -29,6 +30,7 @@ uv run python -m ocr_utils.external_ocr_services run \
     --in-dir "$SHARPENED_DIR" \
     --out-dir "$PROBE_ROOT/out" \
     --debug-dir "$PROBE_ROOT/debug" \
+    --cache-dir "$PROBE_ROOT/cache" \
     --db "$DB_REVIEWED" \
     --pack-name "$PACK_NAME" \
     --only-year 1975 --only-issue 12 \

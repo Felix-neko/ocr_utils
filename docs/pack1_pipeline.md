@@ -74,8 +74,9 @@
 
 | Скрипт | Команда (`ocr_utils.external_ocr_services`) | Читает | Пишет | Замечания |
 |---|---|---|---|---|
-| `run_issue_sharpened.sh [год/выпуск]` | `run --only-year --only-issue` | `SHARPENED_DIR/<выпуск>`, `DB_REVIEWED` | `EXTERNAL_OCR_SERVICES_ROOT/{out,debug}/<выпуск>` | Два этапа: полосы с тегами «Оглавление»/«Годовой указатель» → `toc.json` → остальные полосы со списком статей в промпте. Оглавление вне базы перераспознаётся само (`--on-missed-toc redo` по умолчанию). ~10 ¢ на выпуск. |
-| `run_pack_sharpened.sh` | `run --skip-done` | весь `SHARPENED_DIR`, `DB_REVIEWED` | те же `out/`, `debug/`, `out/missed_toc.txt` | Идемпотентен, в фон через `setsid … < /dev/null`. Оглавления вне базы перераспознаются сами и видны в логе: проставить по ним теги в CVAT (в т. ч. вето «Не оглавление») и `run_3_from_cvat.sh`. ~$12 на пак. |
+| `run_issue_sharpened.sh [год/выпуск]` | `run --only-year --only-issue` | `SHARPENED_DIR/<выпуск>`, `DB_REVIEWED` | `EXTERNAL_OCR_SERVICES_ROOT/{out,debug,cache}/<выпуск>`, `out/<год>/<номер>.md` + `.pages.json` | Два этапа: полосы с тегами «Оглавление»/«Годовой указатель» → `toc.json` → остальные полосы со списком статей в промпте. Оглавление вне базы перераспознаётся само (`--on-missed-toc redo` по умолчанию). В конце выпуск собирается в один markdown (переносы и оборванные абзацы через границу полос сшиты). Кэш запросов в `cache/`: повтор с теми же промптами и тайлами в сеть не ходит. ~10 ¢ на выпуск. |
+| `run_pack_sharpened.sh` | `run --skip-done` | весь `SHARPENED_DIR`, `DB_REVIEWED` | те же `out/`, `debug/`, `cache/`, `out/missed_toc.txt` | Идемпотентен, в фон через `setsid … < /dev/null`. Оглавления вне базы перераспознаются сами и видны в логе: проставить по ним теги в CVAT (в т. ч. вето «Не оглавление») и `run_3_from_cvat.sh`. ~$12 на пак. |
+| `assemble_pack.sh [год/выпуск]` | `assemble` | `out/<год>/<номер>/*.json` | `out/<год>/<номер>.md`, `.pages.json` | Пересборка целиковых md без модели — после правки правил сборки или `.json` полос. ~5 мин на пак. |
 | `run_probe_tiles.sh` | `run --pages` + `run` по 1975/12 | разворот `1967/10/IMG_0041`, выпуск 1975/12 | `EXTERNAL_OCR_SERVICES_ROOT/probe` | Проверка сетки тайлов (2×2 у разворота) и слияния двухполосного «Содержания» с указателем за год. |
 
 ### PDF и FineReader (`run_scripts/pdf_utils/`) — после шага 7
