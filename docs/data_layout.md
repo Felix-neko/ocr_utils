@@ -40,7 +40,7 @@
 | `PICS_ONLY_PDF_DIR` | `$PDF_ROOT/intermediate_pdfs_pages_with_pics_only` | Только полосы с растром | SYSTEM |
 | `GEO_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_no_bg_brightening` | FineReader по полным промежуточным PDF: бинаризация **и** коррекция геометрии | SYSTEM |
 | `NOGEO_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction` | То же **без** коррекции геометрии: образ страницы = полоса + поля пиксель в пиксель, сюда возвращаются иллюстрации | SYSTEM |
-| `FINAL_PDF_DIR` | `$PDF_ROOT/final_pdfs` | Финальные PDF, `{год}_{выпуск}.pdf`, все в одной папке | SYSTEM |
+| `FINAL_PDF_DIR` | `$PDF_ROOT/final_pdfs` | Финальные PDF, `{год}/{год}_{выпуск}.pdf`, по папке на год; та же раскладка у копии на Я.Диске (`…/МТС/PDF с текстовым слоем/пак-1 1966-1976`) | SYSTEM |
 | `FINAL_WORK_DIR` | `/mnt/SYSTEM/raw/mts/pack1_final_pdfs_work` | Рабочий каталог сборщика: `pages/<pdf>/pNNNN.json` (анализ страницы: источник, зоны, вердикты, чтения), `analysis.csv`, `pages.csv`, `summary.csv`, `preview/` | SYSTEM |
 | — | `/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v12` | Прогон детектора порчи геометрии: `cache/<pdf>/pNNN.json`, `metrics.csv`; сборщик читает кэш и дописывает промахи | SYSTEM |
 | — | `/mnt/SYSTEM/raw/mts/pack1_text_layer_fix/pack1_v1` | Исследование текстового слоя по выборке 1050 стр.: кэш, CSV, оверлеи, исправленные копии | SYSTEM |

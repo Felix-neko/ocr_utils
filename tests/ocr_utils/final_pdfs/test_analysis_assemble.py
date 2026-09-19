@@ -61,6 +61,7 @@ def test_assemble_places_pictures_and_verifies(pack) -> None:
     )
     result = assemble_issue(plan, pair, assemble)
     assert result.status == "ok", result.reason
+    assert Path(result.out_path) == tmp_path / "final" / "1970" / "1970_01.pdf"
     assert result.pages == 4 and result.pages_nogeo == 4 and result.pictures == 3
     assert result.verify_failures == 0 and result.figures_removed == 3  # две фигуры под врезками + образ обложки
     with fitz.open(result.out_path) as doc:
@@ -115,7 +116,7 @@ def test_assemble_refuses_shifted_pages(pack) -> None:
         plan, pair, AssembleParams(analysis=params, out_dir=tmp_path / "final", pictures_dir=blurred, margins=MARGINS)
     )
     assert result.status == "error" and "порядок страниц" in result.reason
-    assert not (tmp_path / "final" / "1970_01.pdf").exists()
+    assert not (tmp_path / "final" / "1970" / "1970_01.pdf").exists()
 
 
 def test_assemble_applies_text_layer_edits(layer_pdf, tmp_path) -> None:

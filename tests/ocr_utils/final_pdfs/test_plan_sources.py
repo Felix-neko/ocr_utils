@@ -3,7 +3,9 @@
 import fitz
 import pytest
 
-from ocr_utils.final_pdfs.plan import PageSource, SourceReason, decide_source, final_pdf_name
+from pathlib import Path
+
+from ocr_utils.final_pdfs.plan import PageSource, SourceReason, decide_source, final_pdf_name, final_pdf_path
 from ocr_utils.final_pdfs.sources import Margins, margins_px, pair_issue_pdfs, verify_page_geometry
 from tests.ocr_utils.final_pdfs.conftest import MARGINS
 
@@ -23,6 +25,7 @@ def test_margins_px_rounds_to_pixels() -> None:
 def test_plan_and_pair(pack) -> None:
     _, _, plan, pair, _ = pack
     assert final_pdf_name(plan) == "1970_01.pdf"
+    assert final_pdf_path(Path("/out"), plan) == Path("/out/1970/1970_01.pdf")
     assert [p.full_pdf_page_idx for p in plan.pages] == [0, 1, 2, 3]
     assert plan.pages[3].rotate_cw == 90 and plan.pages[3].file_size == (600, 400)
     found = pair_issue_pdfs(pair.geo.parent, pair.nogeo.parent, plan)

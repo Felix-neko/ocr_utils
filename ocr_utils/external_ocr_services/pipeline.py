@@ -36,6 +36,7 @@ import click
 
 from ocr_utils.external_ocr_services import toc as toc_module
 from ocr_utils.external_ocr_services.assemble import assemble_issue, log_assembly, write_issue
+from ocr_utils.external_ocr_services.boundary import BoundaryChecker, JoinKind
 from ocr_utils.external_ocr_services.client import OpenRouterClient
 from ocr_utils.external_ocr_services.models import ModelSpec
 from ocr_utils.external_ocr_services.ocr import (
@@ -184,6 +185,9 @@ class PipelineParams:
     # После каждого выпуска собирать его в один markdown (`assemble.py`): `{год}/{выпуск}.md` и
     # sidecar `.pages.json` рядом с папкой полос. Выключается ``--no-assemble``.
     assemble: bool = True
+    # При сборке показывать сомнительные стыки полос модели — один запрос на выпуск, полоски строк
+    # обеих полос (`boundary.py`). Выключается ``--no-check-boundaries``.
+    check_boundaries: bool = True
 
     def __post_init__(self) -> None:
         # Строка из старых вызовов («redo») → перечисление; чужое значение падает сразу.
@@ -211,6 +215,9 @@ class PipelineStats:
     demoted_toc: list[str] = field(default_factory=list)  # «выпуск: полосы», которые модель не признала оглавлением
     redo_kept: int = 0  # полос, оставленных без повтора на круге повтора (--redo-scope structured)
     page_messages: int = 0  # полос с замечаниями пост-обработки (meta.messages)
+    boundary_requests: int = 0  # запросов по стыкам полос при сборке (по одному на выпуск с сомнительными стыками)
+    boundary_rewritten: int = 0  # стыков, переписанных по вердикту модели
+    boundary_cost_usd: float = 0.0  # их стоимость (входит и в cost_usd)
 
     def __add__(self, other: PipelineStats) -> PipelineStats:
         """Сумма счётчиков двух прогонов (этапов, выпусков): числа складываются, списки склеиваются.
@@ -241,6 +248,9 @@ class PipelineStats:
             demoted_toc=self.demoted_toc + other.demoted_toc,
             redo_kept=self.redo_kept + other.redo_kept,
             page_messages=self.page_messages + other.page_messages,
+            boundary_requests=self.boundary_requests + other.boundary_requests,
+            boundary_rewritten=self.boundary_rewritten + other.boundary_rewritten,
+            boundary_cost_usd=self.boundary_cost_usd + other.boundary_cost_usd,
         )
 
 
@@ -818,6 +828,10 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         params.options.max_src_tile,
         params.options.max_model_tile,
     )
+    # Проверка стыков полос при сборке — тем же клиентом и моделью, один запрос на выпуск.
+    checker = None
+    if params.assemble and params.check_boundaries:
+        checker = BoundaryChecker(client, spec, params.in_dir, params.options.cache_dir, params.options.quality)
     # Выпуски идут строго по одному: этап page зависит от этапа toc того же выпуска, а полосы
     # внутри этапа распараллеливает run_issue своим пулом потоков.
     for issue_key, pages in groups.items():
@@ -825,8 +839,16 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         stats = stats + run_issue(client, spec, params, issue_key, pages)
         # Выпуск целиком в один markdown — по готовым .json с диска, после круга повтора, если он был.
         if params.assemble:
-            assembly = assemble_issue(params.out_dir, issue_key, pages, join_hyphens=params.options.join_hyphens)
+            assembly = assemble_issue(
+                params.out_dir, issue_key, pages, join_hyphens=params.options.join_hyphens, checker=checker
+            )
             log_assembly(assembly, write_issue(params.out_dir, assembly))
+            stats = stats + PipelineStats(
+                cost_usd=assembly.checked.cost_usd,
+                boundary_requests=assembly.checked.requests,
+                boundary_rewritten=assembly.count(JoinKind.MODEL),
+                boundary_cost_usd=assembly.checked.cost_usd,
+            )
     # Сводка строится по ВСЕМ .meta.json под out-dir, а не по этому прогону: с --skip-done прогон
     # видел только недоделанные полосы, а summary.csv должен описывать папку целиком.
     rows = collect_meta(params.out_dir)
@@ -881,6 +903,13 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     if stats.redo_kept:
         logger.info(
             "круг повтора: без повтора оставлено %d полос (--redo-scope %s)", stats.redo_kept, params.redo_scope
+        )
+    if stats.boundary_requests:
+        logger.info(
+            "стыки полос: запросов %d, стыков переписано по вердикту модели %d, $%.4f",
+            stats.boundary_requests,
+            stats.boundary_rewritten,
+            stats.boundary_cost_usd,
         )
     if stats.missed:
         logger.warning("оглавления вне базы (%d выпусков): %s", len(stats.missed), "; ".join(stats.missed))

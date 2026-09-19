@@ -124,8 +124,29 @@ def test_duplicate_half_word_is_dropped(tmp_path):
     _page(tmp_path, "IMG_0002", "нием эксплуатационных затрат.")
     assembly = _assemble(tmp_path)
     assert "сокращением эксплуатационных затрат." in assembly.text
-    assert [(j.kind, j.word) for j in assembly.joins] == [(JoinKind.DUPLICATE, "сокращением+нием")]
+    assert [(j.kind, j.word) for j in assembly.joins] == [(JoinKind.DUPLICATE, "сокращением+нием→сокращением")]
     assert _page_text(assembly, 1).startswith("эксплуатационных")
+
+
+def test_duplicate_wrong_guess_mirror_and_identical(tmp_path):
+    """Три вида дубля достроенного слова: неверная догадка, зеркальный, обе стороны одинаково."""
+    _page(tmp_path, "IMG_0001", "плакаты были направлена")  # модель достроила «направле-» неверно
+    _page(tmp_path, "IMG_0002", "ны на заключительный смотр. Вторая полоса кончается направле-")
+    _page(tmp_path, "IMG_0003", "направлены дальше. Третья кончается словом направлены")  # голова достроена
+    _page(tmp_path, "IMG_0004", "направлены в конец.")  # обе стороны достроены одинаково
+    assembly = _assemble(tmp_path)
+    text = assembly.text
+    assert "плакаты были направлены на заключительный смотр." in text
+    assert "кончается направлены дальше." in text and "направле-" not in text
+    assert "словом направлены в конец." in text and text.count("направлены") == 3
+    assert [(j.kind, j.word) for j in assembly.joins] == [
+        (JoinKind.DUPLICATE, "направлена+ны→направлены"),
+        (JoinKind.DUPLICATE, "направле-+направлены"),
+        (JoinKind.DUPLICATE, "направлены=направлены"),
+    ]
+    assert _page_text(assembly, 1).startswith("на заключительный") and _page_text(assembly, 2).startswith(
+        "направлены дальше"
+    )
 
 
 def test_missing_page_leaves_comment_and_sidecar_lists_it(tmp_path):

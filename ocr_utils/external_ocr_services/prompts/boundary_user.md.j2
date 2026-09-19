@@ -1,0 +1,11 @@
+{#- Пользовательское сообщение проверки стыков выпуска. Переменные: seams — список
+    {number, page_before, page_after, tail, head, reason}: номер стыка, имена полос, конец
+    транскрипции полосы N (последние ~200 знаков), начало транскрипции полосы N+1, причина сомнения
+    (подсказка модели, где смотреть). После текста идут картинки: по две на стык в том же порядке. -#}
+{{ seams | length }} seam(s) to verify. Images follow the text, two per seam in the same order: images 1–2 belong to seam 1, 3–4 to seam 2, and so on.
+{% for seam in seams %}
+Seam {{ seam.number }} ({{ seam.page_before }} → {{ seam.page_after }}); why it is checked: {{ seam.reason }}.
+Transcribed end of page N (may have completed the last word): «{{ seam.tail }}»
+Transcribed start of page N+1 (may have completed the first word): «{{ seam.head }}»
+{% endfor %}
+Reply with the JSON object only.

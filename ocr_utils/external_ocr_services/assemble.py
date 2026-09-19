@@ -25,13 +25,24 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
 from ocr_utils.external_ocr_services import PROMPT_VERSION
-from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, default_morph, join_across_boundary
+from ocr_utils.external_ocr_services.boundary import (
+    BoundaryChecker,
+    BoundaryVerdict,
+    CheckerStats,
+    DoubtReason,
+    JoinKind,
+    Seam,
+    apply_verdict,
+    decide_boundary,
+    doubt_reason,
+)
+from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, default_morph
 from ocr_utils.external_ocr_services.ocr import output_paths, read_meta
 from ocr_utils.external_ocr_services.render import _yaml_value
 from ocr_utils.external_ocr_services.schema import BlockTag, DamageTag, ParseError, Stage, StructureTag, parse_json_text
@@ -50,20 +61,6 @@ _LEADING_TAG = re.compile(r"^<(?P<name>[a-z][\w-]*)")
 _DAMAGE_TAG_NAMES = frozenset(tag.value for tag in DamageTag)
 # Начала абзацев, которые не сшиваются: заголовки, цитаты, таблицы в markdown, fenced-блоки, списки.
 _NOT_PLAIN_START = re.compile(r"^(?:#|>|\||```|[-*+] |\d+[.)] |\[\^)")
-# Конец предложения (после снятия закрывающих тегов): точка, вопрос, восклицание, многоточие,
-# курсив/жирный (подпись «*И. Иванов*»). Кавычка, скобка, двоеточие и точка с запятой концом не
-# считаются: со строчной головой это середина предложения.
-_SENTENCE_END = re.compile(r"[.!?…*]\s*$")
-# Точка после сокращения — не конец предложения: «35 тыс.» + «автомашин».
-_ABBREVIATION_END = re.compile(
-    r"(?:^|[\s(«])(?:тыс|млн|млрд|руб|коп|гг?|т|кг|км|м|см|мм|стр|с|шт|экз|др|пр|напр|проц|ул|им|обл|р-н|п|см)\.\s*$"
-)
-# Голова, продолжающая оборванное предложение: строчная буква, цифра или знак продолжения.
-_CONTINUATION_START = re.compile(r"^[а-яёa-z0-9—,(;]")
-# Последнее слово хвоста и первое голое слово головы — для поиска повторённого хвоста слова
-# («…сокращением» + «нием эксплуатационных»: модель дописала слово на первой полосе целиком).
-_LAST_WORD = re.compile(r"([а-яёА-ЯЁ]{3,})\s*$")
-_FIRST_WORD = re.compile(r"^([а-яё]{2,})(?![\w-])")
 _TOC_OPEN = re.compile(rf"<{BlockTag.TOC}>")
 _TOC_CLOSE = re.compile(rf"</{BlockTag.TOC}>")
 _TABLE_OPEN = re.compile(r"<table\b", re.IGNORECASE)
@@ -80,15 +77,6 @@ _FLOATING_START = re.compile(
 # Номер таблицы или рисунка отдельной строкой («Таблица 3»): следующий абзац — её название, тоже
 # плавающий (в печати он стоит над таблицей, а текст статьи продолжается после неё).
 _CAPTION_NUMBER = re.compile(r"^(?:Таблица|Табл\.|Рис\.|Рис|Фиг\.)\s*\d+[.:]?\s*$", re.IGNORECASE)
-
-
-class JoinKind(StrEnum):
-    """Что произошло на границе полос."""
-
-    HYPHEN = "hyphen"  # дефис-перенос убран, слово склеено по словарю
-    COMPOUND = "compound"  # дефис на границе — составное слово, оставлен, абзацы сшиты без пробела
-    DUPLICATE = "duplicate"  # модель дописала слово на предыдущей полосе целиком, а на следующей повторила его хвост — хвост убран
-    PARAGRAPH = "paragraph"  # оборванное предложение сшито через пробел
 
 
 @dataclass
@@ -109,7 +97,20 @@ class JoinRecord:
     after: str  # полоса перед границей (file)
     before: str  # полоса после границы
     kind: JoinKind
-    word: str | None = None  # склеенное слово «снаб-жения» у hyphen/compound
+    word: str | None = None  # склеенное слово «снаб-жения» у hyphen/compound, что заменено у duplicate/model
+    reason: DoubtReason | None = None  # почему стык показан модели; None — не показывался
+    model: dict | None = (
+        None  # ответ модели (boundary.BoundaryVerdict.as_dict) и «confirmed», если эвристика подтверждена
+    )
+
+    def as_dict(self) -> dict:
+        """Для sidecar: перечисления строками, пустые поля модели опущены."""
+        data = {"after": self.after, "before": self.before, "kind": self.kind.value, "word": self.word}
+        if self.reason is not None:
+            data["reason"] = self.reason.value
+        if self.model is not None:
+            data["model"] = self.model
+        return data
 
 
 @dataclass
@@ -121,6 +122,7 @@ class IssueAssembly:
     pages: list[PageEntry] = field(default_factory=list)
     joins: list[JoinRecord] = field(default_factory=list)
     missing: list[dict] = field(default_factory=list)  # {"file", "reason"}
+    checked: CheckerStats = field(default_factory=CheckerStats)  # запросы к модели по стыкам этого выпуска
 
     def count(self, kind: JoinKind) -> int:
         """Сколько склеек данного вида.
@@ -137,9 +139,10 @@ class IssueAssembly:
             "assembled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "prompt_version": PROMPT_VERSION,
             "pages": [vars(page) for page in self.pages],
-            "joins": [{**vars(join), "kind": join.kind.value} for join in self.joins],
+            "joins": [join.as_dict() for join in self.joins],
             "missing": self.missing,
             "counts": {kind.value: self.count(kind) for kind in JoinKind},
+            "checked": vars(self.checked),
         }
 
 
@@ -159,6 +162,7 @@ class _PageBody:
     """Полоса, прочитанная с диска: абзацы с пометками или причина пропуска."""
 
     file: str
+    rel: Path = Path()  # путь полосы относительно корня, как пришёл (для полосок строк проверки)
     page_number: str | None = None
     stage: str = Stage.PAGE.value
     blocks: list[_Block] = field(default_factory=list)
@@ -221,15 +225,15 @@ def _read_page(out_dir: Path, rel: Path) -> _PageBody:
     file = rel.with_suffix("").as_posix()
     meta = read_meta(out_dir, rel) or {}
     if not paths.json.is_file():
-        return _PageBody(file, reason=meta.get("error") or meta.get("parse_error") or "нет .json")
+        return _PageBody(file, rel, reason=meta.get("error") or meta.get("parse_error") or "нет .json")
     if meta.get("error") or meta.get("parse_error"):
-        return _PageBody(file, reason=str(meta.get("error") or meta.get("parse_error")))
+        return _PageBody(file, rel, reason=str(meta.get("error") or meta.get("parse_error")))
     stage = Stage(meta.get("stage") or Stage.PAGE)
     try:
         result = parse_json_text(paths.json.read_text(encoding="utf-8"), stage)
     except (ParseError, OSError) as error:
-        return _PageBody(file, reason=f".json не читается: {error}")
-    return _PageBody(file, result.page_number, stage.value, _blocks_of(result.content_markdown))
+        return _PageBody(file, rel, reason=f".json не читается: {error}")
+    return _PageBody(file, rel, result.page_number, stage.value, _blocks_of(result.content_markdown))
 
 
 def _tail_index(blocks: list[_Block], first: int) -> int | None:
@@ -262,45 +266,84 @@ def _head_index(blocks: list[_Block]) -> int | None:
     return None
 
 
-def _try_join(
-    tail: str, head: str, morph: Morph | None, rule: JoinRule, join_paragraphs_across: bool
-) -> tuple[str, int, JoinKind, str | None] | None:
-    """Сшить хвост и голову, если это одно слово или одно предложение.
+@dataclass
+class _Pass:
+    """Итог одного прохода сборки: блоки, начала полос, записи и собранные сомнительные стыки."""
+
+    blocks: list[_Block] = field(default_factory=list)
+    starts: list[tuple[int, int]] = field(default_factory=list)  # (индекс блока, смещение внутри) для каждой полосы
+    pages: list[PageEntry] = field(default_factory=list)
+    joins: list[JoinRecord] = field(default_factory=list)
+    missing: list[dict] = field(default_factory=list)
+    seams: list[Seam] = field(default_factory=list)  # сомнительные стыки — на проверку моделью
+
+
+def _assemble_pass(
+    bodies: list[_PageBody],
+    morph: Morph | None,
+    rule: JoinRule,
+    join_paragraphs_across: bool,
+    collect_doubts: bool,
+    verdicts: dict[int, BoundaryVerdict] | None,
+) -> _Pass:
+    """Один проход сборки по прочитанным полосам.
+
+    Первый проход (``collect_doubts=True``, ``verdicts=None``) решает стыки эвристиками и собирает
+    сомнительные; второй (``verdicts`` от модели) кладёт вердикты поверх эвристик. Стыки нумеруются
+    одинаково в обоих проходах — по порядку границ, где хвост и голова простой текст.
 
     Args:
-        tail: Хвост предыдущей полосы (простой абзац).
-        head: Голова следующей (простой абзац).
-        morph: Анализатор для переносов; ``None`` — слова с дефисом на границе не сшивать.
-        rule: Правило склейки.
-        join_paragraphs_across: Сшивать ли оборванные предложения через пробел.
-
-    Returns:
-        ``(сшитый абзац, смещение начала головы в нём, вид, слово)`` или ``None`` — не сшивать.
+        bodies: Полосы выпуска по порядку (уже прочитанные).
+        morph: Анализатор; ``None`` — без словаря.
+        rule: Правило склейки переносов.
+        join_paragraphs_across: Сшивать оборванные предложения.
+        collect_doubts: Собирать ли сомнительные стыки в ``seams``.
+        verdicts: Вердикты модели по номерам стыков (второй проход) или ``None``.
     """
-    boundary = join_across_boundary(tail, head, morph, rule) if morph is not None else None
-    if boundary is not None:
-        kind = JoinKind.HYPHEN if boundary.joined else JoinKind.COMPOUND
-        return boundary.text, boundary.head_start, kind, boundary.word
-    if not join_paragraphs_across:
-        return None
-    tail_text = _DAMAGE_TAGS.sub("", tail.rstrip())
-    head_text = _DAMAGE_TAGS.sub("", head.lstrip())
-    # Модель дописала слово с переносом на первой полосе целиком («сокращением»), а на следующей
-    # осталась вторая половина («нием»): половина, которой словарь не знает, но которой кончается
-    # последнее слово хвоста, — дубль, убирается.
-    last, fragment = _LAST_WORD.search(tail_text), _FIRST_WORD.match(head_text)
-    if morph is not None and last and fragment and fragment.group(1) != last.group(1):
-        word, half = last.group(1), fragment.group(1)
-        if word.lower().endswith(half) and morph.known(word) and not morph.known(half):
-            stem = tail.rstrip() + " "
-            rest = head.lstrip()[fragment.end() :].lstrip()
-            return stem + rest, len(stem), JoinKind.DUPLICATE, f"{word}+{half}"
-    if not _CONTINUATION_START.match(head_text):
-        return None
-    if _SENTENCE_END.search(tail_text) and not _ABBREVIATION_END.search(tail_text):
-        return None
-    stem = tail.rstrip() + " "
-    return stem + head.lstrip(), len(stem), JoinKind.PARAGRAPH, None
+    result = _Pass()
+    blocks = result.blocks
+    previous: _PageBody | None = None
+    previous_first = 0  # индекс первого блока предыдущей полосы
+    seam_index = 0
+    for page in bodies:
+        page_blocks = list(page.blocks)  # свой список — прочитанные полосы не меняем между проходами
+        if page.reason is not None:
+            result.missing.append({"file": page.file, "reason": page.reason})
+            page_blocks = [_Block(f"<!-- полоса {page.file} не распознана: {page.reason} -->", False)]
+        first = len(blocks)
+        start = (first, 0)
+        tail_index = _tail_index(blocks, previous_first) if previous is not None and blocks else None
+        head_index = _head_index(page_blocks)
+        if tail_index is not None and head_index is not None and page.reason is None:
+            seam_index += 1
+            tail, head = blocks[tail_index].text, page_blocks[head_index].text
+            decision = decide_boundary(tail, head, morph, rule, join_paragraphs_across)
+            reason = doubt_reason(tail, head, decision, morph) if collect_doubts or verdicts is not None else None
+            model: dict | None = None
+            if reason is not None and collect_doubts:
+                result.seams.append(Seam(seam_index, Path(previous.rel), Path(page.rel), tail, head, reason))
+            if reason is not None and verdicts is not None and seam_index in verdicts:
+                # Вердикт модели ложится поверх эвристики (или подтверждает её).
+                verdict = verdicts[seam_index]
+                decision, changed = apply_verdict(tail, head, verdict, decision)
+                model = {**verdict.as_dict(), "confirmed": not changed and verdict.error is None}
+            if decision is not None:
+                blocks[tail_index] = _Block(decision.text, True)
+                start = (tail_index, decision.head_start)
+                result.joins.append(JoinRecord(previous.file, page.file, decision.kind, decision.word, reason, model))
+                # Голова ушла в хвост; плавающие блоки перед ней (таблица, сноска) и всё остальное
+                # идут следом за сшитым абзацем в прежнем порядке.
+                page_blocks = page_blocks[:head_index] + page_blocks[head_index + 1 :]
+            elif reason is not None:
+                # Стык не сшит, но сомнителен — запись без склейки, чтобы вердикт был виден в sidecar.
+                result.joins.append(JoinRecord(previous.file, page.file, JoinKind.NONE, None, reason, model))
+        blocks.extend(page_blocks)
+        result.starts.append(start)
+        result.pages.append(PageEntry(page.file, page.page_number, page.stage, 0, 0))
+        # Хвост следующей границы ищется от начала этой полосы; у сшитой полосы её начало — хвост
+        # предыдущей, так что однобзацная полоса, целиком ушедшая в склейку, тоже даёт хвост.
+        previous, previous_first = page, start[0]
+    return result
 
 
 def assemble_issue(
@@ -311,8 +354,13 @@ def assemble_issue(
     join_hyphens: bool = True,
     join_paragraphs_across: bool = True,
     rule: JoinRule = JoinRule.E,
+    checker: BoundaryChecker | None = None,
 ) -> IssueAssembly:
     """Собрать текст выпуска из готовых полос (в память; запись — :func:`write_issue`).
+
+    С ``checker`` сборка идёт в два прохода: первый решает стыки эвристиками и собирает сомнительные,
+    они уходят модели **одним запросом на выпуск** (``checker.check_issue``), второй проход кладёт
+    вердикты поверх эвристик. Без сомнительных стыков запроса нет.
 
     Args:
         out_dir: Корень выхода с ``{год}/{выпуск}/{полоса}.json``.
@@ -321,56 +369,30 @@ def assemble_issue(
         join_hyphens: Сшивать слова с дефисом на границе (иначе граница с дефисом — как без него).
         join_paragraphs_across: Сшивать оборванные предложения через пробел.
         rule: Правило склейки переносов.
+        checker: Проверка сомнительных стыков моделью (``boundary.BoundaryChecker``); ``None`` — только эвристики.
 
     Returns:
-        :class:`IssueAssembly`: текст файла, смещения полос, склейки, пропуски.
+        :class:`IssueAssembly`: текст файла, смещения полос, склейки, пропуски, счётчики проверки.
     """
     morph = default_morph() if join_hyphens else None  # словарь грузится один раз на процесс
-    blocks: list[_Block] = []
-    # Для каждой полосы — (индекс блока, смещение внутри него), чтобы после сборки посчитать offset.
-    starts: list[tuple[int, int]] = []
-    pages: list[PageEntry] = []
-    joins: list[JoinRecord] = []
-    missing: list[dict] = []
-    previous: _PageBody | None = None
-    previous_first = 0  # индекс первого блока предыдущей полосы
-    for rel in page_rels:
-        page = _read_page(out_dir, rel)
-        if page.reason is not None:
-            missing.append({"file": page.file, "reason": page.reason})
-            page.blocks = [_Block(f"<!-- полоса {page.file} не распознана: {page.reason} -->", False)]
-        first = len(blocks)
-        start = (first, 0)
-        tail_index = _tail_index(blocks, previous_first) if previous is not None and blocks else None
-        head_index = _head_index(page.blocks)
-        if tail_index is not None and head_index is not None:
-            head = page.blocks[head_index].text
-            joined = _try_join(blocks[tail_index].text, head, morph, rule, join_paragraphs_across)
-            if joined is not None:
-                text, head_start, kind, word = joined
-                blocks[tail_index] = _Block(text, True)
-                start = (tail_index, head_start)
-                joins.append(JoinRecord(previous.file, page.file, kind, word))
-                # Голова ушла в хвост; плавающие блоки перед ней (таблица, сноска) и всё остальное
-                # идут следом за сшитым абзацем в прежнем порядке.
-                page.blocks = page.blocks[:head_index] + page.blocks[head_index + 1 :]
-        blocks.extend(page.blocks)
-        starts.append(start)
-        pages.append(PageEntry(page.file, page.page_number, page.stage, 0, 0))
-        # Хвост следующей границы ищется от начала этой полосы; у сшитой полосы её начало — хвост
-        # предыдущей, так что однобзацная полоса, целиком ушедшая в склейку, тоже даёт хвост.
-        previous, previous_first = page, start[0]
-    header = _header(issue_key, len(pages), len(missing))
-    body = join_paragraphs([block.text for block in blocks]) if blocks else ""
+    checker_start = replace(checker.stats) if checker is not None else CheckerStats()  # снимок счётчиков до выпуска
+    bodies = [_read_page(out_dir, rel) for rel in page_rels]
+    result = _assemble_pass(bodies, morph, rule, join_paragraphs_across, checker is not None, None)
+    if checker is not None and result.seams:
+        verdicts = checker.check_issue(issue_key, result.seams)
+        result = _assemble_pass(bodies, morph, rule, join_paragraphs_across, False, verdicts)
+    header = _header(issue_key, len(result.pages), len(result.missing))
+    body = join_paragraphs([block.text for block in result.blocks]) if result.blocks else ""
     text = header + body
     # Смещения: накопленная длина абзацев до нужного плюс смещение внутри него.
     offsets = [len(header)]
-    for block in blocks:
+    for block in result.blocks:
         offsets.append(offsets[-1] + len(block.text) + 2)  # «\n\n» между абзацами
-    for entry, (index, inner) in zip(pages, starts):
-        entry.offset = offsets[index] + inner if index < len(blocks) else len(text)
+    for entry, (index, inner) in zip(result.pages, result.starts):
+        entry.offset = offsets[index] + inner if index < len(result.blocks) else len(text)
         entry.line = text.count("\n", 0, entry.offset) + 1
-    return IssueAssembly(issue_key, text, pages, joins, missing)
+    checked = checker.stats - checker_start if checker is not None else CheckerStats()
+    return IssueAssembly(issue_key, text, result.pages, result.joins, result.missing, checked)
 
 
 def _header(issue_key: str, pages: int, missing: int) -> str:
@@ -472,13 +494,18 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
     """
     logger.info(
         "выпуск %s собран: %d полос, переносов через границу %d (составных %d, дублей половины %d), "
-        "абзацев сшито %d, пропущено %d → %s",
+        "абзацев сшито %d, стыков проверено моделью %d (из кэша %d, переписано %d, сбоев %d, $%.4f), пропущено %d → %s",
         assembly.issue,
         len(assembly.pages),
         assembly.count(JoinKind.HYPHEN),
         assembly.count(JoinKind.COMPOUND),
         assembly.count(JoinKind.DUPLICATE),
         assembly.count(JoinKind.PARAGRAPH),
+        assembly.checked.requests,
+        assembly.checked.cache_hits,
+        assembly.count(JoinKind.MODEL),
+        assembly.checked.errors,
+        assembly.checked.cost_usd,
         len(assembly.missing),
         path,
     )

@@ -5,7 +5,7 @@
 #
 # Читает: $GEO_PDF_DIR, $NOGEO_PDF_DIR (123 пары PDF), $BLURRED_DIR (очищенные полосы — источник
 #         иллюстраций, печати уже закрашены), $DB_REVIEWED (только чтение), $GEOMETRY_RUN_DIR/cache.
-# Пишет:  $FINAL_PDF_DIR/{год}_{выпуск}.pdf; $FINAL_WORK_DIR/{pages/<pdf>/pNNNN.json, analysis.csv,
+# Пишет:  $FINAL_PDF_DIR/{год}/{год}_{выпуск}.pdf; $FINAL_WORK_DIR/{pages/<pdf>/pNNNN.json, analysis.csv,
 #         pages.csv, summary.csv, preview/}.
 # Стадии: A — анализ страниц в пуле (tesseract по ячейкам и зонам, ~2 с на страницу на воркер:
 #         ~1 ч на пак при 12 воркерах); B — surya по ненадёжным зонам в родителе (GPU, десятки минут);

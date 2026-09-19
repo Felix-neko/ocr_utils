@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# Пересобрать выпуски пака-1 в целиковые markdown из готовых полос внешнего OCR — без запросов
-# к модели. Обычно не нужен: `run` собирает каждый выпуск сам; сюда — после правки правил сборки
-# (assemble.py) или ручной правки .json полос.
+# Пересобрать выпуски пака-1 в целиковые markdown из готовых полос внешнего OCR. К модели уходят
+# только сомнительные стыки полос — один запрос на выпуск (README, «Проверка стыков моделью»),
+# ответы кэшируются. Обычно не нужен: `run` собирает каждый выпуск сам; сюда — после правки правил
+# сборки (assemble.py, boundary.py) или ручной правки .json полос.
 #
 # Аргументы: необязательно год/номер (один выпуск); остальное уходит команде assemble
-# (например, --no-join-paragraphs).
-# ЧИТАЕТ  EXTERNAL_OCR_SERVICES_OUT/<год>/<номер>/*.json (и .meta.json — сбойные полосы).
-# ПИШЕТ   EXTERNAL_OCR_SERVICES_OUT/<год>/<номер>.md и <номер>.pages.json.
-# ОРИЕНТИР (замер 2026-09-19): 1966/03 — 97 полос за ~2 с (словарь pymorphy3 грузится 0.05 с);
-# на весь пак ~5 мин. Однопоточный: работа — чтение JSON и регулярки, диск SSD.
+# (например, --no-join-paragraphs, --no-check-boundaries).
+# ЧИТАЕТ  EXTERNAL_OCR_SERVICES_OUT/<год>/<номер>/*.json (и .meta.json — сбойные полосы),
+#         SHARPENED_DIR/<год>/<номер> (полоски строк для проверки стыков), ключ $OPENROUTER_API_KEY.
+# ПИШЕТ   EXTERNAL_OCR_SERVICES_OUT/<год>/<номер>.md и <номер>.pages.json, EXTERNAL_OCR_SERVICES_CACHE/…/_boundaries.
+# ОРИЕНТИР (замер 2026-09-19): 1966/03 — 97 полос за ~2 с (словарь pymorphy3 грузится 0.05 с) плюс
+# один запрос по стыкам ≈ 0.1 ¢; на весь пак ~5 мин и ≈ $0.1. Однопоточный: чтение JSON и регулярки.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -23,5 +25,7 @@ fi
 
 uv run python -m ocr_utils.external_ocr_services assemble \
     --out-dir "$EXTERNAL_OCR_SERVICES_OUT" \
+    --in-dir "$SHARPENED_DIR" \
+    --cache-dir "$EXTERNAL_OCR_SERVICES_CACHE" \
     "${ONLY[@]}" \
     "$@"

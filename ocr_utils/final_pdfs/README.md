@@ -19,7 +19,7 @@ uv run python -m ocr_utils.final_pdfs run \
 | проверка пар | родитель | оба PDF выпуска на месте, число страниц одинаково и равно числу полос в базе | выпуск без пары — в `summary.csv` со статусом `error` |
 | A — анализ | пул (`--jobs` − `--reserve-cpu-cores`) | по странице: источник (растр в базе → nogeo; вердикт детектора геометрии `bad` → nogeo; иначе geo), разбор слоя выбранной страницы (`text_layer_fix.pipeline.process_page`, tesseract) | `work/pages/<pdf>/pNNNN.json`, `work/analysis.csv` |
 | B — surya | родитель (GPU) | второе мнение по зонам, где tesseract не принят или неуверен | те же JSON |
-| C — сборка | пул (`--assemble-jobs`) | страница копируется из источника → правка слоя → снятие образов-фигур FineReader под иллюстрациями → JPEG иллюстраций → обрезка обложки до полосы → сохранение → сверка по файлу | `out/{год}_{выпуск}.pdf`, `work/pages.csv`, `work/summary.csv`, `work/preview/` |
+| C — сборка | пул (`--assemble-jobs`) | страница копируется из источника → правка слоя → снятие образов-фигур FineReader под иллюстрациями → JPEG иллюстраций → обрезка обложки до полосы → сохранение → сверка по файлу | `out/{год}/{год}_{выпуск}.pdf`, `work/pages.csv`, `work/summary.csv`, `work/preview/` |
 
 Идемпотентность: JSON текущей версии (`analysis_version` + версия `text_layer_fix`) и готовый
 PDF с верным числом страниц не пересчитываются (`--skip-done`); `--redo` — всё заново;

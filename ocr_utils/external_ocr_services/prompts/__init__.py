@@ -53,6 +53,25 @@ def render(template_name: str, **variables: object) -> str:
     return _environment().get_template(template_name).render(**variables).strip() + "\n"
 
 
+# Промпт проверки стыка полос (boundary.py) версионируется отдельно: он не входит в запросы полос,
+# и его правка не касается их кэша. Поднимать при любой правке boundary_*.md.j2.
+BOUNDARY_PROMPT_VERSION = 1
+
+
+def boundary_prompts(seams: list[dict]) -> tuple[str, str]:
+    """Системный и пользовательский промпты проверки стыков выпуска (по две полоски строк на стык, один запрос).
+
+    Args:
+        seams: Стыки по порядку: ``{"number", "page_before", "page_after", "tail", "head", "reason"}`` —
+            номер с 1, имена полос, конец транскрипции полосы N и начало N+1 без переводов строк,
+            причина сомнения фразой.
+
+    Returns:
+        ``(system, user)``; картинки (по две на стык, в том же порядке) к user добавляет вызывающий.
+    """
+    return render("boundary_system.md.j2"), render("boundary_user.md.j2", seams=seams)
+
+
 def system_prompt(stage: Stage, source: str = "", has_list: bool = False) -> str:
     """Системный промпт этапа — один на весь пак: без списка статей выпуска, поэтому кэшируется провайдером
     как префикс между выпусками и годами; общие правила идут первыми, чтобы toc и page делили префикс.

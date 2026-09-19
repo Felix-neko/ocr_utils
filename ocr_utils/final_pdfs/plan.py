@@ -162,5 +162,5 @@ def final_pdf_name(plan: IssuePlan) -> str:
 
 
 def final_pdf_path(out_dir: Path, plan: IssuePlan) -> Path:
-    """Путь финального PDF выпуска в выходной папке (все выпуски в одной папке)."""
-    return out_dir / final_pdf_name(plan)
+    """Путь финального PDF выпуска: ``<out_dir>/{год}/{год}_{выпуск}.pdf`` — по папке на год."""
+    return out_dir / plan.year_name / final_pdf_name(plan)

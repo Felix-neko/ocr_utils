@@ -67,7 +67,7 @@ PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
 GEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening"
 NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
 
-# Финальные PDF (все выпуски в одной папке, {год}_{выпуск}.pdf) и рабочий каталог сборщика
+# Финальные PDF ({год}/{год}_{выпуск}.pdf, по папке на год) и рабочий каталог сборщика
 # (JSON анализа на страницу, CSV, превью) — SSD.
 FINAL_PDF_DIR="$PDF_ROOT/final_pdfs"
 FINAL_WORK_DIR="/mnt/SYSTEM/raw/mts/pack1_final_pdfs_work"

@@ -12,14 +12,8 @@ from pathlib import Path
 import click
 
 from ocr_utils.external_ocr_services import models as registry
-from ocr_utils.external_ocr_services.assemble import (
-    JoinKind,
-    assemble_issue,
-    issue_pages,
-    list_issues,
-    log_assembly,
-    write_issue,
-)
+from ocr_utils.external_ocr_services.assemble import assemble_issue, issue_pages, list_issues, log_assembly, write_issue
+from ocr_utils.external_ocr_services.boundary import BoundaryChecker, CheckerStats, JoinKind
 from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
 from ocr_utils.external_ocr_services.models import Reasoning
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions
@@ -174,6 +168,12 @@ def main(log_level: str) -> None:
     help="После каждого выпуска собирать его в один markdown ({год}/{выпуск}.md и .pages.json рядом с папкой полос).",
 )
 @click.option(
+    "--check-boundaries/--no-check-boundaries",
+    default=True,
+    show_default=True,
+    help="При сборке показывать сомнительные стыки полос модели (полоски строк обеих полос, один запрос на выпуск).",
+)
+@click.option(
     "--on-missed-toc",
     type=click.Choice([mode.value for mode in OnMissedToc]),
     default=OnMissedToc.REDO.value,
@@ -216,6 +216,7 @@ def run(
     limit: int | None,
     skip_done: bool,
     assemble: bool,
+    check_boundaries: bool,
     on_missed_toc: str,
     redo_scope: str,
     api_key: str | None,
@@ -266,6 +267,7 @@ def run(
         jobs=max(1, jobs),
         skip_done=skip_done,
         assemble=assemble,
+        check_boundaries=check_boundaries,
         on_missed_toc=OnMissedToc(on_missed_toc),
         redo_scope=RedoScope(redo_scope),
         pages_file=pages_file,
@@ -291,6 +293,11 @@ def run(
     )
     if second_pass:
         click.echo(f"Второй проход: {stats.second_passes} полос, оставлен первый у {stats.second_pass_kept_first}.")
+    if stats.boundary_requests:
+        click.echo(
+            f"Стыки полос: запросов {stats.boundary_requests}, переписано {stats.boundary_rewritten}, "
+            f"${stats.boundary_cost_usd:.4f}."
+        )
     if stats.missed:
         click.echo("ОГЛАВЛЕНИЯ ВНЕ БАЗЫ: " + "; ".join(stats.missed))
     if stats.demoted_toc:
@@ -306,6 +313,28 @@ def run(
     required=True,
     help="Выход прогона run: {год}/{выпуск}/{полоса}.json; сюда же ложатся {год}/{выпуск}.md и .pages.json.",
 )
+@click.option(
+    "--in-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Полосы {год}/{выпуск}/{полоса} — для проверки стыков моделью (полоски строк); без него проверки нет.",
+)
+@click.option(
+    "--cache-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Кэш запросов (тот же, что у run): повтор проверки стыков берётся с диска.",
+)
+@click.option(
+    "--check-boundaries/--no-check-boundaries",
+    default=True,
+    show_default=True,
+    help="Показывать сомнительные стыки модели (один запрос на выпуск); нужен --in-dir и ключ OpenRouter.",
+)
+@click.option(
+    "--model", "model_name", default=registry.DEFAULT_MODEL, show_default=True, help="Модель для проверки стыков."
+)
+@click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
 @click.option("--only-year", default=None, help="Только этот годовой комплект.")
 @click.option("--only-issue", default=None, help="Только этот выпуск (имя папки).")
 @click.option(
@@ -323,33 +352,61 @@ def run(
 @click.option("--log-level", default="INFO", show_default=True)
 def assemble_command(
     out_dir: Path,
+    in_dir: Path | None,
+    cache_dir: Path | None,
+    check_boundaries: bool,
+    model_name: str,
+    api_key: str | None,
     only_year: str | None,
     only_issue: str | None,
     join_hyphens: bool,
     join_paragraphs: bool,
     log_level: str,
 ) -> None:
-    """Собрать выпуски в один markdown каждый из готовых .json полос — без запросов к модели."""
+    """Собрать выпуски в один markdown каждый из готовых .json полос; к модели — только сомнительные стыки."""
     _setup_logging(out_dir, log_level)
     keys = list_issues(out_dir, only_year, only_issue)
     if not keys:
         raise click.ClickException(f"в {out_dir} нет выпусков с готовыми .json полос")
+    # Проверка стыков: нужны полосы на входе (полоски строк) и ключ; без --in-dir — только эвристики.
+    checker = None
+    if check_boundaries and in_dir is None:
+        logger.warning("без --in-dir стыки полос модели не показываются — только словарные эвристики")
+    elif check_boundaries:
+        try:
+            spec = registry.resolve(model_name)
+            client = OpenRouterClient(api_key_from(api_key))
+        except Exception as error:
+            raise click.ClickException(str(error)) from None
+        checker = BoundaryChecker(client, spec, in_dir, cache_dir)
     # Каждый выпуск — по своим .json в порядке имён файлов; итоги в лог и в терминал одной строкой.
     totals = {kind: 0 for kind in JoinKind}
     missing = 0
+    checked = CheckerStats()
     for key in keys:
         assembly = assemble_issue(
-            out_dir, key, issue_pages(out_dir, key), join_hyphens=join_hyphens, join_paragraphs_across=join_paragraphs
+            out_dir,
+            key,
+            issue_pages(out_dir, key),
+            join_hyphens=join_hyphens,
+            join_paragraphs_across=join_paragraphs,
+            checker=checker,
         )
         log_assembly(assembly, write_issue(out_dir, assembly))
         for kind in JoinKind:
             totals[kind] += assembly.count(kind)
         missing += len(assembly.missing)
+        checked = checked + assembly.checked
     click.echo(
         f"Выпусков собрано: {len(keys)}; переносов через границу: {totals[JoinKind.HYPHEN]} "
         f"(составных {totals[JoinKind.COMPOUND]}, дублей половины {totals[JoinKind.DUPLICATE]}), "
         f"абзацев сшито: {totals[JoinKind.PARAGRAPH]}, полос без результата: {missing}."
     )
+    if checker is not None:
+        click.echo(
+            f"Стыки полос: запросов {checked.requests} (из кэша {checked.cache_hits}), переписано {totals[JoinKind.MODEL]}, "
+            f"сбоев {checked.errors}, ${checked.cost_usd:.4f}."
+        )
 
 
 @main.command("models")

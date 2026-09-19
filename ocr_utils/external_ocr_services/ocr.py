@@ -287,6 +287,26 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
     return system, user
 
 
+def provider_field(spec: ModelSpec) -> dict[str, Any]:
+    """Маршрутизация OpenRouter для payload: предпочтительные провайдеры по порядку (с откатом на
+    остальных) и чёрный список — квантованные копии модели читают хуже.
+
+    Args:
+        spec: Модель из реестра.
+
+    Returns:
+        Поле ``provider`` payload (пустой словарь — не слать); ``require_parameters`` добавляет
+        вызывающий для строгой схемы.
+    """
+    provider: dict[str, Any] = {}
+    if spec.provider_order:
+        provider["order"] = list(spec.provider_order)
+        provider["allow_fallbacks"] = True
+    if spec.provider_ignore:
+        provider["ignore"] = list(spec.provider_ignore)
+    return provider
+
+
 def build_payload(
     spec: ModelSpec,
     tiles: list[PreparedImage],
@@ -325,14 +345,7 @@ def build_payload(
         "temperature": 0,
         "max_tokens": options.max_tokens,
     }
-    # Маршрутизация OpenRouter: предпочтительные провайдеры по порядку (с откатом на остальных)
-    # и чёрный список — квантованные копии модели читают хуже.
-    provider: dict[str, Any] = {}
-    if spec.provider_order:
-        provider["order"] = list(spec.provider_order)
-        provider["allow_fallbacks"] = True
-    if spec.provider_ignore:
-        provider["ignore"] = list(spec.provider_ignore)
+    provider = provider_field(spec)
     if json_mode is JsonMode.JSON_SCHEMA:
         # Строгая схема; require_parameters отсекает провайдеров, которые её молча игнорируют.
         payload["response_format"] = {
