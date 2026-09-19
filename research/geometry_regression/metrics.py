@@ -86,8 +86,8 @@ def measure_pair(gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = 
     a = to_work(gray300_a)
     out = PageMeasure()
 
-    warp = estimate_field(b, a, dpi)
     lineart = lineart_boxes(b, dpi)
+    warp = estimate_field(b, a, dpi, lineart)
     lines_b, separators_b = text_lines(gray300_b, dpi)
     lines_a, separators_a = text_lines(gray300_a, dpi)
     # Надписи внутри рисунков (полки шкафа на 1966/01 с.78) — не строки текста: их «выравнивание»

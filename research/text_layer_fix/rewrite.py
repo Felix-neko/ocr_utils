@@ -1,0 +1,462 @@
+"""Правка текстового слоя: удаление и усечение слов FineReader, вставка своего невидимого текста.
+
+ПРАВИЛО УДАЛЕНИЯ. Вырезается только текстовый объект ``BT … ET`` внутри спана; сам спан
+``/Span <</MCID n>> BDC … EMC`` остаётся пустым. Так страничный сдвиг ``cm``, который FineReader
+кладёт внутрь первого спана, остаётся на месте (иначе уехала бы картинка), а ссылки дерева
+структуры на MCID остаются действительными — дерево чистить не нужно.
+
+УСЕЧЕНИЕ. Слово, задетое зоной частично, пересобирается из оставленных глифов: те же
+операторы состояния (``Tf`` …), ``Tm`` с прежними ``a b c d`` и началом первого оставленного
+глифа, между глифами ``Td`` в текстовом пространстве, коды глифов — как в исходнике,
+шестнадцатеричными строками. Шрифт и кодировка не меняются.
+
+ВСТАВКА. Своё чтение пишется в тот же поток: ``BT /<ресурс> <кегль> Tf 3 Tr a b c d e f Tm
+<GID…> Tj ET`` со шрифтом Noto Sans, встроенным через ``page.insert_font`` (Type0,
+Identity-H, ToUnicode есть — поиск и ``pdftotext`` его читают). Матрица задаётся напрямую:
+угол по ``rotate_cw`` из ``rotated_text`` (90 — текст читается снизу вверх), растяжение —
+чтобы строка легла в длинную сторону зоны. Никаких ``TextWriter``/``insert_text``: они
+плодят по потоку на вызов и не дают управлять матрицей.
+
+Картинка страницы и все прочие объекты не трогаются: меняется один поток содержимого.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import math
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import fitz
+from fontTools.ttLib import TTFont
+
+from research.text_layer_fix.text_layer import Matrix, Word, apply, page_matrix
+
+logger = logging.getLogger(__name__)
+
+# Шрифт для вставок: полная кириллица, есть в системе.
+DEFAULT_FONT_PATH = Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")
+FONT_RESOURCE = "TLFnoto"
+
+# Кегль вставки, pt: не крупнее обычного текста и не мельче, чем выделяется мышью.
+MAX_FONT_PT = 10.0
+MIN_FONT_PT = 2.5
+
+# Доля кегля над и под базовой линией при укладке строк в зону.
+LINE_ASCENT = 0.78
+LINE_HEIGHT = 1.15
+
+# Невидимый текст: режим 3 — без заливки и обводки.
+INVISIBLE_RENDER_MODE = 3
+
+
+@dataclass(frozen=True)
+class Insert:
+    """Что вписать: текст (строки через перевод строки), рамка зоны в pt и поворот текста."""
+
+    text: str
+    rect: fitz.Rect
+    # На сколько градусов по часовой повернуть страницу, чтобы этот текст стал прямым
+    # (валюта ``rotated_text.tables.orientation``): 90 — читается снизу вверх, 270 — сверху вниз.
+    rotate_cw: int = 0
+    fontsize: "float | None" = None
+
+
+@dataclass
+class EditStats:
+    """Что сделано с одной страницей."""
+
+    blanked: int = 0
+    trimmed: int = 0
+    inserted: int = 0
+    inserted_lines: int = 0
+    skipped_inserts: list[str] = field(default_factory=list)
+
+
+# --- Удаление и усечение ------------------------------------------------------------------
+
+
+def _splice(raw: bytes, edits: list[tuple[int, int, bytes]]) -> bytes:
+    """Заменить непересекающиеся диапазоны байт, идя с конца, чтобы смещения не поплыли."""
+    out = raw
+    for start, end, replacement in sorted(edits, key=lambda e: e[0], reverse=True):
+        out = out[:start] + replacement + out[end:]
+    return out
+
+
+def blank_edits(words: list[Word]) -> list[tuple[int, int, bytes]]:
+    """Правки «вырезать ``BT … ET``» для слов (диапазоны — в исходном потоке)."""
+    return [(start, end, b" ") for word in words for start, end in word.text_ranges]
+
+
+def blank_words(raw: bytes, words: list[Word]) -> bytes:
+    """Убрать текстовые объекты указанных слов, оставив их спаны пустыми.
+
+    Args:
+        raw: Поток содержимого страницы.
+        words: Слова, чьи ``BT … ET`` вырезаются.
+
+    Returns:
+        Новый поток.
+    """
+    return _splice(raw, blank_edits(words))
+
+
+def _hex_string(codes: list[bytes]) -> bytes:
+    return b"<" + b"".join(code.hex().encode("ascii") for code in codes) + b">"
+
+
+def _fmt(value: float) -> bytes:
+    return f"{value:.4f}".rstrip("0").rstrip(".").encode("ascii") or b"0"
+
+
+def rebuild_text_object(word: Word, keep: tuple[int, ...]) -> bytes:
+    """Собрать ``BT … ET`` слова заново только из глифов с индексами ``keep``.
+
+    Args:
+        word: Разобранное слово.
+        keep: Индексы оставляемых глифов (порядок не важен, сортируется).
+
+    Returns:
+        Байты нового текстового объекта; пустая строка, если оставлять нечего.
+    """
+    kept = [word.glyphs[i] for i in sorted(set(keep)) if 0 <= i < len(word.glyphs)]
+    if not kept:
+        return b""
+    a, b, c, d = word.matrix
+    det = a * d - b * c
+    parts = [b"BT ", word.state_ops.strip(), b" "]
+    first = kept[0]
+    parts += [
+        _fmt(a),
+        b" ",
+        _fmt(b),
+        b" ",
+        _fmt(c),
+        b" ",
+        _fmt(d),
+        b" ",
+        _fmt(first.origin_text[0]),
+        b" ",
+        _fmt(first.origin_text[1]),
+        b" Tm ",
+    ]
+    previous = first
+    for glyph in kept:
+        if glyph is not previous:
+            dx = glyph.origin_text[0] - previous.origin_text[0]
+            dy = glyph.origin_text[1] - previous.origin_text[1]
+            # Td задаётся в текстовом пространстве до Tm: (tx, ty) × [[a, b], [c, d]] = (dx, dy).
+            if abs(det) > 1e-9:
+                tx = (dx * d - dy * c) / det
+                ty = (dy * a - dx * b) / det
+            else:
+                tx, ty = dx, dy
+            parts += [_fmt(tx), b" ", _fmt(ty), b" Td "]
+        parts += [_hex_string([glyph.code]), b"Tj "]
+        previous = glyph
+    parts.append(b"ET")
+    return b"".join(parts)
+
+
+def trim_edits(trims: dict[int, tuple[Word, tuple[int, ...]]]) -> list[tuple[int, int, bytes]]:
+    """Правки «пересобрать ``BT … ET`` из оставленных глифов» (диапазоны — в исходном потоке)."""
+    edits: list[tuple[int, int, bytes]] = []
+    for word, keep in trims.values():
+        if not word.text_ranges:
+            continue
+        start, _ = word.text_ranges[0]
+        _, end = word.text_ranges[-1]
+        edits.append((start, end, rebuild_text_object(word, keep)))
+    return edits
+
+
+def trim_words(raw: bytes, trims: dict[int, tuple[Word, tuple[int, ...]]]) -> bytes:
+    """Усечь слова до оставленных глифов.
+
+    Args:
+        raw: Поток содержимого страницы.
+        trims: ``id(слова) → (слово, индексы оставляемых глифов)``.
+
+    Returns:
+        Новый поток.
+    """
+    return _splice(raw, trim_edits(trims))
+
+
+# --- Вставка -------------------------------------------------------------------------------
+
+
+class InsertFont:
+    """Шрифт вставок: глифы по fontTools, длины по PyMuPDF, ресурс на странице по ``insert_font``."""
+
+    def __init__(self, path: Path = DEFAULT_FONT_PATH) -> None:
+        self.path = Path(path)
+        self.ttf = TTFont(str(self.path))
+        self.cmap = self.ttf.getBestCmap()
+        self.fitz_font = fitz.Font(fontfile=str(self.path))
+        self._space = self.gid(" ")
+
+    def gid(self, char: str) -> "int | None":
+        """Номер глифа символа или None, если его нет в шрифте."""
+        name = self.cmap.get(ord(char))
+        return self.ttf.getGlyphID(name) if name else None
+
+    def encode(self, text: str) -> list[bytes]:
+        """Коды глифов (2 байта, Identity-H) для строки; символы без глифа — пробел."""
+        codes: list[bytes] = []
+        for char in text:
+            gid = self.gid(char)
+            if gid is None:
+                gid = self._space or 0
+            codes.append(gid.to_bytes(2, "big"))
+        return codes
+
+    def length(self, text: str, fontsize: float) -> float:
+        """Длина строки в pt при кегле ``fontsize``."""
+        return self.fitz_font.text_length(text, fontsize=fontsize)
+
+    def ensure_resource(self, page: fitz.Page) -> str:
+        """Добавить шрифт в ресурсы страницы (повторно — без дубля) и вернуть имя ресурса."""
+        names = {entry[4] for entry in page.get_fonts(full=True)}
+        if FONT_RESOURCE not in names:
+            page.insert_font(fontname=FONT_RESOURCE, fontfile=str(self.path))
+        return FONT_RESOURCE
+
+
+def fit_fontsize(font: InsertFont, lines: list[str], length_pt: float, thickness_pt: float) -> float:
+    """Кегль, при котором строки помещаются в зону по длине и по толщине.
+
+    Args:
+        font: Шрифт вставки.
+        lines: Строки текста (уже разбитые).
+        length_pt: Длина зоны вдоль строки, pt.
+        thickness_pt: Толщина зоны поперёк строк, pt (на все строки).
+
+    Returns:
+        Кегль в pt, ограниченный ``MIN_FONT_PT``..``MAX_FONT_PT``.
+    """
+    longest = max((font.length(line, 1.0) for line in lines if line), default=1.0)
+    by_length = length_pt / longest if longest > 0 else MAX_FONT_PT
+    by_height = thickness_pt / (LINE_HEIGHT * max(1, len(lines)))
+    return max(MIN_FONT_PT, min(MAX_FONT_PT, by_length, by_height))
+
+
+def _frame(
+    rect: fitz.Rect, rotate_cw: int
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], float, float]:
+    """Система «прямого» текста для зоны: начало, орт вдоль строки, орт вниз по строкам (в
+    координатах fitz, y вниз), длина зоны вдоль строки и толщина поперёк."""
+    angle = rotate_cw % 360
+    if angle == 90:  # читается снизу вверх: строки идут слева направо, начало — левый нижний угол
+        return (rect.x0, rect.y1), (0.0, -1.0), (1.0, 0.0), rect.height, rect.width
+    if angle == 270:  # сверху вниз: начало — правый верхний угол, строки справа налево
+        return (rect.x1, rect.y0), (0.0, 1.0), (-1.0, 0.0), rect.height, rect.width
+    if angle == 180:  # вверх ногами: начало — правый нижний угол
+        return (rect.x1, rect.y1), (-1.0, 0.0), (0.0, -1.0), rect.width, rect.height
+    return (rect.x0, rect.y0), (1.0, 0.0), (0.0, 1.0), rect.width, rect.height
+
+
+def _invert(m: Matrix) -> Matrix:
+    """Обратная матрица PDF."""
+    a, b, c, d, e, f = m
+    det = a * d - b * c
+    ia, ib, ic, id_ = d / det, -b / det, -c / det, a / det
+    return (ia, ib, ic, id_, -(e * ia + f * ic), -(e * ib + f * id_))
+
+
+def text_object(insert: Insert, font: InsertFont, resource: str, to_fitz: Matrix) -> tuple[bytes, int, float]:
+    """Текстовый объект вставки для потока содержимого.
+
+    Args:
+        insert: Что и куда вписать.
+        font: Шрифт вставки.
+        resource: Имя ресурса шрифта на странице.
+        to_fitz: Матрица «PDF → fitz» страницы (:func:`text_layer.page_matrix`); вставка
+            переводится обратной матрицей, поэтому MediaBox не от нуля не мешает.
+
+    Returns:
+        Байты ``BT … ET``, число строк и выбранный кегль.
+    """
+    lines = [line.strip() for line in insert.text.split("\n") if line.strip()]
+    if not lines:
+        return b"", 0, 0.0
+    origin, along, down, length, thickness = _frame(insert.rect, insert.rotate_cw)
+    fontsize = insert.fontsize or fit_fontsize(font, lines, length, thickness)
+    line_step = fontsize * LINE_HEIGHT
+    # Если строк по толщине помещается меньше, чем есть, сжимаем шаг, но не кегль: пусть лучше
+    # строки перекроются в невидимом слое, чем текст выйдет за зону и наедет на соседей.
+    if line_step * len(lines) > thickness and len(lines) > 1:
+        line_step = thickness / len(lines)
+    # Растяжение вдоль строки, чтобы самая длинная строка легла ровно в зону: FineReader делает так же.
+    longest = max(font.length(line, fontsize) for line in lines)
+    stretch = min(1.0, length / longest) if longest > 0 else 1.0
+    # Матрица текста в координатах PDF: орт «вдоль» — направление строки, орт «вверх» — против
+    # ``down``. Векторы переводятся из fitz в PDF линейной частью обратной матрицы, точка — целиком.
+    to_pdf = _invert(to_fitz)
+    ia, ib, ic, id_ = to_pdf[:4]
+    ax, ay = (along[0] * ia + along[1] * ic) * stretch, (along[0] * ib + along[1] * id_) * stretch
+    ux, uy = -(down[0] * ia + down[1] * ic), -(down[0] * ib + down[1] * id_)
+    parts = [
+        b"BT /",
+        resource.encode("ascii"),
+        b" ",
+        _fmt(fontsize),
+        b" Tf ",
+        str(INVISIBLE_RENDER_MODE).encode(),
+        b" Tr ",
+    ]
+    for number, line in enumerate(lines):
+        offset = fontsize * LINE_ASCENT + number * line_step
+        x = origin[0] + down[0] * offset
+        y = origin[1] + down[1] * offset
+        px, py = apply(to_pdf, x, y)
+        parts += [_fmt(ax), b" ", _fmt(ay), b" ", _fmt(ux), b" ", _fmt(uy), b" ", _fmt(px), b" ", _fmt(py), b" Tm "]
+        parts += [_hex_string(font.encode(line)), b"Tj "]
+    parts.append(b"ET")
+    return b"".join(parts), len(lines), fontsize
+
+
+# --- Применение и проверка ----------------------------------------------------------------
+
+
+def apply_edits(
+    doc: fitz.Document,
+    page_index: int,
+    raw: bytes,
+    blanks: list[Word],
+    trims: dict[int, tuple[Word, tuple[int, ...]]],
+    inserts: list[Insert],
+    font: "InsertFont | None" = None,
+) -> EditStats:
+    """Записать правки в поток содержимого страницы документа (документ — открытая копия).
+
+    Args:
+        doc: Документ PyMuPDF, открытый из КОПИИ исходного PDF.
+        page_index: Номер страницы с нуля.
+        raw: Исходный поток, по которому разбирались ``blanks``/``trims`` (смещения должны совпадать).
+        blanks: Слова на удаление.
+        trims: Слова на усечение (см. :func:`trim_words`).
+        inserts: Вставки.
+        font: Шрифт вставок; None — Noto Sans по умолчанию.
+
+    Returns:
+        Статистика правок.
+    """
+    stats = EditStats()
+    page = doc[page_index]
+    xrefs = page.get_contents()
+    if len(xrefs) != 1:
+        raise ValueError(f"страница {page_index}: потоков содержимого {len(xrefs)}, ожидается один")
+    # Все правки — одним проходом по ИСХОДНОМУ потоку: диапазоны слов посчитаны по нему, и
+    # после первой же вырезки они бы поплыли (замер: усечение после удалений теряло соседние слова).
+    edited = _splice(raw, blank_edits(blanks) + trim_edits(trims))
+    stats.blanked, stats.trimmed = len(blanks), len(trims)
+    if inserts:
+        font = font or InsertFont()
+        resource = font.ensure_resource(page)
+        objects: list[bytes] = []
+        for insert in inserts:
+            data, lines, _ = text_object(insert, font, resource, page_matrix(page))
+            if not data:
+                stats.skipped_inserts.append("пустой текст")
+                continue
+            objects.append(data)
+            stats.inserted += 1
+            stats.inserted_lines += lines
+        if objects:
+            # Свой блок в конце потока, в собственной паре q/Q: состояние страницы не наследуется.
+            edited = edited.rstrip() + b"\nq " + b" ".join(objects) + b" Q\n"
+    doc.update_stream(xrefs[0], edited)
+    return stats
+
+
+@dataclass
+class VerifyReport:
+    """Сверка страницы после правки с тем, что ожидалось."""
+
+    kept_missing: int = 0  # слов KEEP не нашлось на прежнем месте
+    deleted_remaining: int = 0  # удалённых слов всё ещё видно в извлечении
+    inserts_missing: int = 0  # вставок не находит поиск
+    image_changed: bool = False
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not (self.kept_missing or self.deleted_remaining or self.inserts_missing or self.image_changed)
+
+
+def image_digest(doc: fitz.Document, xref: int) -> str:
+    """md5 сырых байт картинки — чтобы убедиться, что растр не пересжат."""
+    return hashlib.md5(doc.xref_stream_raw(xref)).hexdigest()
+
+
+def _char_index(page: fitz.Page) -> dict[tuple[int, int], list[tuple[float, float, str]]]:
+    """Символы страницы по сетке начал (как в ``text_layer``), для посимвольной сверки."""
+    index: dict[tuple[int, int], list[tuple[float, float, str]]] = {}
+    for block in page.get_text("rawdict", flags=0)["blocks"]:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                for char in span.get("chars", []):
+                    x, y = char["origin"]
+                    index.setdefault((int(math.floor(x)), int(math.floor(y))), []).append((x, y, char["c"]))
+    return index
+
+
+def _glyph_present(index: dict, glyph_origin: tuple[float, float], char: str, tolerance: float = 0.35) -> bool:
+    gx, gy = glyph_origin
+    cx, cy = int(math.floor(gx)), int(math.floor(gy))
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for x, y, c in index.get((cx + dx, cy + dy), ()):
+                if c == char and math.hypot(x - gx, y - gy) <= tolerance:
+                    return True
+    return False
+
+
+def verify_page(
+    before: fitz.Page,
+    after: fitz.Page,
+    kept: list[Word],
+    deleted: list[Word],
+    inserts: list[Insert],
+    image_xref: "int | None" = None,
+) -> VerifyReport:
+    """Сверить страницу-копию с ожиданиями (посимвольно, по началам глифов).
+
+    Args:
+        before: Страница исходного PDF.
+        after: Та же страница исправленной копии.
+        kept: Слова, которые должны были остаться: каждый их глиф ищется на прежнем месте.
+        deleted: Слова, которых быть не должно: ни один их глиф не должен найтись.
+        inserts: Вставки, которые должен находить ``search_for`` в своей рамке.
+        image_xref: Картинка страницы для сверки md5 (одинаковый xref в обоих документах).
+
+    Returns:
+        Отчёт сверки.
+    """
+    report = VerifyReport()
+    index = _char_index(after)
+    for word in kept:
+        glyphs = [g for g in word.glyphs if g.char and not g.char.isspace()]
+        if glyphs and not all(_glyph_present(index, g.origin, g.char) for g in glyphs):
+            report.kept_missing += 1
+    for word in deleted:
+        glyphs = [g for g in word.glyphs if g.char and not g.char.isspace()]
+        if glyphs and any(_glyph_present(index, g.origin, g.char) for g in glyphs):
+            report.deleted_remaining += 1
+    for insert in inserts:
+        first = next((line.strip() for line in insert.text.split("\n") if line.strip()), "")
+        if not first:
+            continue
+        hits = after.search_for(first)
+        if not any(hit.intersects(insert.rect) for hit in hits):
+            report.inserts_missing += 1
+            report.notes.append(f"не найдена вставка «{first[:30]}»")
+    if image_xref is not None:
+        try:
+            report.image_changed = image_digest(before.parent, image_xref) != image_digest(after.parent, image_xref)
+        except Exception as error:  # noqa: BLE001
+            report.notes.append(f"md5 картинки не сверен: {error}")
+    return report

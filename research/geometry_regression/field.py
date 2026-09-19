@@ -38,6 +38,13 @@ FINE_SEARCH_MM = 3.4
 MIN_PEAK = 0.45
 MIN_DISTINCT = 1.2
 PEAK_RADIUS_MM = 0.7
+# Тайл, не нашедший пары в масштабе 1:1, ищется ещё и с шаблоном, растянутым/сжатым на эти
+# доли: убирая трапецию, FineReader растягивает верх страницы на 6–10 % (1975/05 с.61: шаг
+# строк 42 → 46 px при 300 dpi), и 27-мм тайл с текстом при таком масштабе не совпадает
+# (пик 0.2 против 0.6 при масштабе 1.08). Без этого верхняя половина страницы оставалась без
+# тайлов, аффинная часть поля туда экстраполировалась мимо на 5–8 мм, и пробы линеек падали
+# на текст. Погнутая схема (1967/01 с.80) масштабом не совпадает — её тайлы остаются без пары.
+SCALE_TRIES = (0.96, 1.04, 0.92, 1.08)
 # Пустой тайл: меньше такой доли краски — искать нечего.
 MIN_INK_FRAC = 0.012
 # Меньше стольких тайлов — аффинная подгонка не имеет смысла.
@@ -161,8 +168,8 @@ def _refine(response: np.ndarray, x: int, y: int) -> tuple[float, float]:
     return dx, dy
 
 
-def _match(template: np.ndarray, image: np.ndarray, x_pred: float, y_pred: float, search: int, radius: int):
-    """Смещение тайла ``(x, y, peak)`` в A, либо код отказа: 0 — слабый пик, 1 — неотчётливый, None — окно за краем."""
+def _match_once(template: np.ndarray, image: np.ndarray, x_pred: float, y_pred: float, search: int, radius: int):
+    """Смещение шаблона ``(x, y, peak)`` в A, либо код отказа: 0 — слабый пик, 1 — неотчётливый, None — окно за краем."""
     tile_h, tile_w = template.shape
     h, w = image.shape
     x0 = int(np.clip(round(x_pred) - search, 0, w))
@@ -183,6 +190,36 @@ def _match(template: np.ndarray, image: np.ndarray, x_pred: float, y_pred: float
         return 1
     sx, sy = _refine(response, px, py)
     return x0 + px + sx, y0 + py + sy, float(peak)
+
+
+def _match(
+    template: np.ndarray,
+    image: np.ndarray,
+    x_pred: float,
+    y_pred: float,
+    search: int,
+    radius: int,
+    rescale: bool = True,
+):
+    """Смещение тайла в A: сначала 1:1, при отказе и ``rescale`` — с шаблоном в масштабах ``SCALE_TRIES``.
+
+    Возвращает ``(x, y, peak)`` — положение левого верхнего угла НЕмасштабированного тайла,
+    как если бы он лёг центром туда же, куда лёг масштабированный; либо код отказа последней
+    попытки 1:1 (0 — слабый пик, 1 — неотчётливый) или None — окно за краем.
+    """
+    found = _match_once(template, image, x_pred, y_pred, search, radius)
+    if not isinstance(found, int) or not rescale:
+        return found
+    tile_h, tile_w = template.shape
+    for scale in SCALE_TRIES:
+        scaled = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        # Масштабированный шаблон центрируется там же, где стоял бы исходный.
+        shift_x, shift_y = (scaled.shape[1] - tile_w) / 2.0, (scaled.shape[0] - tile_h) / 2.0
+        retry = _match_once(scaled, image, x_pred - shift_x, y_pred - shift_y, search, radius)
+        if retry is not None and not isinstance(retry, int):
+            fx, fy, peak = retry
+            return fx + shift_x, fy + shift_y, peak
+    return found
 
 
 def robust_affine(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -211,9 +248,13 @@ def robust_affine(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndar
 
 
 def _tile_matches(
-    before: np.ndarray, after: np.ndarray, predict, tile: int, step: int, search: int, radius: int
+    before: np.ndarray, after: np.ndarray, predict, tile: int, step: int, search: int, radius: int, lineart_boxes: list
 ) -> tuple[np.ndarray, np.ndarray]:
     """Сопоставление тайлов сетки с шагом ``step``; ``predict(x, y)`` — где искать в A.
+
+    Тайлы с центром внутри ``lineart_boxes`` ищутся только 1:1: рисунок, который совпадает лишь
+    после масштабирования, — деформированный рисунок (перекошенное фото 1971/04 с.44), и его
+    тайлы должны остаться без пары; для текста же масштаб — законная правка трапеции.
 
     Returns:
         Найденные ``(cx, cy, ux, uy, peak)`` и ненайденные ``(cx, cy, kind)`` тайлы с краской.
@@ -228,7 +269,9 @@ def _tile_matches(
             if template.mean() / 255.0 < MIN_INK_FRAC:
                 continue
             x_pred, y_pred = predict(x, y)
-            found = _match(template, ink_a, x_pred, y_pred, search, radius)
+            centre = np.array([[x + tile / 2.0, y + tile / 2.0]])
+            in_lineart = bool(_inside(centre, lineart_boxes)[0]) if lineart_boxes else False
+            found = _match(template, ink_a, x_pred, y_pred, search, radius, rescale=not in_lineart)
             if found is None:
                 continue
             if isinstance(found, int):
@@ -239,8 +282,15 @@ def _tile_matches(
     return np.array(rows, dtype=np.float64).reshape(-1, 5), np.array(failed, dtype=np.float64).reshape(-1, 3)
 
 
-def estimate_field(before: np.ndarray, after: np.ndarray, dpi: float = WORK_DPI) -> Field | None:
-    """Поле смещений B → A на серых копиях одного dpi (размеры могут отличаться)."""
+def estimate_field(
+    before: np.ndarray, after: np.ndarray, dpi: float = WORK_DPI, lineart_boxes: list | None = None
+) -> Field | None:
+    """Поле смещений B → A на серых копиях одного dpi (размеры могут отличаться).
+
+    ``lineart_boxes`` — рамки рисунков на B в пикселях ``dpi``: внутри них тайлы не
+    подбираются по масштабу (см. ``_tile_matches``).
+    """
+    boxes = list(lineart_boxes or [])
     h = max(before.shape[0], after.shape[0])
     w = max(before.shape[1], after.shape[1])
     b = _pad_to(before, h, w)
@@ -250,7 +300,7 @@ def estimate_field(before: np.ndarray, after: np.ndarray, dpi: float = WORK_DPI)
     radius = mm_to_px(PEAK_RADIUS_MM, dpi)
 
     coarse, _ = _tile_matches(
-        b, a, lambda x, y: (x + dx, y + dy), tile, step * 2, mm_to_px(COARSE_SEARCH_MM, dpi), radius
+        b, a, lambda x, y: (x + dx, y + dy), tile, step * 2, mm_to_px(COARSE_SEARCH_MM, dpi), radius, boxes
     )
     if len(coarse) < MIN_TILES:
         return None
@@ -260,7 +310,7 @@ def estimate_field(before: np.ndarray, after: np.ndarray, dpi: float = WORK_DPI)
         p = affine @ np.array([x, y, 1.0])
         return float(p[0]), float(p[1])
 
-    tiles, failed = _tile_matches(b, a, predict, tile, step, mm_to_px(FINE_SEARCH_MM, dpi), radius)
+    tiles, failed = _tile_matches(b, a, predict, tile, step, mm_to_px(FINE_SEARCH_MM, dpi), radius, boxes)
     if len(tiles) < MIN_TILES:
         return None
     affine, resid, weight = robust_affine(tiles[:, :2], tiles[:, :2] + tiles[:, 2:4])

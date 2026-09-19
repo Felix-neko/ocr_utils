@@ -21,7 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-JOBS=16  # упирается в CPU (рендер JBIG2 + LSD + корреляция), диск SSD
+# Упирается в CPU (рендер JBIG2 + LSD + корреляция), диск SSD. Оставить ядра под другое: JOBS=12 ./run_pack1.sh
+JOBS="${JOBS:-16}"
 RESERVE_CPU_CORES=4  # столько физических ядер оставить машине: 16 воркеров на 16 ядрах душат всё остальное
 
 uv run python -m research.geometry_regression run \

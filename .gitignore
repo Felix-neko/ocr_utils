@@ -118,3 +118,6 @@ research/external_ocr_models/damaged_issue/
 *.sqlite.bak
 # Выход учебного стенда сравнения языков промпта (research/deepseek_damage_lesson): json/md/raw по полосам.
 research/deepseek_damage_lesson/выход/
+
+# Оверлеи исследования текстового слоя (картинки, вне git)
+reports/text_layer_fix/
