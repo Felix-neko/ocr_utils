@@ -6,7 +6,7 @@ from pathlib import Path
 
 import fitz
 
-from research.text_layer_fix.rewrite import DEFAULT_FONT_PATH, InsertFont
+from ocr_utils.text_layer_fix.rewrite import DEFAULT_FONT_PATH, InsertFont
 
 FONT_RESOURCE = "F0"
 

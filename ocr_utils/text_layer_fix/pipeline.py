@@ -20,13 +20,13 @@ import pikepdf
 from ocr_utils.rotated_text.tables.ocr import LANGUAGES
 from ocr_utils.scan_markup.table_detection.geometry import KIND_TABLE, Box
 
-from research.text_layer_fix import VERSION, WORK_DPI
-from research.text_layer_fix.classify import VerdictCounts, WordVerdict, classify_words
-from research.text_layer_fix.docstrum import glyph_components
-from research.text_layer_fix.ocr import ZoneText, read_zone
-from research.text_layer_fix.raster import PageRaster, downscale, page_raster, render_gray
-from research.text_layer_fix.text_layer import TextLayer, load_layer
-from research.text_layer_fix.zones import (
+from ocr_utils.text_layer_fix import VERSION, WORK_DPI
+from ocr_utils.text_layer_fix.classify import VerdictCounts, WordVerdict, classify_words
+from ocr_utils.text_layer_fix.docstrum import glyph_components
+from ocr_utils.text_layer_fix.ocr import ZoneText, read_zone
+from ocr_utils.text_layer_fix.raster import downscale, page_raster, render_gray
+from ocr_utils.text_layer_fix.text_layer import TextLayer, load_layer
+from ocr_utils.text_layer_fix.zones import (
     RotatedZone,
     TableInfo,
     ZoneKind,

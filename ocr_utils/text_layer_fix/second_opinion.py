@@ -22,9 +22,10 @@ from ocr_utils.rotated_text.tables.structure import strip_stubs
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
 from ocr_utils.scan_markup.table_detection.geometry import Box
 
-from research.text_layer_fix.ocr import TABLE_KINDS, acceptable
-from research.text_layer_fix.raster import page_raster, render_gray
-from research.text_layer_fix.zones import ZoneKind, rotate_crop
+from ocr_utils.text_layer_fix.cache import load_page, save_page
+from ocr_utils.text_layer_fix.ocr import TABLE_KINDS, acceptable
+from ocr_utils.text_layer_fix.raster import page_raster, render_gray
+from ocr_utils.text_layer_fix.zones import rotate_crop
 
 
 @dataclass
@@ -52,40 +53,34 @@ def _crop(gray: np.ndarray, zone: dict, rotate: int, dpi: int) -> np.ndarray:
     return rotate_crop(gray, box, rotate, dpi=dpi)
 
 
-def revise(pdf_dir: Path, out_dir: Path, pages: list[tuple[str, int]], batch: int = surya.DEFAULT_BATCH) -> SuryaStats:
+def revise(pages: list[tuple[Path, Path]], batch: int = surya.DEFAULT_BATCH) -> SuryaStats:
     """Дочитать surya зоны с ненадёжным чтением и обновить JSON кэша.
 
     Args:
-        pdf_dir: Папка исходных PDF.
-        out_dir: Каталог прогона с ``cache/``.
-        pages: Страницы выборки ``(pdf, page)``.
+        pages: Пары «PDF-источник страницы → JSON её разбора». Источник у каждой страницы
+            свой (сборщик финальных PDF берёт страницу то с коррекцией геометрии, то без).
         batch: Размер партии surya.
 
     Returns:
         Статистика.
     """
-    from research.text_layer_fix.cli import cache_path
-
     stats = SuryaStats()
     requests: list[tuple[Path, str, np.ndarray, dict]] = []
-    by_pdf: dict[str, list[int]] = {}
-    for pdf_name, page in pages:
-        by_pdf.setdefault(pdf_name, []).append(page)
-    for pdf_name, indices in sorted(by_pdf.items()):
-        path = pdf_dir / pdf_name
-        if not path.is_file():
+    by_pdf: dict[Path, list[Path]] = {}
+    for pdf_path, cache in pages:
+        by_pdf.setdefault(Path(pdf_path), []).append(Path(cache))
+    for pdf_path, caches in sorted(by_pdf.items()):
+        if not pdf_path.is_file():
             continue
-        with fitz.open(str(path)) as doc:
-            for index in sorted(indices):
-                cache = cache_path(out_dir, pdf_name, index)
-                if not cache.is_file():
-                    continue
-                payload = json.loads(cache.read_text(encoding="utf-8"))
-                if payload.get("error"):
+        with fitz.open(str(pdf_path)) as doc:
+            for cache in sorted(caches):
+                payload = load_page(cache)
+                if payload is None:
                     continue
                 wanted = [(i, r) for i, r in payload["readings"].items() if _needs_opinion(r)]
                 if not wanted:
                     continue
+                index = int(payload["page"])
                 raster = page_raster(doc[index])
                 gray = render_gray(doc[index], raster)
                 dpi = int(round(raster.dpi))
@@ -137,5 +132,5 @@ def revise(pdf_dir: Path, out_dir: Path, pages: list[tuple[str, int]], batch: in
                 )
                 if ok and not was:
                     stats.newly_accepted += 1
-        cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        save_page(cache, payload)
     return stats

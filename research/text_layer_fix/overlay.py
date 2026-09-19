@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from research.text_layer_fix.classify import Verdict
+from ocr_utils.text_layer_fix.classify import Verdict
 
 # Разрешение оверлея: четверть от 600 dpi, страница ~1000×1600 px — читается и весит немного.
 OVERLAY_DPI = 150

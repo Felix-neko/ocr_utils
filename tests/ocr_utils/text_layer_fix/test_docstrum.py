@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from research.text_layer_fix import WORK_DPI
-from research.text_layer_fix.docstrum import cluster_rotated, glyph_components
+from ocr_utils.text_layer_fix import WORK_DPI
+from ocr_utils.text_layer_fix.docstrum import cluster_rotated, glyph_components
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
@@ -44,7 +44,7 @@ def test_finds_vertical_label_only() -> None:
 def test_upright_lines_by_transposition() -> None:
     gray, _ = _page()
     stats = glyph_components(gray, WORK_DPI)
-    from research.text_layer_fix.docstrum import cluster_lines
+    from ocr_utils.text_layer_fix.docstrum import cluster_lines
 
     lines = cluster_lines(stats, WORK_DPI, vertical=False)
     # Двенадцать строк абзаца (могут склеиться в один блок) и ни одной вертикальной подписи.

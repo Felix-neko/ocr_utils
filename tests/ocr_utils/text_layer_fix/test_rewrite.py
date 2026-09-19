@@ -6,8 +6,8 @@ import fitz
 import pikepdf
 import pytest
 
-from research.text_layer_fix.raster import page_raster
-from research.text_layer_fix.rewrite import (
+from ocr_utils.text_layer_fix.raster import page_raster
+from ocr_utils.text_layer_fix.rewrite import (
     Insert,
     InsertFont,
     apply_edits,
@@ -15,8 +15,8 @@ from research.text_layer_fix.rewrite import (
     rebuild_text_object,
     verify_page,
 )
-from research.text_layer_fix.text_layer import load_layer, page_content
-from tests.research.text_layer_fix.synthetic import finereader_like_pdf
+from ocr_utils.text_layer_fix.text_layer import load_layer, page_content
+from tests.ocr_utils.text_layer_fix.synthetic import finereader_like_pdf
 
 
 @pytest.fixture(scope="module")

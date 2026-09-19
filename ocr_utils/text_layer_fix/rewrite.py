@@ -31,7 +31,7 @@ from pathlib import Path
 import fitz
 from fontTools.ttLib import TTFont
 
-from research.text_layer_fix.text_layer import Matrix, Word, apply, page_matrix
+from ocr_utils.text_layer_fix.text_layer import Matrix, Word, apply, page_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +193,11 @@ class InsertFont:
 
     def __init__(self, path: Path = DEFAULT_FONT_PATH) -> None:
         self.path = Path(path)
+        if not self.path.is_file():
+            raise FileNotFoundError(
+                f"нет шрифта для вставок текстового слоя: {self.path} (нужен TTF с кириллицей, "
+                "например пакет fonts-noto-core; другой файл — опция --insert-font)"
+            )
         self.ttf = TTFont(str(self.path))
         self.cmap = self.ttf.getBestCmap()
         self.fitz_font = fitz.Font(fontfile=str(self.path))
@@ -422,6 +427,7 @@ def verify_page(
     deleted: list[Word],
     inserts: list[Insert],
     image_xref: "int | None" = None,
+    after_image_xref: "int | None" = None,
 ) -> VerifyReport:
     """Сверить страницу-копию с ожиданиями (посимвольно, по началам глифов).
 
@@ -431,7 +437,9 @@ def verify_page(
         kept: Слова, которые должны были остаться: каждый их глиф ищется на прежнем месте.
         deleted: Слова, которых быть не должно: ни один их глиф не должен найтись.
         inserts: Вставки, которые должен находить ``search_for`` в своей рамке.
-        image_xref: Картинка страницы для сверки md5 (одинаковый xref в обоих документах).
+        image_xref: Картинка страницы в исходном документе для сверки md5; ``None`` — не сверять.
+        after_image_xref: Та же картинка в копии, если её xref отличается (страница скопирована в
+            новый документ); по умолчанию тот же xref, что и ``image_xref``.
 
     Returns:
         Отчёт сверки.
@@ -456,7 +464,8 @@ def verify_page(
             report.notes.append(f"не найдена вставка «{first[:30]}»")
     if image_xref is not None:
         try:
-            report.image_changed = image_digest(before.parent, image_xref) != image_digest(after.parent, image_xref)
+            after_xref = image_xref if after_image_xref is None else after_image_xref
+            report.image_changed = image_digest(before.parent, image_xref) != image_digest(after.parent, after_xref)
         except Exception as error:  # noqa: BLE001
             report.notes.append(f"md5 картинки не сверен: {error}")
     return report

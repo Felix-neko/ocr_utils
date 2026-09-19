@@ -25,9 +25,9 @@ from ocr_utils.scan_markup.rotation import rotate_box
 from ocr_utils.scan_markup.table_detection.geometry import KIND_TABLE, Box, iou, union
 from ocr_utils.scan_markup.table_detection.layout import FIGURE_LABELS
 
-from research.text_layer_fix import mm_to_px
-from research.text_layer_fix.raster import page_raster, render_gray
-from research.text_layer_fix.zones import detect_tables
+from ocr_utils.text_layer_fix import mm_to_px
+from ocr_utils.text_layer_fix.raster import page_raster, render_gray
+from ocr_utils.text_layer_fix.zones import detect_tables
 
 SOURCES = ("figures", "detector", "ink", "surya", "union")
 MATCH_IOU = 0.5

@@ -19,9 +19,9 @@ import fitz
 
 from ocr_utils.scan_markup.table_detection.geometry import Box
 
-from research.text_layer_fix import px_to_mm
-from research.text_layer_fix.text_layer import SpanShape, TextLayer, Word
-from research.text_layer_fix.zones import RotatedZone, ZoneKind
+from ocr_utils.text_layer_fix import px_to_mm
+from ocr_utils.text_layer_fix.text_layer import SpanShape, TextLayer
+from ocr_utils.text_layer_fix.zones import RotatedZone, ZoneKind
 
 # Доля площади слова внутри зоны, от которой слово удаляется целиком.
 DELETE_OVERLAP = 0.6

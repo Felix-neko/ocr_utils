@@ -32,11 +32,11 @@ from ocr_utils.rotated_text.tables.source import CROP_PAD_MM, deskew_by_rules
 from ocr_utils.rotated_text.tables.structure import analyse_structure, interior_box, merge_split_cells, work_copy
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
 from ocr_utils.scan_markup.table_detection.detector import detect
-from ocr_utils.scan_markup.table_detection.geometry import KIND_TABLE, Box, TableBox
+from ocr_utils.scan_markup.table_detection.geometry import Box, TableBox
 
-from research.text_layer_fix import WORK_DPI, mm_to_px
-from research.text_layer_fix.docstrum import cluster_lines, cluster_rotated, glyph_components
-from research.text_layer_fix.raster import downscale
+from ocr_utils.text_layer_fix import WORK_DPI, mm_to_px
+from ocr_utils.text_layer_fix.docstrum import cluster_lines, cluster_rotated, glyph_components
+from ocr_utils.text_layer_fix.raster import downscale
 
 logger = logging.getLogger(__name__)
 

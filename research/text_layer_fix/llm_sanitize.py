@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from ocr_utils.external_ocr_services.client import OpenRouterClient
 from ocr_utils.external_ocr_services.models import ModelSpec
 
-from research.text_layer_fix.classify import Verdict
+from ocr_utils.text_layer_fix.classify import Verdict
 
 SYSTEM_PROMPT = (
     "You review lines of OCR output from a Russian technical journal of the 1960s-1970s. "

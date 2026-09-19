@@ -29,7 +29,7 @@ from scipy.spatial import cKDTree
 
 from ocr_utils.scan_markup.table_detection.geometry import Box
 
-from research.text_layer_fix import mm_to_px
+from ocr_utils.text_layer_fix import mm_to_px
 
 # Компонента размера глифа: высота и ширина в этих пределах (мм бумаги). 0.8 мм — точка над
 # «й» и пыль отсекаются, 7 мм — заголовок, но не рамка таблицы и не штрих чертежа.

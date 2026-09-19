@@ -6,8 +6,8 @@ import fitz
 import pikepdf
 import pytest
 
-from research.text_layer_fix.text_layer import SpanShape, load_layer, multiply, tokenize
-from tests.research.text_layer_fix.synthetic import finereader_like_pdf, pymupdf_text_pdf
+from ocr_utils.text_layer_fix.text_layer import SpanShape, load_layer, multiply, tokenize
+from tests.ocr_utils.text_layer_fix.synthetic import finereader_like_pdf, pymupdf_text_pdf
 
 
 def test_tokenize_strings_and_dicts() -> None:

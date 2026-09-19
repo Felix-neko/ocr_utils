@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,13 +20,19 @@ from ocr_utils.rotated_text.tables.pipeline import CONFIDENCE_REPLACE, JUNK_TOKE
 from ocr_utils.rotated_text.tables.structure import strip_stubs
 from ocr_utils.scan_markup.table_detection.geometry import Box
 
-from research.text_layer_fix.zones import RotatedZone, ZoneKind, rotate_crop
+from ocr_utils.text_layer_fix.zones import RotatedZone, ZoneKind, rotate_crop
 
 TABLE_KINDS = (ZoneKind.TABLE_CELL, ZoneKind.TABLE_CELL_MIXED, ZoneKind.TABLE_CELL_UPRIGHT)
 
 
 # Насколько прямое чтение должно быть увереннее повёрнутого, чтобы снять зону с ячейки.
 UPRIGHT_MARGIN = 0.1
+
+# Число без букв (размеры на чертежах «24 000», «12 000») принимается от этой уверенности, если
+# ни одна его группа цифр не начинается с нуля: в поясе 0.8–0.9 треть отказов — числа с
+# лишними ведущими нулями («00098», «0099»), а без них чтения верные (reports/text_layer_fix.md).
+NUMERIC_CONFIDENCE_CLEAN = 0.8
+_NUMBER_TOKEN = re.compile(r"\d+(?: \d{3})*")  # число с разбивкой на тысячи пробелом: «24 000»
 
 
 @dataclass
@@ -75,7 +83,23 @@ def acceptable(text: str, confidence: float, min_letters: int = 3) -> tuple[bool
         return True, ""
     if confidence >= NUMERIC_CONFIDENCE:
         return True, ""
+    if letters == 0 and confidence >= NUMERIC_CONFIDENCE_CLEAN and not has_leading_zero(text):
+        return True, ""
     return False, f"коротко ({letters} букв) и неуверенно ({confidence:.2f})"
+
+
+def has_leading_zero(text: str) -> bool:
+    """Есть ли в тексте число, начинающееся с нуля и длиннее одного знака («0099», «00098»).
+
+    Группы тысяч через пробел («24 000») — одно число, его нули не ведущие.
+
+    Args:
+        text: Прочитанный текст.
+
+    Returns:
+        ``True``, если хотя бы одно число выглядит как чтение с лишними ведущими нулями.
+    """
+    return any(len(token) > 1 and token[0] == "0" for token in _NUMBER_TOKEN.findall(text))
 
 
 def _read(gray: np.ndarray, box: Box, rotate: int, dpi: int, lang: str, table_cell: bool = False) -> CellText:

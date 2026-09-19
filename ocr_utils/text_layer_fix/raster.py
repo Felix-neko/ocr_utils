@@ -19,7 +19,7 @@ import cv2
 import fitz
 import numpy as np
 
-from research.text_layer_fix import PAGE_DPI
+from ocr_utils.text_layer_fix import PAGE_DPI
 
 
 @dataclass(frozen=True)

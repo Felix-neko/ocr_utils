@@ -15,12 +15,14 @@ import multiprocessing
 import os
 import statistics
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import click
 
-from research.text_layer_fix import VERSION
+from ocr_utils.text_layer_fix import VERSION
+from ocr_utils.text_layer_fix.cache import cache_path as core_cache_path
+from ocr_utils.text_layer_fix.cache import load_page, save_page
 
 logger = logging.getLogger("research.text_layer_fix")
 
@@ -157,8 +159,8 @@ def _survey_chunk(args: tuple) -> list[dict]:
     import fitz
     import pikepdf
 
-    from research.text_layer_fix.raster import page_raster
-    from research.text_layer_fix.text_layer import (
+    from ocr_utils.text_layer_fix.raster import page_raster
+    from ocr_utils.text_layer_fix.text_layer import (
         SpanShape,
         attach_chars,
         count_offpage,
@@ -283,17 +285,17 @@ def survey(pdf_dir, out_dir, jobs, reserve_cpu_cores, only, pages, limit) -> Non
 
 
 def cache_path(out_dir: Path, pdf: str, page: int) -> Path:
-    return out_dir / "cache" / pdf / f"p{page:04d}.json"
+    """JSON страницы в каталоге прогона (``<out_dir>/cache/<pdf>/pNNNN.json``)."""
+    return core_cache_path(out_dir / "cache", pdf, page)
 
 
 def _run_chunk(args: tuple) -> list[dict]:
     """Разбор пачки страниц одного PDF (в пуле): JSON в кэш, краткая запись на страницу."""
-    import json
 
     import fitz
     import pikepdf
 
-    from research.text_layer_fix.pipeline import Options, process_page
+    from ocr_utils.text_layer_fix.pipeline import Options, process_page
 
     from ocr_utils.external_ocr_services.hyphen_join import default_morph
 
@@ -304,15 +306,12 @@ def _run_chunk(args: tuple) -> list[dict]:
     with fitz.open(path) as doc, pikepdf.open(path) as pdf:
         for index in pages:
             target = cache_path(out_dir, Path(path).name, index)
-            if skip_done and target.is_file():
-                cached = json.loads(target.read_text(encoding="utf-8"))
-                if cached.get("version") == VERSION and not cached.get("error"):
-                    rows.append(_summary_row(cached))
-                    continue
-            result = process_page(doc, pdf, index, options)
-            payload = result.to_json()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            cached = load_page(target) if skip_done else None
+            if cached is not None:
+                rows.append(_summary_row(cached))
+                continue
+            payload = process_page(doc, pdf, index, options).to_json()
+            save_page(target, payload)
             rows.append(_summary_row(payload))
     return rows
 
@@ -668,7 +667,7 @@ def _collect_details(out_dir: Path) -> None:
 
 def _fix_one(args: tuple) -> list[dict]:
     """Исправленная копия одного PDF (в пуле)."""
-    from research.text_layer_fix.fixer import fix_pdf, load_cache
+    from ocr_utils.text_layer_fix.fixer import fix_pdf, load_cache
 
     src, out_dir, out_pdf = Path(args[0]), Path(args[1]), Path(args[2])
     cache = load_cache(out_dir / "cache", src.name)
@@ -766,7 +765,7 @@ def _overlay_chunk(args: tuple) -> int:
     import fitz
 
     from research.text_layer_fix.overlay import draw_overlay
-    from research.text_layer_fix.raster import page_raster, render_gray
+    from ocr_utils.text_layer_fix.raster import page_raster, render_gray
 
     path, pages, out_dir, kinds = Path(args[0]), args[1], Path(args[2]), args[3]
     done = 0
@@ -831,14 +830,16 @@ def second_opinion(pdf_dir, out_dir, only, batch) -> None:
     """Второе мнение surya (GPU, в этом процессе) по зонам с ненадёжным чтением; JSON кэша обновляется."""
     from ocr_utils.rotated_text.tables import second_opinion as surya_module
 
-    from research.text_layer_fix.second_opinion import revise
+    from ocr_utils.text_layer_fix.second_opinion import revise
 
     if not surya_module.surya_available():
         raise click.ClickException("surya недоступна")
     pages = [
-        (r["pdf"], int(r["page"])) for r in _read_sample(out_dir) if not only or any(sub in r["pdf"] for sub in only)
+        (pdf_dir / r["pdf"], cache_path(out_dir, r["pdf"], int(r["page"])))
+        for r in _read_sample(out_dir)
+        if not only or any(sub in r["pdf"] for sub in only)
     ]
-    stats = revise(pdf_dir, out_dir, pages, batch)
+    stats = revise(pages, batch)
     _collect_details(out_dir)
     click.echo(
         f"surya: страниц {stats.pages}, зон спрошено {stats.asked}, ответов принято {stats.accepted}, стали пригодными {stats.newly_accepted}"
@@ -1090,10 +1091,10 @@ def _reclassify_chunk(args: tuple) -> int:
 
     from ocr_utils.external_ocr_services.hyphen_join import default_morph
 
-    from research.text_layer_fix.classify import classify_words
-    from research.text_layer_fix.raster import page_raster
-    from research.text_layer_fix.text_layer import load_layer
-    from research.text_layer_fix.zones import RotatedZone
+    from ocr_utils.text_layer_fix.classify import classify_words
+    from ocr_utils.text_layer_fix.raster import page_raster
+    from ocr_utils.text_layer_fix.text_layer import load_layer
+    from ocr_utils.text_layer_fix.zones import RotatedZone
 
     path, pages, out_dir = Path(args[0]), args[1], Path(args[2])
     known = default_morph().known

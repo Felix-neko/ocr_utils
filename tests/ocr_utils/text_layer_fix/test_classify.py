@@ -6,9 +6,9 @@ import fitz
 
 from ocr_utils.scan_markup.table_detection.geometry import Box
 
-from research.text_layer_fix.classify import Verdict, classify_words, looks_like_junk
-from research.text_layer_fix.text_layer import Glyph, SpanShape, TextLayer, Word
-from research.text_layer_fix.zones import RotatedZone, ZoneKind
+from ocr_utils.text_layer_fix.classify import Verdict, classify_words, looks_like_junk
+from ocr_utils.text_layer_fix.text_layer import Glyph, SpanShape, TextLayer, Word
+from ocr_utils.text_layer_fix.zones import RotatedZone, ZoneKind
 
 
 def _word(mcid: int, text: str, x0: float, y0: float, width: float, shape: SpanShape = SpanShape.PLAIN) -> Word:
