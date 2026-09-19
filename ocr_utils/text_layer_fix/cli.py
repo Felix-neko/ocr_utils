@@ -1,4 +1,4 @@
-"""Команды пакета: ``uv run python -m research.text_layer_fix <команда>``.
+"""Команды пакета: ``uv run python -m ocr_utils.text_layer_fix <команда>``.
 
 ``survey`` — обзор текстового слоя по всем PDF пака (только чтение): по странице число
 слов, формы спанов, повёрнутые матрицы, растяжения, привязка. ``run`` — зоны, вердикты,
@@ -24,7 +24,7 @@ from ocr_utils.text_layer_fix import VERSION
 from ocr_utils.text_layer_fix.cache import cache_path as core_cache_path
 from ocr_utils.text_layer_fix.cache import load_page, save_page
 
-logger = logging.getLogger("research.text_layer_fix")
+logger = logging.getLogger("ocr_utils.text_layer_fix")
 
 # Страниц одного PDF на задачу пула: PDF открывается в воркере один раз на пачку.
 CHUNK_PAGES = 12
@@ -436,8 +436,8 @@ def run(
     import fitz
     from tqdm import tqdm
 
-    from research.text_layer_fix.db_models import KIND_LINE_ART_SCHEMA
-    from research.text_layer_fix.pages import (
+    from ocr_utils.text_layer_fix.db_models import KIND_LINE_ART_SCHEMA
+    from ocr_utils.text_layer_fix.pages import (
         PageRef,
         Sample,
         SampleKind,
@@ -764,7 +764,7 @@ def _overlay_chunk(args: tuple) -> int:
 
     import fitz
 
-    from research.text_layer_fix.overlay import draw_overlay
+    from ocr_utils.text_layer_fix.overlay import draw_overlay
     from ocr_utils.text_layer_fix.raster import page_raster, render_gray
 
     path, pages, out_dir, kinds = Path(args[0]), args[1], Path(args[2]), args[3]
@@ -853,7 +853,7 @@ def _eval_chunk(args: tuple) -> tuple[list[dict], dict[str, dict]]:
     """Оценка пачки страниц одного no-geo PDF (в пуле)."""
     import fitz
 
-    from research.text_layer_fix.lineart_eval import SOURCES, SourceScore, evaluate_page, score_page
+    from ocr_utils.text_layer_fix.lineart_eval import SOURCES, SourceScore, evaluate_page, score_page
 
     path, pages, truths, layout_dir, rel_paths = args
     scores = {name: SourceScore() for name in SOURCES}
@@ -917,8 +917,8 @@ def eval_lineart(nogeo_dir, out_dir, probe_db, markup_db, layout_dir, controls, 
 
     from tqdm import tqdm
 
-    from research.text_layer_fix.lineart_eval import SOURCES, truth_pages
-    from research.text_layer_fix.pages import page_index_map
+    from ocr_utils.text_layer_fix.lineart_eval import SOURCES, truth_pages
+    from ocr_utils.text_layer_fix.pages import page_index_map
 
     jobs = effective_jobs(jobs, reserve_cpu_cores)
     index = page_index_map(probe_db)
@@ -1039,7 +1039,7 @@ def llm_compare(out_dir, model, limit, seed, api_key) -> None:
     from ocr_utils.external_ocr_services.client import OpenRouterClient, api_key_from
     from ocr_utils.external_ocr_services.models import resolve
 
-    from research.text_layer_fix.llm_sanitize import Agreement, ask, lines_from_payload
+    from ocr_utils.text_layer_fix.llm_sanitize import Agreement, ask, lines_from_payload
 
     cases = []
     for row in _read_sample(out_dir):
@@ -1167,7 +1167,7 @@ def reclassify(pdf_dir, out_dir, only, jobs) -> None:
 @click.option("--md-out", type=click.Path(dir_okay=False, path_type=Path), help="куда записать markdown-сводку")
 def report(out_dir, md_out) -> None:
     """Сводка прогона по CSV/JSON каталога → markdown (в stdout или файл)."""
-    from research.text_layer_fix.report import full_report
+    from ocr_utils.text_layer_fix.report import full_report
 
     text = full_report(out_dir)
     if md_out:

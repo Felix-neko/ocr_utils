@@ -1,8 +1,11 @@
 # text_layer_fix — чистка и дополнение текстового слоя FineReader для повёрнутого текста
 
 Зачем и что делаем — в докстринге `__init__.py`. Отчёт с замерами и порогами —
-`reports/text_layer_fix.md`; стенд (обзор по паку, выборки, оверлеи, оценка источников line
-art, сравнение с LLM) — `research/text_layer_fix`, его run-скрипты — `run_scripts/text_layer_fix`.
+`reports/text_layer_fix.md`. Ядро (разбор слоя, зоны, чтение, вердикты, правка, кэш) зовёт сборщик
+финальных PDF `ocr_utils.final_pdfs`; стенд исследования (обзор по паку, выборки, оверлеи, оценка
+источников line art, сравнение с LLM) — команды `python -m ocr_utils.text_layer_fix <команда>`
+(`survey`, `run`, `second-opinion`, `reclassify`, `fix`, `overlay`, `eval-lineart`, `llm-compare`,
+`report`), их run-скрипты — `run_scripts/text_layer_fix`.
 
 ## Как вызывается из сборщика финальных PDF (`ocr_utils.final_pdfs`)
 

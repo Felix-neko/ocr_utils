@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR/../.."
 JOBS="${JOBS:-16}"
 RESERVE_CPU_CORES=4
 
-uv run python -m research.text_layer_fix eval-lineart \
+uv run python -m ocr_utils.text_layer_fix eval-lineart \
     --nogeo-dir "$TEXT_LAYER_NOGEO_PDF_DIR" \
     --out-dir "$TEXT_LAYER_RUN_DIR" \
     --probe-db "$PROBE_DB" \

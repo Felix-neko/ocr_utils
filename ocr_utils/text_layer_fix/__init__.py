@@ -25,7 +25,7 @@ surya — отдельной стадией на GPU) и вписываем пр
 ``docstrum``), чтение (``ocr``, ``second_opinion``), вердикты (``classify``), правка и сверка
 (``rewrite``, ``fixer``), кэш JSON на страницу (``cache``). Вызывает его сборщик финальных PDF
 ``ocr_utils.final_pdfs`` постранично; обзор слоя по паку, выборки, оверлеи, оценка источников
-line art и сравнение с LLM — стенд ``research.text_layer_fix``. Пороги — по отчёту
+line art и сравнение с LLM — стенд ``ocr_utils.text_layer_fix``. Пороги — по отчёту
 ``reports/text_layer_fix.md``.
 """
 

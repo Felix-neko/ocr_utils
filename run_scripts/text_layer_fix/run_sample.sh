@@ -23,7 +23,7 @@ cd "$SCRIPT_DIR/../.."
 JOBS="${JOBS:-16}"
 RESERVE_CPU_CORES=4  # tesseract на каждую ячейку в каждом воркере: оставить ядра машине
 
-uv run python -m research.text_layer_fix run \
+uv run python -m ocr_utils.text_layer_fix run \
     --pdf-dir "$TEXT_LAYER_PDF_DIR" \
     --out-dir "$TEXT_LAYER_RUN_DIR" \
     --probe-db "$PROBE_DB" \

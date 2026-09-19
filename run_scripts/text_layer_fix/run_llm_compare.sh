@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-uv run python -m research.text_layer_fix llm-compare \
+uv run python -m ocr_utils.text_layer_fix llm-compare \
     --out-dir "$TEXT_LAYER_RUN_DIR" \
     --model deepseek-v41-flash \
     --limit 150 \

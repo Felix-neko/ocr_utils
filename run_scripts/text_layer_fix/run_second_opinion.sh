@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-uv run python -m research.text_layer_fix second-opinion \
+uv run python -m ocr_utils.text_layer_fix second-opinion \
     --pdf-dir "$TEXT_LAYER_PDF_DIR" \
     --out-dir "$TEXT_LAYER_RUN_DIR" \
     --batch 16 \

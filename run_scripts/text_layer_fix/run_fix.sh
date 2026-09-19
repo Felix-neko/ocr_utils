@@ -17,7 +17,7 @@ cd "$SCRIPT_DIR/../.."
 
 JOBS="${JOBS:-8}"
 
-uv run python -m research.text_layer_fix fix \
+uv run python -m ocr_utils.text_layer_fix fix \
     --pdf-dir "$TEXT_LAYER_PDF_DIR" \
     --out-dir "$TEXT_LAYER_RUN_DIR" \
     --jobs "$JOBS" \

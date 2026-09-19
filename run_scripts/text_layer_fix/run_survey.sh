@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR/../.."
 JOBS="${JOBS:-16}"
 RESERVE_CPU_CORES=4  # оставить ядра машине: прогон короткий, но пусть не душит остальное
 
-uv run python -m research.text_layer_fix survey \
+uv run python -m ocr_utils.text_layer_fix survey \
     --pdf-dir "$TEXT_LAYER_PDF_DIR" \
     --out-dir "$TEXT_LAYER_RUN_DIR" \
     --jobs "$JOBS" \

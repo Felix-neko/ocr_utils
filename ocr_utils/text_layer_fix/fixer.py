@@ -5,7 +5,7 @@
 FineReader уже написал слово повёрнутым (иначе дубль в поиске).
 
 Две формы использования: :func:`fix_pdf` — исправленная копия целого PDF (стенд
-``research.text_layer_fix fix``); :func:`plan_page_edits` + :func:`apply_page_edits` +
+``ocr_utils.text_layer_fix fix``); :func:`plan_page_edits` + :func:`apply_page_edits` +
 :func:`verify_saved` — постранично, для сборщика финальных PDF, который копирует страницу в
 новый документ и правит её там.
 """

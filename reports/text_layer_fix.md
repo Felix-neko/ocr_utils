@@ -1,6 +1,6 @@
 # Текстовый слой финальных PDF: чистка россыпи от повёрнутого текста и вставка своего чтения
 
-Исследование `research/text_layer_fix` (пак-1, PDF FineReader из
+Исследование `ocr_utils/text_layer_fix` (стенд: команды `survey`, `run`, `eval-lineart`, `llm-compare`…; пак-1, PDF FineReader из
 `full_pdfs_binary_no_bg_brightening`). Оверлеи — в `reports/text_layer_fix/` (вне git), полный выход
 прогона — `/mnt/SYSTEM/raw/mts/pack1_text_layer_fix/pack1_v1/` (кэш JSON на страницу, CSV,
 исправленные копии PDF в `pdf/`).
@@ -31,7 +31,7 @@ line art; годятся ли методики ориентации и чтен�
 * Железо: 16 ядер, 12 воркеров (`--reserve-cpu-cores 4`), surya на RTX 5060 Ti в родителе.
   Время: `survey` 4,5 мин на пак; `run` по выборке ~5 мин (медиана 1,8 с на страницу, p90 5,6 с;
   время уходит в tesseract по ячейкам); `fix` ~1 мин на 123 выпуска; `eval-lineart` 30 с.
-* Код: `git rev-parse --short HEAD` = см. коммит отчёта; тесты `tests/research/text_layer_fix` (12).
+* Код: `git rev-parse --short HEAD` = см. коммит отчёта; тесты `tests/ocr_utils/text_layer_fix`.
 
 ## 3. Что оказалось внутри PDF FineReader (обзор по всему паку)
 

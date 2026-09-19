@@ -31,6 +31,10 @@ def survey_section(out_dir: Path) -> str:
     if not path.is_file():
         return "_survey.csv нет_"
     df = pd.read_csv(path)
+    # Колонки, добавленные позже первой версии обзора: старый CSV без них не должен валить сводку.
+    for column in ("figures", "offpage", "unmatched", "stretch_median", "stretch_outliers", "short_words"):
+        if column not in df.columns:
+            df[column] = 0
     rotated = df[df.rotated_words > 0]
     lines = [
         f"Страниц: {len(df)}, слов слоя: {int(df.words.sum())}, спанов: {int(df.spans.sum())}, "
