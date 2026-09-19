@@ -80,6 +80,14 @@ def test_join_across_boundary_keeps_tags_and_compounds():
     joined = join_across_boundary("форму снаб-  ", "<unclear>жения</unclear> и", morph)
     assert joined is not None and joined.text == "форму снаб<unclear>жения</unclear> и"
     assert joined.text[joined.head_start :] == "<unclear>жения</unclear> и"
+    # Половина в дефисной цепочке: перед хвостом дефис, после головы дефис с продолжением.
+    chained = join_across_boundary("проработанностью технико-техно-", "логического взаимодействия", morph)
+    assert (
+        chained is not None and chained.joined and chained.text.startswith("проработанностью технико-технологического ")
+    )
+    chained = join_across_boundary("стимулирования снаб-", "женческо-сбытовых организаций", morph)
+    assert chained is not None and chained.joined and "снабженческо-сбытовых организаций" in chained.text
+    assert join_across_boundary("связи военно-", "воздушные силы", morph).joined is False, "составное — дефис остаётся"
     compound = join_across_boundary("связи торгово-", "экономических стран.", morph)
     assert compound is not None and not compound.joined and compound.text == "связи торгово-экономических стран."
     # Не слово с переносом: нет дефиса, голова с прописной, дефис после цифры.

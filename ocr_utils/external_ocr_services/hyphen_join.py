@@ -45,8 +45,13 @@ _STRIP_TAGS = re.compile(r"</?(?:supplied|unclear)>")
 # Граница полос: хвост абзаца — половина слова с дефисом на конце (закрывающие теги могут стоять и
 # до дефиса, и после: «<supplied>снаб-</supplied>»), голова следующего — строчное продолжение с
 # возможными открывающими тегами перед ним.
-PAGE_TAIL = re.compile(rf"(?<![\w-])(?P<a>{_HALF_A})-(?P<tail_tags>{_TAG})\s*$")
-PAGE_HEAD = re.compile(rf"^(?P<head_tags>{_TAG})(?P<b>[а-яё]{{2,}}(?:{_TAGS}[а-яё]+)*{_TAG})(?![\w-])")
+# В отличие от HYPHENATED, половина на границе полос может быть частью дефисной цепочки: хвост
+# «технико-техно-» (перед половиной дефис), голова «женческо-сбытовых» (после половины дефис и
+# продолжение — ``chain``). Иначе такие границы уходили в сшивание через пробел («техно- логического»).
+PAGE_TAIL = re.compile(rf"(?<!\w)(?P<prefix>(?:[а-яёА-ЯЁ]+-)+)?(?P<a>{_HALF_A})-(?P<tail_tags>{_TAG})\s*$")
+PAGE_HEAD = re.compile(
+    rf"^(?P<head_tags>{_TAG})(?P<b>[а-яё]{{2,}}(?:{_TAGS}[а-яё]+)*{_TAG})(?P<chain>(?:-[а-яё]+)+)?(?!\w)"
+)
 
 
 class MorphBackend(StrEnum):
@@ -229,7 +234,18 @@ def join_across_boundary(tail: str, head: str, morph: Morph, rule: JoinRule = Jo
     a_raw, b_raw = tail_match.group("a"), head_match.group("b")
     a, b = _STRIP_TAGS.sub("", a_raw), _STRIP_TAGS.sub("", b_raw)
     joined = should_join(a, b, morph, rule)
+    # Голова — начало дефисной цепочки («женческо-сбытовых»): половины «снаб» + «женческо» словарь не
+    # знает, а всё слово «снабженческо-сбытовых» знает — это перенос внутри первой части составного.
+    # Хвост в цепочке («технико-техно-» + «логического»): правило E видит в «техно» + «логического»
+    # составное, но составное уже есть — «технико-…», а трёхчастные («научно-производственно-технический»)
+    # редки; половина после дефиса составного — перенос внутри его второй части, достаточно правила A.
+    chain = head_match.group("chain") or ""
+    prefix = tail_match.group("prefix") or ""
+    if not joined and prefix and should_join(a, b, morph, JoinRule.A):
+        joined = True
+    if not joined and (chain or prefix) and morph.known(prefix + a + b + chain):
+        joined = True
     hyphen = "" if joined else "-"
-    stem = tail[: tail_match.start()] + a_raw + hyphen + tail_match.group("tail_tags")
-    text = stem + head_match.group("head_tags") + b_raw + head[head_match.end() :]
+    stem = tail[: tail_match.start()] + prefix + a_raw + hyphen + tail_match.group("tail_tags")
+    text = stem + head_match.group("head_tags") + b_raw + chain + head[head_match.end() :]
     return BoundaryJoin(text, f"{a}-{b}", joined, len(stem))
