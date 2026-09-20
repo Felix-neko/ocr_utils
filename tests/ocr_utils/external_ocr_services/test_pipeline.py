@@ -561,6 +561,34 @@ def test_page_stage_heading_ids_from_model_or_title(tmp_path):
     assert 'running_header_rubric_id: "R1"' in md
 
 
+def test_page_stage_restores_heading_named_only_in_headings_field(tmp_path):
+    """Заголовок есть в headings ответа, но не в теле (1966/03 с. 69): `#` вставлен, id от модели, автор под ним."""
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0002.jpg"
+    answer = json.loads(
+        _answer(
+            body="<author>**В. Малышев**</author>\n\nКОГДА на заводах работа идёт ритмично.",
+            headings=[{"text": "Важная служба", "article_id": "A1"}],
+        )
+    )
+    answer["authors"] = [{"name": "В. Малышев", "position": None, "article": "starts_here", "printed": "above_title"}]
+    articles = ({"id": "A1", "title": "Важная служба", "authors": [], "rubric": None, "rubric_id": None},)
+    job = PageJob(rel, "page", "none", "1966", (), articles, "h")
+    meta, result = recognize_page(
+        FakeClient(lambda p: json.dumps(answer, ensure_ascii=False)),
+        resolve("deepseek-v41-flash"),
+        tmp_path / "in" / rel,
+        job,
+        tmp_path / "out",
+        RunOptions(),
+    )
+    assert result.content_markdown.startswith("# Важная служба\n\n<author>**В. Малышев**</author>\n\nКОГДА")
+    assert meta["structure"]["headings_restored"] == ["Важная служба"]
+    assert result.headings == [{"text": "Важная служба", "article_id": "A1"}]
+    assert meta["structure"]["heading_ids"] == {"model": 1, "title": 0, "wrong": 0} and result.title_in_list is True
+    assert "\n# Важная служба\n" in (tmp_path / "out" / ISSUE / "IMG_0002.md").read_text(encoding="utf-8")
+
+
 class DemotingReply:
     """Ответы для теста понижения: 0001 — настоящее оглавление; 0002 — «не оглавление», toc пустой;
     0003 — «не оглавление», но одна статья в toc; остальное — обычные полосы."""

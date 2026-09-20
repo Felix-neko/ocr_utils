@@ -130,6 +130,7 @@ def test_apply_all_and_report():
         "header_rubrics_dropped": [],
         "markers": 0,
         "dropped_headings": [],
+        "headings_restored": [],
         "wrapped_math": 0,
         "heading_ids": {"model": 0, "title": 0, "wrong": 0},
         "rubric_ids": {"model": 0, "title": 0, "wrong": 0},
@@ -284,3 +285,26 @@ def test_rubric_equal_to_running_header_is_dropped():
     assert drop_header_rubrics(marker, [None, "Информация"], report) == "# Собственность и оплата труда\n\nТекст.\n"
     assert drop_header_rubrics(body, [None, None], StructureReport()) == body
     assert drop_header_rubrics(body, ["Письма читателей", None], StructureReport()) == body
+
+
+def test_heading_restored_from_model_headings_when_body_has_none():
+    """Модель назвала заголовок в headings, но в тело не написала: `#` вставляется, автор переезжает под него."""
+    body = "<author>**В. Малышев**</author>\n\nКОГДА на заводах работа идёт ритмично.\n\nВторой абзац."
+    authors = [_author("В. Малышев", "starts_here", "above_title")]
+    refs = [{"text": "Важная служба", "article_id": "A13"}]
+    out, report = apply(body, [{"id": "A13", "title": "Важная служба"}], [], authors, model_headings=refs)
+    assert out.startswith("# Важная служба\n\n<author>**В. Малышев**</author>\n\nКОГДА")
+    assert report.headings_restored == ["Важная служба"] and report.title_in_list is True
+    # Текст не из списка — подзаголовок, не название: не вставляется; без списка — вставляется как есть.
+    out, report = apply(body, ["Другая статья"], [], authors, model_headings=[{"text": "Лид", "article_id": None}])
+    assert "# " not in out and report.headings_restored == []
+    out, report = apply(body, [], [], authors, model_headings=[{"text": "Лид", "article_id": None}])
+    assert out.startswith("# Лид\n\n<author>") and report.headings_restored == ["Лид"]
+    # Уже есть `#` — ничего не трогается; ведущие рубрика и иллюстрация остаются над вставленным `#`.
+    out, report = apply("# Важная служба\n\nТекст.", ["Важная служба"], [], [], model_headings=refs)
+    assert out.count("# ") == 1 and report.headings_restored == []
+    body = "```\n[фотография]\nсклад\n```\n\n<rubric>*ОПЫТ*</rubric>\n\nТекст статьи."
+    out, report = apply(
+        body, [{"id": "A13", "title": "Важная служба", "rubric": "Опыт"}], ["Опыт"], [], model_headings=refs
+    )
+    assert out == "```\n[фотография]\nсклад\n```\n\n<rubric>*ОПЫТ*</rubric>\n\n# Важная служба\n\nТекст статьи.\n"

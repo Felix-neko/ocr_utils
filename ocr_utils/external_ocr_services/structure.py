@@ -50,6 +50,8 @@ class StructureReport:
             (рубрика напечатана только в колонтитуле; она остаётся в поле ``running_header``).
         markers: Сколько ``<marker>`` в итоге (и от модели, и от пост-обработки).
         dropped_headings: ``##`` в начале полосы-продолжения с названием из списка — утечка промпта, убраны.
+        headings_restored: `#`, вставленные из ``headings``/``title`` ответа: модель назвала заголовок в
+            поле, но в тело не написала (1966/03 с. 69 «Важная служба»).
         wrapped_math: Сколько формул в голых долларах обёрнуто в ``<latex>``.
         heading_ids_model: Сколько ``#`` получили id статьи от модели (id согласован с текстом).
         heading_ids_title: Сколько ``#`` получили id по совпадению названия (модель id не дала).
@@ -70,6 +72,7 @@ class StructureReport:
     header_rubrics_dropped: list[str] = field(default_factory=list)
     markers: int = 0
     dropped_headings: list[str] = field(default_factory=list)
+    headings_restored: list[str] = field(default_factory=list)
     wrapped_math: int = 0
     heading_ids_model: int = 0
     heading_ids_title: int = 0
@@ -92,6 +95,7 @@ class StructureReport:
             "header_rubrics_dropped": self.header_rubrics_dropped,
             "markers": self.markers,
             "dropped_headings": self.dropped_headings,
+            "headings_restored": self.headings_restored,
             "wrapped_math": self.wrapped_math,
             "heading_ids": {
                 "model": self.heading_ids_model,
@@ -453,6 +457,51 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
     return join_paragraphs(paragraphs)
 
 
+# Абзацы, над которыми восстановленный `#` не ставится: ведущие рубрика/маркер (идут перед `#`),
+# иллюстрация (fenced-блок) и сноска — плавающие блоки в начале полосы.
+_ABOVE_HEADING = re.compile(rf"^(?:<{StructureTag.RUBRIC}>|<{StructureTag.MARKER}>|```|<footnote>|\[\^\w+\]:)")
+
+
+def restore_heading_from_refs(body: str, model_headings: list[dict], titles: list[str], report: StructureReport) -> str:
+    """`#` из ``headings`` (до v20 — ``title``) ответа, если модель назвала заголовок, но в тело его не написала.
+
+    Модель изредка перечисляет заголовок в поле и опускает строку `#` в теле (1966/03 с. 69: в
+    ``headings`` «Важная служба» с верным id, автор ``starts_here`` над названием, а тело начинается
+    с первого абзаца). Сверка на сборке видит только `#` в теле, поэтому строка вставляется здесь —
+    первым содержательным абзацем: после ведущих рубрики, маркера, иллюстрации, сноски; блок
+    ``<author>`` не пропускается — ``place_authors`` переставит его под `#`. При списке статей
+    текст должен совпасть с названием из списка (иначе это мог быть подзаголовок), без списка
+    берётся как есть. Ничего не делается, если в теле уже есть хоть один `#`.
+
+    Args:
+        body: Тело полосы после понижения чужих `#`.
+        model_headings: Записи ``headings`` ответа ``[{"text", "article_id"}]`` (из ``title`` до v20).
+        titles: Названия статей из оглавления; пусто — списка не было.
+        report: Отчёт — вставленные заголовки в ``headings_restored``.
+    """
+    paragraphs = paragraphs_of(body)
+    if not paragraphs or any(_H1.match(paragraph) for paragraph in paragraphs):
+        return body
+    text = next(
+        (
+            str(ref.get("text")).strip()
+            for ref in model_headings
+            if ref.get("text") and (not titles or title_matches(str(ref["text"]), titles))
+        ),
+        None,
+    )
+    if text is None:
+        return body
+    at = 0
+    while at < len(paragraphs) and _ABOVE_HEADING.match(paragraphs[at]):
+        at += 1
+    paragraphs.insert(at, f"# {text}")
+    report.headings_restored.append(text)
+    if titles:
+        report.title_in_list = True  # вставлен заголовок из списка — понижение до него `#` не видело
+    return join_paragraphs(paragraphs)
+
+
 def drop_leaked_titles(body: str, titles: list[str], report: StructureReport) -> str:
     """Убрать `##` с названием статьи из списка в начале страницы без `#`.
 
@@ -637,8 +686,9 @@ def apply(
     authors: list[dict],
     running_header: str | None = None,
     running_footer: str | None = None,
+    model_headings: list[dict] | None = None,
 ) -> tuple[str, StructureReport]:
-    """Все правки по порядку: рубрики из `##`, понижение `#`, расстановка авторов, рубрики по оглавлению.
+    """Все правки по порядку: рубрики из `##`, понижение `#`, восстановление `#` из поля, авторы, рубрики по оглавлению.
 
     Порядок шагов важен: каждый следующий опирается на то, что предыдущий уже привёл в норму.
 
@@ -649,6 +699,8 @@ def apply(
         authors: Поле ``authors`` ответа модели — привязка подписей к статьям и место печати.
         running_header: Колонтитул сверху из ответа модели — тег с его текстом из тела убирается.
         running_footer: Колонтитул снизу — то же.
+        model_headings: Записи ``headings`` ответа модели (``title`` до v20) — заголовок, названный в
+            поле, но пропущенный в теле, вставляется; ``None`` — не восстанавливать.
 
     Returns:
         ``(тело после всех правок, отчёт)``; отчёт уходит в ``meta["structure"]``, а его
@@ -666,6 +718,9 @@ def apply(
     body = rubric_from_heading(body, rubrics, report)
     # 2. `#` только для названий из оглавления: не совпавшие `#` → `##` (подзаголовок внутри статьи).
     body = demote_unlisted_headings(body, titles, report)
+    #    Заголовок, названный моделью в поле headings/title, но не написанный в теле, — вставить: после
+    #    понижения (чтобы «`#` нет» считалось по итогу), до авторов и рубрик (они встанут к нему).
+    body = restore_heading_from_refs(body, model_headings or [], titles, report)
     # 3. Полоса-продолжение без `#`, начатая с `## <название из списка>`, — утечка списка из промпта,
     #    а не напечатанный текст: такой `##` снимается. После шага 2, чтобы видеть уже понятые `#`.
     body = drop_leaked_titles(body, titles, report)

@@ -891,6 +891,7 @@ def recognize_page(
             result.authors,
             result.running_header,
             result.running_footer,
+            result.headings,
         )
         # Id статей и рубрик по строкам тела: от модели, если согласованы с текстом, иначе по названию.
         # Списки переписываются ровно по телу — по ним сборка выпуска сверяет заголовки с оглавлением.
