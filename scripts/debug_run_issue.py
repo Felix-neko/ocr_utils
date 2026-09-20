@@ -23,10 +23,10 @@ from ocr_utils.external_ocr_services.pipeline import PipelineParams, run_issue
 
 # --- Что распознаём (пути и числа те же, что в run_scripts/external_ocr_services/common.sh) ---
 YEAR, ISSUE = "1976", "12"
-IN_DIR = Path("/mnt/SYSTEM/raw/mts/pack1_background_blurred_v2/sharpened")
+IN_DIR = Path("/mnt/system/raw/mts/pack1_background_blurred_v2/sharpened")
 DB_PATH = Path("/home/felix/Projects/mts_markup/pack1_reviewed.sqlite")
 PACK_NAME = "пак-1"
-ROOT = Path("/mnt/SYSTEM/raw/mts/pack1_external_ocr_services")
+ROOT = Path("/mnt/system/raw/mts/pack1_external_ocr_services")
 OUT_DIR = ROOT / "out_debug"
 DEBUG_DIR = ROOT / "debug_debug"  # промпты, тайлы и сырые ответы по полосе
 SOURCE = "журнал «Материально-техническое снабжение», Москва, 1966–1976"

@@ -16,7 +16,13 @@ import re
 from dataclasses import dataclass, field
 
 from ocr_utils.external_ocr_services.schema import FORMULA_TAG, AuthorArticle, AuthorPrinted, StructureTag
-from ocr_utils.external_ocr_services.toc import TITLE_MATCH_RATIO, normalize_title, title_matches  # noqa: F401
+from ocr_utils.external_ocr_services.toc import (  # noqa: F401
+    TITLE_MATCH_RATIO,
+    best_title_match,
+    normalize_title,
+    rubric_titles,
+    title_matches,
+)
 
 # Абзацы, которые различает пост-обработка. Теги допускают курсив/жирный внутри (`<author>**И. Иванов**</author>`).
 _H1 = re.compile(r"^# (.+?)\s*$")
@@ -45,6 +51,12 @@ class StructureReport:
         markers: Сколько ``<marker>`` в итоге (и от модели, и от пост-обработки).
         dropped_headings: ``##`` в начале полосы-продолжения с названием из списка — утечка промпта, убраны.
         wrapped_math: Сколько формул в голых долларах обёрнуто в ``<latex>``.
+        heading_ids_model: Сколько ``#`` получили id статьи от модели (id согласован с текстом).
+        heading_ids_title: Сколько ``#`` получили id по совпадению названия (модель id не дала).
+        heading_ids_wrong: Сколько id модели противоречили тексту ``#`` (заменены по названию).
+        rubric_ids_model: То же для ``<rubric>`` — id от модели.
+        rubric_ids_title: ``<rubric>`` с id по тексту.
+        rubric_ids_wrong: ``<rubric>`` с противоречивым id модели.
         title_in_list: Совпал ли хоть один ``#`` с оглавлением; ``None`` — ``#`` на полосе нет или списка не было.
     """
 
@@ -59,6 +71,12 @@ class StructureReport:
     markers: int = 0
     dropped_headings: list[str] = field(default_factory=list)
     wrapped_math: int = 0
+    heading_ids_model: int = 0
+    heading_ids_title: int = 0
+    heading_ids_wrong: int = 0
+    rubric_ids_model: int = 0
+    rubric_ids_title: int = 0
+    rubric_ids_wrong: int = 0
     title_in_list: bool | None = None
 
     def as_dict(self) -> dict:
@@ -75,6 +93,16 @@ class StructureReport:
             "markers": self.markers,
             "dropped_headings": self.dropped_headings,
             "wrapped_math": self.wrapped_math,
+            "heading_ids": {
+                "model": self.heading_ids_model,
+                "title": self.heading_ids_title,
+                "wrong": self.heading_ids_wrong,
+            },
+            "rubric_ids": {
+                "model": self.rubric_ids_model,
+                "title": self.rubric_ids_title,
+                "wrong": self.rubric_ids_wrong,
+            },
         }
 
 
@@ -504,23 +532,108 @@ def drop_header_rubrics(body: str, headers: list[str | None], report: StructureR
         headers: ``running_header`` и ``running_footer`` ответа (``None`` — нет).
         report: Отчёт — убранные тексты в ``header_rubrics_dropped``.
     """
-    names = [normalize_title(header) for header in headers if header]
+    names = [header_key(header) for header in headers if header]
     if not names:
         return body
     kept = []
     for paragraph in paragraphs_of(body):
         match = _RUBRIC.match(paragraph) or _MARKER_TEXT.match(paragraph)
-        if match is not None and normalize_title(match.group(1)) in names:
+        if match is not None and header_key(match.group(1)) in names:
             report.header_rubrics_dropped.append(match.group(1))
             continue
         kept.append(paragraph)
     return join_paragraphs(kept)
 
 
+_DIGITS = re.compile(r"\d+")
+
+
+def header_key(text: str) -> str:
+    """Ключ сравнения текста с колонтитулом: как ``normalize_title``, но без цифр — модель пишет
+    колонтитул вместе с номером страницы («Резервы — на службу пятилетке! 65», «46 Опыт работы…»).
+
+    Args:
+        text: Колонтитул из ответа или текст тега/заголовка из тела.
+    """
+    return normalize_title(_DIGITS.sub(" ", text))
+
+
+def _assign_refs(
+    texts: list[str], model_refs: list[dict], entries: list[dict], id_key: str
+) -> tuple[list[dict], int, int, int]:
+    """Id для каждого текста тела (заголовка или рубрики): от модели, если согласован с текстом, иначе по названию.
+
+    Args:
+        texts: Тексты `#` (или `<rubric>`) в порядке тела после доводки.
+        model_refs: Записи модели ``[{"text", id_key}]`` — id принимается, если запись с тем же
+            (или похожим) текстом есть и её id указывает на статью/рубрику, чьё название подходит тексту.
+        entries: Статьи или рубрики списка ``[{"id", "title"}]``.
+        id_key: ``article_id`` или ``rubric_id``.
+
+    Returns:
+        ``(записи [{"text", id_key}] по текстам тела, от модели, по названию, противоречивых)``.
+    """
+    by_id = {entry["id"]: entry["title"] for entry in entries if entry.get("id")}
+    titles = [entry["title"] for entry in entries]
+    refs: list[dict] = []
+    from_model = from_title = wrong = 0
+    for text in texts:
+        model_id = None
+        for ref in model_refs:
+            if ref.get(id_key) and title_matches(text, [ref["text"]]):
+                model_id = ref[id_key]
+                break
+        if model_id is not None and model_id in by_id and title_matches(text, [by_id[model_id]]):
+            refs.append({"text": text, id_key: model_id})
+            from_model += 1
+            continue
+        if model_id is not None:
+            wrong += 1
+        index = best_title_match(text, titles)
+        found = entries[index].get("id") if index is not None else None
+        refs.append({"text": text, id_key: found})
+        if found is not None:
+            from_title += 1
+    return refs, from_model, from_title, wrong
+
+
+def heading_refs(body: str, articles: list[dict], model_headings: list[dict], report: StructureReport) -> list[dict]:
+    """``headings`` полосы по строкам тела: каждый `#` с id статьи (от модели или по названию).
+
+    Args:
+        body: Тело после доводки.
+        articles: Статьи списка ``[{"id", "title", …}]``.
+        model_headings: Поле ``headings`` ответа модели.
+        report: Отчёт — счётчики источников id.
+    """
+    texts = [m.group(1) for p in paragraphs_of(body) if (m := _H1.match(p))]
+    refs, report.heading_ids_model, report.heading_ids_title, report.heading_ids_wrong = _assign_refs(
+        texts, model_headings, [a for a in articles if a.get("title")], "article_id"
+    )
+    return refs
+
+
+def rubric_refs(body: str, rubrics: list, model_rubrics: list[dict], report: StructureReport) -> list[dict]:
+    """``rubrics`` полосы по строкам тела: каждый `<rubric>` с id рубрики (от модели или по названию).
+
+    Args:
+        body: Тело после доводки.
+        rubrics: Рубрики списка ``[{"id", "title"}]`` (или строки — тогда id нет).
+        model_rubrics: Поле ``rubrics`` ответа модели.
+        report: Отчёт — счётчики источников id.
+    """
+    texts = [m.group(1) for p in paragraphs_of(body) if (m := _RUBRIC.match(p))]
+    entries = [r if isinstance(r, dict) else {"id": None, "title": str(r)} for r in rubrics if r]
+    refs, report.rubric_ids_model, report.rubric_ids_title, report.rubric_ids_wrong = _assign_refs(
+        texts, model_rubrics, entries, "rubric_id"
+    )
+    return refs
+
+
 def apply(
     body: str,
     articles: list,
-    rubrics: list[str],
+    rubrics: list,
     authors: list[dict],
     running_header: str | None = None,
     running_footer: str | None = None,
@@ -531,8 +644,8 @@ def apply(
 
     Args:
         body: Тело полосы в markdown из ответа модели (после ``tags_from_edge_words``).
-        articles: Статьи оглавления ``[{"title", "authors", "rubric"}]`` или просто названия строками.
-        rubrics: Рубрики «Содержания» выпуска.
+        articles: Статьи оглавления ``[{"id", "title", "authors", "rubric", "rubric_id"}]`` или просто названия строками.
+        rubrics: Рубрики «Содержания» выпуска — ``[{"id", "title"}]`` или строки.
         authors: Поле ``authors`` ответа модели — привязка подписей к статьям и место печати.
         running_header: Колонтитул сверху из ответа модели — тег с его текстом из тела убирается.
         running_footer: Колонтитул снизу — то же.
@@ -543,6 +656,7 @@ def apply(
     """
     # Единый вид списка статей: голые строки (тесты, старые списки) → словари с одним «title».
     articles = [{"title": item} if isinstance(item, str) else dict(item) for item in articles]
+    rubrics = rubric_titles(rubrics)
     # Названия из оглавления — эталон для `#`: заголовок на полосе сверяется с ними по title_matches.
     titles = [article["title"] for article in articles if article.get("title")]
     # Отчёт о каждой правке — уходит в meta.structure, чтобы проверять доводку глазами.

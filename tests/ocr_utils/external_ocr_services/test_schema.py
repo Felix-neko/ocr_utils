@@ -12,6 +12,7 @@ from ocr_utils.external_ocr_services.schema import (
     TocKind,
     json_schema,
     parse_json_text,
+    pretty_json,
     tag_counts,
     drop_duplicate_supplied,
     strip_hyphen_supplied,
@@ -283,3 +284,42 @@ def test_legacy_illustration_blocks_become_fenced_blocks():
     # Конвертация идёт при любом разборе — старые .json читаются в новом виде.
     result = parse_json_text(json.dumps({"content_markdown": LEGACY_ILLUSTRATIONS}, ensure_ascii=False))
     assert "<photo>" not in result.content_markdown and "[фотография]" in result.content_markdown
+
+
+def test_pretty_json_reformats_and_falls_back():
+    """Ограждение и хвост отбрасываются, отступы 4 пробела, кириллица как есть; не JSON — ``None``."""
+    text = '```json\n{"title": "О нормах", "authors": [{"name": "И. Фетисов"}], "n": 1}\n```\nэхо после'
+    pretty = pretty_json(text)
+    assert pretty == json.dumps(json.loads(pretty), ensure_ascii=False, indent=4)
+    assert pretty.startswith('{\n    "title": "О нормах",') and "эхо" not in pretty and "\\u" not in pretty
+    assert pretty_json("это не json") is None and pretty_json("   ") is None
+
+
+def test_headings_ids_parsed_normalized_and_legacy_fields_converted():
+    """v20: headings/rubrics и id колонтитулов с нормализацией омоглифов; файлы до v20 — из title/rubric."""
+    result = parse_json_text(
+        json.dumps(
+            {
+                "content_markdown": "# X",
+                "headings": [{"text": "X", "article_id": "а 3"}, "Голый текст", {"text": "", "article_id": "A1"}],
+                "rubrics": [{"text": "Р", "rubric_id": 7}],
+                "running_header_article_id": "R2",
+                "running_footer_rubric_id": "r-2",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assert result.headings == [{"text": "X", "article_id": "A3"}, {"text": "Голый текст", "article_id": None}]
+    assert result.rubrics == [{"text": "Р", "rubric_id": None}], "число вместо id — не id"
+    assert result.running_header_article_id is None, "id рубрики в поле статьи не принимается"
+    assert result.running_footer_rubric_id == "R2"
+    assert result.title == "X" and result.rubric == "Р", "старые поля выводятся из новых"
+    legacy = parse_json_text(
+        json.dumps({"content_markdown": "# X", "title": "X", "rubric": "Р", "title_in_list": True})
+    )
+    assert legacy.headings == [{"text": "X", "article_id": None}] and legacy.rubrics == [
+        {"text": "Р", "rubric_id": None}
+    ]
+    assert legacy.title_in_list is True and legacy.running_header_rubric_id is None
+    assert json_schema()["properties"]["headings"]["items"]["required"] == ["text", "article_id"]
+    assert "title_in_list" not in json_schema()["properties"]

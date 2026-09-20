@@ -71,6 +71,27 @@ def test_page_stage_prompt_with_and_without_lists():
     assert user.index("KNOWN STRUCTURE") < user.index("2 overlapping tiles")
     assert "Apply rule 5 strictly" not in user, "третий повтор правила о повреждениях убран (v16)"
     assert "KNOWN STRUCTURE" not in user_prompt(2, 1, 2) and "KNOWN STRUCTURE" not in user_prompt(1, 1, 1, stage="toc")
+    # v20: id статей и рубрик в списке, правила про `headings`/`rubrics` и id колонтитулов — в системном.
+    with_ids = user_prompt(
+        2,
+        1,
+        2,
+        rubrics=[{"id": "R1", "title": "Консультация"}],
+        articles=[
+            {
+                "id": "A1",
+                "title": "Улучшать методы",
+                "authors": ["И. Фетисов"],
+                "rubric": "Консультация",
+                "rubric_id": "R1",
+            }
+        ],
+    )
+    assert "* A1: «Улучшать методы» — И. Фетисов [рубрика R1: Консультация]" in with_ids
+    assert "Rubrics: R1 «Консультация»." in with_ids and "refer to them by these ids" in with_ids
+    assert "add an entry to `headings`" in with_lists and "add an entry to `rubrics`" in with_lists
+    assert "running_header_article_id" in with_lists and "running_footer_…" in with_lists
+    assert "title_in_list" not in with_lists and '"headings": array of objects' in system_prompt("toc")
 
 
 def test_system_prompts_share_prefix_and_never_depend_on_issue():

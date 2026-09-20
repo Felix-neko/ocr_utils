@@ -160,6 +160,13 @@ class ParseError(ValueError):
     """Ответ модели не удалось привести к PageResult."""
 
 
+# Префиксы id статей и рубрик в слитом оглавлении выпуска: «A3», «R2». Буква, а не число, чтобы
+# модель не путала id с номером страницы или пункта; разные буквы — чтобы id статьи и рубрики не
+# совпадали. Кириллические «А»/«Р» в ответе приводятся к латинице при разборе (``normalize_ref``).
+ARTICLE_ID_PREFIX = "A"
+RUBRIC_ID_PREFIX = "R"
+
+
 @dataclass
 class TocArticle:
     """Статья в оглавлении: название, авторы, номер страницы и (в указателе) номер выпуска.
@@ -169,12 +176,14 @@ class TocArticle:
         authors: ``[{"name": …, "position": … | None}]`` — авторы с должностями, если указаны.
         page: Номер страницы строкой (как напечатан); ``None`` — не указан.
         issue: Номер выпуска — только в годовом указателе; ``None`` в «Содержании».
+        id: Id статьи в слитом оглавлении выпуска («A3»); у статьи одной полосы до слияния — ``None``.
     """
 
     title: str
     authors: list[dict] = field(default_factory=list)
     page: str | None = None
     issue: str | None = None
+    id: str | None = None
 
 
 @dataclass
@@ -184,10 +193,13 @@ class TocSection:
     Args:
         rubric: Заголовок рубрики над группой статей; ``None`` у статей вне рубрик.
         articles: Статьи секции в порядке печати.
+        id: Id рубрики в слитом оглавлении выпуска («R2»); одинаковые рубрики делят id; ``None`` —
+            секция без рубрики или до слияния.
     """
 
     rubric: str | None
     articles: list[TocArticle] = field(default_factory=list)
+    id: str | None = None
 
 
 @dataclass
@@ -219,9 +231,10 @@ class PageResult:
         toc_kind: Что это за полоса по мнению модели: обычная, «Содержание», указатель. На обычной
             полосе не ``NONE`` — сигнал fallback «оглавление вне базы».
         notes: Сомнения модели свободным текстом; пусто — нет.
-        rubric: Рубрика над заголовком статьи (без тегов); ``None`` — нет.
-        title: Название статьи, начинающейся на полосе; ``None`` — полоса-продолжение.
-        title_in_list: Совпал ли заголовок со списком статей в промпте; ``None`` — списка не было.
+        rubric: Первая рубрика полосы (без тегов); ``None`` — нет. С v20 модель поле не заполняет —
+            выводится из ``rubrics`` для шапки ``.md`` и сводки.
+        title: Первый `#` полосы; ``None`` — полоса-продолжение. С v20 выводится из ``headings``.
+        title_in_list: Совпал ли хоть один `#` со списком статей в промпте (считает код); ``None`` — списка не было.
         authors: ``[{"name", "position", "article": AuthorArticle | None, "printed": AuthorPrinted | None}]``
             — все имена авторов на полосе с привязкой к статье и местом печати.
         is_damaged: Булев вердикт «на полосе есть повреждённые буквы» (в описании модель пишет
@@ -237,6 +250,15 @@ class PageResult:
         toc: Структурированное оглавление полосы — только у этапа ``TOC``, иначе ``None``.
         messages: Замечания пост-обработки к полосе (что достроено, какие расхождения найдены) —
             не из ответа модели; нужны, чтобы при прогоне всего пака видеть проблемные полосы.
+        headings: ``[{"text", "article_id"}]`` — каждый ``#`` полосы по порядку и id статьи из списка в
+            промпте («A3»; ``None`` — модель id не дала или он не из списка). После доводки структуры
+            список переписывается кодом ровно по строкам тела — по нему сборка выпуска сверяет
+            заголовки с оглавлением. В файлах до v20 поля нет: заполняется по ``title``.
+        rubrics: ``[{"text", "rubric_id"}]`` — то же для тегов ``<rubric>`` («R2»).
+        running_header_article_id: Id статьи из списка, если в верхнем колонтитуле её название; иначе ``None``.
+        running_header_rubric_id: Id рубрики из списка, если в верхнем колонтитуле её название.
+        running_footer_article_id: То же для нижнего колонтитула.
+        running_footer_rubric_id: То же для нижнего колонтитула.
     """
 
     content_markdown: str
@@ -260,6 +282,12 @@ class PageResult:
     # Что замаскировано в теле при разборе (masking.MaskReport.as_dict): чужие теги, невидимые символы,
     # экранированные `*`/`_`; пусто — тело было чистым. Уходит в meta и summary.csv.
     masked: dict = field(default_factory=dict)
+    headings: list[dict] = field(default_factory=list)
+    rubrics: list[dict] = field(default_factory=list)
+    running_header_article_id: str | None = None
+    running_header_rubric_id: str | None = None
+    running_footer_article_id: str | None = None
+    running_footer_rubric_id: str | None = None
 
     def to_json(self) -> str:
         """Все поля как JSON (StrEnum сериализуются своими строковыми значениями); indent=1 — читаемый diff."""
@@ -343,6 +371,20 @@ _TOC_SCHEMA = {
 }
 
 
+def _ref_schema(id_key: str) -> dict:
+    """Запись `headings`/`rubrics`: текст как написан и id из списка выпуска (``null`` — не из списка).
+
+    Args:
+        id_key: Имя поля id — ``article_id`` или ``rubric_id``.
+    """
+    return {
+        "type": "object",
+        "properties": {"text": {"type": "string"}, id_key: {"type": ["string", "null"]}},
+        "required": ["text", id_key],
+        "additionalProperties": False,
+    }
+
+
 def json_schema(stage: Stage = Stage.PAGE) -> dict:
     """Строгая схема ответа этапа: additionalProperties=false и полный required, как требует strict-режим.
 
@@ -365,15 +407,30 @@ def json_schema(stage: Stage = Stage.PAGE) -> dict:
             "description": "One short sentence in Russian: which edge or area is damaged and how; empty string if none.",
         },
         "page_number": {"type": ["string", "null"], "description": 'Page number as printed, e.g. "12"; null if none.'},
-        "rubric": {"type": ["string", "null"], "description": "Rubric printed above the title, without tags."},
-        "title": {"type": ["string", "null"], "description": "Title of the article starting on this page."},
-        "title_in_list": {
-            "type": ["boolean", "null"],
-            "description": "Whether the title matches an article from the given list; null if no list was given.",
+        "headings": {
+            "type": "array",
+            "items": _ref_schema("article_id"),
+            "description": "One entry per `#` heading in content_markdown, in reading order, with the id of the "
+            "matching article from the given list (null if no list).",
+        },
+        "rubrics": {
+            "type": "array",
+            "items": _ref_schema("rubric_id"),
+            "description": "One entry per <rubric> paragraph in content_markdown with the id of the rubric from the list.",
         },
         "authors": {"type": "array", "items": _PAGE_AUTHOR_SCHEMA, "description": "Every author named on the page."},
         "running_header": {"type": ["string", "null"]},
+        "running_header_article_id": {
+            "type": ["string", "null"],
+            "description": "Id of the listed article whose title the running header names; else null.",
+        },
+        "running_header_rubric_id": {
+            "type": ["string", "null"],
+            "description": "Id of the listed rubric the running header names; else null.",
+        },
         "running_footer": {"type": ["string", "null"]},
+        "running_footer_article_id": {"type": ["string", "null"]},
+        "running_footer_rubric_id": {"type": ["string", "null"]},
         "toc_kind": {
             "type": "string",
             "enum": [item.value for item in TocKind],
@@ -611,11 +668,18 @@ def _coerce_toc(payload: object) -> TocPage | None:
                 authors=_authors(item.get("authors")),
                 page=_text_or_none(item.get("page")),
                 issue=_text_or_none(item.get("issue")),
+                id=normalize_ref(item.get("id"), ARTICLE_ID_PREFIX),
             )
             for item in (raw.get("articles") or [])
             if isinstance(item, dict) and str(item.get("title") or "").strip()
         ]
-        sections.append(TocSection(rubric=_text_or_none(raw.get("rubric")), articles=articles))
+        sections.append(
+            TocSection(
+                rubric=_text_or_none(raw.get("rubric")),
+                articles=articles,
+                id=normalize_ref(raw.get("id"), RUBRIC_ID_PREFIX),
+            )
+        )
     return TocPage(kind=kind, continues_previous=bool(payload.get("continues_previous", False)), sections=sections)
 
 
@@ -655,6 +719,8 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
     # одиночные `*`/`_`) — всё, что читается через parse_json_text, чистое; повтор ничего не меняет.
     body = expand_gaps(modernize_illustrations(modernize_tags(normalize_tags(unspace_letters(body)))))
     body, mask_report = sanitize(body, MARKDOWN_TAGS)
+    headings = _refs(payload, "headings", "article_id", ARTICLE_ID_PREFIX, payload.get("title"))
+    rubrics = _refs(payload, "rubrics", "rubric_id", RUBRIC_ID_PREFIX, payload.get("rubric"))
     return PageResult(
         content_markdown=body,
         masked=mask_report.as_dict(),
@@ -663,8 +729,9 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         running_footer=_text_or_none(payload.get("running_footer")),
         toc_kind=toc_kind,
         notes=str(payload.get("notes") or ""),
-        rubric=_text_or_none(payload.get("rubric")),
-        title=_text_or_none(payload.get("title")),
+        # Старые поля (до v20) — из новых списков: первый `#` и первый `<rubric>` полосы; в файлах до v20 — как были.
+        rubric=_text_or_none(payload.get("rubric")) or (rubrics[0]["text"] if rubrics else None),
+        title=_text_or_none(payload.get("title")) or (headings[0]["text"] if headings else None),
         title_in_list=None if title_in_list is None else bool(title_in_list),
         authors=_authors(payload.get("authors"), with_article=True),
         is_damaged=_damaged(payload),
@@ -677,7 +744,75 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
         toc=_coerce_toc(payload.get("toc")) if Stage(stage) is Stage.TOC else None,
         # Замечания пост-обработки: у ответа модели их нет, у перечитанного .json — сохраняются.
         messages=[str(item) for item in (payload.get("messages") or []) if str(item).strip()],
+        headings=headings,
+        rubrics=rubrics,
+        running_header_article_id=normalize_ref(payload.get("running_header_article_id"), ARTICLE_ID_PREFIX),
+        running_header_rubric_id=normalize_ref(payload.get("running_header_rubric_id"), RUBRIC_ID_PREFIX),
+        running_footer_article_id=normalize_ref(payload.get("running_footer_article_id"), ARTICLE_ID_PREFIX),
+        running_footer_rubric_id=normalize_ref(payload.get("running_footer_rubric_id"), RUBRIC_ID_PREFIX),
     )
+
+
+# Id статьи или рубрики как пишет его модель: латинская или кириллическая буква, необязательные
+# пробелы, дефис или «#» между буквой и номером, регистр любой: «A3», «а 3», «R-2», «Р2», «a#3».
+_REF = re.compile(r"^\s*([AaRrАаРр])\s*[-#№]?\s*(\d{1,3})\s*$")
+_CYRILLIC_REF_LETTERS = {"А": "A", "а": "A", "Р": "R", "р": "R"}
+
+
+def normalize_ref(value: object, prefix: str) -> str | None:
+    """Id статьи («A3») или рубрики («R2») из ответа модели или файла в каноническом виде.
+
+    Модель пишет id нестрого: кириллическими буквами (омоглифы «А»/«Р»), строчными, с пробелом или
+    дефисом; всё это приводится к «A3»/«R2». Id другого вида (буква не та, число вместо id, мусор)
+    → ``None`` — сборка тогда сопоставляет по названию.
+
+    Args:
+        value: Значение поля из ответа: строка, число или ``None``.
+        prefix: Ожидаемый префикс — ``ARTICLE_ID_PREFIX`` или ``RUBRIC_ID_PREFIX``.
+
+    Returns:
+        Канонический id или ``None``.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return None  # голое число — не id: модель могла написать номер страницы или пункта
+    match = _REF.match(str(value))
+    if match is None:
+        return None
+    letter = _CYRILLIC_REF_LETTERS.get(match.group(1), match.group(1).upper())
+    if letter != prefix:
+        return None
+    return f"{prefix}{int(match.group(2))}"
+
+
+def _refs(payload: dict, key: str, id_key: str, prefix: str, legacy_text: object) -> list[dict]:
+    """Список ``[{"text", id_key}]`` из поля ответа; в файле до v20 — из старого поля с одним текстом.
+
+    Args:
+        payload: Разобранный JSON ответа.
+        key: Имя поля списка (``headings`` / ``rubrics``).
+        id_key: Имя поля id в записи (``article_id`` / ``rubric_id``).
+        prefix: Префикс id для нормализации.
+        legacy_text: Значение старого поля (``title`` / ``rubric``) — запись без id, если списка нет.
+
+    Returns:
+        Записи с непустым текстом; id нормализован или ``None``.
+    """
+    items = payload.get(key)
+    if not isinstance(items, list):
+        text = _text_or_none(legacy_text)
+        return [{"text": text, id_key: None}] if text else []
+    refs = []
+    for item in items:
+        if isinstance(item, str):  # модель дала голый текст вместо объекта
+            item = {"text": item}
+        if not isinstance(item, dict):
+            continue
+        text = _text_or_none(item.get("text"))
+        if text:
+            refs.append({"text": text, id_key: normalize_ref(item.get(id_key), prefix)})
+    return refs
 
 
 def parse_json_text(text: str, stage: Stage = Stage.PAGE) -> PageResult:
@@ -693,22 +828,58 @@ def parse_json_text(text: str, stage: Stage = Stage.PAGE) -> PageResult:
     """
     if not text or not text.strip():
         raise ParseError("пустой ответ")
-    # Кандидаты от самого строгого к самому терпимому; первый разобравшийся побеждает.
-    candidates = [text, _strip_fence(text)]
-    start, end = text.find("{"), text.rfind("}")
-    if start >= 0 and end > start:
-        candidates.append(text[start : end + 1])
-        # Первый объект, что бы ни шло следом: модели дописывают после JSON второй объект или эхо.
-        candidates.append(text[start:])
     last_error: Exception | None = None
     decoder = json.JSONDecoder()
-    for candidate in candidates:
+    for candidate in _json_candidates(text):
         try:
             payload, _ = decoder.raw_decode(candidate.lstrip())
             return _coerce(payload, stage)
         except (json.JSONDecodeError, ParseError) as error:
             last_error = error
     raise ParseError(f"невалидный JSON: {last_error}")
+
+
+def _json_candidates(text: str) -> list[str]:
+    """Кандидаты на JSON в тексте ответа, от самого строгого к самому терпимому.
+
+    Args:
+        text: Сырой текст ответа модели.
+
+    Returns:
+        Список строк: текст как есть, без ограждений ```json, первый ``{...}`` целиком и всё от
+        первого ``{`` до конца (модели дописывают после JSON второй объект или эхо).
+    """
+    candidates = [text, _strip_fence(text)]
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+        candidates.append(text[start:])
+    return candidates
+
+
+def pretty_json(text: str) -> str | None:
+    """Ответ модели, переформатированный для чтения: отступы в 4 пробела, кириллица без escape.
+
+    Схема не проверяется — только синтаксис: файл нужен, чтобы глазами смотреть, что именно
+    ответила модель, в том числе при сбое приведения к ``PageResult``.
+
+    Args:
+        text: Сырой текст ответа модели (возможно, с ограждением ```json или хвостом после объекта).
+
+    Returns:
+        Красиво отформатированный JSON первого разобравшегося кандидата (см. ``_json_candidates``)
+        или ``None``, если JSON в тексте не нашлось.
+    """
+    if not text or not text.strip():
+        return None
+    decoder = json.JSONDecoder()
+    for candidate in _json_candidates(text):
+        try:
+            payload, _ = decoder.raw_decode(candidate.lstrip())
+        except json.JSONDecodeError:
+            continue
+        return json.dumps(payload, ensure_ascii=False, indent=4)
+    return None
 
 
 # Теги повреждений (новые и прежние); ``<gap>`` снимается вместе с содержимым (число, заполнители,

@@ -44,6 +44,7 @@ from ocr_utils.external_ocr_services.schema import (
     is_gap_runaway,
     json_schema,
     parse_json_text,
+    pretty_json,
     strip_hyphen_supplied,
     tag_counts,
     tags_from_edge_words,
@@ -147,8 +148,10 @@ class PageJob:
     stage: Stage = Stage.PAGE  # обычная полоса или полоса оглавления/указателя
     toc_kind: TocKind = TocKind.NONE  # для этапа TOC: что сказала база (CONTENTS | INDEX)
     year: str = ""  # год выпуска — в пользовательский промпт
-    rubrics: tuple[str, ...] = ()  # рубрики «Содержания» выпуска — в системный промпт этапа page
-    articles: tuple[dict, ...] = ()  # статьи «Содержания»: {"title", "authors", "rubric"}
+    rubrics: (
+        tuple
+    ) = ()  # рубрики «Содержания» выпуска ({"id", "title"} или строки) — в пользовательский промпт этапа page
+    articles: tuple[dict, ...] = ()  # статьи «Содержания»: {"id", "title", "authors", "rubric", "rubric_id"}
     toc_hash: str = ""  # отпечаток списков; пишется в meta, по нему is_done узнаёт устаревшую полосу
     second_pass: SecondPass | None = None  # подсказка первого прохода; None — это первый проход
     # Полоса шла этапом TOC, но модель сочла её не оглавлением, и теперь она идёт этапом PAGE;
@@ -281,7 +284,7 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
         job.toc_kind,
         second_pass=job.second_pass,
         max_lines=SECOND_PASS_MAX_LINES,
-        rubrics=list(job.rubrics),
+        rubrics=[dict(r) if isinstance(r, dict) else r for r in job.rubrics],
         articles=[dict(a) for a in job.articles],
     )
     return system, user
@@ -403,7 +406,9 @@ class DebugPaths:
     """Файлы одной полосы под debug-dir (``--debug-dir``); для второго прохода — с суффиксом ``.pass2``.
 
     Args:
-        raw: Сырой ответ модели (всегда, не только при сбое).
+        raw: Ответ модели как JSON, отформатированный для чтения (``.raw.json``) — всегда, не
+            только при сбое; см. ``write_raw_response``.
+        raw_text: Ответ модели дословно (``.raw.txt``) — только если JSON в нём не нашлось.
         prompt: Системный и пользовательский промпты ровно в том виде, в каком ушли.
         tiles: Основа имени для тайлов: ``<tiles>.tile_{столбец}{строка}.jpg``.
         json: Разобранный результат прохода (``.pass1.json`` / ``.pass2.json``).
@@ -411,6 +416,7 @@ class DebugPaths:
     """
 
     raw: Path
+    raw_text: Path
     prompt: Path
     tiles: Path
     json: Path
@@ -446,7 +452,8 @@ def debug_paths(debug_dir: Path, rel: Path, chosen: PassChoice | None = None) ->
     suffix = f".{chosen.value}" if chosen is not None else ""
     base = debug_dir / rel.with_suffix("")
     return DebugPaths(
-        raw=base.with_suffix(f"{suffix}.raw.txt"),
+        raw=base.with_suffix(f"{suffix}.raw.json"),
+        raw_text=base.with_suffix(f"{suffix}.raw.txt"),
         prompt=base.with_suffix(f"{suffix}.prompt.txt"),
         tiles=base,
         json=base.with_suffix(f"{suffix}.json"),
@@ -565,7 +572,30 @@ def _write_debug(options: RunOptions, job: PageJob, tiles: list[PreparedImage], 
         for tile in tiles:
             paths.tiles.with_name(f"{paths.tiles.name}.tile_{tile.box.col}{tile.box.row}.jpg").write_bytes(tile.data)
     if raw is not None:
-        paths.raw.write_text(raw, encoding="utf-8")
+        write_raw_response(paths.raw, paths.raw_text, raw)
+
+
+def write_raw_response(json_path: Path, text_path: Path, text: str) -> Path:
+    """Сохранить сырой ответ модели для чтения глазами: JSON с отступами или, если это не JSON, текст как есть.
+
+    Из пары файлов остаётся ровно один: второй, оставшийся от прошлого прогона, удаляется, чтобы
+    рядом не лежали два ответа разных запусков.
+
+    Args:
+        json_path: Куда писать отформатированный JSON (``.raw.json``): отступы в 4 пробела,
+            кириллица без escape; ограждение ```json и хвост после объекта отбрасываются.
+        text_path: Куда писать ответ дословно (``.raw.txt``), если JSON в нём не нашлось.
+        text: Сырой текст ответа модели.
+
+    Returns:
+        Путь файла, который записан.
+    """
+    pretty = pretty_json(text)
+    written, stale = (json_path, text_path) if pretty is not None else (text_path, json_path)
+    written.parent.mkdir(parents=True, exist_ok=True)
+    written.write_text(pretty if pretty is not None else text, encoding="utf-8")
+    stale.unlink(missing_ok=True)
+    return written
 
 
 def _verdict(json_mode: JsonMode, response: ChatResponse) -> CacheVerdict:
@@ -862,10 +892,24 @@ def recognize_page(
             result.running_header,
             result.running_footer,
         )
+        # Id статей и рубрик по строкам тела: от модели, если согласованы с текстом, иначе по названию.
+        # Списки переписываются ровно по телу — по ним сборка выпуска сверяет заголовки с оглавлением.
+        result.headings = structure.heading_refs(
+            result.content_markdown, [dict(article) for article in job.articles], result.headings, report
+        )
+        result.rubrics = structure.rubric_refs(
+            result.content_markdown,
+            [dict(r) if isinstance(r, dict) else r for r in job.rubrics],
+            result.rubrics,
+            report,
+        )
         meta["structure"] = report.as_dict()  # что именно доводка переставила — для проверки глазами
         # title_in_list модель проставляет сама; при непустом списке вердикт кода точнее.
         if titles and report.title_in_list is not None:
             result.title_in_list = report.title_in_list
+        # Доля `#` без id от модели — метрика качества промпта (порог 30 % — критерий смены модели).
+        meta["heading_ids"] = f"{report.heading_ids_model}/{report.heading_ids_title}/{report.heading_ids_wrong}"
+        meta["rubric_ids"] = f"{report.rubric_ids_model}/{report.rubric_ids_title}/{report.rubric_ids_wrong}"
     if options.join_hyphens:
         # Разорванные переносы («кре-диты») склеиваются по словарю; список склеек — в meta, чтобы при
         # слиянии с FineReader видеть, где вмешался словарь, а не модель.
@@ -882,6 +926,7 @@ def recognize_page(
         toc_kind=result.toc_kind,
         title=result.title,
         title_in_list=result.title_in_list,
+        headings=len(result.headings),
         content_chars=len(result.content_markdown),
         has_header=result.running_header is not None,
         tags=tag_counts(result.content_markdown),

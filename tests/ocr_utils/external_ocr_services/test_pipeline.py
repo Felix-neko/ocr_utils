@@ -29,17 +29,21 @@ ISSUE = "1966/03"
 PAGES = ("IMG_0001.jpg", "IMG_0002.jpg", "IMG_0003.jpg", "IMG_0004.jpg")
 
 
-def _answer(toc_kind="none", body="# Заголовок\n\nТекст.", toc=None, title=None):
+def _answer(toc_kind="none", body="# Заголовок\n\nТекст.", toc=None, title=None, headings=None, header_ids=None):
+    """Ответ модели по схеме v20; ``headings`` — список записей `#`, ``header_ids`` — (article_id, rubric_id) колонтитула."""
     payload = {
         "is_damaged": False,
         "damage_description": "",
         "page_number": "3",
-        "rubric": None,
-        "title": title,
-        "title_in_list": None,
+        "headings": headings if headings is not None else ([{"text": title, "article_id": None}] if title else []),
+        "rubrics": [],
         "authors": [],
         "running_header": "МТС",
+        "running_header_article_id": header_ids[0] if header_ids else None,
+        "running_header_rubric_id": header_ids[1] if header_ids else None,
         "running_footer": None,
+        "running_footer_article_id": None,
+        "running_footer_rubric_id": None,
         "toc_kind": toc_kind,
         "content_markdown": body,
         "supplied": [],
@@ -131,7 +135,10 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
     assert fake.stage_of(fake.payloads[0]) == "toc", "оглавление раньше остальных"
     # Список выпуска — в тексте пользовательского сообщения (первая часть до картинок), не в системном.
     page_prompts = [p["messages"][1]["content"][0]["text"] for p in fake.payloads[1:]]
-    assert all("«Первые шаги» — И. Фетисов" in s and "Rubrics: «Опыт работы»" in s for s in page_prompts)
+    assert all(
+        "A1: «Первые шаги» — И. Фетисов [рубрика R1: Опыт работы]" in s and "Rubrics: R1 «Опыт работы»" in s
+        for s in page_prompts
+    )
     assert all("«Первые шаги»" not in p["messages"][0]["content"] for p in fake.payloads[1:])
     toc = json.loads((params.out_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
     assert [a["title"] for a in toc["contents"]["sections"][0]["articles"]] == ["Первые шаги", "Второй шаг"]
@@ -146,7 +153,10 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
     # «Заголовок» не из списка [Первые шаги, Второй шаг] — понижен кодом, title_in_list пересчитан.
     assert meta["structure"]["demoted_headings"] == ["Заголовок"] and meta["title_in_list"] is False
     assert (params.out_dir / ISSUE / "IMG_0002.md").read_text(encoding="utf-8").count("\n## Заголовок") == 1
-    assert (tmp_path / "dbg" / ISSUE / "IMG_0002.raw.txt").is_file()
+    # Сырой ответ в debug — JSON с отступами в 4 пробела, кириллица без escape.
+    raw = (tmp_path / "dbg" / ISSUE / "IMG_0002.raw.json").read_text(encoding="utf-8")
+    assert raw.startswith('{\n    "') and "\\u" not in raw and json.loads(raw)["content_markdown"]
+    assert not (tmp_path / "dbg" / ISSUE / "IMG_0002.raw.txt").exists()
     assert (tmp_path / "dbg" / ISSUE / "IMG_0002.tile_00.jpg").is_file()
     assert "=== user ===" in (tmp_path / "dbg" / ISSUE / "IMG_0002.prompt.txt").read_text(encoding="utf-8")
     summary = (params.out_dir / "summary.csv").read_text(encoding="utf-8")
@@ -511,6 +521,44 @@ def test_page_stage_moves_author_after_listed_heading(tmp_path):
     )
     assert result.content_markdown.startswith("# Первые шаги\n\n<author>**С. Демидов**</author>")
     assert meta["structure"]["moved_authors"] == ["С. Демидов"] and result.title_in_list is True
+
+
+def test_page_stage_heading_ids_from_model_or_title(tmp_path):
+    """v20: id у `#` берётся от модели, если согласован с текстом; чужой или пустой — по названию; счётчики в meta."""
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0002.jpg"
+    body = "<rubric>*ОПЫТ РАБОТЫ*</rubric>\n\n# Первые шаги\n\nТекст.\n\n# Второй шаг\n\nТекст."
+    answer = json.loads(
+        _answer(
+            body=body,
+            headings=[{"text": "Первые шаги", "article_id": "а1"}, {"text": "Второй шаг", "article_id": "A1"}],
+            header_ids=(None, "Р1"),
+        )
+    )
+    answer["rubrics"] = [{"text": "ОПЫТ РАБОТЫ", "rubric_id": None}]
+    articles = (
+        {"id": "A1", "title": "Первые шаги", "authors": [], "rubric": "Опыт работы", "rubric_id": "R1"},
+        {"id": "A2", "title": "Второй шаг", "authors": [], "rubric": "Опыт работы", "rubric_id": "R1"},
+    )
+    job = PageJob(rel, "page", "none", "1966", ({"id": "R1", "title": "Опыт работы"},), articles, "h")
+    meta, result = recognize_page(
+        FakeClient(lambda p: json.dumps(answer, ensure_ascii=False)),
+        resolve("deepseek-v41-flash"),
+        tmp_path / "in" / rel,
+        job,
+        tmp_path / "out",
+        RunOptions(),
+    )
+    # Кириллическая «а1» → A1 принята; «A1» у второго заголовка противоречит тексту → A2 по названию.
+    assert result.headings == [{"text": "Первые шаги", "article_id": "A1"}, {"text": "Второй шаг", "article_id": "A2"}]
+    assert result.rubrics == [{"text": "ОПЫТ РАБОТЫ", "rubric_id": "R1"}]
+    assert result.running_header_rubric_id == "R1" and result.title == "Первые шаги"
+    assert meta["structure"]["heading_ids"] == {"model": 1, "title": 1, "wrong": 1}
+    assert meta["structure"]["rubric_ids"] == {"model": 0, "title": 1, "wrong": 0}
+    assert meta["heading_ids"] == "1/1/1" and meta["headings"] == 2
+    md = (tmp_path / "out" / ISSUE / "IMG_0002.md").read_text(encoding="utf-8")
+    assert 'headings: ["A1: Первые шаги", "A2: Второй шаг"]' in md and 'rubrics: ["R1: ОПЫТ РАБОТЫ"]' in md
+    assert 'running_header_rubric_id: "R1"' in md
 
 
 class DemotingReply:

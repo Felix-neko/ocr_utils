@@ -98,8 +98,8 @@ def test_two_passes_keep_second_and_record_both(tmp_path):
     assert meta["cost_usd"] == 0.002 and "<supplied>ния</supplied>" in result.content_markdown
     assert "<supplied>" in out.with_suffix(".md").read_text(encoding="utf-8")
     assert json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))["second_pass_chosen"] == "pass2"
-    assert dbg.with_suffix(".pass1.json").is_file() and dbg.with_suffix(".pass2.raw.txt").is_file()
-    assert dbg.with_suffix(".raw.txt").is_file() and dbg.with_suffix(".pass2.prompt.txt").is_file()
+    assert dbg.with_suffix(".pass1.json").is_file() and dbg.with_suffix(".pass2.raw.json").is_file()
+    assert dbg.with_suffix(".raw.json").is_file() and dbg.with_suffix(".pass2.prompt.txt").is_file()
 
 
 def test_second_pass_with_transcript_and_safeguard(tmp_path):

@@ -155,6 +155,9 @@ SUMMARY_FIELDS = (
     "toc_kind",
     "title",
     "title_in_list",
+    "headings",
+    "heading_ids",
+    "rubric_ids",
     "content_chars",
     "toc_articles",
     "tags",
@@ -217,6 +220,8 @@ class PipelineStats:
     redo_kept: int = 0  # полос, оставленных без повтора на круге повтора (--redo-scope structured)
     page_messages: int = 0  # полос с замечаниями пост-обработки (meta.messages)
     page_masked: int = 0  # полос, где при разборе замаскирован мусор модели (meta.masked)
+    heading_ids_model: int = 0  # `#`, чей id статьи дала модель (согласован с текстом)
+    heading_ids_other: int = 0  # `#`, чей id код нашёл по названию (модель id не дала или дала чужой)
     boundary_requests: int = 0  # запросов по стыкам полос при сборке (по одному на выпуск с сомнительными стыками)
     boundary_rewritten: int = 0  # стыков, переписанных по вердикту модели
     boundary_cost_usd: float = 0.0  # их стоимость (входит и в cost_usd)
@@ -251,6 +256,8 @@ class PipelineStats:
             redo_kept=self.redo_kept + other.redo_kept,
             page_messages=self.page_messages + other.page_messages,
             page_masked=self.page_masked + other.page_masked,
+            heading_ids_model=self.heading_ids_model + other.heading_ids_model,
+            heading_ids_other=self.heading_ids_other + other.heading_ids_other,
             boundary_requests=self.boundary_requests + other.boundary_requests,
             boundary_rewritten=self.boundary_rewritten + other.boundary_rewritten,
             boundary_cost_usd=self.boundary_cost_usd + other.boundary_cost_usd,
@@ -335,6 +342,10 @@ def _recognize_many(
                 stats.page_messages += 1
             if meta.get("masked"):
                 stats.page_masked += 1
+            # Источник id статей у `#` (meta.structure.heading_ids): доля не от модели — метрика промпта.
+            ids = (meta.get("structure") or {}).get("heading_ids") or {}
+            stats.heading_ids_model += int(ids.get("model") or 0)
+            stats.heading_ids_other += int(ids.get("title") or 0)  # «wrong» — подмножество «title»
             # В строке лога — сетевая ошибка, иначе ошибка разбора, иначе «ok».
             status = meta.get("error") or meta.get("parse_error") or "ok"
             if result is None:
@@ -903,6 +914,16 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         logger.warning("полос с замечаниями пост-обработки: %d (колонка messages в summary.csv)", stats.page_messages)
     if stats.page_masked:
         logger.info("полос с замаскированным мусором модели: %d (колонка masked в summary.csv)", stats.page_masked)
+    # Сколько `#` получили id статьи не от модели: свыше 30 % — промпт с id модели не по силам.
+    headings_total = stats.heading_ids_model + stats.heading_ids_other
+    if headings_total:
+        logger.info(
+            "id статей у `#`: от модели %d, по названию или исправлено %d из %d (%.0f %% не от модели; колонка heading_ids)",
+            stats.heading_ids_model,
+            stats.heading_ids_other,
+            headings_total,
+            100.0 * stats.heading_ids_other / headings_total,
+        )
     if stats.demoted_toc:
         logger.warning(
             "в базе оглавление, модель — нет (%d выпусков): %s", len(stats.demoted_toc), "; ".join(stats.demoted_toc)

@@ -131,6 +131,8 @@ def test_apply_all_and_report():
         "markers": 0,
         "dropped_headings": [],
         "wrapped_math": 0,
+        "heading_ids": {"model": 0, "title": 0, "wrong": 0},
+        "rubric_ids": {"model": 0, "title": 0, "wrong": 0},
     }
     assert report.title_in_list is True
 

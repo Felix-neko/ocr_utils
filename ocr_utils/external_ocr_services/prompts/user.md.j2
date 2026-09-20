@@ -3,7 +3,8 @@
     от выпуска к выпуску (список статей), потом от полосы к полосе (раскладка тайлов, второй проход).
     Переменные: damage_note — фраза про повреждения по умолчанию (ищи сам, скрытое достраивай);
     stage; toc_kind — вид полосы для этапа toc; rubrics, articles — оглавление выпуска для этапа
-    page ([{title, authors: [str], rubric}]); ntiles, ncols, nrows — раскладка; second_pass —
+    page (рубрики [{id, title}], статьи [{id, title, authors: [str], rubric, rubric_id}]; id «A3»/«R2»
+    модель возвращает в полях ответа — v20); ntiles, ncols, nrows — раскладка; second_pass —
     сводка первого прохода или None; max_lines — сколько строк edge_words показывать.
     v16: абзац «Apply rule 5 strictly» убран (третий повтор правила; на втором проходе его
     удаление ничего не меняло); во втором проходе список edge_words — только «как видно» и вид,
@@ -22,10 +23,10 @@ A detector has preliminarily classified this page as part of the TABLE OF CONTEN
 Transcribe this page.
 {%- endif %}
 {% if stage != "toc" and articles %}
-KNOWN STRUCTURE OF THIS ISSUE (from its table of contents). Article titles:
-{% for article in articles %}* «{{ article.title }}»{% if article.authors %} — {{ article.authors | join(", ") }}{% endif %}{% if article.get("rubric") %} [рубрика: {{ article.get("rubric") }}]{% endif %}
+KNOWN STRUCTURE OF THIS ISSUE (from its table of contents). Each article and each rubric has an id (A1, A2, … for articles; R1, R2, … for rubrics) — refer to them by these ids in `headings`, `rubrics` and the running header/footer id fields. Article titles:
+{% for article in articles %}* {% if article.get("id") %}{{ article.get("id") }}: {% endif %}«{{ article.title }}»{% if article.authors %} — {{ article.authors | join(", ") }}{% endif %}{% if article.get("rubric") %} [рубрика{% if article.get("rubric_id") %} {{ article.get("rubric_id") }}{% endif %}: {{ article.get("rubric") }}]{% endif %}
 {% endfor -%}
-{% if rubrics %}Rubrics: {% for rubric in rubrics %}«{{ rubric }}»{% if not loop.last %}, {% endif %}{% endfor %}.
+{% if rubrics %}Rubrics: {% for rubric in rubrics %}{% if rubric is mapping %}{% if rubric.get("id") %}{{ rubric.get("id") }} {% endif %}«{{ rubric.title }}»{% else %}«{{ rubric }}»{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.
 {% endif %}
 {%- endif %}
 {% if ntiles > 1 %}

@@ -59,6 +59,16 @@ def _yaml_value(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def _ref_line(ref: dict, id_key: str) -> str:
+    """Запись ``headings``/``rubrics`` одной строкой шапки: «A3: Название» или «?: Название» без id.
+
+    Args:
+        ref: ``{"text", id_key}``.
+        id_key: ``article_id`` / ``rubric_id``.
+    """
+    return f"{ref.get(id_key) or '?'}: {ref.get('text', '')}"
+
+
 def to_markdown(result: PageResult) -> str:
     """Текст файла ``.md`` полосы: шапка с полями, затем тело; в конце ровно один перевод строки.
 
@@ -77,6 +87,21 @@ def to_markdown(result: PageResult) -> str:
         f"title: {_yaml_value(result.title)}",
         f"notes: {_yaml_value(result.notes)}",
     ]
+    # Id статей у `#` и рубрик у `<rubric>` (v20) — JSON-списки строк «A3: Название», они же валидный YAML.
+    if result.headings:
+        head.append(
+            f"headings: {json.dumps([_ref_line(h, 'article_id') for h in result.headings], ensure_ascii=False)}"
+        )
+    if result.rubrics:
+        head.append(f"rubrics: {json.dumps([_ref_line(r, 'rubric_id') for r in result.rubrics], ensure_ascii=False)}")
+    for key in (
+        "running_header_article_id",
+        "running_header_rubric_id",
+        "running_footer_article_id",
+        "running_footer_rubric_id",
+    ):
+        if getattr(result, key):
+            head.append(f"{key}: {_yaml_value(getattr(result, key))}")
     # Замечания пост-обработки — только если есть: JSON-список строк, он же валидный YAML.
     if result.messages:
         head.append(f"messages: {json.dumps(result.messages, ensure_ascii=False)}")

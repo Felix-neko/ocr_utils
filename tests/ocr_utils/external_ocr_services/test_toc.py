@@ -44,7 +44,8 @@ def test_prompt_lists_and_hash_change_with_content():
         "contents", [("a", TocPage("contents", sections=[TocSection("Р", [_article("Т", "И. Фетисов")])]))]
     )
     rubrics, articles = prompt_lists(toc)
-    assert rubrics == ["Р"] and articles == [{"title": "Т", "authors": ["И. Фетисов"], "rubric": "Р"}]
+    assert rubrics == [{"id": "R1", "title": "Р"}]
+    assert articles == [{"id": "A1", "title": "Т", "authors": ["И. Фетисов"], "rubric": "Р", "rubric_id": "R1"}]
     assert prompt_lists(None) == ([], [])
     base = toc_hash(rubrics, articles)
     assert base == toc_hash(rubrics, articles) and len(base) == 12

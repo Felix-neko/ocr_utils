@@ -43,11 +43,21 @@ from ocr_utils.external_ocr_services.boundary import (
     doubt_reason,
 )
 from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, default_morph
+from ocr_utils.external_ocr_services.numbering import NumberSource, suggest_page_numbers
 from ocr_utils.external_ocr_services.ocr import output_paths, read_meta
+from ocr_utils.external_ocr_services.reconcile import BlockEdits, PageRefs, ReconcileReport, reconcile_headings
 from ocr_utils.external_ocr_services.render import _yaml_value, space_author_tags
-from ocr_utils.external_ocr_services.schema import BlockTag, DamageTag, ParseError, Stage, StructureTag, parse_json_text
+from ocr_utils.external_ocr_services.schema import (
+    BlockTag,
+    DamageTag,
+    ParseError,
+    Stage,
+    StructureTag,
+    TocKind,
+    parse_json_text,
+)
 from ocr_utils.external_ocr_services.structure import _RUBRIC, join_paragraphs, paragraphs_of
-from ocr_utils.external_ocr_services.toc import normalize_title
+from ocr_utils.external_ocr_services.toc import IssueToc, from_dict as toc_from_dict, normalize_title
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +99,10 @@ class PageEntry:
     stage: str  # этап, ответ которого вошёл в текст (page / toc)
     offset: int  # смещение первого символа полосы в тексте выпуска (внутри сшитого абзаца — внутри него)
     line: int  # строка (с 1) того же места
+    suggested_page_number: int | None = (
+        None  # номер по соседям (numbering), когда напечатанного нет или он подозрителен
+    )
+    page_number_source: str = NumberSource.NONE.value  # каким номером пользуется сверка: printed / suggested / none
 
 
 @dataclass
@@ -126,6 +140,7 @@ class IssueAssembly:
     checked: CheckerStats = field(default_factory=CheckerStats)  # запросы к модели по стыкам этого выпуска
     repeated_rubrics: list[dict] = field(default_factory=list)  # убранные повторы <rubric>: {"rubric", "page"}
     toc_merged: list[dict] = field(default_factory=list)  # слитые блоки <toc> полос-продолжений: {"after", "before"}
+    reconcile: ReconcileReport = field(default_factory=ReconcileReport)  # сверка `#`/<rubric> с оглавлением
 
     def count(self, kind: JoinKind) -> int:
         """Сколько склеек данного вида.
@@ -148,6 +163,7 @@ class IssueAssembly:
             "checked": vars(self.checked),
             "repeated_rubrics": self.repeated_rubrics,
             "toc_merged": self.toc_merged,
+            **self.reconcile.as_dict(),
         }
 
 
@@ -173,6 +189,7 @@ class _PageBody:
     blocks: list[_Block] = field(default_factory=list)
     reason: str | None = None  # не None — полосы нет, в текст идёт комментарий
     toc_continues: bool = False  # полоса-продолжение оглавления/указателя (``toc.continues_previous`` этапа toc)
+    refs: PageRefs | None = None  # id заголовков, рубрик и колонтитулов по ответу модели — для сверки с оглавлением
 
 
 def _is_plain(paragraph: str) -> bool:
@@ -240,7 +257,23 @@ def _read_page(out_dir: Path, rel: Path) -> _PageBody:
     except (ParseError, OSError) as error:
         return _PageBody(file, rel, reason=f".json не читается: {error}")
     continues = stage is Stage.TOC and result.toc is not None and bool(result.toc.continues_previous)
-    return _PageBody(file, rel, result.page_number, stage.value, _blocks_of(result.content_markdown), None, continues)
+    refs = PageRefs(
+        file,
+        stage.value,
+        None,
+        list(result.headings),
+        list(result.rubrics),
+        result.running_header,
+        result.running_footer,
+        result.running_header_article_id,
+        result.running_header_rubric_id,
+        result.running_footer_article_id,
+        result.running_footer_rubric_id,
+        toc_kind=result.toc_kind.value,
+    )
+    return _PageBody(
+        file, rel, result.page_number, stage.value, _blocks_of(result.content_markdown), None, continues, refs
+    )
 
 
 def _tail_index(blocks: list[_Block], first: int) -> int | None:
@@ -385,6 +418,7 @@ def assemble_issue(
     join_paragraphs_across: bool = True,
     rule: JoinRule = JoinRule.E,
     checker: BoundaryChecker | None = None,
+    toc: IssueToc | None = None,
 ) -> IssueAssembly:
     """Собрать текст выпуска из готовых полос (в память; запись — :func:`write_issue`).
 
@@ -400,9 +434,11 @@ def assemble_issue(
         join_paragraphs_across: Сшивать оборванные предложения через пробел.
         rule: Правило склейки переносов.
         checker: Проверка сомнительных стыков моделью (``boundary.BoundaryChecker``); ``None`` — только эвристики.
+        toc: «Содержание» выпуска для сверки заголовков; ``None`` — читается из ``toc.json`` рядом с полосами.
 
     Returns:
-        :class:`IssueAssembly`: текст файла, смещения полос, склейки, пропуски, счётчики проверки.
+        :class:`IssueAssembly`: текст файла, смещения полос, склейки, пропуски, счётчики проверки,
+        итог сверки с оглавлением.
     """
     morph = default_morph() if join_hyphens else None  # словарь грузится один раз на процесс
     checker_start = replace(checker.stats) if checker is not None else CheckerStats()  # снимок счётчиков до выпуска
@@ -411,6 +447,10 @@ def assemble_issue(
     if checker is not None and result.seams:
         verdicts = checker.check_issue(issue_key, result.seams)
         result = _assemble_pass(bodies, morph, rule, join_paragraphs_across, False, verdicts)
+    # Сверка `#` и `<rubric>` с оглавлением выпуска: один заголовок на статью, одна рубрика на раздел;
+    # номера полос без напечатанного номера выводятся по соседям.
+    toc = toc_contents(out_dir, issue_key) if toc is None else toc
+    anchors, reconciled = _reconcile(result, bodies, toc)
     repeated = drop_repeated_rubrics(result)
     header = _header(issue_key, len(result.pages), len(result.missing))
     # Переводы строк у тегов автора удваиваются в самом конце — по ним же режется на абзацы выше.
@@ -428,10 +468,122 @@ def assemble_issue(
         else:
             entry.offset = len(text)
         entry.line = text.count("\n", 0, entry.offset) + 1
+    # Настоящие `#` и `<rubric>` — смещения в тексте для нарезки по статьям.
+    for kind, entries in (("article", reconciled.articles), ("rubric", reconciled.rubrics)):
+        for entry_dict in entries:
+            block = anchors.get((kind, entry_dict["id"]))
+            if block is not None and block < len(result.blocks):
+                entry_dict["offset"] = offsets[block]
+                entry_dict["line"] = text.count("\n", 0, offsets[block]) + 1
     checked = checker.stats - checker_start if checker is not None else CheckerStats()
     return IssueAssembly(
-        issue_key, text, result.pages, result.joins, result.missing, checked, repeated, result.toc_merged
+        issue_key, text, result.pages, result.joins, result.missing, checked, repeated, result.toc_merged, reconciled
     )
+
+
+def toc_contents(out_dir: Path, issue_key: str) -> IssueToc | None:
+    """«Содержание» выпуска из ``toc.json`` рядом с полосами (с id статей и рубрик); нет файла — ``None``.
+
+    Args:
+        out_dir: Корень выхода.
+        issue_key: «год/выпуск».
+    """
+    path = out_dir / issue_key / "toc.json"
+    if not path.is_file():
+        return None
+    try:
+        tocs = toc_from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        logger.warning("%s: toc.json не читается (%s) — сверка заголовков с оглавлением пропущена", issue_key, error)
+        return None
+    return tocs.get(TocKind.CONTENTS)
+
+
+def _reconcile(
+    result: _Pass, bodies: list[_PageBody], toc: IssueToc | None
+) -> tuple[dict[tuple[str, str], int], ReconcileReport]:
+    """Сверить заголовки и рубрики выпуска с оглавлением и применить правки к блокам на месте.
+
+    Номера полос: напечатанные проверяются по соседям, отсутствующие выводятся (``numbering``) и
+    пишутся в записи sidecar; сверке уходит номер по ``source``.
+
+    Args:
+        result: Итог прохода сборки; ``blocks``, ``starts`` правятся на месте, ``pages`` дополняются номерами.
+        bodies: Прочитанные полосы (в том же порядке, что ``result.pages``).
+        toc: «Содержание» выпуска; ``None`` — правятся только полосы оглавления.
+
+    Returns:
+        ``(якоря, отчёт)``: якоря — индексы блоков настоящих `#`/`<rubric>` после правок по метке.
+    """
+    guesses = suggest_page_numbers([body.page_number for body in bodies])
+    merged_into_previous = {item["before"] for item in result.toc_merged}
+    refs: list[PageRefs] = []
+    for body, entry, guess in zip(bodies, result.pages, guesses):
+        entry.suggested_page_number = guess.suggested
+        entry.page_number_source = guess.source.value
+        page_refs = body.refs if body.refs is not None else PageRefs(body.file, body.stage)
+        page_refs.number = guess.number
+        page_refs.toc_merged = body.file in merged_into_previous
+        refs.append(page_refs)
+    # Полоса каждого блока: последняя полоса, начавшаяся не позже него.
+    page_of: list[int] = []
+    starts = [start for start, _ in result.starts]
+    current = 0
+    for index in range(len(result.blocks)):
+        while current + 1 < len(starts) and starts[current + 1] <= index:
+            current += 1
+        page_of.append(current)
+    edits, report = reconcile_headings(
+        [block.text for block in result.blocks],
+        [block.plain for block in result.blocks],
+        [block.floating for block in result.blocks],
+        page_of,
+        refs,
+        toc,
+    )
+    anchors = _apply_edits(result, edits)
+    return anchors, report
+
+
+def _apply_edits(result: _Pass, edits: BlockEdits) -> dict[tuple[str, str], int]:
+    """Применить правки сверки к блокам: удаления, замены, вставки; начала полос пересчитать.
+
+    Начало полосы, попавшее на убранный блок, переезжает на следующий уцелевший; вставки перед блоком
+    относятся к полосе этого блока (комментарий с id и восстановленный заголовок идут в её начало).
+
+    Args:
+        result: Итог прохода; ``blocks`` и ``starts`` правятся на месте.
+        edits: Правки по индексам исходного списка блоков.
+
+    Returns:
+        Индексы блоков настоящих `#`/`<rubric>` после правок по метке (первое вхождение).
+    """
+    if not edits.delete and not edits.replace and not edits.insert_before:
+        return {label: index for label, index in reversed(edits.anchors)}
+    old_anchor = {index: label for label, index in reversed(edits.anchors)}
+    new_blocks: list[_Block] = []
+    new_index: list[int] = []  # индекс, куда переезжает начало полосы, стоявшее на старом блоке
+    anchors: dict[tuple[str, str], int] = {}
+    for index, block in enumerate(result.blocks):
+        first_here = len(new_blocks)
+        for text, label in edits.insert_before.get(index, []):
+            if label is not None:
+                anchors.setdefault(label, len(new_blocks))
+            new_blocks.append(_Block(text, _is_plain(text), bool(_FLOATING_START.match(text))))
+        new_index.append(first_here)
+        if index in edits.delete:
+            continue
+        if index in old_anchor:
+            anchors.setdefault(old_anchor[index], len(new_blocks))
+        if index in edits.replace:
+            block = _Block(edits.replace[index], _is_plain(edits.replace[index]), block.floating)
+        new_blocks.append(block)
+    result.starts = [
+        (new_index[index] if index < len(new_index) else len(new_blocks), 0 if index in edits.delete else inner)
+        for index, inner in result.starts
+    ]
+    result.blocks = new_blocks
+    return anchors
 
 
 def drop_repeated_rubrics(result: _Pass) -> list[dict]:
@@ -592,6 +744,7 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
     logger.info(
         "выпуск %s собран: %d полос, переносов через границу %d (составных %d, дублей половины %d), "
         "абзацев сшито %d, стыков проверено моделью %d (из кэша %d, переписано %d, сбоев %d, $%.4f), "
+        "статей с `#` %d из %d (восстановлено %d), фантомов `#` убрано %d, лишних <rubric> %d, "
         "повторов рубрик убрано %d, блоков toc слито %d, пропущено %d → %s",
         assembly.issue,
         len(assembly.pages),
@@ -604,6 +757,11 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
         assembly.count(JoinKind.MODEL),
         assembly.checked.errors,
         assembly.checked.cost_usd,
+        sum(1 for entry in assembly.reconcile.articles if entry["status"] != "missing"),
+        len(assembly.reconcile.articles),
+        sum(1 for entry in assembly.reconcile.articles if entry["status"] == "restored"),
+        len(assembly.reconcile.phantom_headings),
+        len(assembly.reconcile.phantom_rubrics),
         len(assembly.repeated_rubrics),
         len(assembly.toc_merged),
         len(assembly.missing),

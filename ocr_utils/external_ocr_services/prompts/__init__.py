@@ -97,7 +97,7 @@ def user_prompt(
     toc_kind: TocKind = TocKind.CONTENTS,
     second_pass: object | None = None,
     max_lines: int = 60,
-    rubrics: list[str] | None = None,
+    rubrics: list | None = None,
     articles: list[dict] | None = None,
 ) -> str:
     """Текст рядом с картинками: фраза про повреждения, задача этапа, список выпуска, раскладка тайлов.
@@ -115,7 +115,7 @@ def user_prompt(
             ``tags``, ``transcript``); с ней вместо нейтральной фразы о повреждениях идёт блок
             «первое чтение нашло…». ``None`` — первый проход.
         max_lines: Сколько строк ``edge_words`` первого прохода показывать второму.
-        rubrics: Рубрики «Содержания» выпуска для этапа ``PAGE``; пусто — списка нет.
+        rubrics: Рубрики «Содержания» выпуска для этапа ``PAGE`` (``[{"id", "title"}]`` или строки); пусто — списка нет.
         articles: Статьи «Содержания» (``[{"title", "authors": [str], "rubric"}]``) для этапа ``PAGE``.
 
     Returns:

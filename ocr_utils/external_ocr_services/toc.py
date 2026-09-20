@@ -16,6 +16,8 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from ocr_utils.external_ocr_services.schema import (
+    ARTICLE_ID_PREFIX,
+    RUBRIC_ID_PREFIX,
     TOC_KINDS_WITH_TOC,
     BlockTag,
     StructureTag,
@@ -77,6 +79,43 @@ def title_matches(heading: str, titles: list[str]) -> bool:
     return False
 
 
+def best_title_match(heading: str, titles: list[str]) -> int | None:
+    """Индекс названия, лучше всего подходящего заголовку: равенство → вхождение → похожесть ≥ порога.
+
+    Тот же критерий, что у :func:`title_matches`, но с выбором одного кандидата: короткий заголовок
+    («Сотрудничество развивается») при нескольких похожих названиях получает то, где совпадение
+    точнее; при равных — первое по порядку оглавления.
+
+    Args:
+        heading: Заголовок как напечатан на полосе.
+        titles: Названия из оглавления по порядку.
+
+    Returns:
+        Индекс в ``titles`` или ``None``, если ни одно не подходит.
+    """
+    key = normalize_title(heading)
+    if not key:
+        return None
+    best: tuple[int, float, int] | None = None  # (ранг критерия, похожесть, -индекс) — больше лучше
+    for index, title in enumerate(titles):
+        other = normalize_title(title)
+        if not other:
+            continue
+        if key == other:
+            rank, ratio = 3, 1.0
+        elif key in other or other in key:
+            rank, ratio = 2, min(len(key), len(other)) / max(len(key), len(other))
+        else:
+            ratio = difflib.SequenceMatcher(None, key, other).ratio()
+            if ratio < TITLE_MATCH_RATIO:
+                continue
+            rank = 1
+        candidate = (rank, ratio, -index)
+        if best is None or candidate > best:
+            best = candidate
+    return -best[2] if best is not None else None
+
+
 @dataclass
 class IssueToc:
     """Слитое оглавление одного вида (contents или index) по всем его полосам выпуска.
@@ -106,6 +145,54 @@ class IssueToc:
             if section.rubric:
                 seen.setdefault(section.rubric.strip(), None)
         return list(seen)
+
+    @property
+    def rubric_entries(self) -> list[dict]:
+        """Рубрики без повторов с id: ``[{"id", "title"}]`` в порядке первого появления (``id`` — «R2» или ``None``)."""
+        seen: dict[str, dict] = {}
+        for section in self.sections:
+            if section.rubric:
+                seen.setdefault(section.rubric.strip(), {"id": section.id, "title": section.rubric.strip()})
+        return list(seen.values())
+
+    def article_by_id(self, article_id: str | None) -> TocArticle | None:
+        """Статья по id («A3»); ``None`` — нет такой или id пуст."""
+        if not article_id:
+            return None
+        return next((article for article in self.articles if article.id == article_id), None)
+
+    def section_by_id(self, rubric_id: str | None) -> TocSection | None:
+        """Первая секция с этим id рубрики («R2»); ``None`` — нет такой или id пуст."""
+        if not rubric_id:
+            return None
+        return next((section for section in self.sections if section.id == rubric_id), None)
+
+
+def assign_ids(toc: IssueToc) -> None:
+    """Присвоить статьям и рубрикам слитого оглавления id: статьи «A1…» по порядку чтения, рубрики
+    «R1…» по порядку первого появления; секции с одинаковой рубрикой (без учёта регистра и
+    пунктуации) делят один id. Уже присвоенные id не меняются — досчитываются только недостающие
+    (так ``toc.json`` прежних прогонов получает id тем же правилом, что и новые).
+
+    Args:
+        toc: Слитое оглавление; правится на месте.
+    """
+    used_articles = {int(a.id[len(ARTICLE_ID_PREFIX) :]) for a in toc.articles if a.id}
+    next_article = max(used_articles, default=0) + 1
+    for article in toc.articles:
+        if not article.id:
+            article.id = f"{ARTICLE_ID_PREFIX}{next_article}"
+            next_article += 1
+    by_rubric: dict[str, str] = {normalize_title(s.rubric): s.id for s in toc.sections if s.rubric and s.id}
+    next_rubric = max((int(rid[len(RUBRIC_ID_PREFIX) :]) for rid in by_rubric.values()), default=0) + 1
+    for section in toc.sections:
+        if not section.rubric or section.id:
+            continue
+        key = normalize_title(section.rubric)
+        if key not in by_rubric:
+            by_rubric[key] = f"{RUBRIC_ID_PREFIX}{next_rubric}"
+            next_rubric += 1
+        section.id = by_rubric[key]
 
 
 def merge_pages(kind: TocKind, pages: list[tuple[str, TocPage]]) -> IssueToc:
@@ -144,37 +231,54 @@ def merge_pages(kind: TocKind, pages: list[tuple[str, TocPage]]) -> IssueToc:
             if not articles and section.rubric is None:
                 continue
             toc.sections.append(TocSection(rubric=section.rubric, articles=articles))
+    # Id — только у «Содержания»: по нему идёт список в промпт и сверка на сборке; указатель
+    # за год в промпт не уходит.
+    if toc.kind is TocKind.CONTENTS:
+        assign_ids(toc)
     return toc
 
 
-def prompt_lists(toc: IssueToc | None) -> tuple[list[str], list[dict]]:
-    """Рубрики и статьи (``[{"title", "authors": [имена], "rubric": рубрика секции | None}]``) для промпта.
+def prompt_lists(toc: IssueToc | None) -> tuple[list[dict], list[dict]]:
+    """Рубрики и статьи выпуска с id для промпта этапа ``page`` и доводки структуры.
 
     Рубрика статьи берётся из оглавления — оно источник истины: по ней пост-обработка ставит
-    ``<rubric>`` перед ``#`` статьи, где бы маркер рубрики ни был напечатан на полосе.
+    ``<rubric>`` перед ``#`` статьи, где бы маркер рубрики ни был напечатан на полосе. Id («A3»,
+    «R2») модель возвращает в полях ответа (``headings``, ``rubrics``, id колонтитулов), а сборка
+    выпуска сверяет по ним заголовки с оглавлением.
 
     Args:
         toc: Слитое «Содержание» выпуска; ``None`` (нет полос оглавления) — пустые списки.
 
     Returns:
-        ``(рубрики, статьи)``: рубрики без повторов в порядке появления; статьи —
-        ``[{"title", "authors": [имена], "rubric"}]`` в порядке оглавления.
+        ``(рубрики, статьи)``: рубрики ``[{"id", "title"}]`` без повторов в порядке появления; статьи
+        ``[{"id", "title", "authors": [имена], "rubric", "rubric_id"}]`` в порядке оглавления.
     """
     if toc is None:
         return [], []
     articles = [
         {
+            "id": article.id,
             "title": article.title,
             "authors": [author["name"] for author in article.authors if author.get("name")],
             "rubric": section.rubric.strip() if section.rubric else None,
+            "rubric_id": section.id if section.rubric else None,
         }
         for section in toc.sections
         for article in section.articles
     ]
-    return toc.rubrics, articles
+    return toc.rubric_entries, articles
 
 
-def toc_hash(rubrics: list[str], articles: list[dict]) -> str:
+def rubric_titles(rubrics: list) -> list[str]:
+    """Названия рубрик из списка промпта (``[{"id", "title"}]``) или из голых строк — для кода, которому нужны только тексты.
+
+    Args:
+        rubrics: Рубрики в любом из двух видов.
+    """
+    return [item["title"] if isinstance(item, dict) else str(item) for item in rubrics if item]
+
+
+def toc_hash(rubrics: list, articles: list[dict]) -> str:
     """Отпечаток списков, с которыми распознавалась полоса: сменился список — полоса устарела.
 
     Args:
@@ -246,15 +350,25 @@ def from_dict(payload: dict) -> dict[TocKind, IssueToc]:
             TocSection(
                 rubric=section.get("rubric"),
                 articles=[
-                    TocArticle(item["title"], list(item.get("authors") or []), item.get("page"), item.get("issue"))
+                    TocArticle(
+                        item["title"],
+                        list(item.get("authors") or []),
+                        item.get("page"),
+                        item.get("issue"),
+                        item.get("id"),
+                    )
                     for item in section.get("articles") or []
                 ],
+                id=section.get("id"),
             )
             for section in raw.get("sections") or []
         ]
-        tocs[TocKind(kind)] = IssueToc(
-            TocKind(kind), sections, list(raw.get("pages") or []), int(raw.get("continuations") or 0)
-        )
+        toc_kind = TocKind(kind)
+        toc = IssueToc(toc_kind, sections, list(raw.get("pages") or []), int(raw.get("continuations") or 0))
+        # toc.json прежних прогонов без id — досчитать тем же правилом, что при слиянии.
+        if toc_kind is TocKind.CONTENTS:
+            assign_ids(toc)
+        tocs[toc_kind] = toc
     return tocs
 
 

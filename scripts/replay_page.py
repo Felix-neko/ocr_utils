@@ -6,17 +6,23 @@
 раз ушли впустую $0.30, потому что руками собранный payload не выключал ``reasoning``). Здесь
 запрос идёт через ``ocr.recognize_page`` — тот же код, что в прогоне: тайлы, цепочка режимов
 JSON, ``reasoning.effort none``, разбор, теги из ``edge_words``, доводка структуры — только без
-второго прохода и без оглавления выпуска (список статей в промпт не уходит).
+второго прохода; оглавление выпуска (список статей и рубрик с id) уходит в промпт, если задан
+``--toc-root`` — корень выхода боевого прогона с ``{год}/{выпуск}/toc.json`` (v20: по нему в
+сводке видно, сколько `#` получили id от модели, а сколько код присвоил по названию).
 
 Команды::
 
     # 2 повтора мини-набора повреждённых полос текущими промптами (PROMPT_VERSION пакета)
     uv run python scripts/replay_page.py run \\
         --in-dir "research/external_ocr_models/damaged/нарезанное по страницам" \\
-        --out-dir /mnt/SYSTEM/raw/mts/replay/damaged_v16 --repeats 2
+        --out-dir /mnt/system/raw/mts/replay/damaged_v16 --repeats 2
 
     # то же промптами другой версии: папка с system.md.j2, user.md.j2 и, если нужно, damage_note.txt
     uv run python scripts/replay_page.py run ... --out-dir .../damaged_v15 --prompts-dir /tmp/prompts_v15
+
+    # полосы пака со списком статей выпуска в промпте (toc.json из выхода боевого прогона)
+    uv run python scripts/replay_page.py run --in-dir .../sharpened --pages полосы.txt \
+        --toc-root /mnt/system/raw/mts/pack1_external_ocr_services/out --out-dir .../headings_v20 --repeats 2
 
     # сводка по повторам (и сходство с другим прогоном тех же полос)
     uv run python scripts/replay_page.py summarize --out-dir .../damaged_v16 [--baseline-dir .../damaged_v15]
@@ -50,7 +56,8 @@ from ocr_utils.external_ocr_services import ocr as ocr_module  # noqa: E402
 from ocr_utils.external_ocr_services.client import OpenRouterClient, api_key_from  # noqa: E402
 from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, recognize_page  # noqa: E402
 from ocr_utils.external_ocr_services.pages import list_pages  # noqa: E402
-from ocr_utils.external_ocr_services.schema import DamageTag  # noqa: E402
+from ocr_utils.external_ocr_services.schema import DamageTag, TocKind  # noqa: E402
+from ocr_utils.external_ocr_services.toc import from_dict as toc_from_dict, prompt_lists, toc_hash  # noqa: E402
 from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE  # noqa: E402
 
 logger = logging.getLogger("replay_page")
@@ -84,8 +91,43 @@ def use_prompts_dir(prompts_dir: Path) -> None:
     logger.info("промпты из %s%s", prompts_dir, " (+ damage_note.txt)" if note.is_file() else "")
 
 
+def issue_job_lists(toc_root: Path | None, rel: Path, cache: dict[str, tuple]) -> tuple:
+    """Рубрики, статьи и отпечаток списков выпуска полосы из ``toc.json`` боевого прогона.
+
+    Args:
+        toc_root: Корень выхода боевого прогона (``{год}/{выпуск}/toc.json``); ``None`` — списков нет.
+        rel: Полоса относительно входа: ``{год}/{выпуск}/имя``.
+        cache: ``{«год/выпуск»: (рубрики, статьи, отпечаток)}`` — toc.json читается один раз на выпуск.
+
+    Returns:
+        ``(рубрики, статьи, отпечаток)`` как для ``PageJob``; пустые, если toc.json нет.
+    """
+    key = rel.parent.as_posix()
+    if toc_root is None or len(rel.parts) < 3:
+        return (), (), ""
+    if key not in cache:
+        path = toc_root / key / "toc.json"
+        if path.is_file():
+            tocs = toc_from_dict(json.loads(path.read_text(encoding="utf-8")))
+            rubrics, articles = prompt_lists(tocs.get(TocKind.CONTENTS))
+            cache[key] = (tuple(rubrics), tuple(articles), toc_hash(rubrics, articles))
+            logger.info("%s: в промпт уходят %d статей и %d рубрик из %s", key, len(articles), len(rubrics), path)
+        else:
+            logger.warning("%s: нет %s — полосы выпуска идут без списка", key, path)
+            cache[key] = ((), (), "")
+    return cache[key]
+
+
 def _recognize_one(
-    client: OpenRouterClient, spec, in_dir: Path, out_dir: Path, options: RunOptions, joiner, rel: Path
+    client: OpenRouterClient,
+    spec,
+    in_dir: Path,
+    out_dir: Path,
+    options: RunOptions,
+    joiner,
+    toc_root: Path | None,
+    toc_cache: dict[str, tuple],
+    rel: Path,
 ) -> tuple[Path, dict]:
     """Одна полоса одним проходом — для пула потоков.
 
@@ -96,12 +138,16 @@ def _recognize_one(
         out_dir: Корень выхода этого повтора.
         options: Настройки запроса.
         joiner: ``(Morph, JoinRule)`` для склейки переносов после разбора или ``None``.
+        toc_root: Корень с ``toc.json`` выпусков (списки в промпт) или ``None``.
+        toc_cache: Кэш списков по выпускам (общий на прогон).
         rel: Полоса относительно ``in_dir``.
 
     Returns:
         ``(rel, meta)`` — meta как записана в ``.meta.json`` (при склейке — плюс ``hyphens_joined``).
     """
-    meta, result = recognize_page(client, spec, in_dir / rel, PageJob(rel), out_dir, options)
+    rubrics, articles, digest = issue_job_lists(toc_root, rel, toc_cache)
+    job = PageJob(rel, rubrics=rubrics, articles=articles, toc_hash=digest)
+    meta, result = recognize_page(client, spec, in_dir / rel, job, out_dir, options)
     if joiner is not None and result is not None:
         # Склейка — поверх готового выхода: .json/.md перезаписываются, число склеек — в meta.
         from ocr_utils.external_ocr_services.hyphen_join import join_broken_hyphens  # noqa: PLC0415
@@ -169,6 +215,12 @@ def main() -> None:
     default=None,
     help="Дополнительная склейка переносов другим бэкендом/правилом: БЭКЕНД:ПРАВИЛО (боевая pymorphy3:E идёт всегда, --no-join нет).",
 )
+@click.option(
+    "--toc-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Корень выхода боевого прогона с {год}/{выпуск}/toc.json: список статей и рубрик выпуска с id уходит в промпт.",
+)
 def run_command(
     in_dir: Path,
     out_dir: Path,
@@ -187,6 +239,7 @@ def run_command(
     rows: int | None,
     hints_csv: Path | None,
     join_hyphens: str | None,
+    toc_root: Path | None,
 ) -> None:
     """Распознать полосы ``--repeats`` раз каждую; повтор i пишется в ``<out-dir>/run<i>/``."""
     if prompts_dir is not None:
@@ -207,6 +260,7 @@ def run_command(
     client = OpenRouterClient(api_key_from(api_key))
     logger.info("полос %d × повторов %d, модель %s, промпт v%d", len(rels), repeats, spec.name, PROMPT_VERSION)
     total_cost = 0.0
+    toc_cache: dict[str, tuple] = {}  # списки выпусков — один раз на прогон
     for index in range(1, repeats + 1):
         run_dir = out_dir / f"run{index}"
         # Сырые ответы, промпты и тайлы — только у первого повтора: тайлы весят как вход.
@@ -217,7 +271,7 @@ def run_command(
             debug_dir=out_dir / "debug" if index == 1 else None,
             second_pass=False,
         )
-        work = partial(_recognize_one, client, spec, in_dir, run_dir, options, joiner)
+        work = partial(_recognize_one, client, spec, in_dir, run_dir, options, joiner, toc_root, toc_cache)
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             for rel, meta in pool.map(work, rels):
                 total_cost += float(meta.get("cost_usd") or 0.0)
@@ -227,7 +281,7 @@ def run_command(
                 )
     (out_dir / "prompt_version.txt").write_text(
         f"{PROMPT_VERSION}\n{prompts_dir or 'шаблоны пакета'}\nrows={rows or 'сетка'} hints={hints_csv or '-'} "
-        f"join={join_hyphens or '-'}\n",
+        f"join={join_hyphens or '-'} toc_root={toc_root or '-'}\n",
         encoding="utf-8",
     )
     if hinted is not None:
@@ -254,15 +308,24 @@ class PageMetrics:
     cost_usd: float
     error: str | None
     text: str  # тело без тегов — для сходства между повторами
+    headings: int = 0  # `#` на полосе после доводки
+    ids_model: int = 0  # из них с id статьи от модели (v20, согласован с текстом)
+    ids_title: int = 0  # с id по названию (модель id не дала или дала чужой)
+    ids_wrong: int = 0  # id модели противоречил тексту
+    rubric_tags: int = 0  # `<rubric>` на полосе
+    rubric_ids_model: int = 0  # из них с id от модели
+    header_ids: int = 0  # сколько id (статьи/рубрики) модель дала колонтитулам (0–4)
 
     def cell(self) -> str:
-        """Ячейка таблицы: «s/u/g · ew(пусто) · нераз · дефисы · знаков» или причина сбоя."""
+        """Ячейка таблицы: «s/u/g · ew(пусто) · нераз · дефисы · знаков · # ids · rub · hdr» или причина сбоя."""
         if self.error:
             return f"сбой: {self.error[:40]}"
         damaged = "D" if self.is_damaged else "-"
         return (
             f"{damaged} {self.supplied}/{self.unclear}/{self.gap} · ew {self.edge_words}({self.edge_words_empty})"
             f"+{self.from_edge_words} · нр {self.unreadable} · деф {self.inner_hyphens} · {self.chars}"
+            f" · # {self.headings} id {self.ids_model}/{self.ids_title}/{self.ids_wrong}"
+            f" · rub {self.rubric_tags}/{self.rubric_ids_model} · hdr {self.header_ids}"
         )
 
 
@@ -301,6 +364,22 @@ def read_page(base: Path) -> PageMetrics:
         cost_usd=float(meta.get("cost_usd") or 0.0),
         error=None,
         text=_TAGS.sub("", body),
+        headings=len(result.get("headings") or []),
+        ids_model=int(((meta.get("structure") or {}).get("heading_ids") or {}).get("model") or 0),
+        ids_title=int(((meta.get("structure") or {}).get("heading_ids") or {}).get("title") or 0),
+        ids_wrong=int(((meta.get("structure") or {}).get("heading_ids") or {}).get("wrong") or 0),
+        rubric_tags=len(result.get("rubrics") or []),
+        rubric_ids_model=int(((meta.get("structure") or {}).get("rubric_ids") or {}).get("model") or 0),
+        header_ids=sum(
+            1
+            for key in (
+                "running_header_article_id",
+                "running_header_rubric_id",
+                "running_footer_article_id",
+                "running_footer_rubric_id",
+            )
+            if result.get(key)
+        ),
     )
 
 
@@ -380,6 +459,13 @@ def _totals(pages: dict[str, list[PageMetrics | None]], run_index: int) -> dict[
         "[неразборчиво]": sum(m.unreadable for m in good),
         "дефисов": sum(m.inner_hyphens for m in good),
         "знаков": sum(m.chars for m in good),
+        "#": sum(m.headings for m in good),
+        "id от модели": sum(m.ids_model for m in good),
+        "id по названию": sum(m.ids_title for m in good),
+        "id чужой": sum(m.ids_wrong for m in good),
+        "<rubric>": sum(m.rubric_tags for m in good),
+        "rubric id от модели": sum(m.rubric_ids_model for m in good),
+        "id колонтитулов": sum(m.header_ids for m in good),
         "$": round(sum(m.cost_usd for m in items), 4),
     }
 
