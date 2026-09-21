@@ -127,7 +127,7 @@ def source_boxes(
     Returns:
         Словарь ``источник → рамки``, включая объединение ``union``.
     """
-    from ocr_utils.line_art_detection.features import analyse_gray, params_for_dpi
+    from ocr_utils.page_layout.line_art.features import analyse_gray, params_for_dpi
 
     raster = page_raster(page)
     px = raster.to_px()

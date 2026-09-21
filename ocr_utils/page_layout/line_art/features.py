@@ -50,7 +50,7 @@
 разъехаться (та же схема, что у ``dots.ScreenParams``).
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import cv2
 import numpy as np
@@ -319,6 +319,21 @@ class Candidate:
     source: str = "ink"
 
 
+# Вид объединённой рамки по источникам её кандидатов: разлинованная таблица (скопление
+# линеек ``rules`` или предложение surya ``Table``) против прочего крупного штриха — рисунка,
+# схемы, графика, формулы (связное пятно ``ink``, surya ``Figure``/``Equation``/``Form``).
+#
+# Различие нужно НЕ детектору порчи геометрии — тому всё равно, что внутри рамки, — а этапу
+# ``scan_markup detect``: там находки уходят в базу и в CVAT двумя классами, чтобы разметчик
+# мог оценить каждый порознь. Поэтому ``boxes`` остаются прежними (объединение по всем
+# источникам сразу), а вид приписывается объединённой рамке ЗАДНИМ ЧИСЛОМ — по площади
+# кандидатов, вошедших в неё: чего больше, то и вид. Слить сначала по видам, а потом между
+# собой было бы другим алгоритмом с другими рамками.
+BOX_KIND_TABLE = "table"
+BOX_KIND_DRAWING = "drawing"
+TABLE_SOURCES = ("rules", "surya:Table")
+
+
 @dataclass
 class PageFindings:
     """Итог по одной странице."""
@@ -330,6 +345,8 @@ class PageFindings:
     n_components: int
     dropped: dict[str, int]
     full_page: bool
+    # Вид каждой рамки из ``boxes`` (``BOX_KIND_TABLE`` / ``BOX_KIND_DRAWING``), той же длины.
+    kinds: list[str] = field(default_factory=list)
 
 
 def ink_mask(gray: np.ndarray, params: LineArtParams) -> np.ndarray:
@@ -555,8 +572,40 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
     boxes = [b for b in merged if (b[2] - b[0]) * (b[3] - b[1]) >= min_area]
     coverage = sum((b[2] - b[0]) * (b[3] - b[1]) for b in boxes) / page_area if boxes else 0.0
     full_page = any((b[2] - b[0]) * (b[3] - b[1]) >= params.full_page_frac * page_area for b in boxes)
+    kinds = [box_kind(members_of(box, candidates)) for box in boxes]
 
-    return PageFindings(boxes, coverage, candidates, max_cc_area, max(0, count - 1), dropped, full_page)
+    return PageFindings(boxes, coverage, candidates, max_cc_area, max(0, count - 1), dropped, full_page, kinds)
+
+
+def members_of(box: tuple[int, int, int, int], candidates: list[Candidate]) -> list[Candidate]:
+    """Кандидаты, вошедшие в объединённую рамку ``box``.
+
+    Объединение рамок — это охватывающий прямоугольник своих членов, поэтому член лежит в
+    нём целиком; допуск 0.9 площади оставлен на округления. Кандидат, отброшенный порогом
+    площади рамки (``min_region_frac``), ни в одну рамку не попадает — и это правильно.
+
+    Args:
+        box: Объединённая рамка ``(x0, y0, x1, y1)``.
+        candidates: Все кандидаты страницы.
+
+    Returns:
+        Кандидаты, чья рамка лежит внутри ``box``.
+    """
+    return [c for c in candidates if _overlaps_any(c.box, [box], 0.9)]
+
+
+def box_kind(members: list[Candidate]) -> str:
+    """Вид объединённой рамки по площади её кандидатов: таблица, если табличных источников не меньше.
+
+    Args:
+        members: Кандидаты рамки (см. :func:`members_of`); пустой список — рисунок.
+
+    Returns:
+        ``BOX_KIND_TABLE`` или ``BOX_KIND_DRAWING``.
+    """
+    table_area = sum(c.area for c in members if c.source in TABLE_SOURCES)
+    other_area = sum(c.area for c in members if c.source not in TABLE_SOURCES)
+    return BOX_KIND_TABLE if members and table_area >= other_area else BOX_KIND_DRAWING
 
 
 def _distinct(positions: list[int], gap: int) -> int:

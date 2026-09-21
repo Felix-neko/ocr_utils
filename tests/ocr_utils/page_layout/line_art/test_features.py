@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from ocr_utils.line_art_detection.features import analyse_gray, params_for_dpi, rule_clusters
+from ocr_utils.page_layout.line_art.features import analyse_gray, params_for_dpi, rule_clusters
 
 PAGE = (6733, 4165)  # страница пака-1 при 600 dpi
 
@@ -189,3 +189,23 @@ def test_разделитель_колонок_перебитый_надвое_�
         cv2.rectangle(page, (600, 2650 + row * 900), (3500, 2662 + row * 900), 0, -1)
     findings = analyse_gray(page, params)
     assert not any(c.source == "rules" for c in findings.candidates)
+
+
+def test_вид_рамки_по_источнику_кандидатов(params):
+    """Скопление линеек даёт рамку-таблицу, связное пятно — рамку-рисунок; ``boxes`` от этого не меняются."""
+    from ocr_utils.page_layout.line_art.features import BOX_KIND_DRAWING, BOX_KIND_TABLE
+
+    page = ruled_table(blank())
+    rng = np.random.default_rng(1)
+    points = rng.integers([600, 4200], [3400, 6400], size=(60, 2))
+    cv2.polylines(page, [points.reshape(-1, 1, 2).astype(np.int32)], False, 0, 7)
+    findings = analyse_gray(page, params)
+    assert len(findings.kinds) == len(findings.boxes) >= 2
+    by_kind = dict(zip(findings.kinds, findings.boxes))
+    assert set(by_kind) == {BOX_KIND_TABLE, BOX_KIND_DRAWING}
+    assert by_kind[BOX_KIND_TABLE][3] <= 3750 < by_kind[BOX_KIND_DRAWING][1] + 200, "таблица сверху, рисунок снизу"
+
+
+def test_пустая_страница_без_видов(params):
+    findings = analyse_gray(blank(), params)
+    assert findings.boxes == [] and findings.kinds == []

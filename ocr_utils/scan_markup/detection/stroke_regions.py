@@ -2,7 +2,7 @@
 
 ЗАЧЕМ. При сборке финальных PDF страница берётся из прогона FineReader без коррекции
 геометрии, если детектор порчи геометрии (``ocr_utils.geometry_regression``) сказал «bad»;
-а тот, решая, где на странице рисунок, зовёт ``line_art_detection.features.analyse_gray``
+а тот, решая, где на странице рисунок, зовёт ``page_layout.line_art.features.analyse_gray``
 на бинарном рендере 150 dpi (``geometry_regression.regions.lineart_boxes``). Качество этого
 детектора до сих пор было видно только косвенно — по вердиктам. Здесь его находки кладутся
 в базу разметки двумя видами (``STROKE_KINDS``) и уходят в CVAT: разметчик их правит, и
@@ -23,7 +23,7 @@
 
 ВЕРСИЯ. ``STROKE_DETECTOR_VERSION`` пишется в ``Page.stroke_detector_version`` и решает при
 ``--skip-detected``, пересчитывать ли полосу. Поднимать при любой правке, меняющей рамки
-или виды: как здесь (бинаризация, пересчёт), так и в ``line_art_detection.features``.
+или виды: как здесь (бинаризация, пересчёт), так и в ``page_layout.line_art.features``.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.db.models import KIND_STROKE_DRAWING, KIND_STROKE_TABLE
-from ocr_utils.line_art_detection.features import BOX_KIND_TABLE, PageFindings, analyse_gray, members_of, params_for_dpi
+from ocr_utils.page_layout.line_art.features import BOX_KIND_TABLE, PageFindings, analyse_gray, members_of, params_for_dpi
 from ocr_utils.page_layout.tables import Region
 from ocr_utils.page_layout.tables.ruling import binarize
 

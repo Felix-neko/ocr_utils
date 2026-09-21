@@ -6,7 +6,7 @@
 ## Зачем
 
 FineReader с включённым «исправлением искажений строк» иногда корёжит line art. Эталон
-дефекта — стр. 80 файла `/mnt/SYSTEM/raw/full_1967_01_bg_off_ori_off.pdf`: схема
+дефекта — стр. 80 файла `/mnt/system/raw/full_1967_01_bg_off_ori_off.pdf`: схема
 организации диспетчерской службы вышла с чёрными гребёнками вместо рамок и надписей.
 Такие страницы при сборке финального PDF надо брать из бинаризации, сделанной **без**
 распрямления строк.
@@ -28,7 +28,7 @@ FineReader с включённым «исправлением искажений
 ```bash
 # 1. Тяжёлый проход: признаки всех страниц -> CSV. Единожды.
 uv run python -m ocr_utils.line_art_detection scan \
-    --input-dir /mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg \
+    --input-dir /mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg \
     --db ~/Projects/mts_markup/pack1_reviewed.sqlite --pack-name пак-1 \
     --csv line_art_pack1.csv --md-report reports/line_art_pack1.md --jobs 16
 
@@ -110,7 +110,7 @@ Surya кэшируется на диск (`--surya-cache`).
 
 | Файл | Что в нём |
 |---|---|
-| `features.py` | признаки пятна, правило «это штрих», детектор скоплений линеек; **все замеры и пороги** |
+| `page_layout/line_art/features.py` (переехал сюда из `features.py`) | признаки пятна, правило «это штрих», детектор скоплений линеек; **все замеры и пороги**; вид каждой объединённой рамки (`PageFindings.kinds`: `table` по скоплению линеек / `drawing` по связному пятну, по площади кандидатов) — нужен этапу `scan_markup detect`, который кладёт находки в базу видами `stroke_table`/`stroke_drawing` (`scan_markup/detection/stroke_regions.py`) |
 | `render.py` | рендер страницы PDF в numpy |
 | `markup.py` | растровые области из SQLite в координатах страницы PDF |
 | `layout.py` | предложения Surya (`Figure`/`Table`/`Equation`/`Form`), кэш на диск |

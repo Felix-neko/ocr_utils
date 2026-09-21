@@ -19,7 +19,7 @@ from ocr_utils.line_art_detection.analysis import (
     collect_pdfs,
     detect_layout,
 )
-from ocr_utils.line_art_detection.features import params_for_dpi
+from ocr_utils.page_layout.line_art.features import params_for_dpi
 from ocr_utils.line_art_detection.markup import load_pdf_markup
 from ocr_utils.line_art_detection.render import DEFAULT_DPI
 from ocr_utils.line_art_detection.report import console_table, markdown_report, read_csv, summary, write_csv

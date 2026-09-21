@@ -23,7 +23,7 @@ import cv2
 import fitz
 from tqdm import tqdm
 
-from ocr_utils.line_art_detection.features import LineArtParams, analyse_gray
+from ocr_utils.page_layout.line_art.features import LineArtParams, analyse_gray
 from ocr_utils.line_art_detection.markup import PdfPageMarkup
 from ocr_utils.line_art_detection.render import render_page
 

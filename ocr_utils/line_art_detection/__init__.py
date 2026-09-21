@@ -31,7 +31,7 @@ line art: на стр. 80 файла ``full_1967_01_bg_off_ori_off.pdf`` схе�
 
     # признаки всех страниц -> CSV (единожды)
     uv run python -m ocr_utils.line_art_detection scan \\
-        --input-dir /mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg \\
+        --input-dir /mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg \\
         --db ~/Projects/mts_markup/pack1_reviewed.sqlite --pack-name пак-1 \\
         --csv line_art_pack1.csv --md-report reports/line_art_pack1.md
 
