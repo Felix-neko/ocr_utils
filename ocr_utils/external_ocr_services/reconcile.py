@@ -245,7 +245,7 @@ def candidate_lines(
             if toc_page is None or not plain[index] or seen_plain.get(page_of[index], 0) >= 2:
                 continue
             seen_plain[page_of[index]] = seen_plain.get(page_of[index], 0) + 1
-        cleaned = marker.group(1) if marker is not None else (_body_title(text) or " ".join(text.split()))
+        cleaned = marker.group(1) if marker is not None else strip_title_markup(text)
         found.append((index, in_window or toc_page is None, cleaned[:LINE_MAX_CHARS]))
         if len(found) >= limit:
             break
@@ -271,7 +271,7 @@ def _restore_from_hint(
     if block >= len(blocks) or block in edits.delete or block in edits.replace or _H1.match(blocks[block]):
         return None
     marker = _MARKER_TEXT.match(blocks[block])
-    text = marker.group(1) if marker is not None else (_body_title(blocks[block]) or " ".join(blocks[block].split()))
+    text = marker.group(1) if marker is not None else strip_title_markup(blocks[block])
     edits.replace[block] = f"# {text}"
     edits.anchors.append((("article", article_id), block))
     return page_of[block], text, block, "model"
@@ -662,13 +662,21 @@ def _body_title(text: str) -> str | None:
     # Абзац с тегом в начале (рубрика, автор, сноска, таблица, комментарий) — не название; `<u>` — можно.
     if "\n" in stripped or len(stripped) > BODY_TITLE_MAX_CHARS or re.match(r"<(?!u>)", stripped, re.IGNORECASE):
         return None
-    cleaned = stripped
+    return strip_title_markup(stripped) or None
+
+
+def strip_title_markup(text: str) -> str:
+    """Снять с абзаца разметку заголовка/жирного/курсива/подчёркивания — текст названия как напечатан.
+
+    Args:
+        text: Абзац тела (одной строкой).
+    """
+    cleaned = " ".join(text.split())
     # Разметка снимается по слою: `**Тема:** …` → «Тема: …»; вложенное (жирный курсив) — тоже.
     for _ in range(3):
         cleaned = _BODY_TITLE_MARKUP.sub("", cleaned).strip()
-    # Пометка, обёрнутая отдельно (`**Тема:** Название`): «Тема:** Название» → снять хвост разметки.
-    cleaned = re.sub(r"^(Тема\s*[:.])\s*(?:\*{1,2}|_{1,2})\s*", r"\1 ", cleaned, flags=re.IGNORECASE)
-    return cleaned or None
+    # Пометка, обёрнутая отдельно (`**Тема 9.** Название`): «Тема 9.** Название» → снять хвост разметки.
+    return re.sub(r"^(Тема\s*\d*\s*[:.])\s*(?:\*{1,2}|_{1,2})\s*", r"\1 ", cleaned, flags=re.IGNORECASE)
 
 
 def _title_key(text: str) -> str:

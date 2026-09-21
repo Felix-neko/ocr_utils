@@ -127,18 +127,26 @@ def test_assembly_restores_heading_from_model_hint(tmp_path):
     """Статья без `#` и без похожей строки: модель указывает строку — она становится `#` с source model."""
     _toc(tmp_path, [(None, [("Первая", "1"), ("Совсем иначе названная статья", "3")])])
     _page(tmp_path, "IMG_0001", "# Первая\n\nТекст.", "1")
-    _page(tmp_path, "IMG_0003", "## Об одном подходе к делу\n\nТекст второй статьи.", "3")
+    _page(
+        tmp_path,
+        "IMG_0003",
+        "**Тема 9.** Об одном подходе к делу " + "и о его последствиях " * 14 + "\n\nТекст второй статьи.",
+        "3",
+    )
     client = FakeClient(
         '{"articles": [{"article_id": "A2", "line": 1, "confidence": "high", "notes": "перефразировано"}]}'
     )
     checker = HeadingChecker(client, resolve("deepseek-v41-flash"), tmp_path / "cache")
     assembly = assemble_issue(tmp_path, ISSUE, issue_pages(tmp_path, ISSUE), heading_checker=checker)
-    assert "<!-- article A2 -->\n\n# Об одном подходе к делу\n\nТекст второй статьи." in assembly.text
+    assert (
+        "<!-- article A2 -->\n\n# Тема 9. Об одном подходе к делу и о его последствиях" in assembly.text
+    ), "разметка снята и у длинного абзаца"
+    assert "# **" not in assembly.text
     entry = next(a for a in assembly.reconcile.articles if a["id"] == "A2")
     assert (entry["status"], entry["source"], entry["model"]["status"]) == ("restored", "model", "accepted")
     assert assembly.heading_checked.requests == 1 and assembly.as_dict()["heading_checked"]["requests"] == 1
     user = client.payloads[0]["messages"][1]["content"]
-    assert "Article A2: «Совсем иначе названная статья»" in user and "1. [p. 3] Об одном подходе к делу" in user
+    assert "Article A2: «Совсем иначе названная статья»" in user and "1. [p. 3] Тема 9. Об одном подходе к делу" in user
     assert "Article A1" not in user, "найденные статьи в запрос не идут"
     # Отклонённый ответ: статья остаётся missing, вердикт в sidecar.
     client2 = FakeClient('{"articles": [{"article_id": "A2", "line": 1, "confidence": "low"}]}')
