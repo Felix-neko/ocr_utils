@@ -20,7 +20,7 @@ from typing import Sequence
 
 import numpy as np
 
-from ocr_utils.scan_markup.orientation.detectors.osd import TIMEOUT_S, _write_pgm, tesseract_available
+from ocr_utils.page_layout.orientation.detectors.osd import TIMEOUT_S, _write_pgm, tesseract_available
 
 from research.legacy.table_processing.ocr.base import Engine, OcrResult, prepare
 

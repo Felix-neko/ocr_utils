@@ -43,17 +43,17 @@ from PIL import Image
 from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.scan_cropping.image_io import read_dpi
 from ocr_utils.db.models import KIND_COLOR, KIND_STAMP_SUSPECT
-from ocr_utils.scan_markup.detection import cover as cover_module
+from ocr_utils.page_layout.raster import cover as cover_module
 from ocr_utils.scan_markup.detection import layout_cache
 from ocr_utils.scan_markup.detection.layout_cache import CachedLayout
-from ocr_utils.scan_markup.detection.boxes import (
+from ocr_utils.page_layout.raster.boxes import (
     FULL_PAGE_FRAC,
     MIN_REGION_FRAC,
     is_full_page,
     polygons_to_boxes,
     upscale_box,
 )
-from ocr_utils.scan_markup.detection.color_kind import (
+from ocr_utils.page_layout.raster.color_kind import (
     CHROMA_SELF_FRAC_THR,
     CHROMA_SPREAD_THR,
     CHROMA_THR,
@@ -62,8 +62,8 @@ from ocr_utils.scan_markup.detection.color_kind import (
     classify,
     paper_color,
 )
-from ocr_utils.scan_markup.detection.dots import ScreenParams, ScreenRegions, params_for_dpi, screen_regions
-from ocr_utils.scan_markup.detection.tone import (
+from ocr_utils.page_layout.raster.dots import ScreenParams, ScreenRegions, params_for_dpi, screen_regions
+from ocr_utils.page_layout.raster.tone import (
     LINEART_ENTROPY_THR,
     LINEART_MID_FRAC_THR,
     LINEART_SCREEN_PEAK_THR,
@@ -71,7 +71,7 @@ from ocr_utils.scan_markup.detection.tone import (
     ToneMaps,
     tone_maps,
 )
-from ocr_utils.scan_markup.detection.regions import (
+from ocr_utils.page_layout.raster.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
     LEADER_EMPTY_ROWS_THR,
@@ -86,9 +86,9 @@ from ocr_utils.scan_markup.detection.regions import (
     find_raster_boxes,
 )
 from ocr_utils.scan_markup.hashing import FileStamp, full_stamp
-from ocr_utils.scan_markup.orientation.analysis import combine, run_cpu_detectors
-from ocr_utils.scan_markup.orientation.detectors.base import ROTATIONS, Verdict
-from ocr_utils.scan_markup.orientation.image_io import frame_from_gray
+from ocr_utils.page_layout.orientation.analysis import combine, run_cpu_detectors
+from ocr_utils.page_layout.orientation.detectors.base import ROTATIONS, Verdict
+from ocr_utils.page_layout.orientation.image_io import frame_from_gray
 from ocr_utils.scan_markup.detection.stroke_regions import detect_stroke_regions
 from ocr_utils.page_layout.tables import Region, detect_regions
 from ocr_utils.page_layout.geometry import Box

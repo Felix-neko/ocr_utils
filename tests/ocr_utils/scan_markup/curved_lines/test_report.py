@@ -7,7 +7,7 @@ import pytest
 from ocr_utils.scan_markup.curved_lines import report
 from ocr_utils.scan_markup.curved_lines.analysis import PageResult
 from ocr_utils.scan_markup.curved_lines.detectors.base import Measure
-from ocr_utils.scan_markup.orientation.pdf_pages import PdfPage
+from ocr_utils.page_layout.orientation.pdf_pages import PdfPage
 
 
 def _result(rel: str, tmp_path: Path, flag: bool, score: float, label: str = "") -> PageResult:

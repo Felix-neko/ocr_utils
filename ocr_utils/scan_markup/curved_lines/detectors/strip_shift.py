@@ -25,8 +25,8 @@ from scipy.ndimage import uniform_filter1d
 
 from ocr_utils.scan_markup.curved_lines.detectors.base import Detector, Frame, Measure, silent
 from ocr_utils.scan_markup.curved_lines.detectors.line_fit import column_separators
-from ocr_utils.scan_markup.orientation.detectors.ink_axis import _smear, glyph_mask
-from ocr_utils.scan_markup.orientation.detectors.profile import PITCH_MAX_PX, PITCH_MIN_PX
+from ocr_utils.page_layout.orientation.detectors.ink_axis import _smear, glyph_mask
+from ocr_utils.page_layout.orientation.detectors.profile import PITCH_MAX_PX, PITCH_MIN_PX
 
 # Все размеры — в пикселях копии 150 dpi.
 

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_markup.curved_lines.detectors.base import Frame
-from tests.ocr_utils.scan_markup.orientation.synthetic import PAGE_SHAPE, text_page
+from tests.ocr_utils.page_layout.orientation.synthetic import PAGE_SHAPE, text_page
 from tests.ocr_utils.scan_markup.synthetic import PAPER
 
 

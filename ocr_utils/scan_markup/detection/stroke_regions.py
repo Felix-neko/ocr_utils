@@ -34,7 +34,13 @@ import cv2
 import numpy as np
 
 from ocr_utils.db.models import KIND_STROKE_DRAWING, KIND_STROKE_TABLE
-from ocr_utils.page_layout.line_art.features import BOX_KIND_TABLE, PageFindings, analyse_gray, members_of, params_for_dpi
+from ocr_utils.page_layout.line_art.features import (
+    BOX_KIND_TABLE,
+    PageFindings,
+    analyse_gray,
+    members_of,
+    params_for_dpi,
+)
 from ocr_utils.page_layout.tables import Region
 from ocr_utils.page_layout.tables.ruling import binarize
 

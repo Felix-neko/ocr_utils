@@ -26,7 +26,7 @@ DEBUG_DIR="$MARKUP_ROOT/debug"
 # run_scripts/table_processing/run_layout_pack_source.sh) и полон на все 12 135 полос;
 # detect берёт разметку отсюда и модель не зовёт, а полосу без файла (или с битым файлом)
 # разбирает заново и дописывает сюда же.
-LAYOUT_CACHE_DIR="/mnt/SYSTEM/raw/mts/pack1_table_research/layout_surya_готовое"
+LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack1_table_research/layout_surya_готовое"
 
 # Оглавления (шаг 1, команда toc): признаки полос окна, контактные листы для разметки эталона
 # и списки полос оглавления по выпускам для внешнего OCR (--pages / --skip-pages).
@@ -43,10 +43,8 @@ VALIDATE_DIR="$MARKUP_ROOT/validate"
 # на /mnt/dump3: выход весит примерно столько же, сколько вход (~300 ГиБ), и писать его
 # на шпиндельный NTFS-3G значило бы упереться в диск на всём прогоне. Плюс корень
 # /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы поверх исходных.
-# Регистр в /mnt/SYSTEM ЗНАЧИМ: /mnt — это ext4, и /mnt/system там отдельный пустой
-# каталог, а том с данными смонтирован именно как /mnt/SYSTEM. Путь со строчными буквами
-# не падает, а тихо уводит вывод на системный диск — заметить это можно очень нескоро.
-CLEAN_ROOT="/mnt/SYSTEM/raw/mts/pack1_background_blurred_v2"
+# Регистр в /mnt/system ЗНАЧИМ: с 2026-09-20 том смонтирован как /mnt/system строчными; прежний /mnt/SYSTEM заглавными больше не существует.
+CLEAN_ROOT="/mnt/system/raw/mts/pack1_background_blurred_v2"
 BLURRED_DIR="$CLEAN_ROOT/blurred"
 CLEAN_DEBUG_DIR="$CLEAN_ROOT/debug"
 
@@ -56,21 +54,28 @@ SHARPENED_DIR="$CLEAN_ROOT/sharpened"
 
 # Промежуточные PDF под FineReader: по паку, а не по годам — распознание идёт пакетом по
 # папке, и раскладка по годам означала бы одиннадцать отдельных заданий вместо одного.
-PDF_ROOT="/mnt/SYSTEM/raw/mts/pack1_pdf"
+PDF_ROOT="/mnt/system/raw/mts/pack1_pdf"
 FULL_PDF_DIR="$PDF_ROOT/full_intermediate_pdfs"
 PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
 
 # Куда FineReader положил распознанное: два прогона по одним полным промежуточным PDF —
 # с коррекцией геометрии (перекос, искажение строк, трапеция) и без неё. Без коррекции
 # геометрия страницы = скан + поля, только туда можно точно вернуть иллюстрации. Финальный
-# PDF собирается постранично из обоих (run_scripts/final_pdfs).
+# PDF собирается постранично из обоих (run_final_pdfs.sh).
 GEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening"
 NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
 
 # Финальные PDF ({год}/{год}_{выпуск}.pdf, по папке на год) и рабочий каталог сборщика
-# (JSON анализа на страницу, CSV, превью) — SSD.
+# (JSON анализа на страницу, CSV, превью) — SSD. Сборка — run_final_pdfs.sh здесь же.
 FINAL_PDF_DIR="$PDF_ROOT/final_pdfs"
-FINAL_WORK_DIR="/mnt/SYSTEM/raw/mts/pack1_final_pdfs_work"
+FINAL_WORK_DIR="/mnt/system/raw/mts/pack1_final_pdfs_work"
+
+# Прогон детектора порчи геометрии по паку (run_scripts/geometry_regression): сборщик финальных
+# PDF берёт cache/<pdf>/pNNN.json той же версии детектора как есть, страницы без записи меряет
+# на месте (~3 с) и дописывает в этот же кэш. Перекрыть можно переменной окружения:
+# GEOMETRY_RUN_DIR=... ./run_final_pdfs.sh
+GEOMETRY_REGRESSION_ROOT="/mnt/system/raw/mts/pack1_geometry_regression"
+GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v12}"
 
 # Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
 # невелики и живут ровно до выбора параметров.

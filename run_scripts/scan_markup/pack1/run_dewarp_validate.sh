@@ -10,7 +10,7 @@
 # результат смотрится глазами по парам «было | стало».
 #
 # ВХОД — заострённые копии на SSD (то, что ушло в FineReader), полное разрешение 600 dpi.
-# ВЫХОД — папка на движок в /mnt/SYSTEM/raw/mts/pack1_dewarp/validate/ плюс compare/ и
+# ВЫХОД — папка на движок в /mnt/system/raw/mts/pack1_dewarp/validate/ плюс compare/ и
 # quality.{csv,md}. На /mnt/dump3 не писать: там Яндекс.Диск.
 #
 # ВРЕМЯ. textline — секунды на полосу, pagedewarp — до минуты (Powell на CPU), нейросети —
@@ -24,7 +24,7 @@ source "$(dirname "$0")/common.sh"
 set -m
 trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
 
-OUT_DIR="/mnt/SYSTEM/raw/mts/pack1_dewarp/validate"
+OUT_DIR="/mnt/system/raw/mts/pack1_dewarp/validate"
 
 # Восемь полос, про которые известно, что строки кривые и FineReader их обычно улучшает.
 PAGES=(

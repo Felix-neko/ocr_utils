@@ -32,7 +32,7 @@ from ocr_utils.scan_markup.curved_lines.detectors.skew_map import MIN_COLUMN_PX
 from ocr_utils.scan_markup.curved_lines.detectors.base import Detector, Frame, Measure
 from ocr_utils.scan_markup.curved_lines.detectors.line_fit import LineSample, line_samples
 from ocr_utils.scan_markup.curved_lines.fitting import long_mask
-from ocr_utils.scan_markup.orientation.detectors.ink_axis import glyph_mask
+from ocr_utils.page_layout.orientation.detectors.ink_axis import glyph_mask
 
 # Размеры — в пикселях копии 300 dpi, если не сказано иное.
 

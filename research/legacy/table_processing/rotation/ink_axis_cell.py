@@ -23,7 +23,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.orientation.detectors.ink_axis import ASYMMETRY_THR, UPRIGHT_ASYMMETRY
+from ocr_utils.page_layout.orientation.detectors.ink_axis import ASYMMETRY_THR, UPRIGHT_ASYMMETRY
 
 from research.legacy.table_processing.detection.ruling import mm_to_px
 from ocr_utils.page_layout.tables.verify import (  # noqa: F401 — реэкспорт для стенда

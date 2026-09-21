@@ -23,8 +23,8 @@ import numpy as np
 from ocr_utils.scan_markup.curved_lines.detectors.base import Detector, Frame, Measure, silent
 from ocr_utils.scan_markup.curved_lines.detectors.line_fit import column_separators
 from ocr_utils.scan_markup.curved_lines.fitting import plane_fit
-from ocr_utils.scan_markup.orientation.detectors.ink_axis import _smear, glyph_mask
-from ocr_utils.scan_markup.orientation.detectors.profile import PITCH_MAX_PX, PITCH_MIN_PX
+from ocr_utils.page_layout.orientation.detectors.ink_axis import _smear, glyph_mask
+from ocr_utils.page_layout.orientation.detectors.profile import PITCH_MAX_PX, PITCH_MIN_PX
 
 # Сетка тайлов: 5 поперёк, 8 вдоль. На копии 150 dpi полосы пака-1 (~900x1600) тайл выходит
 # 180x200 px — это 8-9 строк корпуса, достаточно для острого пика профиля, и при этом

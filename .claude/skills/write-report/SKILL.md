@@ -13,7 +13,7 @@ description: Оформить отчёт о прогоне, сравнении �
 - `reports/<направление>_<что>.md`: `reports/line_art_pack1.md`, `reports/dewarp_report.md`.
 - Оверлеи и контактные листы — в подпапку `reports/<направление>/...` и строку в `.gitignore`
   (в репо не тащить сотни JPEG); в отчёте — относительные пути к ним.
-- CSV с метриками всех полос — на SSD (`~/Projects/mts_markup` или `/mnt/SYSTEM/raw/mts/...`),
+- CSV с метриками всех полос — на SSD (`~/Projects/mts_markup` или `/mnt/system/raw/mts/...`),
   в отчёте путь и число строк. Небольшие CSV эталонов (сотни строк) можно в `run_scripts/...`.
 
 ## Структура

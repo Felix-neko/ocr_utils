@@ -27,7 +27,7 @@ from tqdm import tqdm
 from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, SOURCE_AUTO, Issue, Page, RectRegion, YearPackage
 from ocr_utils.db.repo import require_pack
-from ocr_utils.scan_markup.detection.color_kind import (
+from ocr_utils.page_layout.raster.color_kind import (
     CHROMA_SELF_FRAC_THR,
     CHROMA_SPREAD_THR,
     CHROMA_THR,
@@ -35,7 +35,7 @@ from ocr_utils.scan_markup.detection.color_kind import (
     classify,
     paper_color,
 )
-from ocr_utils.scan_markup.detection.cover import cover_region
+from ocr_utils.page_layout.raster.cover import cover_region
 
 logger = logging.getLogger(__name__)
 

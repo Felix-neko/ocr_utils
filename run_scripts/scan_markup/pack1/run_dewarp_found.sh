@@ -8,7 +8,7 @@
 # ВХОД — симлинки curved_lines_pack1_links/combo (их пишет run_curved_lines.sh); имя
 # симлинка уже несёт год, выпуск, номер страницы PDF и score, оно и становится именем
 # результата. Цель симлинка — оригинальный TIFF на /mnt/dump3.
-# ВЫХОД — /mnt/SYSTEM/raw/mts/pack1_dewarp/found/<движок>/, в 300 dpi: находок сотни,
+# ВЫХОД — /mnt/system/raw/mts/pack1_dewarp/found/<движок>/, в 300 dpi: находок сотни,
 # движков семь, и по 13 МБ на полосу в 600 dpi это была бы сотня гигабайт.
 #
 # ВРЕМЯ. При сотнях полос — часы, в основном pagedewarp; при необходимости сузить
@@ -20,7 +20,7 @@ set -m
 trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
 
 LINKS_DIR="curved_lines_pack1_links/combo"
-OUT_DIR="/mnt/SYSTEM/raw/mts/pack1_dewarp/found"
+OUT_DIR="/mnt/system/raw/mts/pack1_dewarp/found"
 
 if [ ! -d "$LINKS_DIR" ]; then
     echo "Нет каталога $LINKS_DIR — сперва run_curved_lines.sh" >&2

@@ -22,7 +22,7 @@ from ocr_utils.page_layout.geometry import KIND_TABLE, Box
 
 from ocr_utils.text_layer_fix import VERSION, WORK_DPI
 from ocr_utils.text_layer_fix.classify import VerdictCounts, WordVerdict, classify_words
-from ocr_utils.text_layer_fix.docstrum import glyph_components
+from ocr_utils.page_layout.rotated_text.docstrum import glyph_components
 from ocr_utils.text_layer_fix.ocr import ZoneText, read_zone
 from ocr_utils.text_layer_fix.raster import downscale, page_raster, render_gray
 from ocr_utils.text_layer_fix.text_layer import TextLayer, load_layer

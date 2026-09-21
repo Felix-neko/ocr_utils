@@ -46,7 +46,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from ocr_utils.scan_markup.detection.color_kind import balanced_lab, paper_color
+from ocr_utils.page_layout.raster.color_kind import balanced_lab, paper_color
 
 logger = logging.getLogger(__name__)
 

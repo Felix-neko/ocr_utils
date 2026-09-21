@@ -40,7 +40,7 @@ from ocr_utils.scan_markup.curved_lines.detectors.line_fit import (
     link_spans,
 )
 from ocr_utils.scan_markup.curved_lines.fitting import LineFit, centreline, fit_line, long_mask, smooth_median
-from ocr_utils.scan_markup.orientation.detectors.ink_axis import LINE_ASPECT, LINE_MIN_LENGTH_PX, glyph_mask
+from ocr_utils.page_layout.orientation.detectors.ink_axis import LINE_ASPECT, LINE_MIN_LENGTH_PX, glyph_mask
 
 logger = logging.getLogger(__name__)
 

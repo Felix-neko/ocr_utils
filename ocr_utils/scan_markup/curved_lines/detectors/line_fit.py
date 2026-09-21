@@ -37,7 +37,7 @@ from ocr_utils.scan_markup.curved_lines.fitting import (
     slope_field_stats,
     smooth_median,
 )
-from ocr_utils.scan_markup.orientation.detectors.ink_axis import (
+from ocr_utils.page_layout.orientation.detectors.ink_axis import (
     LINE_ASPECT,
     LINE_MAX_THICKNESS_PX,
     LINE_MIN_LENGTH_PX,

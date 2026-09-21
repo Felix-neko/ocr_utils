@@ -19,7 +19,7 @@
 | table_detection | `ocr_utils/page_layout/tables` | рабочее | детектор v4.2: линейки → ядра → проверка «а таблица ли это» | `reports/table_processing_report.md` |
 | таблицы: выпрямление и боковой текст | `research/legacy/table_processing` | заморожено | `rules_separable` (раздельное поле смещений); живой код переехал в `scan_markup` | `reports/table_processing_report.md`, `reports/table_geometry.md` |
 | toc (оглавления) | `ocr_utils/scan_markup/toc` | рабочее | surya `TableOfContents` + позиционное окно + tesseract-признаки; 43/43 на эталоне | `reports/toc_detection.md` |
-| orientation | `ocr_utils/scan_markup/orientation` | рабочее | 4 быстрых детектора → арбитр; 122/122 на кандидатах, `--angles 0,90` | `reports/orientation_method.md`, `orientation_pack1.md` |
+| orientation | `ocr_utils/page_layout/orientation` | рабочее | 4 быстрых детектора → арбитр; 122/122 на кандидатах, `--angles 0,90` | `reports/orientation_method.md`, `orientation_pack1.md` |
 | curved_lines | `ocr_utils/scan_markup/curved_lines` | рабочее | `skew_map` + `line_fit` (+`surya_lines` вторым голосом) + `end_curl` | `reports/curved_lines_detection_report.md`, `curved_lines_pack1.md` |
 | dewarp | `ocr_utils/dewarp` | исследование | годится только `textline`; нейросетевые движки на сканах вредны | `reports/dewarp_report.md` |
 | line_art | `ocr_utils/line_art_detection` | рабочее | связное пятно + скопление линеек, порог покрытия 5 %; формулы — только surya; с 2026-09-21 гоняется и на этапе `scan_markup detect` по бинаризованной (Оцу) копии 1/4 — виды `stroke_table`/`stroke_drawing` в базе и CVAT, чтобы оценить детектор по ручной правке | `reports/line_art_detection_report.md`, `reports/line_art_detection_state_of_the_art.md` |

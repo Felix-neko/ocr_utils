@@ -22,7 +22,7 @@ from typing import Sequence
 
 import numpy as np
 
-from ocr_utils.scan_markup.orientation.detectors.surya_lines import (
+from ocr_utils.page_layout.orientation.detectors.surya_lines import (
     AXIS_MARGIN_THR,
     shared_detection_predictor,
     surya_available,

@@ -2,6 +2,8 @@
 
 Пак-1 — журнал «Материально-техническое снабжение», 1966–1976: 11 годовых комплектов, 123 выпуска, 12 135 полос TIFF RGB 600 dpi; раскладка каталогов и смысл переменных `common.sh` (`PACK_DIR`, `MARKUP_ROOT`, `DB`, `DB_REVIEWED`, `SHARE_ROOT`, `CLEAN_ROOT`, `SHARPENED_DIR`, `PDF_ROOT`, `LAYOUT_CACHE_DIR`) — в [docs/data_layout.md](data_layout.md).
 
+Для пака-2 (1977/01–06) есть зеркальный набор `run_scripts/scan_markup/pack2/` — шаги 1, 2, 3, 7 с той же нумерацией и теми же параметрами (масштаб набора совпадает, см. `docs/data_layout.md`, «Пак-2»); отличается только `common.sh`.
+
 ## Основная цепочка (шаги 0–9)
 
 Все скрипты в `run_scripts/scan_markup/pack1/`, каждый делает `source common.sh`: тот переходит в корень репозитория и кладёт `$DB.bak` перед любым шагом.
@@ -9,7 +11,7 @@
 | Шаг | Скрипт | Команда `python -m …` | Читает | Пишет | Замечания |
 |---|---|---|---|---|---|
 | 0 | `run_0_validate.sh` | `ocr_utils.scan_markup validate` | `CASES_DIR`, `PACK_DIR`, `DB` | `VALIDATE_DIR` | Калибровка порогов на ~100 файлах (полминуты) вместо полного прогона; нужен GPU; `--control 40` ловит обратную ошибку. Гнать ПЕРЕД шагом 1. |
-| 1 | `run_1_detect.sh` | `scan_markup detect`, затем `scan_markup toc` | `PACK_DIR` (~0.5 ТБ), `LAYOUT_CACHE_DIR` | `DB`, `DEBUG_DIR`, кэш layout | Первичный детектор — surya (GPU), пиксельные проверки в 16 воркерах; ~2.2 ч. Идемпотентен через `--skip-detected`. Ориентация и таблицы считаются этим же проходом, чтобы не читать пак дважды. `toc` идёт после `detect` (берёт дерево выпусков из базы) и с `SHARPENED_DIR`, если тот есть. |
+| 1 | `run_1_detect.sh` | `scan_markup detect`, затем `scan_markup toc` | `PACK_DIR` (~0.5 ТБ), `LAYOUT_CACHE_DIR` | `DB`, `DEBUG_DIR`, кэш layout | Первичный детектор — surya (GPU), пиксельные проверки в 16 воркерах; ~2.2 ч. Идемпотентен через `--skip-detected`. Ориентация, таблицы и крупный штрих (`stroke_*`, детектор `line_art_detection` по бинаризованной копии 1/4) считаются этим же проходом, чтобы не читать пак дважды. `toc` идёт после `detect` (берёт дерево выпусков из базы) и с `SHARPENED_DIR`, если тот есть. |
 | 2 | `run_2_to_cvat.sh` | `scan_markup to-cvat` | `DB`, `PACK_DIR` | `SHARE_ROOT`, задачи CVAT | Требует поднятого CVAT и `SHARE_ROOT` внутри `IMAGES_DIR` из `docker/.env`. Последнее чтение оригиналов. `--annotator user` обязателен. `--force-annotations` затирает ручную правку; `--recreate-stale` — только после шага 3. `--append-kinds`/`--append-tags` дозаливают PATCH-ем, не трогая ручное. |
 | — | **ручной шаг** | — | CVAT | CVAT | Разметчик правит рамки растра, рисует кистью печати и надписи, ставит теги оглавления. Недели работы, на диске больше нигде нет. |
 | 3 | `run_3_from_cvat.sh` | `scan_markup from-cvat` | `DB`, CVAT | `DB_REVIEWED` | Отдельный файл, автодетекция в `DB` остаётся нетронутой. Оригиналы не читаются. Полезно прогонять «просто так» как снимок разметки. |
@@ -18,7 +20,7 @@
 | 6 | `run_6_compare_masks.sh` | `scan_cleanup compare-masks` | `DB_REVIEWED`, `PACK_DIR` | `COMPARE_DIR/masks` | До шага 7: выбирает `--method`, `--dilate-px`, `--blur-px`. Смотреть кропы 1:1 на бледные перемычки букв. |
 | 7 | `run_7_cleanup.sh` | `scan_cleanup run` | `DB_REVIEWED`, `PACK_DIR` | `BLURRED_DIR`, `CLEAN_DEBUG_DIR`, `report.csv`, `pages.cleaned_rel_path` | Боевая очистка: закрас + размытие фона одним проходом. Имена содержат отпечаток sha256 исходника. Полосы без цветной разметки уходят в серый (167 цветных из 12 135). ~101 ГиБ. `--jobs 8` — упор в диск. Перед полным прогоном проба на `--only-year 1976`. Все размеры в пикселях, для другого пака перемерять. |
 | 8 | `run_8_migrate_db.sh` | `db.migrate` | `DB`, `DB_REVIEWED`, оба `.bak` | те же файлы | Переименование колонок под сборку PDF, идемпотентно, снимает свои `.bak-до-переименования`. Гонять по всем четырём файлам, включая бэкапы. Обязателен перед `run_intermediate_pdfs_mts_pack1.sh`. |
-| 9 | `run_9_copy_table_regions.sh` | `scan_markup copy-regions` | `DB` | `DB_REVIEWED` | Переносит `table`/`line_art_schema` с `source=auto`, не дожидаясь разметчика; ручной растр в целевой базе не трогается, следующий `from-cvat` заменит их уточнёнными. |
+| 9 | `run_9_copy_table_regions.sh` | `scan_markup copy-regions` | `DB` | `DB_REVIEWED` | Переносит `table`/`line_art_schema` и `stroke_table`/`stroke_drawing` (детектор `line_art_detection`, тот же, что у детектора геометрии) с `source=auto`, не дожидаясь разметчика; ручной растр в целевой базе не трогается, следующий `from-cvat` заменит их уточнёнными. |
 
 ## Боковые ветки
 
@@ -33,8 +35,8 @@
 
 | Скрипт | Команда | Читает | Пишет | Замечания |
 |---|---|---|---|---|
-| `run_orientation.sh` | `scan_markup.orientation run` | `SHARPENED_DIR`, `DB_REVIEWED` | симлинки `orientation_pack1_rotate`, CSV, md, контактный лист | Ищет полосы с боком напечатанной иллюстрацией, на которых падает FineReader с «исправлять ориентацию». Углы 0,90 — против часовой в паке не встретилось. ~1.5 ч, `--jobs 12` (родитель занят постобработкой surya). |
-| `run_orientation_validate.sh` | `scan_markup.orientation validate` | `SHARPENED_DIR` | md-отчёт | Синтетические повороты заведомо прямых полос: матрица ошибок ловит перепутанный знак угла у чужих движков. Не показывает поведение на настоящей боковой полосе. |
+| `run_orientation.sh` | `page_layout.orientation run` | `SHARPENED_DIR`, `DB_REVIEWED` | симлинки `orientation_pack1_rotate`, CSV, md, контактный лист | Ищет полосы с боком напечатанной иллюстрацией, на которых падает FineReader с «исправлять ориентацию». Углы 0,90 — против часовой в паке не встретилось. ~1.5 ч, `--jobs 12` (родитель занят постобработкой surya). |
+| `run_orientation_validate.sh` | `page_layout.orientation validate` | `SHARPENED_DIR` | md-отчёт | Синтетические повороты заведомо прямых полос: матрица ошибок ловит перепутанный знак угла у чужих движков. Не показывает поведение на настоящей боковой полосе. |
 
 ### Кривые строки и dewarp — вход `SHARPENED_DIR`, симлинки целят в `PACK_DIR`
 
@@ -86,7 +88,7 @@
 | `run_collect_sharpened_mts_pack1.sh` | `collect_sharpened` | `BLURRED_DIR/*/*/sharpened` | `SHARPENED_DIR`, `DB_REVIEWED` | Перенос, не копия (~144 ГиБ). Можно запускать, не дожидаясь конца выгрузки Capture One: молодые файлы и неполные выпуски пропускаются. |
 | `run_verify_sharpened_mts_pack1.sh` | `verify_sharpened` | `BLURRED_DIR`, `SHARPENED_DIR`, `DB_REVIEWED` | `verify_sharpened.csv` | Обязателен ПЕРЕД сборкой промежуточных PDF: ловит подмену одноимённых полос по содержимому. Пороги выверены по паку. |
 | `run_intermediate_pdfs_mts_pack1.sh` | `intermediate_pdfs` | `SHARPENED_DIR`, `BLURRED_DIR`, `DB_REVIEWED` | `FULL_PDF_DIR`, `PICS_ONLY_PDF_DIR`, номера страниц в базе | Сам проверяет, что шаг 8 пройден, и отказывается работать на немигрированной базе. Поля 12/6 мм только у полной PDF. ~144 ГиБ, до 20 ГБ ОЗУ при `--jobs 8`. |
-| `run_scripts/final_pdfs/run_pack1.sh` | `ocr_utils.final_pdfs run` | `GEO_PDF_DIR`, `NOGEO_PDF_DIR`, `BLURRED_DIR`, `DB_REVIEWED` (чтение), `GEOMETRY_RUN_DIR/cache` | `FINAL_PDF_DIR/{год}/{год}_{выпуск}.pdf`, `FINAL_WORK_DIR/{pages/,analysis.csv,pages.csv,summary.csv,preview/}` | Только после обоих прогонов FineReader (с коррекцией геометрии и без). Страница ↔ полоса — по порядку в базе со сверкой размера образа no-geo (полоса + поля 12.192/6.096 мм); расхождение — выпуск не собирается. Стадии: анализ в пуле (~1 ч), surya в родителе, сборка (~20 с на выпуск). Проба: `--only-year 1966 --only-issue 03`. |
+| `run_final_pdfs.sh` (в `pack1/`) | `ocr_utils.final_pdfs run` | `GEO_PDF_DIR`, `NOGEO_PDF_DIR`, `BLURRED_DIR`, `DB_REVIEWED` (чтение), `GEOMETRY_RUN_DIR/cache` | `FINAL_PDF_DIR/{год}/{год}_{выпуск}.pdf`, `FINAL_WORK_DIR/{pages/,analysis.csv,pages.csv,summary.csv,preview/}` | Только после обоих прогонов FineReader (с коррекцией геометрии и без). Страница ↔ полоса — по порядку в базе со сверкой размера образа no-geo (полоса + поля 12.192/6.096 мм); расхождение — выпуск не собирается. Стадии: анализ в пуле (~1 ч), surya в родителе, сборка (~20 с на выпуск). Проба: `--only-year 1966 --only-issue 03`. |
 | `run_finereader_compare.sh` (в `pack1/`) | `scan_markup.curved_lines.finereader_compare` | `curved_lines_pack1_links/combo`, распознанные PDF | пары «было \| стало» | Зависит от ветки кривых строк. Порядок страниц PDF = порядок файлов в папке выпуска. |
 | `run_extract_images_planhoz_pack_1*.sh` | `ocr_utils.pdf_utils` | PDF «Планового хозяйства» | картинки | К паку-1 МТС не относится — другой пак, обратная задача (PDF → картинки). |
 

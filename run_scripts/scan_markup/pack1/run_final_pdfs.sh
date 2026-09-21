@@ -16,15 +16,14 @@
 #        по образам no-geo PDF на 1181 странице); пороги детектора геометрии — по умолчанию
 #        (ocr_utils/geometry_regression/scoring.py); приём чтений — reports/text_layer_fix.md.
 #
-# Проба на одном выпуске: ./run_pack1.sh --only-year 1966 --only-issue 03
-# Весь пак в фон:  setsid ./run_pack1.sh > лог 2>&1 < /dev/null & PID=$!; ждать по PID.
+# Проба на одном выпуске: ./run_final_pdfs.sh --only-year 1966 --only-issue 03
+# Весь пак в фон:  setsid ./run_final_pdfs.sh > лог 2>&1 < /dev/null & PID=$!; ждать по PID.
 
 set -euo pipefail
 set -m
 trap 'kill -- -$$ 2>/dev/null' EXIT INT TERM
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/common.sh"
-cd "$SCRIPT_DIR/../.."
+# common.sh пака: пути PDF, BLURRED_DIR, DB_REVIEWED, GEOMETRY_RUN_DIR; он же переходит в корень репо.
+source "$(dirname "$0")/common.sh"
 
 # Анализ — чистый CPU (tesseract): 16 воркеров минус резерв ядер под родителя (surya, запись).
 # Сборка — запись PDF и разжатие 20-мегапиксельных TIFF: упор в диск, воркеров меньше.

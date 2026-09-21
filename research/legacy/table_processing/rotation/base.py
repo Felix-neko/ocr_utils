@@ -2,7 +2,7 @@
 
 ВАЛЮТА ТА ЖЕ, что у ориентации полос: ``Verdict.rotate_cw`` — на сколько повернуть ПО
 ЧАСОВОЙ, чтобы стало прямо. Классы ``Verdict``, ``Detector`` и функция ``unknown``
-переиспользуются из ``ocr_utils.scan_markup.orientation.detectors.base`` намеренно: второе
+переиспользуются из ``ocr_utils.page_layout.orientation.detectors.base`` намеренно: второе
 соглашение о знаке угла по соседству рано или поздно повернуло бы текст не в ту сторону,
 а отчёты обоих пакетов читает один человек.
 
@@ -21,7 +21,7 @@ from typing import Callable, Protocol, Sequence
 import numpy as np
 
 # Единая валюта углов и общий контракт вердикта — из пакета ориентации полос.
-from ocr_utils.scan_markup.orientation.detectors.base import Verdict, unknown  # noqa: F401
+from ocr_utils.page_layout.orientation.detectors.base import Verdict, unknown  # noqa: F401
 from ocr_utils.scan_markup.rotation import rotate_cw  # noqa: F401
 
 from research.legacy.table_processing.geometry import Cell

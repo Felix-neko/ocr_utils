@@ -13,7 +13,7 @@
     страница 68, плотный текст           2027
     страница 80, штриховой рисунок     412267
 
-Разница в два порядка. То же самое замерено в ``scan_markup.detection.dots`` с другой
+Разница в два порядка. То же самое замерено в ``page_layout.raster.dots`` с другой
 стороны и на другом материале: у полутоновых фотографий p99 площади пятна 100..4439,
 у штриха 4761..550783. Отсюда и порог ``MIN_AREA_PX``.
 
@@ -55,7 +55,7 @@ from dataclasses import dataclass, field, replace
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.detection.boxes import merge_boxes
+from ocr_utils.page_layout.raster.boxes import merge_boxes
 
 # Разрешение, для которого названы все размеры ниже.
 REFERENCE_DPI = 600

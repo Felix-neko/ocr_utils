@@ -1,6 +1,6 @@
 # final_pdfs — сборка финальных PDF из двух прогонов FineReader
 
-Зачем и что делаем — в докстринге `__init__.py`. Запуск по паку-1 — `run_scripts/final_pdfs/run_pack1.sh`
+Зачем и что делаем — в докстринге `__init__.py`. Запуск по паку-1 — `run_scripts/scan_markup/pack1/run_final_pdfs.sh`
 (проба: `--only-year 1966 --only-issue 03`).
 
 ```bash

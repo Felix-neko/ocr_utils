@@ -8,7 +8,7 @@ import pytest
 from ocr_utils.dewarp import compare, quality
 from ocr_utils.dewarp.engines.textline import TextLineEngine
 from tests.ocr_utils.dewarp.synthetic import curl_page, sine_page
-from tests.ocr_utils.scan_markup.orientation.synthetic import text_page
+from tests.ocr_utils.page_layout.orientation.synthetic import text_page
 
 DPI = 300
 

@@ -16,7 +16,7 @@ from ocr_utils.db.models import SOURCE_AUTO, SOURCE_CVAT
 from ocr_utils.db.repo import iter_pages, require_pack
 from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
-from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
+from ocr_utils.page_layout.orientation import ORIENTATION_VERSION
 
 # Синтетический пак берём готовый: рисовать вторую такую же полосу незачем.
 from tests.ocr_utils.scan_markup.test_cli import pack_dir  # noqa: F401

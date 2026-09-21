@@ -28,7 +28,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.orientation.detectors.osd import TIMEOUT_S, _write_pgm, tesseract_available
+from ocr_utils.page_layout.orientation.detectors.osd import TIMEOUT_S, _write_pgm, tesseract_available
 
 __all__ = ["CellText", "LANGUAGES", "join_lines", "prepare", "read_cell", "tesseract_available", "tesseract_tsv"]
 

@@ -15,7 +15,7 @@ source "$(dirname "$0")/common.sh"
 set -m
 trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
 
-OUT_DIR="/mnt/SYSTEM/raw/mts/pack1_finereader_compare"
+OUT_DIR="/mnt/system/raw/mts/pack1_finereader_compare"
 
 ARGS=(
     --links-dir curved_lines_pack1_links/combo

@@ -25,7 +25,7 @@ import numpy as np
 
 from ocr_utils.scan_markup.curved_lines.cache import PageCache
 from ocr_utils.scan_markup.curved_lines.detectors import DETECTORS, Detector
-from ocr_utils.scan_markup.orientation.image_io import read_frame
+from ocr_utils.page_layout.orientation.image_io import read_frame
 
 logger = logging.getLogger(__name__)
 

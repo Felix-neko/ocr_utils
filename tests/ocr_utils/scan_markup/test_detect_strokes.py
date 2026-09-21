@@ -23,7 +23,7 @@ from ocr_utils.db.models import (
     RectRegion,
 )
 from ocr_utils.db.session import open_db
-from ocr_utils.line_art_detection.features import BOX_KIND_DRAWING, BOX_KIND_TABLE
+from ocr_utils.page_layout.line_art.features import BOX_KIND_DRAWING, BOX_KIND_TABLE
 from ocr_utils.scan_markup.cli import main
 from ocr_utils.scan_markup.cvat.project import LABEL_BY_KIND, LABELS
 from ocr_utils.scan_markup.detection.stroke_regions import STROKE_DETECTOR_VERSION, bitonal, find_strokes

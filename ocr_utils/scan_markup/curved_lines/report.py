@@ -22,7 +22,7 @@ from ocr_utils.scan_markup.curved_lines.analysis import PageResult, flagged_coun
 from ocr_utils.scan_markup.curved_lines.detectors import DETECTORS
 from ocr_utils.scan_markup.curved_lines.detectors.base import Measure
 from ocr_utils.scan_markup.curved_lines.flags import COMBO, Thresholds
-from ocr_utils.scan_markup.orientation.pdf_pages import PdfPage, lookup
+from ocr_utils.page_layout.orientation.pdf_pages import PdfPage, lookup
 from ocr_utils.scan_cropping.image_io import IMAGE_EXTS
 
 logger = logging.getLogger(__name__)

@@ -459,7 +459,7 @@ Surya **не разметила вовсе** (0 блоков) — её заде�
 ```bash
 uv run python -m ocr_utils.background_smoothing \
     --input-dir "/mnt/dump3/.../МТС/Готовое/1966/03" \
-    --output-dir /mnt/SYSTEM/pack1/background_blurred
+    --output-dir /mnt/system/pack1/background_blurred
 ```
 
 Боевой прогон целого пака с оверлеями и таймингами (`--recursive` включён по
@@ -468,8 +468,8 @@ uv run python -m ocr_utils.background_smoothing \
 ```bash
 uv run python -m ocr_utils.background_smoothing \
     --input-dir "/mnt/dump3/.../МТС/Готовое" \
-    --output-dir /mnt/SYSTEM/pack1_background_blurring/background_blurred \
-    --debug-dir  /mnt/SYSTEM/pack1_background_blurring/debug \
+    --output-dir /mnt/system/pack1_background_blurring/background_blurred \
+    --debug-dir  /mnt/system/pack1_background_blurring/debug \
     --output-format tiff \
     --log-level INFO
 ```

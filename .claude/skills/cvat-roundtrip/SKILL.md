@@ -24,7 +24,7 @@ description: Обмен разметкой с локальным CVAT (cvat_mts)
 ## Залить (to-cvat)
 
 - Первый раз по паку: `run_2_to_cvat.sh` — с `--annotator user`, иначе разметчик видит пустой список.
-- Дозалить находки нового детектора в уже размеченные задачи: `to-cvat --append-kinds table,line_art_schema`
+- Дозалить находки нового детектора в уже размеченные задачи: `to-cvat --append-kinds table,line_art_schema,stroke_table,stroke_drawing`
   или теги `--append-tags` — это PATCH, ручная правка цела.
 - **`--force-annotations` затирает ручную разметку задачи целиком**; `--recreate-stale`
   пересоздаёт задачу-года — перед ними прогнать `from-cvat` как снимок. Оба — только по явному

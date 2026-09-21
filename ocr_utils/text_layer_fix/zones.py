@@ -35,7 +35,7 @@ from ocr_utils.page_layout.tables.detector import detect
 from ocr_utils.page_layout.geometry import Box, TableBox
 
 from ocr_utils.text_layer_fix import WORK_DPI, mm_to_px
-from ocr_utils.text_layer_fix.docstrum import cluster_lines, cluster_rotated, glyph_components
+from ocr_utils.page_layout.rotated_text.docstrum import cluster_lines, cluster_rotated, glyph_components
 from ocr_utils.text_layer_fix.raster import downscale
 
 logger = logging.getLogger(__name__)

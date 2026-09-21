@@ -19,6 +19,6 @@ paths:
 - Запуск в фон из сессии агента — только `setsid ./run_x.sh > лог 2>&1 < /dev/null & PID=$!`:
   без `setsid` pgid ≠ pid, и `kill -- -$PID` промахивается. Ждать — `while kill -0 "$PID"`,
   живость — `ps -p "$PID"`. Перед повторным запуском — `ps -eo pid,pgid,cmd | grep '[r]un_'`.
-- Выход прогона — на SSD (`/mnt/SYSTEM/...`, регистр значим) или в `~/Projects/mts_markup`,
+- Выход прогона — на SSD (`/mnt/system/...`, регистр значим) или в `~/Projects/mts_markup`,
   никогда в корень `/mnt/dump3` (Я.Диск переименует поверх исходников). См. `docs/data_layout.md`.
 - Скрипты, забирающие внешний экспорт, — идемпотентные и с `--min-age-minutes 10`.

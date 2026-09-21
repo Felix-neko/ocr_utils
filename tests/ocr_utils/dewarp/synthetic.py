@@ -5,7 +5,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from tests.ocr_utils.scan_markup.orientation.synthetic import PAGE_SHAPE, text_page
+from tests.ocr_utils.page_layout.orientation.synthetic import PAGE_SHAPE, text_page
 
 
 def warp(image: np.ndarray, dy: np.ndarray) -> np.ndarray:

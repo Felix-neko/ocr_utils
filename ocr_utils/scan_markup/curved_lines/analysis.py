@@ -28,7 +28,7 @@ import cv2
 from ocr_utils.scan_markup.curved_lines.cache import PageCache
 from ocr_utils.scan_markup.curved_lines.detectors import DETECTORS, Detector, GpuPage, Measure
 from ocr_utils.scan_markup.curved_lines.flags import COMBO, Thresholds, combine
-from ocr_utils.scan_markup.orientation.image_io import decode_gpu_jpeg, read_frame
+from ocr_utils.page_layout.orientation.image_io import decode_gpu_jpeg, read_frame
 
 logger = logging.getLogger(__name__)
 

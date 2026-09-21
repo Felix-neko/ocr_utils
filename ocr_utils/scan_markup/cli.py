@@ -19,22 +19,17 @@ from ocr_utils.scan_markup.cvat.export import ExportParams, copy_regions, run_ex
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
 from ocr_utils.db.models import RECT_KINDS, TABLE_KINDS
 from ocr_utils.db.session import open_db
-from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
-from ocr_utils.scan_markup.detection.color_kind import (
-    CHROMA_SELF_FRAC_THR,
-    CHROMA_SPREAD_THR,
-    CHROMA_THR,
-    COLOR_FRAC_THR,
-)
+from ocr_utils.page_layout.raster.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
+from ocr_utils.page_layout.raster.color_kind import CHROMA_SELF_FRAC_THR, CHROMA_SPREAD_THR, CHROMA_THR, COLOR_FRAC_THR
 from ocr_utils.scan_markup.detection.recolor import RecolorParams, run_mark_covers, run_recolor
 from ocr_utils.scan_markup.detection.page import PageOptions
-from ocr_utils.scan_markup.detection.tone import (
+from ocr_utils.page_layout.raster.tone import (
     LINEART_ENTROPY_THR,
     LINEART_MID_FRAC_THR,
     LINEART_SCREEN_PEAK_THR,
     STAMP_INK_CONTRAST_THR,
 )
-from ocr_utils.scan_markup.detection.regions import (
+from ocr_utils.page_layout.raster.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
     LEADER_EMPTY_ROWS_THR,

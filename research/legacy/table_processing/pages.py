@@ -12,7 +12,7 @@
 а страницу называет текстовый слой распознанного PDF (см. ``mining/page_match``).
 
 СТРАНИЦА PDF → СКАН — из базы разметки, ровно как в
-``ocr_utils.scan_markup.orientation.pdf_pages``: страница N (с единицы) это ``order_index``
+``ocr_utils.page_layout.orientation.pdf_pages``: страница N (с единицы) это ``order_index``
 N-1. Проверено запросом по всем 12135 полосам: ``full_pdf_page_idx == order_index`` везде.
 База открывается ТОЛЬКО НА ЧТЕНИЕ.
 """

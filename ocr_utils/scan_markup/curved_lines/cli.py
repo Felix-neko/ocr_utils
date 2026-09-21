@@ -13,8 +13,8 @@ from ocr_utils.scan_markup.curved_lines import CURVED_LINES_VERSION, analysis, o
 from ocr_utils.scan_markup.curved_lines import labels as labelling
 from ocr_utils.scan_markup.curved_lines.detectors import DEFAULT_SET, DETECTORS, registry_text, resolve
 from ocr_utils.scan_markup.curved_lines.flags import ThresholdError, Thresholds
-from ocr_utils.scan_markup.orientation.cli import collect_images
-from ocr_utils.scan_markup.orientation.pdf_pages import PdfPage, load_pdf_pages, lookup
+from ocr_utils.page_layout.orientation.cli import collect_images
+from ocr_utils.page_layout.orientation.pdf_pages import PdfPage, load_pdf_pages, lookup
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ from typing import Callable, Protocol, Sequence
 import numpy as np
 
 from ocr_utils.scan_markup.curved_lines import CURVED_LINES_VERSION
-from ocr_utils.scan_markup.orientation.detectors.base import Frame  # noqa: F401 (реэкспорт: тот же кадр)
+from ocr_utils.page_layout.orientation.detectors.base import Frame  # noqa: F401 (реэкспорт: тот же кадр)
 
 
 @dataclass(frozen=True)

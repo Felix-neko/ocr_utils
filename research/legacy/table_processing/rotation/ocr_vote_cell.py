@@ -21,8 +21,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.orientation.detectors.ocr_vote import letters
-from ocr_utils.scan_markup.orientation.detectors.osd import tesseract_available
+from ocr_utils.page_layout.orientation.detectors.ocr_vote import letters
+from ocr_utils.page_layout.orientation.detectors.osd import tesseract_available
 
 from research.legacy.table_processing.rotation.base import CellCrop, CellDetector, Verdict, rotate_cw
 

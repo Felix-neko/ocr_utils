@@ -70,4 +70,4 @@ ARGS=(
 )
 
 echo "Поиск полос под поворот в $SHARPENED_DIR"
-uv run python -m ocr_utils.scan_markup.orientation "${ARGS[@]}"
+uv run python -m ocr_utils.page_layout.orientation "${ARGS[@]}"

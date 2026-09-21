@@ -16,7 +16,7 @@ import numpy as np
 from ocr_utils.page_layout.line_art.features import analyse_gray, params_for_dpi
 from ocr_utils.scan_markup.curved_lines.detectors.line_fit import LineSample, line_samples
 from ocr_utils.scan_markup.curved_lines.fitting import LineFit, fit_line
-from ocr_utils.scan_markup.orientation.image_io import frame_from_gray
+from ocr_utils.page_layout.orientation.image_io import frame_from_gray
 from ocr_utils.geometry_regression import WORK_DPI
 from ocr_utils.geometry_regression.render import RENDER_DPI
 

@@ -57,23 +57,18 @@ from ocr_utils.db.repo import iter_pages, replace_rect_regions, upsert_pack
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
 from ocr_utils.scan_markup.detection.stroke_regions import STROKE_DETECTOR_VERSION
 from ocr_utils.page_layout.tables import TABLE_DETECTOR_VERSION
-from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
+from ocr_utils.page_layout.orientation import ORIENTATION_VERSION
 from ocr_utils.scan_markup.rotation import format_allowed
-from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
-from ocr_utils.scan_markup.detection.color_kind import (
-    CHROMA_SELF_FRAC_THR,
-    CHROMA_SPREAD_THR,
-    CHROMA_THR,
-    COLOR_FRAC_THR,
-)
+from ocr_utils.page_layout.raster.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
+from ocr_utils.page_layout.raster.color_kind import CHROMA_SELF_FRAC_THR, CHROMA_SPREAD_THR, CHROMA_THR, COLOR_FRAC_THR
 from ocr_utils.scan_markup.detection.overlay import write_debug_overlay
-from ocr_utils.scan_markup.detection.tone import (
+from ocr_utils.page_layout.raster.tone import (
     LINEART_ENTROPY_THR,
     LINEART_MID_FRAC_THR,
     LINEART_SCREEN_PEAK_THR,
     STAMP_INK_CONTRAST_THR,
 )
-from ocr_utils.scan_markup.detection.regions import (
+from ocr_utils.page_layout.raster.regions import (
     FULL_PAGE_COLOR_FRAC,
     GROW_PAPER_MARGIN,
     LEADER_EMPTY_ROWS_THR,
@@ -205,7 +200,7 @@ class DetectParams:
 
     def cpu_orientation_detectors(self) -> tuple[str, ...]:
         """Только те, что считаются в воркере: не GPU и не арбитр."""
-        from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+        from ocr_utils.page_layout.orientation.detectors import DETECTORS
 
         return tuple(
             name
@@ -214,14 +209,14 @@ class DetectParams:
         )
 
     def gpu_orientation_detectors(self) -> tuple[str, ...]:
-        from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+        from ocr_utils.page_layout.orientation.detectors import DETECTORS
 
         return tuple(
             name for name in self.detector_names() if (d := DETECTORS.get(name)) is not None and d.stage == "gpu"
         )
 
     def arbiter_orientation_detectors(self) -> tuple[str, ...]:
-        from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+        from ocr_utils.page_layout.orientation.detectors import DETECTORS
 
         return tuple(name for name in self.detector_names() if (d := DETECTORS.get(name)) is not None and d.arbiter)
 
@@ -629,8 +624,8 @@ def _run_arbiter(session: Session, params: DetectParams, by_rel: "dict[str, Page
     if not params.orientation or not names:
         return
 
-    from ocr_utils.scan_markup.orientation.detectors import DETECTORS
-    from ocr_utils.scan_markup.orientation.image_io import read_frame
+    from ocr_utils.page_layout.orientation.detectors import DETECTORS
+    from ocr_utils.page_layout.orientation.image_io import read_frame
 
     candidates = [page for page in by_rel.values() if page.rotate_cw and page.orientation_source == SOURCE_AUTO]
     if not candidates:
@@ -691,7 +686,7 @@ def _orientation_gpu(params: DetectParams):
     контекстом ``fork``, и форк процесса с уже поднятой CUDA даёт зависшие воркеры. Пока
     первое обращение случается в родителе ПОСЛЕ форка, всё в порядке.
     """
-    from ocr_utils.scan_markup.orientation.detectors import DETECTORS
+    from ocr_utils.page_layout.orientation.detectors import DETECTORS
 
     if not params.orientation:
         return {}

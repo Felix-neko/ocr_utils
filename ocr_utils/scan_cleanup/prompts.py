@@ -36,7 +36,7 @@ import numpy as np
 from ocr_utils.background_smoothing.processing import has_halftone
 from ocr_utils.scan_cleanup.source import PageMarkup, Rect
 from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE, MASK_OTHER_REMOVAL
-from ocr_utils.scan_markup.detection.color_kind import classify, paper_color
+from ocr_utils.page_layout.raster.color_kind import classify, paper_color
 
 # Доля площади РАМКИ ГРУППЫ, которая должна лежать внутри растровой области, чтобы
 # считать зону «внутри растра». Именно рамки группы, а не ROI: ROI вдвое больше и у

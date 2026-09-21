@@ -57,7 +57,7 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 echo "Выход:    $BLURRED_DIR"
 echo "Оверлеи:  $CLEAN_DEBUG_DIR"
-df -h /mnt/SYSTEM | tail -1
+df -h /mnt/system | tail -1
 
 CLEANUP_ARGS=(
     --db "$DB_REVIEWED"
