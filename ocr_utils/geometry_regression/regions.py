@@ -99,6 +99,10 @@ def layout_boxes(document, page_index: int, dpi: float = WORK_DPI, surya=None) -
     Returns:
         Рамки ``(x0, y0, x1, y1)`` таблиц и line art; таблица для детектора порчи — та же
         «нетекстовая геометрия», что и рисунок: её линейки нельзя ни наклонять, ни гнуть.
+        ФОРМУЛЫ (блок surya ``Equation``) сюда не входят: дробные черты — текстовые штрихи, и
+        правила штрихов (``strokes.py``) считают их наклон именно как у текста; внутри рамки
+        рисунка та же черта без перпендикуляра сошла бы за росчерк и выпала из метрики
+        (регрессия v13 на 1966/06 с.58, 1967/01 с.85, 1968/01 с.29 — все «hmean»).
     """
     from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
     from ocr_utils.page_layout.image import PageImage, Variant
@@ -109,6 +113,8 @@ def layout_boxes(document, page_index: int, dpi: float = WORK_DPI, surya=None) -
     k = dpi / image.dpi
     boxes: list[Box] = []
     for region in layout.tables + layout.line_arts:
+        if "surya:Equation" in region.info.get("sources", ()):
+            continue
         box = region.box.scaled(k)
         boxes.append((int(box.x0), int(box.y0), int(box.x1), int(box.y1)))
     return boxes

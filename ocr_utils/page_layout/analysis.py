@@ -237,6 +237,32 @@ class PageLayout:
         """Разрешение копии растрового детектора: строго 1/``HALFTONE_DOWNSCALE`` полного кадра."""
         return max(1, int(round(self.image.dpi / HALFTONE_DOWNSCALE)))
 
+    def table_findings(self) -> list[TableBox]:
+        """Находки детектора таблиц всех видов (таблица / схема / рисунок) в РОДНЫХ пикселях.
+
+        Нужны правке текстового слоя: ячейки таблицы разбираются по ``TableBox`` (линейки,
+        наклон), а не по рамке. Уже без тех, что накрыты растром.
+        """
+        native = self.image.scale_to_native(self.work_dpi)
+        width, height = self.image.width, self.image.height
+        out: list[TableBox] = []
+        for table in self._table_boxes:
+            out.append(
+                TableBox(
+                    box=table.box.scaled(native).clipped(width, height),
+                    score=table.score,
+                    source=table.source,
+                    origin=table.origin,
+                    skew_deg=table.skew_deg,
+                    metrics=table.metrics,
+                    rule_box=(
+                        table.rule_box.scaled(native).clipped(width, height) if table.rule_box is not None else None
+                    ),
+                    kind=table.kind,
+                )
+            )
+        return out
+
     def orientation_image(self):
         """Картинка под GPU-детектор ориентации (PIL RGB копии рабочего разрешения) или ``None``."""
         if Find.ORIENTATION not in self.find or self.is_cover:

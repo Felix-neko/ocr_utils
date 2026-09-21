@@ -34,4 +34,6 @@ uv run python -m ocr_utils.text_layer_fix run \
     --controls 200 \
     --jobs "$JOBS" \
     --reserve-cpu-cores "$RESERVE_CPU_CORES" \
+    --layout-cache "$LAYOUT_CACHE_DIR" \
+    --variant fr_geo \
     "$@"

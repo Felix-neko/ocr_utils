@@ -8,8 +8,7 @@
 # Формат выхода — TIFF (без потерь; DPI переносится из исходника), цвет как на входе.
 # Обложки и растровые вкладки обрабатываются отдельно, здесь цель — текст и line art.
 #
-# ВНИМАНИЕ: том называется /mnt/SYSTEM ЗАГЛАВНЫМИ; /mnt/system строчными —
-# пустая заглушка, принадлежащая root, и не точка монтирования.
+# ВНИМАНИЕ: с 2026-09-20 том смонтирован как /mnt/system строчными; прежний /mnt/SYSTEM заглавными больше не существует.
 #
 set -euo pipefail
 
@@ -18,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/Готовое"
-BASE_DIR="/mnt/SYSTEM/raw/mts/pack1_background_blurring"
+BASE_DIR="/mnt/system/raw/mts/pack1_background_blurring"
 OUTPUT_DIR="$BASE_DIR/background_blurred"
 DEBUG_DIR="$BASE_DIR/debug"
 

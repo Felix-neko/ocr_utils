@@ -3,7 +3,8 @@
 # Точность и полнота источников line art против 221 ручной области line_art_schema
 # (pack1_reviewed.sqlite) на PDF без коррекции геометрии: картинки FineReader, детектор
 # таблиц (виды «схема»/«рисунок»), связные пятна line_art_detection, блоки Figure surya из
-# кэша разметки по сканам и их объединение. Плюс 200 контрольных страниц без эталона —
+# кэша разметки по сканам, их объединение, плюс с 2026-09-21 — surya по рендеру no-geo и единый
+# детектор page_layout (кэш fr_nogeo набивается здесь же перед пулом, GPU в родителе). Плюс 200 контрольных страниц без эталона —
 # ложные срабатывания. → $TEXT_LAYER_RUN_DIR/{lineart_eval.csv,lineart_eval.json}.
 #
 # Читает: $TEXT_LAYER_NOGEO_PDF_DIR, $PROBE_DB, $DB_REVIEWED, $LAYOUT_CACHE_DIR, sample.csv прогона.

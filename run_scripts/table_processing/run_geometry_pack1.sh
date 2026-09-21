@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # PDF без коррекции геометрии: нужен, чтобы отличить «было криво» от «искорёжил FineReader».
-NOGEO_PDF_DIR="/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
+NOGEO_PDF_DIR="/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
 
 step() {
     uv run python -m research.legacy.table_processing "$@" &

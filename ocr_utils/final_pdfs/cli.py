@@ -105,6 +105,24 @@ def pair_all(geo_dir: Path, nogeo_dir: Path, plans: list[IssuePlan]) -> tuple[di
     return pairs, failures
 
 
+def _prefill_surya(cache_root: Path, pairs, jobs: int) -> None:
+    """Стадия 0: surya по всем страницам пар PDF (оба варианта) — в родителе, до пула стадии A."""
+    from ocr_utils.page_layout.image import Variant
+    from ocr_utils.page_layout.prefill import pdf_requests, prefill
+    from ocr_utils.page_layout.surya.cache import SuryaCache
+    from ocr_utils.page_layout.surya.model import SuryaLayoutModel
+
+    model = SuryaLayoutModel()
+    cache = SuryaCache(cache_root)
+    items = list(pairs.values()) if isinstance(pairs, dict) else list(pairs)
+    requests = list(pdf_requests([p.nogeo for p in items], Variant.FR_NOGEO)) + list(
+        pdf_requests([p.geo for p in items], Variant.FR_GEO)
+    )
+    stats = prefill(requests, cache, model, jobs=jobs)
+    model.close()  # видеопамять — стадии B (surya OCR)
+    click.echo(f"  страниц {stats.requested}: уже в кэше {stats.cached}, размечено {stats.done}, ошибок {stats.failed}")
+
+
 def run_analysis(
     plans: list[IssuePlan], pairs: dict[int, IssuePair], params: AnalysisParams, jobs: int
 ) -> list[PageAnalysis]:
@@ -245,6 +263,14 @@ def main(log_level: str) -> None:
     type=click.Path(file_okay=False, path_type=Path),
     help="прогон детектора геометрии с cache/; без него — всегда мерить",
 )
+@click.option(
+    "--layout-cache",
+    "layout_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="корень кэша surya page_layout: стадия 0 набивает его по всем страницам обеих PDF выпуска (GPU в "
+    "родителе), дальше детектор геометрии и правка слоя читают его в воркерах. Без него — без surya.",
+)
 @click.option("--geometry-thr", multiple=True, help="порог детектора «имя=значение», можно несколько")
 @click.option("--geometry-hard", default=DEFAULT_HARD, show_default=True, type=float)
 @click.option("--geometry-min-gain", default=DEFAULT_MIN_GAIN, show_default=True, type=float)
@@ -301,6 +327,7 @@ def run(
     only_year,
     only_issue,
     geometry_run_dir,
+    layout_cache_dir,
     geometry_thr,
     geometry_hard,
     geometry_min_gain,
@@ -334,8 +361,12 @@ def run(
         text_layer=text_layer,
         lang=lang,
         skip_done=skip_done,
+        layout_cache_dir=layout_cache_dir,
     )
     workers = effective_jobs(jobs, reserve_cpu_cores)
+    if layout_cache_dir is not None and not reassemble:
+        click.echo("Стадия 0: кэш surya по страницам обеих PDF")
+        _prefill_surya(layout_cache_dir, pairs, workers)
     click.echo(f"Стадия A: анализ страниц, воркеров {workers}")
     rows = run_analysis(plans, pairs, analysis, workers)
     write_analysis_csv(work_dir / "analysis.csv", rows)

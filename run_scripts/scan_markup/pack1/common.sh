@@ -77,7 +77,7 @@ FINAL_WORK_DIR="/mnt/system/raw/mts/pack1_final_pdfs_work"
 # на месте (~3 с) и дописывает в этот же кэш. Перекрыть можно переменной окружения:
 # GEOMETRY_RUN_DIR=... ./run_final_pdfs.sh
 GEOMETRY_REGRESSION_ROOT="/mnt/system/raw/mts/pack1_geometry_regression"
-GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v12}"
+GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v13}"
 
 # Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
 # невелики и живут ровно до выбора параметров.

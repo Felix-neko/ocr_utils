@@ -3,7 +3,7 @@
 # Поиск страниц с крупным line art в бинаризованных PDF пака-1 и выгрузка их картинками.
 #
 # ЗАЧЕМ. FineReader с включённым «исправлением искажений строк» иногда корёжит line art
-# (эталон дефекта — стр. 80 файла /mnt/SYSTEM/raw/full_1967_01_bg_off_ori_off.pdf: схема
+# (эталон дефекта — стр. 80 файла /mnt/system/raw/full_1967_01_bg_off_ori_off.pdf: схема
 # организации диспетчерской службы вышла с чёрными гребёнками вместо рамок). Такие
 # страницы при сборке финального PDF надо брать из бинаризации БЕЗ распрямления строк.
 # Чтобы найти их глазами, не листая девять тысяч полос, прогоняем детектор и смотрим
@@ -15,7 +15,7 @@
 # делается ровно один.
 #
 # РАЗМЕРЫ. Шаг текстовых строк 89 px и толщина штриха 7 px при 600 dpi — замер пака-1
-# (см. ocr_utils/paper.py). Они зашиты умолчаниями в ocr_utils/line_art_detection/features.py;
+# (см. ocr_utils/paper.py). Они зашиты умолчаниями в ocr_utils/page_layout/line_art/features.py;
 # для ДРУГОГО пака их надо перемерить (ocr_utils/defocus_detection/scale.py:
 # text_line_pitch и stroke_width) и передать ключами --pitch-px / --stroke-px.
 #
@@ -29,7 +29,7 @@
 # РАЗМЕТКА. --db отсеивает полутоновые фотографии по выверенной вручную разметке CVAT:
 # распрямление строк их заметно не портит, и в список они не нужны. Отделить фотографию
 # от штриха ПИКСЕЛЯМИ на этом материале не вышло — почему именно, замерено и записано
-# в докстринге ocr_utils/line_art_detection/features.py.
+# в докстринге ocr_utils/page_layout/line_art/features.py.
 #
 # SURYA. Ключ --use-surya-layout добавляет таблицы без линеек и многострочные формулы,
 # которых связная статистика не видит по построению. Он выключен: стоит около двух часов
@@ -58,7 +58,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg"
+INPUT_DIR="/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg"
 DB="$HOME/Projects/mts_markup/pack1_reviewed.sqlite"
 BASE_NAME="line_art_pack1"
 CSV="${BASE_NAME}.csv"

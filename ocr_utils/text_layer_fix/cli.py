@@ -289,6 +289,26 @@ def cache_path(out_dir: Path, pdf: str, page: int) -> Path:
     return core_cache_path(out_dir / "cache", pdf, page)
 
 
+def _prefill_layout(cache_root: Path, variant: str, paths: list[Path], by_pdf: dict[str, list[int]], jobs: int) -> None:
+    """Набить кэш surya по нужным страницам ДО пула: surya в пул не заворачивается (GPU один)."""
+    from ocr_utils.page_layout.image import Variant
+    from ocr_utils.page_layout.prefill import PrefillRequest, prefill
+    from ocr_utils.page_layout.surya.cache import SuryaCache
+    from ocr_utils.page_layout.surya.model import SuryaLayoutModel
+
+    kind = Variant(variant)
+    requests = [
+        PrefillRequest(path, kind, f"{path.stem}/p{index:04d}", index)
+        for path in paths
+        if path.is_file()
+        for index in by_pdf[path.name]
+    ]
+    stats = prefill(requests, SuryaCache(cache_root), SuryaLayoutModel(), jobs=jobs)
+    click.echo(
+        f"Кэш surya ({variant}): страниц {stats.requested}, уже было {stats.cached}, размечено {stats.done}, ошибок {stats.failed}"
+    )
+
+
 def _run_chunk(args: tuple) -> list[dict]:
     """Разбор пачки страниц одного PDF (в пуле): JSON в кэш, краткая запись на страницу."""
 
@@ -412,6 +432,21 @@ def _read_sample(out_dir: Path) -> list[dict]:
 @click.option("--lang", default="rus", show_default=True)
 @click.option("--no-free-text", is_flag=True, help="не искать боковой текст вне таблиц")
 @click.option("--skip-done/--redo", default=True, show_default=True)
+@click.option(
+    "--layout-cache",
+    "layout_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="корень кэша surya page_layout: таблицы, line art и цепочки повёрнутого текста — разбором page_layout "
+    "с surya; кэш набивается здесь же перед пулом (GPU в родителе). Без него — по одним пикселям.",
+)
+@click.option(
+    "--variant",
+    default="fr_geo",
+    show_default=True,
+    type=click.Choice(["fr_geo", "fr_nogeo"]),
+    help="какой это PDF FineReader (с коррекцией геометрии или без) — вариант картинки в кэше surya",
+)
 def run(
     pdf_dir,
     out_dir,
@@ -431,10 +466,14 @@ def run(
     lang,
     no_free_text,
     skip_done,
+    layout_cache_dir,
+    variant,
 ) -> None:
     """Зоны, вердикты и чтение по выборке страниц → cache/ и pages.csv, words.csv, zones.csv."""
     import fitz
     from tqdm import tqdm
+
+    from ocr_utils.page_layout.surya.source import SuryaSourceConfig
 
     from ocr_utils.text_layer_fix.db_models import KIND_LINE_ART_SCHEMA
     from ocr_utils.text_layer_fix.pages import (
@@ -493,7 +532,11 @@ def run(
         "lang": lang,
         "read_zones": True,
         "free_text": not no_free_text,
+        "variant": variant,
+        "layout": SuryaSourceConfig(layout_cache_dir) if layout_cache_dir is not None else None,
     }
+    if layout_cache_dir is not None:
+        _prefill_layout(layout_cache_dir, variant, [pdf_dir / name for name in sorted(by_pdf)], by_pdf, jobs)
     tasks = []
     for pdf_name, indices in sorted(by_pdf.items()):
         path = pdf_dir / pdf_name
@@ -903,7 +946,10 @@ EVAL_FIELDS = ["pdf", "page", "kind", "source", "box", "iou", "covered", "error"
 @click.option("--probe-db", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--markup-db", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "--layout-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), help="кэш разметки surya по сканам"
+    "--layout-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="корень кэша surya page_layout: вариант scan — источник surya по сканам, fr_nogeo — surya_render и "
+    "page_layout по рендеру (набивается здесь же перед пулом, GPU в родителе)",
 )
 @click.option(
     "--controls", default=200, show_default=True, type=int, help="контрольных страниц без эталона (ложные срабатывания)"
@@ -960,6 +1006,9 @@ def eval_lineart(nogeo_dir, out_dir, probe_db, markup_db, layout_dir, controls, 
     click.echo(
         f"страниц с эталоном: {len(truths)}, областей: {sum(len(t.boxes) for t in truths.values())}, контрольных: {len(control_pages)}, задач: {len(tasks)}, воркеров: {jobs}"
     )
+    if layout_dir:
+        by_pdf = {name: sorted(pages) for name, pages in wanted.items()}
+        _prefill_layout(layout_dir, "fr_nogeo", [nogeo_dir / name for name in sorted(by_pdf)], by_pdf, jobs)
     if jobs <= 1:
         outcomes = map(_eval_chunk, tasks)
     else:

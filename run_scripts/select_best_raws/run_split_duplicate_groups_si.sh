@@ -13,8 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 REPORT_FILE="si_85_7_9_чётная.txt"
-INPUT_DIR="/mnt/SYSTEM/raw/SI/186_FUJI - СИ 1985 07-09 четная/"
-OUTPUT_DIR="/mnt/SYSTEM/raw/SI/focus_groups_186_FUJI_СИ_1985_07-09_чётная"
+INPUT_DIR="/mnt/system/raw/SI/186_FUJI - СИ 1985 07-09 четная/"
+OUTPUT_DIR="/mnt/system/raw/SI/focus_groups_186_FUJI_СИ_1985_07-09_чётная"
 
 uv run split_duplicate_groups.py \
     "$REPORT_FILE" \

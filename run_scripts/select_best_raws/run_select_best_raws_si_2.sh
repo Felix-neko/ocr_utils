@@ -10,7 +10,7 @@ set -euo pipefail
 # репозитория — поднимаемся на два уровня.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/SYSTEM/raw/SI/237_FUJI SI 1989 1-3 чётная"
+INPUT_DIR="/mnt/system/raw/SI/237_FUJI SI 1989 1-3 чётная"
 REPORT_FILE="si_89_1_3 чётная.txt"
 echo "select_best_raws (report):"
 echo "  input  = $INPUT_DIR"

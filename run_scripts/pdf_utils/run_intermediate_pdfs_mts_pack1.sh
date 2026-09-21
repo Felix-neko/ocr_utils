@@ -55,7 +55,7 @@ echo "Оригиналы:  $BLURRED_DIR"
 echo "Заострённые: $SHARPENED_DIR"
 echo "Выход:      $FULL_PDF_DIR"
 echo "            $PICS_ONLY_PDF_DIR"
-df -h /mnt/SYSTEM | tail -1
+df -h /mnt/system | tail -1
 
 PDF_ARGS=(
     --db "$DB_REVIEWED"

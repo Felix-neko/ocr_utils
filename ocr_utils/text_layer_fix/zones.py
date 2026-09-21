@@ -367,42 +367,35 @@ def side_of(
     return best, letters
 
 
-def free_zones(
+def side_zones(
     gray600: np.ndarray,
-    exclude: list[Box],
+    chains: list[Box],
     kind: ZoneKind,
     dpi: int = 600,
     lang: str = LANGUAGES,
     with_side: bool = True,
-    inside: "Box | None" = None,
 ) -> list[RotatedZone]:
-    """Зоны бокового текста вне таблиц (по соседям глифов) с определением стороны.
+    """Зоны бокового текста из готовых цепочек глифов (``page_layout.rotated_text``) с определением стороны.
+
+    Цепочки ищет разбор страницы (Docstrum вне таблиц и растра); здесь — только сторона
+    поворота, за которой зовётся tesseract (две попытки на зону — дорого, поэтому отдельно).
 
     Args:
         gray600: Растр страницы.
-        exclude: Рамки, внутри которых искать не надо (таблицы, растр).
+        chains: Рамки цепочек в пикселях растра.
         kind: Какой вид присвоить найденным зонам.
         dpi: Разрешение растра.
         lang: Языки tesseract.
-        with_side: Звать ли tesseract за стороной (дорого: две попытки на зону).
-        inside: Искать только внутри этой рамки (подписи на конкретной схеме).
+        with_side: Звать ли tesseract за стороной.
 
     Returns:
         Зоны в пикселях растра.
     """
-    factor = dpi / WORK_DPI
-    small = downscale(gray600, factor)
-    stats = glyph_components(small, WORK_DPI, [b.scaled(1.0 / factor) for b in exclude])
     height, width = gray600.shape[:2]
     zones: list[RotatedZone] = []
-    for small_box in cluster_rotated(stats, WORK_DPI):
-        box = small_box.scaled(factor).clipped(width, height)
-        if inside is not None and (
-            box.x0 < inside.x0 - box.width
-            or box.x1 > inside.x1 + box.width
-            or box.y0 < inside.y0 - box.height
-            or box.y1 > inside.y1 + box.height
-        ):
+    for chain in chains:
+        box = chain.clipped(width, height)
+        if box.area <= 0:
             continue
         rotate, letters = (None, {})
         if with_side:

@@ -10,9 +10,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../scan_markup/pack1/common.sh"
 
 # Выход прогона — на SSD: JSON на страницу (cache/), metrics.csv, отчёт, картинки pairs/<год>/.
 # Подпапка прогона — версия детектора, чтобы прошлый прогон оставался для сравнения;
-# перекрыть можно переменной окружения: GEOMETRY_RUN_DIR=... ./run_pack1.sh
-GEOMETRY_REGRESSION_ROOT="/mnt/SYSTEM/raw/mts/pack1_geometry_regression"
-GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v12}"
+# перекрыть можно переменной окружения: GEOMETRY_RUN_DIR=... ./run_pack1.sh.
+# Сами GEOMETRY_REGRESSION_ROOT и GEOMETRY_RUN_DIR заданы в common.sh пака: тот же кэш читает
+# сборщик финальных PDF (run_scripts/scan_markup/pack1/run_final_pdfs.sh).
 
 # Эталон: папка валидации с fr_correction_bad.csv и fr_correction_good.csv (TSV, вердикты
 # пользователя по картинкам «было | стало»); пополнять именно их.

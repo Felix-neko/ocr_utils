@@ -31,7 +31,12 @@ from ocr_utils.text_layer_fix import mm_to_px
 from ocr_utils.text_layer_fix.raster import page_raster, render_gray
 from ocr_utils.text_layer_fix.zones import detect_tables
 
-SOURCES = ("figures", "detector", "ink", "surya", "union")
+# Источники: figures — картинки FineReader; detector — схема/рисунок детектора таблиц (без surya);
+# ink — связные пятна line_art_detection по полному растру; surya — Figure/Picture из кэша по СКАНАМ
+# (сдвиг на поля); surya_render — Figure/Picture surya по РЕНДЕРУ no-geo (кэш fr_nogeo);
+# page_layout — единый детектор page_layout (детектор таблиц + surya по рендеру + пятна, вне таблиц);
+# union — объединение первых четырёх (как до page_layout).
+SOURCES = ("figures", "detector", "ink", "surya", "surya_render", "page_layout", "union")
 MATCH_IOU = 0.5
 COVER_SHARE = 0.5
 
@@ -111,7 +116,12 @@ def _merge_overlapping(boxes: list[Box]) -> list[Box]:
 
 
 def source_boxes(
-    page: fitz.Page, gray: np.ndarray, dpi: int, cached: "LayoutBlocks | None", scan_size: "tuple[int, int] | None"
+    page: fitz.Page,
+    gray: np.ndarray,
+    dpi: int,
+    cached: "LayoutBlocks | None",
+    scan_size: "tuple[int, int] | None",
+    layout=None,
 ) -> dict[str, list[Box]]:
     """Рамки line art страницы от каждого источника (пиксели растра страницы).
 
@@ -121,6 +131,7 @@ def source_boxes(
         dpi: Разрешение растра.
         cached: Разметка surya полосы из кэша (в пикселях скана) или None.
         scan_size: Размер скана ``(width, height)`` для масштабирования разметки surya.
+        layout: Готовый ``page_layout.PageLayout`` по рендеру этой страницы или None.
 
     Returns:
         Словарь ``источник → рамки``, включая объединение ``union``.
@@ -141,6 +152,14 @@ def source_boxes(
         layout = cached.scaled_to(scan_size[0], scan_size[1])
         surya = [b.box.shifted(dx, dy).clipped(width, height) for b in layout.blocks if b.label in FIGURE_LABELS]
     result["surya"] = surya
+    result["surya_render"] = []
+    result["page_layout"] = []
+    if layout is not None:
+        if layout.raw_surya_content is not None:
+            result["surya_render"] = [
+                b.box.clipped(width, height) for b in layout.raw_surya_content.by_label(FIGURE_LABELS)
+            ]
+        result["page_layout"] = [r.box.clipped(width, height) for r in layout.line_arts]
     result["union"] = _merge_overlapping([b for name in ("figures", "detector", "ink", "surya") for b in result[name]])
     return result
 
@@ -254,15 +273,32 @@ def score_page(truth: list[Box], predictions: dict[str, list[Box]], scores: dict
 def evaluate_page(
     doc: fitz.Document, index: int, truth: "TruthPage | None", layout_dir: "Path | None", rel_path: "str | None"
 ) -> tuple[dict[str, list[Box]], list[Box]]:
-    """Предсказания всех источников и эталон одной страницы no-geo PDF."""
+    """Предсказания всех источников и эталон одной страницы no-geo PDF.
+
+    ``layout_dir`` — корень кэша surya page_layout: вариант ``scan`` даёт источник ``surya``
+    (по сканам, сдвиг на поля), вариант ``fr_nogeo`` — ``surya_render`` и ``page_layout`` (по
+    рендеру; кэш набивается заранее, промах — без surya).
+    """
+    from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
+    from ocr_utils.page_layout.image import PageImage, SourceStat
+    from ocr_utils.page_layout.surya.source import OnMiss, SuryaSourceConfig
+
     page = doc[index]
     raster = page_raster(page)
     gray = render_gray(page, raster)
+    layout = None
+    if layout_dir:
+        path = Path(doc.name)
+        image = PageImage.from_array(
+            gray, int(round(raster.dpi)), Variant.FR_NOGEO, f"{path.stem}/p{index:04d}", SourceStat.of(path, index)
+        )
+        surya = SuryaSourceConfig(Path(layout_dir), OnMiss.SKIP).open()
+        layout = PageLayout(image, {Find.TABLES, Find.LINE_ART}, LayoutOptions()).process(surya)
     cached = (
         SuryaCache(layout_dir, readonly=True).blocks_of(Variant.SCAN, scan_cache_name(rel_path))
         if (layout_dir and rel_path)
         else None
     )
     scan_size = (truth.scan_width, truth.scan_height) if truth else None
-    predictions = source_boxes(page, gray, int(round(raster.dpi)), cached, scan_size)
+    predictions = source_boxes(page, gray, int(round(raster.dpi)), cached, scan_size, layout)
     return predictions, list(truth.boxes) if truth else []

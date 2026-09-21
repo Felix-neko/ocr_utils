@@ -21,6 +21,8 @@ from ocr_utils.final_pdfs import VERSION
 from ocr_utils.final_pdfs.plan import IssuePlan, PageDecision, PageSource, decide_source
 from ocr_utils.final_pdfs.sources import IssuePair
 from ocr_utils.geometry_regression.cache import verdict_for_page
+from ocr_utils.geometry_regression.metrics import Params as GeometryParams
+from ocr_utils.page_layout.surya.source import SuryaSourceConfig
 from ocr_utils.geometry_regression.scoring import Thresholds
 from ocr_utils.text_layer_fix import VERSION as TEXT_LAYER_VERSION
 from ocr_utils.text_layer_fix.cache import cache_path, load_page, save_page
@@ -50,6 +52,10 @@ class AnalysisParams:
     lang: str = "rus"
     free_text: bool = True
     skip_done: bool = True
+    # Корень кэша surya page_layout: детектор геометрии (рамки по fr_nogeo) и правка слоя (по
+    # выбранной странице) берут блоки из него; в воркере промах — ошибка страницы, кэш набивает
+    # стадия 0 в родителе. ``None`` — разбор без surya.
+    layout_cache_dir: Path | None = None
 
     @property
     def pages_dir(self) -> Path:
@@ -175,7 +181,10 @@ def decide_page(
         source, reason = decide_source(True, None)
         return PageDecision(source, reason)
     stem = Path(pair.geo).stem
-    result = verdict_for_page(params.geometry_run_dir, stem, index + 1, geo_doc, nogeo_doc, params.thresholds())
+    geometry_params = GeometryParams(layout_cache_dir=params.layout_cache_dir)
+    result = verdict_for_page(
+        params.geometry_run_dir, stem, index + 1, geo_doc, nogeo_doc, params.thresholds(), geometry_params
+    )
     source, reason = decide_source(False, result.verdict.verdict)
     return PageDecision(
         source,
@@ -225,6 +234,10 @@ def analyse_chunk(job: AnalysisJob) -> list[PageAnalysis]:
                         allowed=tuple(params.allowed_rotations),
                         lang=params.lang,
                         free_text=params.free_text,
+                        variant="fr_geo" if decision.source is PageSource.GEO else "fr_nogeo",
+                        layout=(
+                            SuryaSourceConfig(params.layout_cache_dir) if params.layout_cache_dir is not None else None
+                        ),
                         known=_known_words(),
                     )
                     payload = process_page(source_doc, pdfs[decision.source], index, options).to_json()

@@ -33,4 +33,5 @@ uv run python -m research.geometry_regression run \
     --reserve-cpu-cores "$RESERVE_CPU_CORES" \
     --stroke-min-mm 4 \
     --line-min-mm 25 \
+    --layout-cache "$LAYOUT_CACHE_DIR" \
     "$@"

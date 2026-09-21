@@ -7,7 +7,8 @@
 #         иллюстраций, печати уже закрашены), $DB_REVIEWED (только чтение), $GEOMETRY_RUN_DIR/cache.
 # Пишет:  $FINAL_PDF_DIR/{год}/{год}_{выпуск}.pdf; $FINAL_WORK_DIR/{pages/<pdf>/pNNNN.json, analysis.csv,
 #         pages.csv, summary.csv, preview/}.
-# Стадии: A — анализ страниц в пуле (tesseract по ячейкам и зонам, ~2 с на страницу на воркер:
+# Стадии: 0 — кэш surya page_layout по страницам обеих PDF (GPU в родителе, ~0.7 с на страницу,
+#         разово ~4.7 ч на пак; повтор — из кэша); A — анализ страниц в пуле (tesseract по ячейкам и зонам, ~2 с на страницу на воркер:
 #         ~1 ч на пак при 12 воркерах); B — surya по ненадёжным зонам в родителе (GPU, десятки минут);
 #         C — сборка выпусков (~20 с на выпуск, 8 воркеров — упор в диск). Всё идемпотентно.
 # Числа: иллюстрации 300 dpi, JPEG 75 (решение пользователя 2026-09-06), Gaussian σ = 0.05 мм
@@ -40,6 +41,7 @@ uv run python -m ocr_utils.final_pdfs run \
     --pack-name "$PACK_NAME" \
     --work-dir "$FINAL_WORK_DIR" \
     --geometry-run-dir "$GEOMETRY_RUN_DIR" \
+    --layout-cache "$LAYOUT_CACHE_DIR" \
     --picture-dpi 300 \
     --jpeg-quality 75 \
     --descreen-sigma-mm 0.05 \

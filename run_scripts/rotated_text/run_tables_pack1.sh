@@ -23,7 +23,7 @@ source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 set -m
 trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
 
-OUT_DIR="/mnt/SYSTEM/raw/mts/pack1_rotated_tables"
+OUT_DIR="/mnt/system/raw/mts/pack1_rotated_tables"
 
 ARGS=(
     run

@@ -21,7 +21,7 @@ set -euo pipefail
 # Скрипт лежит в run_scripts/<подсистема>/, пути внутри отсчитываются от корня репозитория.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/SYSTEM/raw/SI/186_FUJI - СИ 1985 07-09 четная"
+INPUT_DIR="/mnt/system/raw/SI/186_FUJI - СИ 1985 07-09 четная"
 OUT_DIR="defocus_compare_186_fuji"
 
 # combo идёт последним: он считает сразу две метрики (edge_width + reblur) и потому

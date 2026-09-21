@@ -12,7 +12,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../scan_markup/pack1/common.sh"
 # research/external_ocr_models (pack1_external_ocr): у боевого прогона своя схема ответа и своя
 # нумерация промптов, смешивать их с пробниками нельзя. Внутри — та же раскладка
 # {год}/{выпуск}/полоса.{md,json,meta.json}, что у входа, плюс toc.json/toc.md на выпуск.
-EXTERNAL_OCR_SERVICES_ROOT="/mnt/SYSTEM/raw/mts/pack1_external_ocr_services"
+EXTERNAL_OCR_SERVICES_ROOT="/mnt/system/raw/mts/pack1_external_ocr_services"
 EXTERNAL_OCR_SERVICES_OUT="$EXTERNAL_OCR_SERVICES_ROOT/out"
 # Сырые ответы модели, промпты и отправленные тайлы — по полосе; полезно при разборе сбоев
 # и при проверке сетки тайлов. Весит примерно как вход в JPEG 2200 px (~0.6 МБ на полосу).

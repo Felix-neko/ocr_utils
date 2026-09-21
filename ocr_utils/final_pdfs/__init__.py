@@ -36,4 +36,4 @@ tesseract; JSON на страницу в ``--work-dir``); B — surya в род�
 from __future__ import annotations
 
 # Версия логики сборщика: входит в JSON анализа страницы; при смене старые записи не подхватываются.
-VERSION = 1
+VERSION = 2  # v2: структура страницы (геометрия, слой) — единым разбором page_layout с surya

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -26,15 +27,7 @@ from ocr_utils.page_layout.rotated_text.docstrum import glyph_components
 from ocr_utils.text_layer_fix.ocr import ZoneText, read_zone
 from ocr_utils.text_layer_fix.raster import downscale, page_raster, render_gray
 from ocr_utils.text_layer_fix.text_layer import TextLayer, load_layer
-from ocr_utils.text_layer_fix.zones import (
-    RotatedZone,
-    TableInfo,
-    ZoneKind,
-    analyse_table,
-    detect_tables,
-    free_zones,
-    upright_zones,
-)
+from ocr_utils.text_layer_fix.zones import RotatedZone, TableInfo, ZoneKind, analyse_table, side_zones, upright_zones
 
 # Прямая ячейка считается «с краской», если внутри неё не меньше стольких компонент размера глифа.
 MIN_GLYPHS_FOR_MISSING = 3
@@ -49,6 +42,11 @@ class Options:
     read_zones: bool = True
     # Искать боковой текст вне таблиц (docstrum): подписи на схемах и отдельный текст.
     free_text: bool = True
+    # Какой это PDF FineReader — с коррекцией геометрии или без: вариант картинки в кэше surya.
+    variant: str = "fr_geo"
+    # Источник surya для разбора ``page_layout`` (кэш только для чтения в воркере); ``None`` —
+    # разбор без surya (детектор таблиц + связные пятна).
+    layout: "SuryaSourceConfig | None" = None  # ocr_utils.page_layout.surya.SuryaSourceConfig
     # Словарная проверка для слов в непрочитанных зонах (``classify_words``); ставится воркером.
     known: "Callable[[str], bool] | None" = None
 
@@ -148,6 +146,31 @@ def missing_upright_cells(
     return zones
 
 
+def page_structure(doc: fitz.Document, index: int, gray: np.ndarray, dpi: int, options: Options):
+    """Разбор структуры страницы (``page_layout``) по растру PDF: таблицы, line art, повёрнутые цепочки.
+
+    Args:
+        doc: Документ PyMuPDF.
+        index: Номер страницы с нуля.
+        gray: Растр страницы (по нему считают детекторы; его же в родном разрешении отдаёт PDF).
+        dpi: Разрешение растра.
+        options: ``variant`` и ``layout`` — вариант картинки и источник surya.
+
+    Returns:
+        Готовый :class:`~ocr_utils.page_layout.analysis.PageLayout`.
+    """
+    from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
+    from ocr_utils.page_layout.image import PageImage, SourceStat, Variant
+
+    path = Path(doc.name) if doc.name else None
+    source = SourceStat.of(path, index) if path is not None and path.is_file() else None
+    cache_name = f"{path.stem}/p{index:04d}" if path is not None else None
+    image = PageImage.from_array(gray, dpi, Variant(options.variant), cache_name, source)
+    surya = options.layout.open() if options.layout is not None else None
+    layout_options = LayoutOptions(use_surya=surya is not None)
+    return PageLayout(image, {Find.TABLES, Find.LINE_ART, Find.ROTATED_TEXT}, layout_options).process(surya)
+
+
 def process_page(doc: fitz.Document, pdf: "pikepdf.Pdf | None", index: int, options: Options) -> PageResult:
     """Полный разбор одной страницы.
 
@@ -175,21 +198,23 @@ def process_page(doc: fitz.Document, pdf: "pikepdf.Pdf | None", index: int, opti
         result.layer_words = sum(1 for w in layer.words if w.text.strip())
         result.unmatched, result.offpage = layer.unmatched_glyphs, layer.offpage_glyphs
 
-        found = detect_tables(gray, int(round(raster.dpi)))
+        # Структура страницы — тем же разбором, что на detect и в детекторе порчи геометрии:
+        # таблицы, line art (схемы детектора таблиц + surya + пятна) и цепочки повёрнутого текста.
+        layout = page_structure(doc, index, gray, int(round(raster.dpi)), options)
+        found = layout.table_findings()
         zones: list[RotatedZone] = []
-        art_boxes: list[Box] = list(figures)
+        art_boxes: list[Box] = list(figures) + [r.box for r in layout.line_arts]
         for i, table in enumerate(found):
             if table.kind == KIND_TABLE:
                 info, cell_zones = analyse_table(gray, i, table, int(round(raster.dpi)), options.allowed, options.lang)
                 result.tables.append(info)
                 zones.extend(cell_zones)
-            else:
-                result.tables.append(TableInfo(i, table.box, table.kind))
-                art_boxes.append(table.box)
+        for region in layout.line_arts:
+            result.tables.append(TableInfo(len(result.tables), region.box, str(region.info.get("kind", "рисунок"))))
         zones.extend(missing_upright_cells(gray, result.tables, layer, px, raster.dpi))
         if options.free_text:
-            exclude = [t.box for t in result.tables if t.kind == KIND_TABLE]
-            for zone in free_zones(gray, exclude, ZoneKind.STANDALONE, int(round(raster.dpi)), options.lang):
+            chains = [r.box for r in layout.rotated_text_not_in_tables_regions]
+            for zone in side_zones(gray, chains, ZoneKind.STANDALONE, int(round(raster.dpi)), options.lang):
                 if any(_inside(zone.box, art, max(zone.box.width, zone.box.height)) for art in art_boxes):
                     zone.kind = ZoneKind.LINE_ART_LABEL
                 zones.append(zone)
