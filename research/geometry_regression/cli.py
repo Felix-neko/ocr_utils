@@ -11,14 +11,14 @@ import json
 import logging
 import multiprocessing
 import os
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
 import click
 
-from ocr_utils.geometry_regression import VERSION
-from ocr_utils.geometry_regression.cache import cache_path, load_page_cache, measure_page, save_page_cache
+from ocr_utils.geometry_regression.cache import cache_path
 from ocr_utils.geometry_regression.metrics import Params
 from ocr_utils.geometry_regression.render import PdfPair, pair_pdfs, render_gray, to_work
 from research.geometry_regression.report import (
@@ -31,6 +31,7 @@ from research.geometry_regression.report import (
     write_csv,
 )
 from ocr_utils.geometry_regression.scoring import Thresholds
+from research.geometry_regression.v15.engine import ENGINES, get_engine
 
 logger = logging.getLogger("research.geometry_regression")
 
@@ -53,9 +54,10 @@ def _measure_chunk(args: tuple) -> list[dict]:
     """Одна пачка страниц одного выпуска; возвращает записи для CSV."""
     import fitz
 
-    pair_dict, pages, out_dir, params_dict, skip_done = args
+    pair_dict, pages, out_dir, params_dict, skip_done, engine_name = args
     pair = PdfPair(**pair_dict)
     params = Params(**params_dict)
+    engine = get_engine(engine_name)
     out_dir = Path(out_dir)
     results = []
     with fitz.open(pair.geo) as geo, fitz.open(pair.nogeo) as nogeo:
@@ -63,13 +65,13 @@ def _measure_chunk(args: tuple) -> list[dict]:
             path = cache_path(out_dir, pair.name, page)
             record = {"pdf": pair.name, "page": page, "metrics": {}, "error": ""}
             try:
-                cached = load_page_cache(path) if skip_done else None
+                cached = engine.load_page_cache(path) if skip_done else None
                 if cached is not None:
                     record["metrics"] = cached["metrics"]
                     results.append(record)
                     continue
-                measure = measure_page(geo, nogeo, page, params)
-                save_page_cache(path, measure)
+                measure = engine.measure_page(geo, nogeo, page, params)
+                engine.save_page_cache(path, measure)
                 record["metrics"] = measure.metrics
             except Exception as error:  # страница не должна валить прогон
                 record["error"] = f"{type(error).__name__}: {error}"
@@ -191,6 +193,14 @@ def effective_jobs(jobs: int, reserve_cpu_cores: int) -> int:
     help="корень кэша surya page_layout: рамки таблиц и line art — разбором page_layout по варианту fr_nogeo; "
     "перед пулом кэш набивается здесь же (GPU в родителе). Без него — по одним пикселям.",
 )
+@click.option(
+    "--engine",
+    "engine_name",
+    default="core",
+    show_default=True,
+    type=click.Choice(sorted(ENGINES)),
+    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд research.geometry_regression.v15",
+)
 def run(
     geo_dir,
     nogeo_dir,
@@ -204,10 +214,12 @@ def run(
     stroke_min_mm,
     line_min_mm,
     layout_cache_dir,
+    engine_name,
 ) -> None:
     """Померить все пары страниц → JSON на страницу и metrics.csv."""
     from tqdm import tqdm
 
+    engine = get_engine(engine_name)
     jobs = effective_jobs(jobs, reserve_cpu_cores)
     pairs, notes = pair_pdfs(geo_dir, nogeo_dir)
     if only:
@@ -236,7 +248,8 @@ def run(
                 "geo_dir": str(geo_dir),
                 "nogeo_dir": str(nogeo_dir),
                 "params": {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(params).items()},
-                "version": VERSION,
+                "version": engine.version,
+                "engine": engine.name,
                 "notes": notes,
             },
             ensure_ascii=False,
@@ -248,10 +261,21 @@ def run(
     for pair in pairs:
         wanted = _parse_pages(pages, pair.pages)
         for start in range(0, len(wanted), CHUNK_PAGES):
-            tasks.append((asdict(pair), wanted[start : start + CHUNK_PAGES], str(out_dir), asdict(params), skip_done))
+            tasks.append(
+                (
+                    asdict(pair),
+                    wanted[start : start + CHUNK_PAGES],
+                    str(out_dir),
+                    asdict(params),
+                    skip_done,
+                    engine.name,
+                )
+            )
     total_pages = sum(len(t[1]) for t in tasks)
-    click.echo(f"PDF-пар: {len(pairs)}, страниц: {total_pages}, задач: {len(tasks)}, воркеров: {jobs}")
-    thresholds = Thresholds()
+    click.echo(
+        f"PDF-пар: {len(pairs)}, страниц: {total_pages}, задач: {len(tasks)}, воркеров: {jobs}, движок: {engine.name}"
+    )
+    thresholds = engine.thresholds()
     rows: list[PageRow] = []
     if jobs <= 1:
         outcomes = map(_measure_chunk, tasks)
@@ -328,6 +352,14 @@ def _write_pair(args: tuple) -> str:
 @click.option("--limit-pairs", type=int, help="не больше стольких картинок (по убыванию score)")
 @click.option("--jobs", default=8, show_default=True, type=int)
 @click.option("--list-thresholds", is_flag=True)
+@click.option(
+    "--engine",
+    "engine_name",
+    default="core",
+    show_default=True,
+    type=click.Choice(sorted(ENGINES)),
+    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд research.geometry_regression.v15",
+)
 def report(
     out_dir,
     thr,
@@ -343,11 +375,12 @@ def report(
     limit_pairs,
     jobs,
     list_thresholds,
+    engine_name,
 ) -> None:
     """Перефлаговать metrics.csv, собрать сводку и картинки «было | стало» по вердиктам."""
     from tqdm import tqdm
 
-    thresholds = Thresholds.parse(tuple(thr), hard, min_gain, ratio)
+    thresholds = get_engine(engine_name).thresholds.parse(tuple(thr), hard, min_gain, ratio)
     if list_thresholds:
         click.echo(thresholds.describe())
         return
@@ -385,6 +418,117 @@ def report(
             f"стало: {row.verdict}, порча {row.score:.2f} ({row.reason}), выигрыш {row.gain:.2f} ({row.gain_reason})"
         )
         tasks.append((geo, nogeo, row.pdf, row.page, culprit, field_raw, str(out_path), caption))
+    if jobs <= 1 or len(tasks) <= 1:
+        outcomes = map(_write_pair, tasks)
+    else:
+        pool = ProcessPoolExecutor(max_workers=jobs, mp_context=multiprocessing.get_context("forkserver"))
+        outcomes = pool.map(_write_pair, tasks)
+    errors = [e for e in tqdm(outcomes, total=len(tasks), desc="пары", unit="стр") if e]
+    click.echo(f"Картинок: {len(tasks) - len(errors)} в {pairs_dir}; ошибок: {len(errors)}")
+    for error in errors[:10]:
+        click.echo(f"  {error}")
+
+
+VERDICT_RANK = {"ok": 0, "mixed": 1, "bad": 2}
+
+
+@main.command()
+@click.option("--old-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--new-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--old-engine", default="core", show_default=True, type=click.Choice(sorted(ENGINES)))
+@click.option("--new-engine", default="v15", show_default=True, type=click.Choice(sorted(ENGINES)))
+@click.option("--thr", multiple=True, help="перекрытие порога НОВОГО движка: имя=число")
+@click.option("--csv-out", type=click.Path(dir_okay=False, path_type=Path), help="CSV смен вердикта")
+@click.option(
+    "--pairs-dir", type=click.Path(file_okay=False, path_type=Path), help="картинки changed/<старый>_to_<новый>/"
+)
+@click.option("--labels", type=click.Path(exists=True, path_type=Path), help="папка валидации: метка в CSV")
+@click.option("--jobs", default=8, show_default=True, type=int)
+def diff(old_dir, new_dir, old_engine, new_engine, thr, csv_out, pairs_dir, labels, jobs) -> None:
+    """Смены вердикта между двумя прогонами: CSV и пары «было | стало» по видам смен."""
+    import csv
+
+    from tqdm import tqdm
+
+    old = get_engine(old_engine)
+    new = get_engine(new_engine)
+    old_rows = read_csv(old_dir / "metrics.csv")
+    new_rows = read_csv(new_dir / "metrics.csv")
+    reflag(old_rows, old.thresholds())
+    reflag(new_rows, new.thresholds.parse(tuple(thr)))
+    label_map = load_labels(labels) if labels else {}
+    by_key = {r.key: r for r in old_rows}
+    changed = []
+    for row in new_rows:
+        before = by_key.get(row.key)
+        if before is None or before.error or row.error or before.verdict == row.verdict:
+            continue
+        changed.append((before, row))
+    kinds = Counter(f"{b.verdict}_to_{a.verdict}" for b, a in changed)
+    total = sum(1 for r in new_rows if not r.error)
+    click.echo(
+        f"Страниц: {total}; смен вердикта: {len(changed)} — " + ", ".join(f"{k}: {n}" for k, n in kinds.most_common())
+    )
+    if csv_out:
+        csv_out.parent.mkdir(parents=True, exist_ok=True)
+        with csv_out.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "pdf",
+                    "page",
+                    "label",
+                    "old",
+                    "old_score",
+                    "old_reason",
+                    "old_gain",
+                    "new",
+                    "new_score",
+                    "new_reason",
+                    "new_gain",
+                    "new_flags",
+                ]
+            )
+            for b, a in sorted(changed, key=lambda pair: pair[1].key):
+                label = label_map.get(a.key, ("", ""))[0]
+                flags = ";".join(f"{k}:{v:.2f}" for k, v in a.flags.items())
+                writer.writerow(
+                    [
+                        a.pdf,
+                        a.page,
+                        label,
+                        b.verdict,
+                        f"{b.score:.2f}",
+                        b.reason,
+                        f"{b.gain:.2f}",
+                        a.verdict,
+                        f"{a.score:.2f}",
+                        a.reason,
+                        f"{a.gain:.2f}",
+                        flags,
+                    ]
+                )
+        click.echo(f"CSV: {csv_out}")
+    if pairs_dir is None:
+        return
+    run_info = json.loads((new_dir / "run.json").read_text(encoding="utf-8"))
+    tasks = []
+    for b, a in changed:
+        # Рамка виновника — от того движка, чей вердикт хуже: он и объясняет смену.
+        worse, worse_dir = (a, new_dir) if VERDICT_RANK[a.verdict] >= VERDICT_RANK[b.verdict] else (b, old_dir)
+        culprit = None
+        if worse.flags:
+            cache = json.loads(cache_path(worse_dir, worse.pdf, worse.page).read_text(encoding="utf-8"))
+            culprit = cache.get("culprits", {}).get(max(worse.flags, key=worse.flags.get))
+        name = f"{a.pdf}_p{a.page:03d}_{b.verdict}_d{b.score:.2f}_{b.reason or 'none'}__{a.verdict}_d{a.score:.2f}_g{a.gain:.2f}_{a.reason or 'none'}.jpg"
+        out_path = pairs_dir / f"{b.verdict}_to_{a.verdict}" / name
+        geo = str(Path(run_info["geo_dir"]) / f"{a.pdf}.pdf")
+        nogeo = str(Path(run_info["nogeo_dir"]) / f"{a.pdf}.pdf")
+        caption = (
+            f"стало: {old.name} {b.verdict} {b.score:.2f} ({b.reason}) / {b.gain:.2f} → "
+            f"{new.name} {a.verdict} {a.score:.2f} ({a.reason}) / {a.gain:.2f} ({a.gain_reason})"
+        )
+        tasks.append((geo, nogeo, a.pdf, a.page, culprit, None, str(out_path), caption))
     if jobs <= 1 or len(tasks) <= 1:
         outcomes = map(_write_pair, tasks)
     else:
@@ -594,15 +738,26 @@ def vlm_report(out_dir, labels, md_report) -> None:
     type=click.Path(file_okay=False, path_type=Path),
     help="корень кэша surya page_layout; промахи досчитываются моделью прямо здесь и пишутся в кэш",
 )
-def regress(geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, line_min_mm, layout_cache_dir) -> None:
+@click.option(
+    "--engine",
+    "engine_name",
+    default="core",
+    show_default=True,
+    type=click.Choice(sorted(ENGINES)),
+    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд research.geometry_regression.v15",
+)
+def regress(
+    geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, line_min_mm, layout_cache_dir, engine_name
+) -> None:
     """Регрессия на эталоне: вердикты прошлого прогона против текущего кода, страница за страницей."""
     import fitz
 
     from ocr_utils.geometry_regression.cache import surya_source_for
 
+    engine = get_engine(engine_name)
     label_map = load_labels(labels)
     old_rows = {r.key: r for r in read_csv(old_dir / "metrics_flagged.csv")} if old_dir else {}
-    thresholds = Thresholds.parse(tuple(thr))
+    thresholds = engine.thresholds.parse(tuple(thr))
     params = Params(stroke_min_mm=stroke_min_mm, line_min_mm=line_min_mm, layout_cache_dir=layout_cache_dir)
     surya = None
     if layout_cache_dir is not None:
@@ -613,7 +768,7 @@ def regress(geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, 
     hits_old = hits_new = 0
     for (pdf, page), (label, _) in sorted(label_map.items()):
         with fitz.open(nogeo_dir / f"{pdf}.pdf") as nogeo, fitz.open(geo_dir / f"{pdf}.pdf") as geo:
-            measure = measure_page(geo, nogeo, page, params, surya)
+            measure = engine.measure_page(geo, nogeo, page, params, surya)
         new = thresholds.apply(measure.metrics)
         old = old_rows.get((pdf, page))
         ok_new = (new.verdict == "bad") == (label == "bad")

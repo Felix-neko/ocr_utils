@@ -163,6 +163,8 @@ def markdown_report(
     rows: list[PageRow], thresholds: Thresholds, labels: dict | None, out_dir: Path, top: int = 25
 ) -> str:
     good = [r for r in rows if not r.error]
+    reasons = getattr(thresholds, "reasons", {name: DEFAULT_THRESHOLDS[name][1] for name in DEFAULT_THRESHOLDS})
+    unforgivable = getattr(thresholds, "unforgivable", UNFORGIVABLE)
     flagged = [r for r in good if r.score >= 1.0]
     bad = [r for r in good if r.verdict == "bad"]
     mixed = [r for r in good if r.verdict == "mixed"]
@@ -179,7 +181,7 @@ def markdown_report(
         "| метрика | порог | причина | непрощаемая |",
         "|---|---|---|---|",
         *(
-            f"| `{name}` | {thresholds.values[name]:g} | {DEFAULT_THRESHOLDS[name][1]} | {'да' if name in UNFORGIVABLE else ''} |"
+            f"| `{name}` | {thresholds.values[name]:g} | {reasons.get(name, '')} | {'да' if name in unforgivable else ''} |"
             for name in thresholds.values
         ),
         "",
