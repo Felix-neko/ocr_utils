@@ -29,3 +29,5 @@ JSON другой `VERSION` игнорируется и переписывает
 | `field.py`, `strokes.py`, `bend.py`, `lines.py`, `stretch.py`, `edges.py`, `regions.py` | поле смещений, штрихи, изгиб линий, строки, растяжение, кромки, области |
 
 Тесты — `tests/ocr_utils/geometry_regression` (синтетические страницы).
+
+С v13 (2026-09-21) рамки таблиц и line art, внутри которых тайлы поля ищутся 1:1 и штрихам разрешена толщина рисунка, даёт `ocr_utils.page_layout` (`regions.layout_boxes`: детектор таблиц + surya по варианту `fr_nogeo` из кэша + связные пятна; формулы surya `Equation` исключены). Кэш surya набивается перед пулом (`research.geometry_regression run --layout-cache`, `final_pdfs` стадия 0). Регрессия на эталоне v12→v13: 63/70, единственная смена вердикта — 1975_07 с.44.

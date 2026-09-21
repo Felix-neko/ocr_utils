@@ -11,7 +11,7 @@
 | Шаг | Скрипт | Команда `python -m …` | Читает | Пишет | Замечания |
 |---|---|---|---|---|---|
 | 0 | `run_0_validate.sh` | `ocr_utils.scan_markup validate` | `CASES_DIR`, `PACK_DIR`, `DB` | `VALIDATE_DIR` | Калибровка порогов на ~100 файлах (полминуты) вместо полного прогона; нужен GPU; `--control 40` ловит обратную ошибку. Гнать ПЕРЕД шагом 1. |
-| 1 | `run_1_detect.sh` | `scan_markup detect`, затем `scan_markup toc` | `PACK_DIR` (~0.5 ТБ), `LAYOUT_CACHE_DIR` | `DB`, `DEBUG_DIR`, кэш layout | Первичный детектор — surya (GPU), пиксельные проверки в 16 воркерах; ~2.2 ч. Идемпотентен через `--skip-detected`. Ориентация, таблицы и крупный штрих (`stroke_*`, детектор `line_art_detection` по бинаризованной копии 1/4) считаются этим же проходом, чтобы не читать пак дважды. `toc` идёт после `detect` (берёт дерево выпусков из базы) и с `SHARPENED_DIR`, если тот есть. |
+| 1 | `run_1_detect.sh` | `scan_markup detect`, затем `scan_markup toc` | `PACK_DIR` (~0.5 ТБ), `LAYOUT_CACHE_DIR` | `DB`, `DEBUG_DIR`, кэш layout | Первичный детектор — surya (GPU), пиксельные проверки в 16 воркерах; ~2.2 ч. Идемпотентен через `--skip-detected`. Ориентация, таблицы, line art и повёрнутый текст (разбор `page_layout`, те же детекторы, что у сборки PDF; у каждого семейства своя версия) считаются этим же проходом, чтобы не читать пак дважды. `toc` идёт после `detect` (берёт дерево выпусков из базы) и с `SHARPENED_DIR`, если тот есть. |
 | 2 | `run_2_to_cvat.sh` | `scan_markup to-cvat` | `DB`, `PACK_DIR` | `SHARE_ROOT`, задачи CVAT | Требует поднятого CVAT и `SHARE_ROOT` внутри `IMAGES_DIR` из `docker/.env`. Последнее чтение оригиналов. `--annotator user` обязателен. `--force-annotations` затирает ручную правку; `--recreate-stale` — только после шага 3. `--append-kinds`/`--append-tags` дозаливают PATCH-ем, не трогая ручное. |
 | — | **ручной шаг** | — | CVAT | CVAT | Разметчик правит рамки растра, рисует кистью печати и надписи, ставит теги оглавления. Недели работы, на диске больше нигде нет. |
 | 3 | `run_3_from_cvat.sh` | `scan_markup from-cvat` | `DB`, CVAT | `DB_REVIEWED` | Отдельный файл, автодетекция в `DB` остаётся нетронутой. Оригиналы не читаются. Полезно прогонять «просто так» как снимок разметки. |
@@ -20,7 +20,7 @@
 | 6 | `run_6_compare_masks.sh` | `scan_cleanup compare-masks` | `DB_REVIEWED`, `PACK_DIR` | `COMPARE_DIR/masks` | До шага 7: выбирает `--method`, `--dilate-px`, `--blur-px`. Смотреть кропы 1:1 на бледные перемычки букв. |
 | 7 | `run_7_cleanup.sh` | `scan_cleanup run` | `DB_REVIEWED`, `PACK_DIR` | `BLURRED_DIR`, `CLEAN_DEBUG_DIR`, `report.csv`, `pages.cleaned_rel_path` | Боевая очистка: закрас + размытие фона одним проходом. Имена содержат отпечаток sha256 исходника. Полосы без цветной разметки уходят в серый (167 цветных из 12 135). ~101 ГиБ. `--jobs 8` — упор в диск. Перед полным прогоном проба на `--only-year 1976`. Все размеры в пикселях, для другого пака перемерять. |
 | 8 | `run_8_migrate_db.sh` | `db.migrate` | `DB`, `DB_REVIEWED`, оба `.bak` | те же файлы | Переименование колонок под сборку PDF, идемпотентно, снимает свои `.bak-до-переименования`. Гонять по всем четырём файлам, включая бэкапы. Обязателен перед `run_intermediate_pdfs_mts_pack1.sh`. |
-| 9 | `run_9_copy_table_regions.sh` | `scan_markup copy-regions` | `DB` | `DB_REVIEWED` | Переносит `table`/`line_art_schema` и `stroke_table`/`stroke_drawing` (детектор `line_art_detection`, тот же, что у детектора геометрии) с `source=auto`, не дожидаясь разметчика; ручной растр в целевой базе не трогается, следующий `from-cvat` заменит их уточнёнными. |
+| 9 | `run_9_copy_table_regions.sh` | `scan_markup copy-regions` | `DB` | `DB_REVIEWED` | Переносит `table`/`line_art_schema`/`rotated_text` с `source=auto`, не дожидаясь разметчика; ручной растр в целевой базе не трогается, следующий `from-cvat` заменит их уточнёнными. |
 
 ## Боковые ветки
 
@@ -51,7 +51,7 @@
 
 | Скрипт | Команда (`research.legacy.table_processing`) | Читает | Пишет | Замечания |
 |---|---|---|---|---|
-| `run_layout_pack_source.sh` | `layout-pack --ext tif` | исходные TIFF пака | `LAYOUT_CACHE_DIR` | Именно этот кэш потребляет `detect` на шаге 1. ~3.5 ч, `--readers 3` (диск). Прерванный прогон перезапускается. |
+| `run_layout_pack_source.sh` | `layout-pack --ext tif` | исходные TIFF пака | старый pickle-кэш | Устарел: кэш `detect` теперь набивает `page_layout prefill-surya` (или сам `detect`). ~3.5 ч, `--readers 3` (диск). Прерванный прогон перезапускается. |
 | `run_layout_pack.sh` | `layout-pack` | `SHARPENED_DIR` | `OUT_DIR/layout_surya` | То же по заострённым копиям. GPU в одном процессе. |
 | `run_mine_pack1.sh` | `mine` + `sheet` | DOCX/PDF FineReader, `SHARPENED_DIR`, `DB` | вырезки, контактные листы | Шаг 1 ветки: таблицы, которые FineReader превратил в мешанину (порог 0.20), ~230 вырезок. |
 | `run_pipeline_pack1.sh` | `run` + `pairs` | вырезки | `pairs/`, `sheets/` | Шаг 2: сетка ячеек, боковой текст, tesseract (лучший по CER). |

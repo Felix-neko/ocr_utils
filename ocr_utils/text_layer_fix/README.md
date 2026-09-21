@@ -52,3 +52,5 @@
 * Текст обрезанной части образа FineReader кладёт за CropBox; `rawdict` их не видит.
 * MediaBox страницы и её образ могут не совпадать — координаты считаются через
   `page.transformation_matrix`, а не переворотом по высоте.
+
+С v2 (2026-09-21) таблицы, line art и цепочки повёрнутого текста вне таблиц даёт `ocr_utils.page_layout` (`pipeline.page_structure`: surya по варианту `fr_geo`/`fr_nogeo` из кэша, `--layout-cache`/`--variant` у `run`; кэш набивается перед пулом). Здесь остались ячейки таблиц, сторона поворота (tesseract, `zones.side_zones`), прямые строки без слоя и вердикты по словам. `eval-lineart` меряет ещё источники `surya_render` и `page_layout`.

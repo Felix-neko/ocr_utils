@@ -22,15 +22,16 @@
 |---|---|---|
 | `scan_cropping` | Главный пайплайн кадра: YOLO-World+SAM → разворот, палец (LaMa), поворот, crop-зона | `python -m ocr_utils.scan_cropping` |
 | `db` | Схема SQLite-базы разметки (пак → год → выпуск → полоса → области/маски/точки), открытие с дописыванием колонок, идемпотентная запись, миграции | `python -m ocr_utils.db.migrate` |
-| `scan_markup` | Разметка пака: растр, таблицы, схемы, печати → CVAT → SQLite; внутри `toc`, `orientation`, `curved_lines`, `table_detection` | `python -m ocr_utils.scan_markup <команда>` |
+| `page_layout` | Разбор структуры страницы одним пакетом: `PageImage` (варианты картинки: скан / заострённая / PDF FineReader geo и no-geo), единая модель surya и JSON-кэш по варианту, детекторы растра, таблиц, line art (схемы + surya + пятна, вне растра и таблиц), повёрнутого текста, ориентации; версии семейств; те же детекторы у `detect`, `geometry_regression`, `text_layer_fix` | `python -m ocr_utils.page_layout analyze\|prefill-surya`, `python -m ocr_utils.page_layout.orientation` |
+| `scan_markup` | Разметка пака: растр, таблицы, line art, повёрнутый текст, печати (разбор `page_layout`) → CVAT → SQLite; внутри `toc`, `curved_lines` | `python -m ocr_utils.scan_markup <команда>` |
 | `scan_cleanup` | Закрас разметки из CVAT (LaMa) и размытие фона по паку | `python -m ocr_utils.scan_cleanup` |
 | `pdf_utils` | Промежуточные PDF под FineReader, сбор и сверка заострённых копий, JPEG-примитивы | `python -m ocr_utils.pdf_utils.intermediate_pdfs` |
 | `final_pdfs` | Финальные PDF выпуска из двух прогонов FineReader: источник страницы (растр в базе, детектор геометрии), правка слоя, иллюстрации JPEG верхним слоем, снятие образов-фигур FineReader; стадии анализ → surya → сборка со сверкой | `python -m ocr_utils.final_pdfs run` |
-| `geometry_regression` | Ядро детектора «FineReader ухудшил геометрию»: метрики пары страниц «с коррекцией / без», пороги, вердикт bad/mixed/ok, кэш с пересчётом при промахе | библиотека (`cache.verdict_for_page`) |
+| `geometry_regression` | Ядро детектора «FineReader ухудшил геометрию»: метрики пары страниц «с коррекцией / без» (рамки таблиц и line art — от `page_layout`), пороги, вердикт bad/mixed/ok, кэш с пересчётом при промахе | библиотека (`cache.verdict_for_page`) |
 | `text_layer_fix` | Правка текстового слоя FineReader (ядро + стенд исследования): разбор потока до слов и глифов, зоны повёрнутого и пропущенного прямого текста, tesseract/surya, удаление россыпи и вставка невидимого текста, сверка | библиотека (постранично из `final_pdfs`) |
 | `defocus_detection` | Расфокус по папке RAF-превью: ранжирование, зональный | `python -m ocr_utils.defocus_detection` |
 | `show_through_detection` | Просвечивающая бумага | `python -m ocr_utils.show_through_detection` |
-| `line_art_detection` | Крупный штриховой рисунок и формулы в бинаризованных PDF | `python -m ocr_utils.line_art_detection` |
+| `line_art_detection` | Стенд: крупный штрих по бинаризованным PDF пака (CSV, экспорт по порогу покрытия); признаки — в `page_layout.line_art.features` | `python -m ocr_utils.line_art_detection` |
 | `gutter_loss_detection` / `_restoration` | Текст, ушедший под корешок: детектор / восстановление (исследование) | `python -m ocr_utils.gutter_loss_*` |
 | `dewarp` | Выпрямление кривых строк, несколько движков; годен только `textline` | `python -m ocr_utils.dewarp` |
 | `rotated_text` | Таблицы с боковым текстом: прочитать, набрать прямо | `python -m ocr_utils.rotated_text.tables` |
@@ -65,9 +66,9 @@ uv run python scripts/gen_module_map.py        # карта модулей (ху
 ## Куда что класть
 
 Новый отчёт — `reports/` (навык `write-report`). Run-скрипт — `run_scripts/<пакет>/`. Черновик —
-`ai_slop/`. Выход прогона — на SSD (`/mnt/SYSTEM/...`, регистр значим, или `~/Projects/mts_markup`),
+`ai_slop/`. Выход прогона — на SSD (`/mnt/system/...`, регистр значим, или `~/Projects/mts_markup`),
 не в корень репо и **никогда в `/mnt/dump3/yandex_disk_*`** (Я.Диск затирает исходники).
-Хук блокирует `pgrep -f` без `[x]`-разрыва, запись в корень Я.Диска, путь `/mnt/system` строчными
+Хук блокирует `pgrep -f` без `[x]`-разрыва, запись в корень Я.Диска, старый путь `/mnt/SYSTEM` заглавными
 и `rm` баз разметки.
 
 ## Ожидание фоновых процессов

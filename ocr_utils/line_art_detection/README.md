@@ -110,7 +110,7 @@ Surya кэшируется на диск (`--surya-cache`).
 
 | Файл | Что в нём |
 |---|---|
-| `page_layout/line_art/features.py` (переехал сюда из `features.py`) | признаки пятна, правило «это штрих», детектор скоплений линеек; **все замеры и пороги**; вид каждой объединённой рамки (`PageFindings.kinds`: `table` по скоплению линеек / `drawing` по связному пятну, по площади кандидатов) — нужен этапу `scan_markup detect`, который кладёт находки в базу видами `stroke_table`/`stroke_drawing` (`scan_markup/detection/stroke_regions.py`) |
+| `page_layout/line_art/features.py` (переехал туда из `features.py`) | признаки пятна, правило «это штрих», детектор скоплений линеек; **все замеры и пороги**; вид каждой объединённой рамки (`PageFindings.kinds`). Единый детектор line art поверх этих признаков — `page_layout/line_art/detector.py`; этот пакет остался стендом по PDF |
 | `render.py` | рендер страницы PDF в numpy |
 | `markup.py` | растровые области из SQLite в координатах страницы PDF |
 | `layout.py` | предложения Surya (`Figure`/`Table`/`Equation`/`Form`), кэш на диск |
