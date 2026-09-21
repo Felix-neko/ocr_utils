@@ -555,6 +555,22 @@ def _collect_jobs(
     return jobs, by_rel
 
 
+def _db_regions(page: Page) -> list[Region]:
+    """Все прямоугольники полосы из базы как ``Region`` — для оверлея."""
+    from ocr_utils.page_layout.geometry import Box
+
+    out: list[Region] = []
+    for r in page.rect_regions:
+        try:
+            kind = RegionKind(r.kind)
+        except ValueError:
+            continue
+        info = {"chroma_spread": r.chroma_spread, "dot_frac": r.dot_frac, "source": r.source}
+        box = Box(r.x1, r.y1, max(r.x1, r.x2), max(r.y1, r.y2))
+        out.append(Region(box, kind, None, r.source or "", bool(r.full_page), info))
+    return out
+
+
 def _known(page: Page, kinds) -> tuple[tuple[int, int, int, int, str], ...]:
     """Области полосы заданных видов из базы (и авто, и ручные) — исключения для других семейств."""
     return tuple((r.x1, r.y1, r.x2, r.y2, r.kind) for r in page.rect_regions if r.kind in kinds)
@@ -604,9 +620,12 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
             if result.combo is not None:
                 oriented.add(result.rel_path)
             session.commit()
-            if params.debug_dir is not None and result.regions:
+            if params.debug_dir is not None:
+                # Оверлей — по ВСЕМ областям полосы в базе (включая ручные и не пересчитанные
+                # сейчас семейства), и всегда: иначе после пересчёта одного семейства на диске
+                # остался бы прежний оверлей с уже удалёнными рамками.
                 write_debug_overlay(
-                    params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, result.regions
+                    params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, _db_regions(page)
                 )
 
         _run_arbiter(session, params, {rel: by_rel[rel] for rel in oriented}, stats)
