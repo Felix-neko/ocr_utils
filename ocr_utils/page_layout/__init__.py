@@ -48,7 +48,7 @@ def px_to_mm(px: float, dpi: float) -> float:
 # состав затравок. Не поднимать за оверлеи, сообщения, переименования.
 RASTER_VERSION = 10  # растровый детектор: тот же алгоритм, что DETECTOR_VERSION 10 у scan_markup
 TABLES_VERSION = 1  # детектор таблиц v4.2 (бывший TABLE_DETECTOR_VERSION)
-LINE_ART_VERSION = 1  # единый line art: схемы детектора таблиц + surya + пятна и линейки, вне растра и таблиц
+LINE_ART_VERSION = 2  # единый line art: схемы детектора таблиц + surya Figure/Form/Picture + пятна и линейки, вне растра и таблиц; v2 — без формул (surya Equation)
 ROTATED_TEXT_VERSION = 1  # зоны повёрнутого текста вне таблиц (Docstrum)
 ORIENTATION_VERSION = 1  # ориентация полосы (бывший scan_markup.orientation.ORIENTATION_VERSION)
 
