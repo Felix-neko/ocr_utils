@@ -73,8 +73,23 @@ KIND_LINE_ART_SCHEMA = "line_art_schema"
 
 TABLE_KINDS = (KIND_TABLE, KIND_LINE_ART_SCHEMA)
 
+# КРУПНЫЙ ШТРИХ — находки второго, независимого детектора: ``ocr_utils.line_art_detection``,
+# того самого, которым при сборке финальных PDF детектор порчи геометрии
+# (``geometry_regression.regions.lineart_boxes``) решает, где на странице рисунок. На этапе
+# ``detect`` он гоняется по бинаризованной копии 1/4 полосы тем же алгоритмом
+# (``scan_markup.detection.stroke_regions``), чтобы его находки можно было проверить и
+# поправить в CVAT, а потом сравнить с детектором на том же материале. Два вида по источнику
+# кандидатов: разлинованная таблица (скопление линеек) и прочий штрих — связное пятно
+# рисунка, схемы, графика. Своя версия и своё время у полосы (``Page.stroke_detector_version``),
+# своя замена в базе (``STROKE_KINDS``): с ``table``/``line_art_schema`` детектора таблиц
+# они не смешиваются, хотя часто накрывают те же объекты — в этом и смысл сравнения.
+KIND_STROKE_TABLE = "stroke_table"
+KIND_STROKE_DRAWING = "stroke_drawing"
+
+STROKE_KINDS = (KIND_STROKE_TABLE, KIND_STROKE_DRAWING)
+
 # Все виды прямоугольников, которые вообще бывают в ``rect_regions``.
-RECT_KINDS = RASTER_KINDS + TABLE_KINDS
+RECT_KINDS = RASTER_KINDS + TABLE_KINDS + STROKE_KINDS
 
 # Типы, которые действительно означают ИЛЛЮСТРАЦИЮ: их вырезают из оригинала и вклеивают
 # в PDF. ``KIND_STAMP_SUSPECT`` сюда не входит намеренно.
@@ -356,6 +371,13 @@ class Page(Base):
     # ради растра — и наоборот. NULL значит «таблицы на этой полосе не искали».
     table_detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
     tables_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+
+    # --- Крупный штрих (детектор line_art_detection) ---------------------------
+    # Четвёртая пара «версия + время», по тому же правилу: детектор штриха живёт в своём
+    # пакете и правится отдельно, а его находки (``STROKE_KINDS``) заменяются в базе
+    # отдельно от таблиц и растра. NULL — штрих на этой полосе не искали.
+    stroke_detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    strokes_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     # --- Оглавление -----------------------------------------------------------
     # Два признака, а не один «вид»: в CVAT им отвечают два тега («Оглавление» и «Годовой

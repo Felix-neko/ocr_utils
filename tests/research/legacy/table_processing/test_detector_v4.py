@@ -1,7 +1,7 @@
 """Паритет четвёртой версии с третьей на стенде: живой детектор конвейера не теряет найденного v3.
 
 Остальные проверки четвёртой версии переехали вместе с детектором в
-``tests/ocr_utils/scan_markup/table_detection``.
+``tests/ocr_utils/page_layout/tables``.
 """
 
 from __future__ import annotations

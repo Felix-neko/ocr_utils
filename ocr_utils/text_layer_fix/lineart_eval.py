@@ -23,7 +23,7 @@ from ocr_utils.pdf_utils.intermediate_pdfs import DEFAULT_MARGIN_X_MM, DEFAULT_M
 from ocr_utils.scan_markup.detection import layout_cache
 from ocr_utils.scan_markup.rotation import rotate_box
 from ocr_utils.page_layout.geometry import KIND_TABLE, Box, iou, union
-from ocr_utils.scan_markup.table_detection.layout import FIGURE_LABELS
+from ocr_utils.page_layout.surya.blocks import FIGURE_LABELS
 
 from ocr_utils.text_layer_fix import mm_to_px
 from ocr_utils.text_layer_fix.raster import page_raster, render_gray

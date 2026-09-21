@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.ruling import Lines, mm_to_px
+from ocr_utils.page_layout.tables.ruling import Lines, mm_to_px
 from ocr_utils.page_layout.geometry import Box
 
 SIDES = ("сверху", "снизу", "слева", "справа")
@@ -201,7 +201,7 @@ def foreign_text(ink: np.ndarray, lines: Lines, box: Box, dpi: int) -> float:
 
 def measure(gray: np.ndarray, lines: Lines, box: Box, dpi: int) -> BoxQuality:
     """Все четыре меры разом. ``gray`` — вся полоса, ``box`` — рамка в её координатах."""
-    from ocr_utils.scan_markup.table_detection.grid import text_ink
+    from ocr_utils.page_layout.tables.grid import text_ink
 
     ink = text_ink(gray, lines)
     clipped = box.clipped(gray.shape[1], gray.shape[0])

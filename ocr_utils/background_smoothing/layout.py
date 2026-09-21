@@ -134,7 +134,7 @@ class LayoutDetector:
 
         Отдельно от :meth:`picture_polygons`, потому что у ответа два потребителя:
         блоки Picture нужны растру, а Table/Figure/Form/Text — детектору таблиц
-        (``scan_markup.table_detection``), и модель ради них зовётся один раз. Координаты в
+        (``page_layout.tables``), и модель ради них зовётся один раз. Координаты в
         ответе — в пикселях УМЕНЬШЕННОГО кадра: делить на ``scale``.
         """
         from PIL import Image as PILImage

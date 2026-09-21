@@ -33,7 +33,7 @@ import numpy as np
 
 from ocr_utils.scan_markup.rotation import rotate_cw
 from ocr_utils.page_layout.geometry import Cell, Grid
-from ocr_utils.scan_markup.table_detection.verify import glyph_mask
+from ocr_utils.page_layout.tables.verify import glyph_mask
 
 from ocr_utils.rotated_text.tables.ocr import LANGUAGES, prepare, tesseract_tsv
 from ocr_utils.rotated_text.tables.structure import MIN_GLYPH_MM2, cell_interior

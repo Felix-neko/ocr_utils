@@ -31,8 +31,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.refine import crosses
-from ocr_utils.scan_markup.table_detection.ruling import (
+from ocr_utils.page_layout.tables.refine import crosses
+from ocr_utils.page_layout.tables.ruling import (
     MAX_RULE_THICKNESS_MM,
     MIN_RULE_MM,
     Lines,

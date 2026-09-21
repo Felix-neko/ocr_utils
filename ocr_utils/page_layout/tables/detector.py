@@ -33,9 +33,9 @@ from dataclasses import replace
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection import kind as kind_module
-from ocr_utils.scan_markup.table_detection import quality, refine, rules
-from ocr_utils.scan_markup.table_detection.ruling import (
+from ocr_utils.page_layout.tables import kind as kind_module
+from ocr_utils.page_layout.tables import quality, refine, rules
+from ocr_utils.page_layout.tables.ruling import (
     WORK_DPI,
     ClusterPolicy,
     Lines,
@@ -45,15 +45,8 @@ from ocr_utils.scan_markup.table_detection.ruling import (
     find_lines,
     mm_to_px,
 )
-from ocr_utils.page_layout.geometry import (
-    KIND_DIAGRAM,
-    KIND_DRAWING,
-    KIND_TABLE,
-    Box,
-    TableBox,
-    intersection,
-)
-from ocr_utils.scan_markup.table_detection.layout import FIGURE_LABELS, FORM_LABELS, TABLE_LABELS, PageLayout
+from ocr_utils.page_layout.geometry import KIND_DIAGRAM, KIND_DRAWING, KIND_TABLE, Box, TableBox, intersection
+from ocr_utils.page_layout.surya.blocks import FIGURE_LABELS, FORM_LABELS, TABLE_LABELS, LayoutBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +373,7 @@ def grow_diagram(art: np.ndarray, box: Box, dpi: int, barriers: list[Box], figur
 # --- Конвейер ------------------------------------------------------------------------
 
 
-def _layout_kind(layout: "PageLayout | None", box: Box) -> tuple[str, "Box | None"]:
+def _layout_kind(layout: "LayoutBlocks | None", box: Box) -> tuple[str, "Box | None"]:
     """Вид по surya и блок, который его дал; пусто — surya не решает."""
     if layout is None:
         return "", None
@@ -397,14 +390,14 @@ def _layout_kind(layout: "PageLayout | None", box: Box) -> tuple[str, "Box | Non
 
 
 def detect(
-    gray: np.ndarray, dpi: int = WORK_DPI, verify_findings: bool = True, layout: "PageLayout | None" = None
+    gray: np.ndarray, dpi: int = WORK_DPI, verify_findings: bool = True, layout: "LayoutBlocks | None" = None
 ) -> list[TableBox]:
     """Таблицы, схемы и рисунки четвёртой версии. Координаты — в пикселях поданного изображения.
 
     ``layout`` — разметка surya в тех же пикселях (см. ``layout.surya.load``); без неё вид
     решают признаки решётки, а рост — только связность.
     """
-    from ocr_utils.scan_markup.table_detection import verify as verification
+    from ocr_utils.page_layout.tables import verify as verification
 
     height, width = gray.shape[:2]
     binary = binarize(gray)

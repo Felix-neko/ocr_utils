@@ -1,10 +1,10 @@
 """Вид объекта по линейкам: таблица, схема или рисунок.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.kind``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.kind``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 """
 
-from ocr_utils.scan_markup.table_detection.kind import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.kind import (  # noqa: F401 — реэкспорт для стенда
     ALIGN_TOL_MM,
     CROSS_TOL_MM,
     LONG_SPAN,

@@ -33,7 +33,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.ruling import Lines, binarize, find_lines, mm_to_px
+from ocr_utils.page_layout.tables.ruling import Lines, binarize, find_lines, mm_to_px
 from ocr_utils.page_layout.geometry import Box, Cell, Edge, Grid
 
 # Рабочее разрешение разбора вырезанной таблицы. Выше, чем у поиска таблиц на полосе

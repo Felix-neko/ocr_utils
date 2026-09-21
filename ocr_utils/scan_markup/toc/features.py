@@ -30,7 +30,7 @@ import numpy as np
 from ocr_utils.scan_cropping.image_io import read_dpi
 from ocr_utils.scan_markup import tesseract
 from ocr_utils.scan_markup.detection import layout_cache
-from ocr_utils.scan_markup.table_detection.layout import PageLayout
+from ocr_utils.page_layout.surya.blocks import LayoutBlocks
 from ocr_utils.scan_markup.tesseract import Word
 from ocr_utils.scan_markup.toc import WORK_DPI
 
@@ -128,7 +128,7 @@ METRIC_NAMES = tuple(PageFeatures("", 0, 0).metrics())
 # --- surya --------------------------------------------------------------------------
 
 
-def surya_features(layout: PageLayout | None) -> dict[str, float]:
+def surya_features(layout: LayoutBlocks | None) -> dict[str, float]:
     """Уверенность и площадь блоков оглавления, площадь таблиц — в долях полосы."""
     if layout is None or layout.width <= 0 or layout.height <= 0:
         return {"surya_toc_conf": 0.0, "surya_toc_area": 0.0, "surya_table_area": 0.0}

@@ -27,7 +27,7 @@
    9 px при 300 dpi, и единый отступ 0.6 мм либо оставлял обрывок линейки в ячейке (его
    потом дважды подчищали ниже по конвейеру), либо съедал выносные элементы.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.grid``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.grid``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 Здесь остались извлечение ячеек под распознавание (``extract``, ``strip_rules``, ``cell_image``).
 """
@@ -37,7 +37,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.grid import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.grid import (  # noqa: F401 — реэкспорт для стенда
     WORK_DPI,
     SEPARATOR_TOL_MM,
     DOUBLE_RULE_MM,

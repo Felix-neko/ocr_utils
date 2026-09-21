@@ -12,7 +12,7 @@
 
 ФОРМАТ совместим с кэшем исследований (``research/legacy/table_processing``, команда
 ``layout-pack``): ``<каталог>/{год}/{выпуск}/{основа}.pkl`` со словарём
-``{"scan_rel_path", "dpi", "layout": PageLayout.to_json(), "surya": сырой LayoutResult}``.
+``{"scan_rel_path", "dpi", "layout": LayoutBlocks.to_json(), "surya": сырой LayoutResult}``.
 Именно им размечен пак-1 по сырым TIFF «Готовое» (``layout_surya_готовое``).
 
 СЫРОЙ ОТВЕТ SURYA ПРИ ЧТЕНИИ НЕ ВОССТАНАВЛИВАЕТСЯ. Он лежит в pickle ради других
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ocr_utils.page_layout.geometry import Box
-from ocr_utils.scan_markup.table_detection.layout import PageLayout
+from ocr_utils.page_layout.surya.blocks import LayoutBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class CachedLayout:
     у прочитанной из кэша он ``None``.
     """
 
-    layout: PageLayout
+    layout: LayoutBlocks
     dpi: int = 0
     raw: object | None = None
 
@@ -92,7 +92,7 @@ def load(cache_dir: "Path | None", rel_path: str) -> "CachedLayout | None":
             raise ValueError(f"в файле не словарь, а {type(payload).__name__}")
         if payload.get("scan_rel_path") != rel_path:
             raise ValueError(f"внутри записан путь {payload.get('scan_rel_path')!r}")
-        layout = PageLayout.from_json(payload["layout"])
+        layout = LayoutBlocks.from_json(payload["layout"])
         if layout.width <= 0 or layout.height <= 0:
             raise ValueError(f"размер картинки {layout.width}x{layout.height}")
         return CachedLayout(layout, int(payload.get("dpi") or 0))
@@ -115,7 +115,7 @@ def save(cache_dir: Path, rel_path: str, cached: CachedLayout) -> Path:
     return path
 
 
-def scaled_to(cached: CachedLayout, width: int, height: int) -> PageLayout:
+def scaled_to(cached: CachedLayout, width: int, height: int) -> LayoutBlocks:
     """Разметка в пикселях картинки ``width`` x ``height`` (копия 1/4 может отличаться на пиксель)."""
     layout = cached.layout
     if (layout.width, layout.height) == (width, height):

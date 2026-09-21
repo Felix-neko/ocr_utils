@@ -9,11 +9,11 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image, ImageDraw
 
-from ocr_utils.scan_markup.table_detection import detector, kind, quality, refine, ruling, rules
+from ocr_utils.page_layout.tables import detector, kind, quality, refine, ruling, rules
 from ocr_utils.page_layout.geometry import KIND_DIAGRAM, KIND_TABLE, Box
-from ocr_utils.scan_markup.table_detection.grid import text_ink
-from tests.ocr_utils.scan_markup.table_detection import synthetic
-from tests.ocr_utils.scan_markup.table_detection.synthetic import load_font
+from ocr_utils.page_layout.tables.grid import text_ink
+from tests.ocr_utils.page_layout.tables import synthetic
+from tests.ocr_utils.page_layout.tables.synthetic import load_font
 
 DPI = synthetic.DPI
 
@@ -242,7 +242,7 @@ def test_regions_scale_to_original_and_carry_kind_and_info() -> None:
     import json
 
     from ocr_utils.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE as DB_TABLE
-    from ocr_utils.scan_markup.table_detection import to_regions
+    from ocr_utils.page_layout.tables import to_regions
     from ocr_utils.page_layout.geometry import KIND_DRAWING, TableBox
 
     table = TableBox(Box(10, 20, 110, 220), score=0.9, skew_deg=0.4, metrics={"cells": 9.0}, kind=KIND_TABLE)
@@ -259,7 +259,7 @@ def test_regions_scale_to_original_and_carry_kind_and_info() -> None:
 def test_detect_regions_end_to_end_on_a_synthetic_page() -> None:
     """Сквозной ход: серая копия -> регион вида ``table`` в пикселях оригинала."""
     from ocr_utils.db.models import KIND_TABLE as DB_TABLE
-    from ocr_utils.scan_markup.table_detection import detect_regions
+    from ocr_utils.page_layout.tables import detect_regions
 
     table = _filled_table()
     page, box = synthetic.make_page(table, lines_above=3, lines_below=3)
@@ -276,7 +276,7 @@ def test_layout_from_surya_result_clamps_boxes() -> None:
     """Сырой ответ surya разбирается в блоки, рамки зажимаются в кадр."""
     from types import SimpleNamespace
 
-    from ocr_utils.scan_markup.table_detection.layout import from_surya_result
+    from ocr_utils.page_layout.surya.blocks import from_surya_result
 
     raw = SimpleNamespace(
         bboxes=[

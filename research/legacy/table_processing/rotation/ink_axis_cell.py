@@ -26,7 +26,7 @@ import numpy as np
 from ocr_utils.scan_markup.orientation.detectors.ink_axis import ASYMMETRY_THR, UPRIGHT_ASYMMETRY
 
 from research.legacy.table_processing.detection.ruling import mm_to_px
-from ocr_utils.scan_markup.table_detection.verify import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.verify import (  # noqa: F401 — реэкспорт для стенда
     GLYPH_MIN_MM,
     GLYPH_MAX_MM,
     GLYPH_MAX_LONG_FACTOR,

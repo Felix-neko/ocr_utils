@@ -33,7 +33,7 @@ PDF под FineReader, `final_pdfs` — финальную из распозна
 uv run python -m ocr_utils.scan_markup detect \
     --pack-dir "/mnt/.../Готовое/пак-1" \
     --db ~/Projects/mts_markup/pack1.sqlite \
-    --layout-cache /mnt/SYSTEM/raw/mts/pack1_table_research/layout_surya_готовое \
+    --layout-cache /mnt/system/raw/mts/pack1_table_research/layout_surya_готовое \
     --debug-dir ~/Projects/mts_markup/debug
 
 # 2. Уменьшенные копии в share + проект/задачи/джобы CVAT с предразметкой
@@ -48,13 +48,13 @@ uv run python -m ocr_utils.scan_markup from-cvat \
     --pack-name пак-1
 
 # 2а. Дозалить находки нового детектора в уже размеченные задачи (PATCH, ручная разметка цела)
-uv run python -m ocr_utils.scan_markup to-cvat ... --append-kinds table,line_art_schema
+uv run python -m ocr_utils.scan_markup to-cvat ... --append-kinds table,line_art_schema,stroke_table,stroke_drawing
 
 # 3а. Те же находки — в уточнённую базу, не дожидаясь разметчика (source=auto, растр не трогается)
 uv run python -m ocr_utils.scan_markup copy-regions \
     --db ~/Projects/mts_markup/pack1.sqlite \
     --out-db ~/Projects/mts_markup/pack1_reviewed.sqlite \
-    --pack-name пак-1 --kinds table,line_art_schema
+    --pack-name пак-1 --kinds table,line_art_schema,stroke_table,stroke_drawing
 ```
 
 ## Иерархия
@@ -379,7 +379,7 @@ PDF, его не увидят. Команда `recolor` такие област�
 ## Таблицы и блок-схемы
 
 Тем же прогоном `detect` по копии 1/4 ищутся **таблицы с линейками** и **блок-схемы /
-штриховые рисунки** — детектор `scan_markup.table_detection` (как он устроен, история версий
+штриховые рисунки** — детектор `page_layout.tables` (как он устроен, история версий
 и отвергнутые ходы — в его README). Находки ложатся в ту же таблицу `rect_regions`, что и
 растр, видами `table` и `line_art_schema` (схема и рисунок — один вид: лечат их одинаково,
 тонкий вид лежит в JSON `detector_info` вместе с баллом, наклоном линеек и метриками), с
@@ -408,6 +408,32 @@ GPU на полосу; ответ кладётся на диск pickle-файл
 
 `--raster/--no-raster` и `--tables/--no-tables` выключают детекторы целиком; выключенный в
 базе не трогается вовсе.
+
+## Крупный штрих (второй детектор line art)
+
+Тем же прогоном `detect` по той же копии 1/4 гоняется **`ocr_utils.line_art_detection`** — детектор,
+которым при сборке финальных PDF детектор порчи геометрии (`geometry_regression.regions.lineart_boxes`)
+решает, где на странице рисунок, и от которого зависит, из какого прогона FineReader взять
+страницу. До сих пор его качество было видно только косвенно, по вердиктам; теперь его находки
+лежат в базе и правятся в CVAT, и уточнённая база — эталон для его оценки на том же материале, что
+и детектор таблиц.
+
+Адаптер — `detection/stroke_regions.py`: серая копия 1/4 бинаризуется порогом Оцу (тем же
+`table_detection.ruling.binarize`, что ищет линейки), и по битональному кадру идёт
+`features.analyse_gray(params_for_dpi(150))` — без surya и без исключений растра, ровно как в
+`lineart_boxes`. Разница с прогоном по PDF одна: там страницу бинаризовал FineReader. Объединённые
+рамки те же, что видит детектор геометрии (`PageFindings.boxes`), а вид приписан каждой по площади
+её кандидатов (`PageFindings.kinds`): скопление линеек (`rules`) → **`stroke_table`**, связное пятно
+(`ink`) → **`stroke_drawing`**; в `detector_info` — вид, источники, число кандидатов, заполнение и доля
+длинных прогонов. Замечание: таблица, линейки которой в печати *касаются* друг друга, — одно связное
+пятно, и детектор зовёт её `stroke_drawing`; так он и работает в `geometry_regression`.
+
+**Своя версия** — `STROKE_DETECTOR_VERSION` в `Page.stroke_detector_version` / `strokes_detected_at`,
+четвёртая пара по тем же правилам, что у таблиц; замена в базе только по `STROKE_KINDS`, так что
+`table`/`line_art_schema` детектора таблиц и растр не трогаются, хотя рамки часто накрывают один
+объект — в этом и смысл. `--strokes/--no-strokes`; GPU не нужен. В CVAT — метки «Таблица (крупный
+штрих)» и «Рисунок (крупный штрих)», в проект досылаются `to-cvat` сами; дозаливка —
+`--append-kinds …,stroke_table,stroke_drawing`, перенос в уточнённую базу — `copy-regions --kinds`.
 
 **В CVAT и обратно.** В новую задачу таблицы уходят обычной предразметкой. В задачу, где
 разметчик уже работал, перезаливка запрещена (она заменяет разметку целиком), поэтому

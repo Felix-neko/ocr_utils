@@ -1,7 +1,7 @@
 """Сетка ячеек вырезанной таблицы и всё, что о ней можно измерить без распознавания.
 
 Сетка строится тем же кодом, что проверяет находки детектора таблиц
-(``scan_markup.table_detection.grid``): линейки → разделители → объединения по отсутствующим
+(``page_layout.tables.grid``): линейки → разделители → объединения по отсутствующим
 линейкам → шапка по двойной линейке. Здесь только обёртка: рабочая копия в 300 dpi,
 внутренность ячейки без обрубков линеек и пересчёт сетки в другое разрешение.
 
@@ -22,9 +22,9 @@ import numpy as np
 
 from ocr_utils.scan_markup.rotation import rotate_cw
 from ocr_utils.page_layout.geometry import Box, Cell, Grid
-from ocr_utils.scan_markup.table_detection.grid import NO_RULE_PAD_MM, WORK_DPI, grid_from_lines, text_ink
-from ocr_utils.scan_markup.table_detection.ruling import Lines, binarize, find_lines, mm_to_px
-from ocr_utils.scan_markup.table_detection.verify import glyph_mask
+from ocr_utils.page_layout.tables.grid import NO_RULE_PAD_MM, WORK_DPI, grid_from_lines, text_ink
+from ocr_utils.page_layout.tables.ruling import Lines, binarize, find_lines, mm_to_px
+from ocr_utils.page_layout.tables.verify import glyph_mask
 
 # Обрубок линейки у края внутренности: тонкий (до 1 мм), вытянутый (втрое) и от 1.2 мм
 # длиной. От штриха буквы «П» его отличает КАСАНИЕ КРАЯ: текст отбит от линейки отступом,
@@ -319,8 +319,8 @@ def merge_split_cells(grid: Grid, lines: Lines, work: np.ndarray, dpi: int) -> G
 
 def _glyph_boxes(work: np.ndarray, lines: Lines, dpi: int) -> np.ndarray:
     """Габариты компонент размера буквы по краске без линеек: ``[x0, y0, x1, y1]`` построчно."""
-    from ocr_utils.scan_markup.table_detection.grid import text_ink
-    from ocr_utils.scan_markup.table_detection.verify import GLYPH_MAX_MM, GLYPH_MIN_MM
+    from ocr_utils.page_layout.tables.grid import text_ink
+    from ocr_utils.page_layout.tables.verify import GLYPH_MAX_MM, GLYPH_MIN_MM
 
     ink = text_ink(work, lines)
     count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)

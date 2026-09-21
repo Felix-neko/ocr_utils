@@ -1,6 +1,6 @@
 """Surya layout для стенда: блоки полосы с видом и их кэш на диске.
 
-ТИПЫ И РАЗБОР ОТВЕТА ПЕРЕЕХАЛИ в ``ocr_utils.scan_markup.table_detection.layout``, кэш — в
+ТИПЫ И РАЗБОР ОТВЕТА ПЕРЕЕХАЛИ в ``ocr_utils.page_layout.surya.blocks``, кэш — в
 ``ocr_utils.scan_markup.detection.layout_cache`` (формат тот же; конвейер читает кэш, набитый
 командой ``layout-pack``). Здесь — реэкспорт, обёртки кэша со старой сигнатурой и ``Predictor``
 для ``layout-pack``.
@@ -30,15 +30,15 @@ from typing import Sequence
 import numpy as np
 
 from ocr_utils.scan_markup.detection import layout_cache
-from ocr_utils.scan_markup.table_detection.layout import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.surya.model import BATCH  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.surya.blocks import (  # noqa: F401 — реэкспорт для стенда
     FIGURE_LABELS,
     FORM_LABELS,
     TABLE_LABELS,
     TEXT_LABELS,
     MIN_CONFIDENCE,
-    BATCH,
     Block,
-    PageLayout,
+    LayoutBlocks,
     from_surya_result,
 )
 
@@ -48,13 +48,13 @@ def cache_path(cache_dir: Path, scan_rel_path: str) -> Path:
     return layout_cache.cache_path(cache_dir, scan_rel_path)
 
 
-def load(cache_dir: "Path | None", scan_rel_path: str) -> "PageLayout | None":
+def load(cache_dir: "Path | None", scan_rel_path: str) -> "LayoutBlocks | None":
     """Разметка полосы из кэша или ``None``, если её там нет (тогда детектор идёт без неё)."""
     cached = layout_cache.load(cache_dir, scan_rel_path)
     return cached.layout if cached is not None else None
 
 
-def save(cache_dir: Path, scan_rel_path: str, layout: PageLayout, raw: object = None, dpi: int = 0) -> Path:
+def save(cache_dir: Path, scan_rel_path: str, layout: LayoutBlocks, raw: object = None, dpi: int = 0) -> Path:
     """Сохранить разметку полосы: наш разбор и СЫРОЙ ответ surya рядом (для других детекторов)."""
     return layout_cache.save(cache_dir, scan_rel_path, layout_cache.CachedLayout(layout, dpi, raw))
 
@@ -74,16 +74,16 @@ class Predictor:
             self._predictor = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
         return self._predictor
 
-    def predict(self, grays: Sequence[np.ndarray]) -> list[PageLayout]:
+    def predict(self, grays: Sequence[np.ndarray]) -> list[LayoutBlocks]:
         """Разметка серых полос; координаты — в пикселях поданных картинок."""
         return [layout for layout, _ in self.predict_raw(grays)]
 
-    def predict_raw(self, grays: Sequence[np.ndarray]) -> list[tuple[PageLayout, object]]:
+    def predict_raw(self, grays: Sequence[np.ndarray]) -> list[tuple[LayoutBlocks, object]]:
         """То же, плюс сырой ответ surya на каждую полосу — для кэша."""
         from PIL import Image
 
         predictor = self._load()
-        results: list[tuple[PageLayout, object]] = []
+        results: list[tuple[LayoutBlocks, object]] = []
         for start in range(0, len(grays), BATCH):
             chunk = grays[start : start + BATCH]
             images = [Image.fromarray(gray).convert("RGB") for gray in chunk]
@@ -93,4 +93,4 @@ class Predictor:
         return results
 
 
-__all__ = ["Block", "PageLayout", "Predictor", "cache_path", "load", "save"]
+__all__ = ["Block", "LayoutBlocks", "Predictor", "cache_path", "load", "save"]

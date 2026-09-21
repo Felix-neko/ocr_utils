@@ -168,9 +168,18 @@ def main() -> None:
     "--tables/--no-tables",
     default=True,
     show_default=True,
-    help="Искать таблицы и блок-схемы (scan_markup.table_detection) по копии 1/4 тем же чтением "
+    help="Искать таблицы и блок-схемы (page_layout.tables) по копии 1/4 тем же чтением "
     "полосы. Своя версия детектора: при --skip-detected пересчитываются только полосы, где "
     "таблиц ещё не искали или искали прежней версией.",
+)
+@click.option(
+    "--strokes/--no-strokes",
+    default=True,
+    show_default=True,
+    help="Искать крупный штрих детектором ocr_utils.line_art_detection — тем же, которым детектор "
+    "порчи геометрии при сборке финальных PDF решает, где на странице рисунок, — по бинаризованной "
+    "копии 1/4 (150 dpi). Два вида: stroke_table (скопление линеек) и stroke_drawing (связное "
+    "пятно). Своя версия детектора; surya и GPU не нужны.",
 )
 @click.option(
     "--first-page-is-cover/--no-first-page-is-cover",
@@ -413,6 +422,7 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
         f"Растровых областей: {stats.regions} (цветных {stats.color}, серых {stats.grayscale}, "
         f"во всю полосу {stats.full_page}).\n"
         f"Таблиц: {stats.tables}, схем и line art: {stats.line_art}.\n"
+        f"Крупный штрих: таблиц {stats.stroke_tables}, рисунков {stats.stroke_drawings}.\n"
         f"Полос под поворот: {stats.rotated}."
     )
 
@@ -717,7 +727,8 @@ def fix_pen_marks_command(
     "--append-kinds",
     default="",
     show_default=True,
-    help="Виды прямоугольников через запятую (например, table,line_art_schema), которые ДОБАВИТЬ "
+    help="Виды прямоугольников через запятую (например, table,line_art_schema,stroke_table,"
+    "stroke_drawing), которые ДОБАВИТЬ "
     "в уже существующие задачи: PATCH, а не замена — ручная разметка и теги целы. Только на "
     "кадры, где шейпов с такими метками ещё нет, так что повторный прогон ничего не удваивает.",
 )
@@ -851,7 +862,8 @@ def from_cvat_command(
     click.echo(
         f"Полос: {stats.pages}. Прямоугольных областей: {stats.regions} "
         f"(цветных {stats.color}, серых {stats.grayscale}, цветного текста {stats.color_text}, "
-        f"таблиц {stats.table}, схем и line art {stats.line_art}, во всю полосу {stats.full_page}). "
+        f"таблиц {stats.table}, схем и line art {stats.line_art}, крупного штриха {stats.stroke_table} + "
+        f"{stats.stroke_drawing}, во всю полосу {stats.full_page}). "
         f"Масок под удаление: {stats.masks}, точек экслибриса: {stats.points}.\n"
         f"Полос под поворот: {stats.rotated}"
         + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")

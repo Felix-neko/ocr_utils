@@ -12,13 +12,13 @@ from ocr_utils.scan_markup.detection import layout_cache
 from ocr_utils.scan_markup.detection.layout_cache import CachedLayout, load, picture_boxes, save
 from ocr_utils.scan_markup.detection.page import PageAnalysis, PageOptions, page_layout_for
 from ocr_utils.page_layout.geometry import Box
-from ocr_utils.scan_markup.table_detection.layout import Block, PageLayout
+from ocr_utils.page_layout.surya.blocks import Block, LayoutBlocks
 
 REL = "1966/01/IMG_0017_2R.tif"
 
 
-def _layout() -> PageLayout:
-    return PageLayout(
+def _layout() -> LayoutBlocks:
+    return LayoutBlocks(
         (Block("Table", 0.9, Box(10, 20, 300, 400)), Block("Picture", 0.8, Box(0, 500, 200, 700))), 873, 1512
     )
 

@@ -1,10 +1,10 @@
 """Линейки четвёртой версии: цепочки фрагментов и связные ядра.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.rules``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.rules``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 """
 
-from ocr_utils.scan_markup.table_detection.rules import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.rules import (  # noqa: F401 — реэкспорт для стенда
     FRAGMENT_MM,
     CHAIN_GAP_MM,
     CHAIN_SHORT_GAP_MM,

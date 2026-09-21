@@ -1,11 +1,11 @@
 """Детектор четвёртой версии (v4.2): связные рёбра, вид объекта, граница без разрезанных букв.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.detector``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.detector``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 Политика ``POLICY_V4`` конвейера зовётся ``POLICY``; здесь оба имени.
 """
 
-from ocr_utils.scan_markup.table_detection.detector import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.detector import (  # noqa: F401 — реэкспорт для стенда
     TABLE_POLICY,
     POLICY,
     MIN_LONG_RULES_FOR_TABLE,

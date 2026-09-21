@@ -22,7 +22,7 @@ import numpy as np
 from ocr_utils.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE
 from ocr_utils.page_layout.geometry import KIND_TABLE as KIND_TABLE_RU
 from ocr_utils.page_layout.geometry import TableBox
-from ocr_utils.scan_markup.table_detection.layout import PageLayout
+from ocr_utils.page_layout.surya.blocks import LayoutBlocks
 
 TABLE_DETECTOR_VERSION = 1
 
@@ -75,14 +75,14 @@ def to_regions(findings: list[TableBox], scale: float, page_size: tuple[int, int
 
 
 def detect_regions(
-    gray: np.ndarray, dpi: int, layout: "PageLayout | None", scale: float, page_size: tuple[int, int]
+    gray: np.ndarray, dpi: int, layout: "LayoutBlocks | None", scale: float, page_size: tuple[int, int]
 ) -> list[Region]:
     """Полный ход по одной полосе: детектор на рабочей копии -> регионы оригинала.
 
     Импорт детектора отложен: он тянет OpenCV-морфологию и не нужен тем, кто берёт отсюда
     только версию и типы.
     """
-    from ocr_utils.scan_markup.table_detection.detector import detect
+    from ocr_utils.page_layout.tables.detector import detect
 
     return to_regions(detect(gray, dpi, layout=layout), scale, page_size)
 

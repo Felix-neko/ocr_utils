@@ -17,12 +17,15 @@ SURYA ЖИВЁТ В РОДИТЕЛЕ, И ПУЛ ЭТОМУ НЕ МЕШАЕТ. В
 образом только инференс, а чтение с медленного диска и счёт по полному кадру идут в
 шестнадцать процессов, и прогон по-прежнему упирается в диск.
 
-ТРИ ДЕТЕКТОРА, ТРИ ВЕРСИИ. Растр (``DETECTOR_VERSION``), ориентация (``ORIENTATION_VERSION``)
-и таблицы со схемами (``TABLE_DETECTOR_VERSION``) считаются одним чтением полосы, но помнят
-себя порознь: при ``--skip-detected`` пересчитывается только то, чья версия устарела или
-чего ещё не считали, а полоса, которой нужны одни таблицы, растр и ориентацию не трогает.
+ЧЕТЫРЕ ДЕТЕКТОРА, ЧЕТЫРЕ ВЕРСИИ. Растр (``DETECTOR_VERSION``), ориентация
+(``ORIENTATION_VERSION``), таблицы со схемами (``TABLE_DETECTOR_VERSION``) и крупный штрих
+(``STROKE_DETECTOR_VERSION`` — детектор ``line_art_detection``, тот же, что у детектора порчи
+геометрии при сборке финальных PDF) считаются одним чтением полосы, но помнят себя порознь:
+при ``--skip-detected`` пересчитывается только то, чья версия устарела или чего ещё не
+считали, а полоса, которой нужны одни таблицы, растр и ориентацию не трогает.
 Разметка surya у растра и таблиц общая и берётся из кэша ``--layout-cache``: попадание —
-воркер считает таблицы сам, промах — родитель зовёт модель и пишет в кэш.
+воркер считает таблицы сам, промах — родитель зовёт модель и пишет в кэш. Штриху surya не
+нужна, он считается в воркере всегда.
 """
 
 import logging
@@ -39,17 +42,21 @@ from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_GRAYSCALE,
     KIND_LINE_ART_SCHEMA,
+    KIND_STROKE_DRAWING,
+    KIND_STROKE_TABLE,
     KIND_TABLE,
     RASTER_KINDS,
     SOURCE_AUTO,
     SOURCE_CVAT,
+    STROKE_KINDS,
     TABLE_KINDS,
     Page,
     RectRegion,
 )
 from ocr_utils.db.repo import iter_pages, replace_rect_regions, upsert_pack
 from ocr_utils.scan_markup.detection import DETECTOR_VERSION
-from ocr_utils.scan_markup.table_detection import TABLE_DETECTOR_VERSION
+from ocr_utils.scan_markup.detection.stroke_regions import STROKE_DETECTOR_VERSION
+from ocr_utils.page_layout.tables import TABLE_DETECTOR_VERSION
 from ocr_utils.scan_markup.orientation import ORIENTATION_VERSION
 from ocr_utils.scan_markup.rotation import format_allowed
 from ocr_utils.scan_markup.detection.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
@@ -114,9 +121,11 @@ class DetectParams:
     use_surya_layout: bool = True
     # Кэш разметки surya (см. ``detection.layout_cache``); None — считать каждый раз.
     layout_cache_dir: Path | None = None
-    # Что считать: растр, таблицы со схемами. Ориентация — ниже, у неё свой набор ключей.
+    # Что считать: растр, таблицы со схемами, крупный штрих. Ориентация — ниже, у неё свой
+    # набор ключей.
     raster: bool = True
     tables: bool = True
+    strokes: bool = True
     first_page_is_cover: bool = False
     jobs: int = 8
     chroma_thr: float = CHROMA_THR
@@ -186,6 +195,7 @@ class DetectParams:
             allowed_rotations=self.allowed_rotations(),
             raster=self.raster,
             tables=self.tables,
+            strokes=self.strokes,
             use_surya_layout=self.use_surya_layout,
             layout_cache_dir=self.layout_cache_dir,
         )
@@ -251,6 +261,9 @@ class DetectStats:
     # Таблицы и схемы — своим счётом: их считает другой детектор.
     tables: int = 0
     line_art: int = 0
+    # Крупный штрих — третьим счётом, детектор ``line_art_detection``.
+    stroke_tables: int = 0
+    stroke_drawings: int = 0
 
 
 @dataclass(frozen=True)
@@ -299,6 +312,20 @@ def _needs_tables(page: Page, params: DetectParams, stamp) -> bool:
     if not params.tables:
         return False
     if _tables_stale(page) or params.rehash_all:
+        return True
+    return not stat_matches(page, stamp)
+
+
+def _strokes_stale(page: Page) -> bool:
+    """Устарел ли крупный штрих сам по себе: не считали или считали прежней версией детектора."""
+    return page.strokes_detected_at is None or page.stroke_detector_version != STROKE_DETECTOR_VERSION
+
+
+def _needs_strokes(page: Page, params: DetectParams, stamp) -> bool:
+    """То же для КРУПНОГО ШТРИХА — четвёртая независимая версия."""
+    if not params.strokes:
+        return False
+    if _strokes_stale(page) or params.rehash_all:
         return True
     return not stat_matches(page, stamp)
 
@@ -432,6 +459,31 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
         stats.tables += sum(1 for region in result.tables if region.kind == KIND_TABLE)
         stats.line_art += sum(1 for region in result.tables if region.kind == KIND_LINE_ART_SCHEMA)
 
+    # Крупный штрих — то же правило и своя пара колонок; заменяются только ``STROKE_KINDS``.
+    if result.strokes is not None:
+        page.strokes_detected_at = _utcnow()
+        page.stroke_detector_version = STROKE_DETECTOR_VERSION
+        replace_rect_regions(
+            session,
+            page,
+            [
+                RectRegion(
+                    x1=region.x1,
+                    y1=region.y1,
+                    x2=region.x2,
+                    y2=region.y2,
+                    kind=region.kind,
+                    full_page=False,
+                    detector_info=region.detector_info,
+                    source=SOURCE_AUTO,
+                )
+                for region in result.strokes
+            ],
+            kinds=STROKE_KINDS,
+        )
+        stats.stroke_tables += sum(1 for region in result.strokes if region.kind == KIND_STROKE_TABLE)
+        stats.stroke_drawings += sum(1 for region in result.strokes if region.kind == KIND_STROKE_DRAWING)
+
 
 def _collect_jobs(
     session: Session, params: DetectParams, stats: DetectStats, years
@@ -469,7 +521,8 @@ def _collect_jobs(
         need_regions = params.raster and (not params.skip_detected or _needs_detection(page, params, stamp))
         need_orientation = _needs_orientation(page, params, stamp) if params.skip_detected else params.orientation
         need_tables = params.tables and (not params.skip_detected or _needs_tables(page, params, stamp))
-        if not need_regions and not need_orientation and not need_tables:
+        need_strokes = params.strokes and (not params.skip_detected or _needs_strokes(page, params, stamp))
+        if not need_regions and not need_orientation and not need_tables and not need_strokes:
             stats.skipped += 1
             continue
 
@@ -484,19 +537,21 @@ def _collect_jobs(
             page.detected_at is not None and page.detector_version == DETECTOR_VERSION
         )
         tables_current = not params.tables or not _tables_stale(page)
+        strokes_current = not params.strokes or not _strokes_stale(page)
         orientation_current = not params.orientation or not _orientation_stale(page, params)
         stale_stat_only = (
             params.skip_detected
             and page.file_hash is not None
             and regions_current
             and tables_current
+            and strokes_current
             and orientation_current
         )
         # Считается только то, что нужно этой полосе. Растр там, где он свежий, не
         # пересчитывается: это не только CPU по полному кадру, но и замена областей в базе,
         # а ориентация — заметная трата: tesseract OSD стоит две с половиной секунды на полосу.
         job_options = dataclasses.replace(
-            options, orientation=need_orientation, raster=need_regions, tables=need_tables
+            options, orientation=need_orientation, raster=need_regions, tables=need_tables, strokes=need_strokes
         )
         known_digest = page.file_hash if stale_stat_only else None
         jobs.append(_Job(path, page.source_rel_path, page.order_index, job_options, known_digest))
@@ -548,7 +603,8 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
                 oriented.add(result.rel_path)
             session.commit()
             drawn = list(result.regions) + [
-                DetectedRegion((t.x1, t.y1, t.x2, t.y2), t.kind, False) for t in result.tables or []
+                DetectedRegion((t.x1, t.y1, t.x2, t.y2), t.kind, False)
+                for t in (result.tables or []) + (result.strokes or [])
             ]
             if params.debug_dir is not None and drawn:
                 write_debug_overlay(params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, drawn)

@@ -353,7 +353,7 @@ def cluster_tables(
     allowed = [(mm_to_px(long_mm, dpi), mm_to_px(short_mm, dpi)) for long_mm, short_mm in policy.min_sides_mm]
 
     if grouping == "cores":
-        from ocr_utils.scan_markup.table_detection.rules import cores
+        from ocr_utils.page_layout.tables.rules import cores
 
         regions: list[tuple[Box, list[Segment], list[Segment]]] = []
         for group in cores(lines, dpi):

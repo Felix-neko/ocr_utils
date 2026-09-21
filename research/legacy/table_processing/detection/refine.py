@@ -1,6 +1,6 @@
 """Доводка рамки находки третьей версии: обрезка по линейкам и прилипание к просвету.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.refine``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.refine``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 Здесь остались ``trim_ruleless`` и ``snap_edges`` третьей версии; ``drop_border_rules``,
 ``fit_rows`` и ``push_edges`` берутся из конвейера.
@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.refine import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.refine import (  # noqa: F401 — реэкспорт для стенда
     BORDER_MM,
     BORDER_LONG_SHARE,
     CROSS_TOL_MM,

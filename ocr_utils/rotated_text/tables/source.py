@@ -34,7 +34,7 @@ from ocr_utils.db.session import open_db
 from ocr_utils.scan_markup.rotation import rotate_box
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
 from ocr_utils.page_layout.geometry import Box
-from ocr_utils.scan_markup.table_detection.ruling import find_lines, mm_to_px, skew_of
+from ocr_utils.page_layout.tables.ruling import find_lines, mm_to_px, skew_of
 
 logger = logging.getLogger(__name__)
 

@@ -1,10 +1,10 @@
 """Проверка находки детектора: таблица это или что-то другое.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.verify``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.verify``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 """
 
-from ocr_utils.scan_markup.table_detection.verify import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.verify import (  # noqa: F401 — реэкспорт для стенда
     INNER_MARGIN_MM,
     GUTTER_MIN_MM,
     LINE_GAP_MM,

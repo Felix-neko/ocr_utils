@@ -1,6 +1,6 @@
 """Таблица по линейкам: морфология вместо сети (первая версия детектора).
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.ruling``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.tables.ruling``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 Здесь остался только ``detect`` первой и второй версий и его ``ALGORITHM``.
 
@@ -31,7 +31,7 @@ import logging
 
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.ruling import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.tables.ruling import (  # noqa: F401 — реэкспорт для стенда
     WORK_DPI,
     MIN_RULE_MM,
     MAX_RULE_THICKNESS_MM,

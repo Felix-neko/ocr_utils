@@ -24,7 +24,7 @@
 Здесь же снимается отпечаток файла: файл всё равно читается целиком, и хеш на прогретом
 кеше стоит доли секунды (см. ``scan_markup.hashing``).
 
-ТАБЛИЦЫ И БЛОК-СХЕМЫ (``scan_markup.table_detection``) считаются тем же прогоном по той же
+ТАБЛИЦЫ И БЛОК-СХЕМЫ (``page_layout.tables``) считаются тем же прогоном по той же
 копии 1/4. Детектору нужна разметка surya той же копии; если она нашлась в кэше на диске
 (``layout_cache``), таблицы считаются прямо в воркере — GPU для этого не нужен, а счёт по
 линейкам стоит десятки миллисекунд и параллелится вместе с чтением. Если разметки в кэше
@@ -89,9 +89,10 @@ from ocr_utils.scan_markup.hashing import FileStamp, full_stamp
 from ocr_utils.scan_markup.orientation.analysis import combine, run_cpu_detectors
 from ocr_utils.scan_markup.orientation.detectors.base import ROTATIONS, Verdict
 from ocr_utils.scan_markup.orientation.image_io import frame_from_gray
-from ocr_utils.scan_markup.table_detection import Region, detect_regions
-from ocr_utils.scan_markup.table_detection.geometry import Box
-from ocr_utils.scan_markup.table_detection.layout import Block, PageLayout, from_surya_result
+from ocr_utils.scan_markup.detection.stroke_regions import detect_stroke_regions
+from ocr_utils.page_layout.tables import Region, detect_regions
+from ocr_utils.page_layout.geometry import Box
+from ocr_utils.page_layout.surya.blocks import Block, LayoutBlocks, from_surya_result
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +145,11 @@ class PageOptions:
     # --- Что считать на полосе ---------------------------------------------------
     # Растровые области (``detection.regions``) — дорогая часть: точки по полному кадру.
     raster: bool = True
-    # Таблицы и блок-схемы (``table_detection``) по копии 1/4.
+    # Таблицы и блок-схемы (``page_layout.tables``) по копии 1/4.
     tables: bool = False
+    # Крупный штрих (``line_art_detection`` через ``stroke_regions``) по той же копии 1/4.
+    # Ни surya, ни GPU ему не нужны: считается целиком в воркере.
+    strokes: bool = False
     # Зовёт ли родитель surya вовсе. Воркеру это знать нужно: при промахе кэша таблицы ждут
     # разметку от родителя, а без surya ждать нечего — считаются здесь по одним линейкам.
     use_surya_layout: bool = True
@@ -210,12 +214,14 @@ class PageAnalysis:
     # прогона, а решение «растр свежий, нужны одни таблицы» принято по полосе — и едет с ней.
     raster: bool = True
     tables_wanted: bool = False
-    # Серая копия 1/4: по ней ищутся линейки таблиц и блоки Picture.
+    # Серая копия 1/4: по ней ищутся линейки таблиц, крупный штрих и блоки Picture.
     work_gray: np.ndarray | None = None
     # Разметка surya из кэша; ``None`` — промах, считает родитель (если surya включена).
     layout: CachedLayout | None = None
     # Таблицы и схемы, если их успел посчитать воркер; ``None`` — считать в родителе.
     tables: list[Region] | None = None
+    # Крупный штрих; ``None`` — не просили. Родителю досчитывать нечего: surya не нужна.
+    strokes: list[Region] | None = None
 
 
 @dataclass
@@ -240,6 +246,8 @@ class PageResult:
     raster: bool = True
     # Таблицы и схемы; ``None`` — не считали (то же различие, что у ориентации).
     tables: list[Region] | None = None
+    # Крупный штрих (``STROKE_KINDS``); ``None`` — не считали.
+    strokes: list[Region] | None = None
 
 
 def resolve_dpi(path: Path, default_dpi: int | None) -> int:
@@ -285,9 +293,11 @@ def analyse_page(
             analysis.ready = [DetectedRegion(box, KIND_COLOR, True)]
             # Обложка по определению не лежит боком, и читать ради этого 40 МБ незачем.
             analysis.orientation_done = options.orientation
-            # Таблиц на обложке нет по тому же определению: ответ известен, и он пуст.
+            # Таблиц и штриха на обложке нет по тому же определению: ответ известен, и он пуст.
             if options.tables:
                 analysis.tables = []
+            if options.strokes:
+                analysis.strokes = []
             return analysis
 
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -319,6 +329,9 @@ def analyse_page(
         if options.tables and (analysis.layout is not None or not options.use_surya_layout):
             # Разметка есть (или не будет вовсе) — таблицы считаются здесь, в пуле.
             analysis.tables = tables_for(analysis, analysis.layout)
+        if options.strokes:
+            # Штриху разметка не нужна вовсе — считается в пуле всегда.
+            analysis.strokes = strokes_for(analysis)
         if options.orientation and options.orientation_detectors:
             # По уже разжатому серому, без второго чтения файла с диска.
             frame = frame_from_gray(full_gray, dpi, rel_path, path, options.allowed_rotations)
@@ -345,6 +358,15 @@ def tables_for(analysis: PageAnalysis, layout: "CachedLayout | None") -> list[Re
     return detect_regions(gray, work_dpi(analysis), page_layout, scale, (analysis.width, analysis.height))
 
 
+def strokes_for(analysis: PageAnalysis) -> list[Region]:
+    """Крупный штрих детектора ``line_art_detection`` по серой копии 1/4 в координатах ОРИГИНАЛА."""
+    gray = analysis.work_gray
+    if gray is None:
+        return []
+    scale = analysis.width / max(1, gray.shape[1])
+    return detect_stroke_regions(gray, work_dpi(analysis), scale, (analysis.width, analysis.height))
+
+
 def page_layout_for(analysis: PageAnalysis, detector, options: PageOptions) -> "CachedLayout | None":
     """Разметка surya полосы: из кэша, если воркер её нашёл, иначе — моделью, с записью в кэш.
 
@@ -365,7 +387,7 @@ def page_layout_for(analysis: PageAnalysis, detector, options: PageOptions) -> "
         # собирается разметка с одними Picture — растру этого достаточно, таблицам surya не будет.
         polygons = detector.picture_polygons(analysis.work, analysis.work_gray, filter_raster=False)
         blocks = tuple(Block("Picture", 1.0, Box(*box).clipped(width, height)) for box in polygons_to_boxes(polygons))
-        cached = CachedLayout(PageLayout(blocks, width, height), work_dpi(analysis))
+        cached = CachedLayout(LayoutBlocks(blocks, width, height), work_dpi(analysis))
     if options.layout_cache_dir is not None:
         try:
             layout_cache.save(options.layout_cache_dir, analysis.rel_path, cached)
@@ -448,6 +470,7 @@ def finish_page(
             combo=combo,
             raster=analysis.raster,
             tables=analysis.tables,
+            strokes=analysis.strokes,
         )
     if analysis.work is None:  # содержимое не изменилось, пиксели не читались
         return PageResult(analysis.rel_path, stamp=analysis.stamp, unchanged=True)
@@ -467,6 +490,7 @@ def finish_page(
             combo=combo,
             raster=False,
             tables=tables,
+            strokes=analysis.strokes,
         )
 
     work_gray = (
@@ -521,6 +545,7 @@ def finish_page(
         orientation=verdicts,
         combo=combo,
         tables=tables,
+        strokes=analysis.strokes,
     )
 
 

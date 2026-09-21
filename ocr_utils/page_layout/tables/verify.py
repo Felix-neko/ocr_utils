@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.ruling import Lines, binarize, mm_to_px
+from ocr_utils.page_layout.tables.ruling import Lines, binarize, mm_to_px
 
 # Линейка считается ВНУТРЕННЕЙ, если её середина отстоит от края находки не меньше чем на
 # столько: 4 мм. Ближе — это сама рамка, и у рамки объявления других линеек нет.
@@ -321,7 +321,7 @@ def _filled_cells(mask: np.ndarray, lines: Lines, dpi: int) -> tuple[int, float]
     Главный признак против координатной сетки и чертежа: у таблицы клетки заполнены
     текстом, у сетки графика они пустые, у чертежа заполнены как попало.
     """
-    from ocr_utils.scan_markup.table_detection.grid import grid_from_lines
+    from ocr_utils.page_layout.tables.grid import grid_from_lines
 
     grid = grid_from_lines(lines, mask.shape[:2], dpi)
     if not grid.cells:
@@ -337,7 +337,7 @@ def _filled_cells(mask: np.ndarray, lines: Lines, dpi: int) -> tuple[int, float]
 
 def _edge_fill(lines: Lines, shape: tuple[int, int], dpi: int) -> float:
     """Доля ВНУТРЕННИХ рёбер сетки, под которыми действительно есть линейка."""
-    from ocr_utils.scan_markup.table_detection.grid import _edge_tables, separators
+    from ocr_utils.page_layout.tables.grid import _edge_tables, separators
 
     xs, ys, _ = separators(lines, shape, dpi)
     if len(xs) < 2 or len(ys) < 2:

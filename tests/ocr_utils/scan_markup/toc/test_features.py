@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ocr_utils.page_layout.geometry import Box
-from ocr_utils.scan_markup.table_detection.layout import Block, PageLayout
+from ocr_utils.page_layout.surya.blocks import Block, LayoutBlocks
 from ocr_utils.scan_markup.tesseract import Word
 from ocr_utils.scan_markup.toc.features import (
     is_contents_word,
@@ -116,7 +116,7 @@ def test_low_confidence_words_do_not_make_keywords() -> None:
 
 
 def test_surya_features_sum_toc_area_and_table_area() -> None:
-    layout = PageLayout(
+    layout = LayoutBlocks(
         (
             Block("TableOfContents", 0.75, Box(0, 0, 100, 100)),
             Block("TableOfContents", 0.9, Box(0, 100, 100, 200)),
