@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.geometry_regression import px_to_mm
-from ocr_utils.geometry_regression.bend import BEND_MIN_MM, SAG_PERCENTILES, _continuous, _despike
+from ocr_utils.geometry_regression.bend import BEND_MIN_MM, SAG_PERCENTILES, _continuous, _despike, _ink_fraction
 from ocr_utils.geometry_regression.field import Field
 from ocr_utils.geometry_regression.strokes import (
     AXIS_TOL_DEG,
@@ -46,8 +46,14 @@ MAX_THICK_MM = 1.5
 MAX_JUMP_MM = 0.5
 # Кусок следа короче этой доли исходной длины — линии нет.
 MIN_COVERAGE = 0.6
-# Разрыв в пробах (пропущенных подряд) больше — след рвётся.
-MAX_GAP_SAMPLES = 2
+# Излом: соседний кусок следа отстоит от продолжения прямой главного куска не меньше чем на
+# столько (мм), в куске не меньше JOG_MIN_SAMPLES проб, а вдоль продолжения прямой краски нет
+# (доля ниже JOG_MAX_CONTINUATION) — линия в этом месте разорвана и сдвинута (1974/10 с.30:
+# рамка со сдвигом 3.9 мм). Если краска вдоль продолжения есть, линия продолжается прямо, а
+# кусок в стороне — соседняя линия, на которую соскочило окно (1971/08 с.30).
+JOG_MIN_MM = 1.0
+JOG_MIN_SAMPLES = 3
+JOG_MAX_CONTINUATION = 0.3
 # Средний наклон штрихов ориентации считается от такой суммарной длины (мм): в ядре 20 мм (две
 # черты по 5 мм давали 0.6° «из ничего» по LSD); след краски точнее, и три дробные черты по 4 мм
 # (1966/05 с.70, наклон +1.6° каждая) должны считаться.
@@ -63,6 +69,7 @@ class Trace:
     sag_mm: float
     coverage: float
     length_px: float
+    jog_mm: float = 0.0  # излом: боковой сдвиг куска линии относительно её главной части
 
     @property
     def axis_tilt(self) -> float:
@@ -97,20 +104,38 @@ def _pick_nearest(runs_per_sample, target: float) -> np.ndarray:
     return np.array([min(runs, key=lambda c: abs(c - target)) if runs else np.nan for runs in runs_per_sample])
 
 
-def _longest_piece(ts: np.ndarray, offsets: np.ndarray, valid: np.ndarray, max_jump: float) -> np.ndarray:
-    """Маска самого длинного куска следа без скачков центра и без длинных пропусков."""
+def _pieces(ts: np.ndarray, offsets: np.ndarray, valid: np.ndarray, max_jump: float) -> list[list[int]]:
+    """Куски следа без скачков центра и без длинных пропусков (индексы проб), от длинного к короткому."""
     idx = np.flatnonzero(valid)
     if idx.size == 0:
-        return valid
+        return []
     pieces: list[list[int]] = [[int(idx[0])]]
     for prev, cur in zip(idx[:-1], idx[1:]):
-        if cur - prev > MAX_GAP_SAMPLES + 1 or abs(offsets[cur] - offsets[prev]) > max_jump:
+        # Пропуск проб след не рвёт (штриховка, подписи поперёк полки шкафа — 1966/01 с.78):
+        # скачок мерится на пропуск, допуск растёт с его длиной.
+        if abs(offsets[cur] - offsets[prev]) > max_jump * (cur - prev):
             pieces.append([])
         pieces[-1].append(int(cur))
-    best = max(pieces, key=lambda p: ts[p[-1]] - ts[p[0]] + 1)
-    keep = np.zeros_like(valid)
-    keep[best] = True
-    return keep
+    return sorted(pieces, key=lambda p: -(ts[p[-1]] - ts[p[0]] + 1))
+
+
+def _jog(gray, p0, u, n, ts, offsets, pieces: list[list[int]], coef: np.ndarray, dpi: float) -> float:
+    """Излом (мм): сдвиг соседнего куска от продолжения прямой главного, если вдоль продолжения краски нет."""
+    mm = dpi / 25.4
+    jog = 0.0
+    for piece in pieces[1:]:
+        if len(piece) < JOG_MIN_SAMPLES:
+            continue
+        t_piece = ts[piece]
+        predicted = np.polyval(coef, t_piece)
+        shift = float(abs(np.median(offsets[piece] - predicted)))
+        if shift < JOG_MIN_MM * mm:
+            continue
+        start = p0 + t_piece[0] * u + predicted[0] * n
+        stop = p0 + t_piece[-1] * u + predicted[-1] * n
+        if _ink_fraction(gray, start, stop) < JOG_MAX_CONTINUATION:
+            jog = max(jog, shift / mm)
+    return jog
 
 
 def trace_line(
@@ -168,11 +193,15 @@ def trace_line(
     valid = ~np.isnan(offsets)
     if valid.sum() >= 2:
         valid &= _continuous(gray, p0, u, n, ts, offsets)
-    valid = _longest_piece(ts, offsets, valid, MAX_JUMP_MM * dpi / 25.4)
-    coverage = float(valid.mean()) if len(ts) else 0.0
-    if valid.sum() < min_samples or coverage < MIN_COVERAGE:
+    pieces = _pieces(ts, offsets, valid, MAX_JUMP_MM * dpi / 25.4)
+    if not pieces:
         return None
-    ts_ok, off_ok = ts[valid], offsets[valid]
+    keep = np.zeros_like(valid)
+    keep[pieces[0]] = True
+    coverage = float(keep.mean()) if len(ts) else 0.0
+    if keep.sum() < min_samples or coverage < MIN_COVERAGE:
+        return None
+    ts_ok, off_ok = ts[keep], offsets[keep]
     if len(off_ok) >= 5:
         off_ok = _despike(off_ok)
     coef = np.polyfit(ts_ok, off_ok, 1)
@@ -182,7 +211,8 @@ def trace_line(
     angle = float(np.degrees(np.arctan2(direction[1], direction[0])))
     angle = (angle + 90.0) % 180.0 - 90.0
     points = p0[None, :] + ts_ok[:, None] * u[None, :] + off_ok[:, None] * n[None, :]
-    return Trace(points, angle, px_to_mm(float(hi - lo), dpi), coverage, float(ts_ok[-1] - ts_ok[0]))
+    jog = _jog(gray, p0, u, n, ts, offsets, pieces, coef, dpi)
+    return Trace(points, angle, px_to_mm(float(hi - lo), dpi), coverage, float(ts_ok[-1] - ts_ok[0]), jog)
 
 
 @dataclass(frozen=True)
@@ -277,7 +307,13 @@ def ridge_stroke_metrics(
         key = f"{orient}stroke"
         metrics[f"{key}_pairs"] = float(len(own))
         tilt_b = [_axis_tilt(t.angle_b, orient) for t in own]
-        tilt_a = [_axis_tilt(t.angle_a - rot_adjust_deg, orient) for t in own]
+        tilt_a = [_axis_tilt(t.angle_a, orient) for t in own]
+        # Поправка на доворот — только если семейство от неё становится прямее: линейка, ушедшая
+        # против доворота страницы (врезка 1970/04 с.26 при снятой трапеции), от поправки хуже.
+        adjusted = [_axis_tilt(t.angle_a - rot_adjust_deg, orient) for t in own]
+        weights = [t.stroke.length for t in own]
+        if rot_adjust_deg and _weighted_tilt(list(zip(adjusted, weights))) < _weighted_tilt(list(zip(tilt_a, weights))):
+            tilt_a = adjusted
         total_mm = px_to_mm(sum(t.stroke.length for t in own), dpi)
         metrics[f"{key}_tilt_wmean_b"] = _weighted_tilt([(tb, t.stroke.length) for tb, t in zip(tilt_b, own)])
         metrics[f"{key}_tilt_wmean_a"] = _weighted_tilt([(ta, t.stroke.length) for ta, t in zip(tilt_a, own)])
@@ -333,8 +369,8 @@ def _trace_box(trace: Trace) -> tuple[int, int, int, int]:
 def bend_metrics(
     gray_b: np.ndarray, gray_a: np.ndarray, strokes_b: list[Stroke], field: Field | None, dpi: float, field_dpi: float
 ) -> tuple[dict[str, float], dict]:
-    """Прирост сагитты A − B по длинным (≥ ``BEND_MIN_MM``) штрихам B, след с ограничением шага."""
-    metrics = {"stroke_bend_dev_mm": 0.0, "stroke_bend_lines": 0.0}
+    """Прирост сагитты и излома A − B по длинным (≥ ``BEND_MIN_MM``) штрихам B, след с ограничением шага."""
+    metrics = {"stroke_bend_dev_mm": 0.0, "stroke_bend_lines": 0.0, "stroke_jog_dev_mm": 0.0}
     culprits: dict = {}
     k = field_dpi / dpi
     min_len = BEND_MIN_MM * dpi / 25.4
@@ -347,16 +383,20 @@ def bend_metrics(
         if trace_b is None or trace_a is None:
             continue
         metrics["stroke_bend_lines"] += 1.0
-        delta = trace_a.sag_mm - trace_b.sag_mm
-        if delta > metrics["stroke_bend_dev_mm"]:
-            metrics["stroke_bend_dev_mm"] = delta
-            pts = trace_a.points
-            culprits["stroke_bend_dev_mm"] = {
-                "b": stroke.box,
-                "a": _trace_box(trace_a),
-                "segments_b": [[stroke.x0, stroke.y0, stroke.x1, stroke.y1]],
-                "segments_a": [[*pts[i], *pts[i + 1]] for i in range(len(pts) - 1)],
-            }
+        pts = trace_a.points
+        culprit = {
+            "b": stroke.box,
+            "a": _trace_box(trace_a),
+            "segments_b": [[stroke.x0, stroke.y0, stroke.x1, stroke.y1]],
+            "segments_a": [[*pts[i], *pts[i + 1]] for i in range(len(pts) - 1)],
+        }
+        for name, delta in (
+            ("stroke_bend_dev_mm", trace_a.sag_mm - trace_b.sag_mm),
+            ("stroke_jog_dev_mm", trace_a.jog_mm - trace_b.jog_mm),
+        ):
+            if delta > metrics[name]:
+                metrics[name] = delta
+                culprits[name] = culprit
     return metrics, culprits
 
 

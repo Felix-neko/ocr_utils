@@ -46,6 +46,10 @@ DESKEW_MIN_GAIN_DEG = 0.3
 DESKEW_TOL_DEG = 0.35
 # Элементов для оценки доворота меньше — не подтверждается.
 DESKEW_MIN_ITEMS = 5
+# Группы параллельных внутри рисунков — из штрихов не короче стольких мм (полки шкафа 1966/01
+# с.78 — от 56 мм; рёбра столбиков и легенда диаграммы 1975/09 с.10 — 13–17 мм; формулы вне
+# рисунков — от 8 мм, как в ядре).
+PARALLEL_LINEART_MIN_MM = 20.0
 
 
 def _wrap(angle: float) -> float:
@@ -164,9 +168,15 @@ def measure_pair(
             culprits.pop(name, None)
     out.metrics.update(metrics)
     out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
-    # Параллельность — только околоосевые штрихи вне рисунков: штриховка диаграмм под 45°
-    # (1975/09 с.6, с.10; 1975/06 с.69) — не линейки, разброс её углов ничего не значит.
-    axis_pairs = [(sb, sa) for sb, sa in pairs if sb.axis_tilt is not None and not sb.in_lineart]
+    # Параллельность — только околоосевые штрихи (полки шкафа под −5° на 1966/01 с.78 — в допуске):
+    # штриховка диаграмм под 45° (1975/09 с.6, с.10; 1975/06 с.69) — не линейки, разброс её
+    # углов ничего не значит. Внутри рисунков — да: там параллельность и была придумана.
+    # Внутри рисунков — только штрихи от PARALLEL_LINEART_MIN_MM: рёбра столбиков диаграммы
+    # по 5–8 мм (1975/09 с.10) и обломки в чертеже (1974/10 с.30) дают разброс углов из ничего.
+    min_lineart = PARALLEL_LINEART_MIN_MM * RENDER_DPI / 25.4
+    axis_pairs = [
+        (sb, sa) for sb, sa in pairs if sb.axis_tilt is not None and (not sb.in_lineart or sb.length >= min_lineart)
+    ]
     metrics, culprits = stroke_metrics(strokes_b, strokes_a, axis_pairs, rot_deg, RENDER_DPI)
     out.metrics.update({name: value for name, value in metrics.items() if name.startswith("parallel")})
     out.culprits.update(

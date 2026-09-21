@@ -46,6 +46,11 @@ class ShearMap:
 def shear_map(field: Field, dpi: float) -> ShearMap | None:
     """Карта сдвига по тайлам поля с весом > 0.
 
+    Сдвиг — du_x/dy плюс глобальный поворот страницы (аффинная часть поля): у чистого поворота
+    на θ du_x/dy = −θ, и сумма нулевая; у сдвига вдоль x — сам коэффициент. Симметричная часть
+    градиента (du_x/dy + du_y/dx) для этого не годится: du_y/dx — это выпрямление кривой строки
+    (законная правка), и на 1966/06 с.62 она давала «сдвиг» 2°.
+
     Args:
         field: Поле смещений B → A.
         dpi: Разрешение поля (``field.dpi``), чтобы радиус соседей задать в мм.
@@ -70,9 +75,7 @@ def shear_map(field: Field, dpi: float) -> ShearMap | None:
         gx = np.linalg.lstsq(design, u[idx, 0], rcond=None)[0]
         gy = np.linalg.lstsq(design, u[idx, 1], rcond=None)[0]
         centres.append(p)
-        # Симметричная часть градиента: du_x/dy + du_y/dx — сдвиг (у чистого поворота du_x/dy =
-        # −du_y/dx и сумма 0; у сдвига вдоль x — сам коэффициент); антисимметричная — поворот.
-        shears.append(np.degrees(np.arctan(gx[1] + gy[0])))
+        shears.append(np.degrees(np.arctan(gx[1])) + field.rot_deg)
         rots.append(np.degrees(np.arctan((gy[0] - gx[1]) / 2.0)))
     if not centres:
         return None
@@ -99,12 +102,13 @@ def shear_metrics(
 
     Returns:
         Метрики: ``field_shear_p90_deg`` — p90 |сдвига| по тайлам текста; ``field_shear_max_deg``
-        — максимум; ``field_shear_tiles`` — сколько тайлов текста; ``field_rot_local_p90_deg`` —
-        p90 |локального поворота| (контекст). Виновник — рамка тайлов с наибольшим сдвигом.
+        — максимум; ``field_shear_med_deg`` — |медиана сдвига со знаком|; ``field_shear_tiles`` —
+        сколько тайлов текста; ``field_rot_local_p90_deg`` — p90 |локального поворота| (контекст). Виновник — рамка тайлов с наибольшим сдвигом.
     """
     metrics = {
         "field_shear_p90_deg": 0.0,
         "field_shear_max_deg": 0.0,
+        "field_shear_med_deg": 0.0,
         "field_shear_tiles": 0.0,
         "field_rot_local_p90_deg": 0.0,
     }
@@ -121,6 +125,9 @@ def shear_metrics(
     values = np.abs(shear.shear_deg[text])
     metrics["field_shear_p90_deg"] = float(np.percentile(values, 90))
     metrics["field_shear_max_deg"] = float(values.max())
+    # Медиана со знаком: у параллелограмма все тайлы сдвинуты в одну сторону, у снятой трапеции
+    # (x растянут по-разному сверху и снизу) знак меняется по ширине и медиана около нуля.
+    metrics["field_shear_med_deg"] = float(abs(np.median(shear.shear_deg[text])))
     metrics["field_rot_local_p90_deg"] = float(np.percentile(np.abs(shear.rot_deg[text]), 90))
     # Виновник: тайлы с сильным сдвигом одним прямоугольником, в обеих версиях по полю.
     strong = shear.centres[text][values >= CULPRIT_FRAC * values.max()]

@@ -48,6 +48,8 @@ TILT_COARSE_DEG = 0.25
 TILT_FINE_DEG = 0.05
 # Полоса строки для проекции — бокс с припуском в долях высоты (соседняя строка дальше 0.5 h).
 TILT_BAND_HEIGHTS = 0.15
+# Размытие полосы перед перебором углов (px рендера): снимает преимущество нулевого угла.
+TILT_BLUR_PX = 1.0
 # Разность наклонов по проекции и доворот по кускам глифов расходятся сильнее — наклон не мерится.
 CROSS_TOL_DEG = 0.35
 # Отдельная строка (заголовок): выше медианы корпуса во столько раз ИЛИ пустота сверху и снизу.
@@ -84,6 +86,12 @@ def tilt_summary(
     """
     metrics = {"line_tilt_dev_max_mm": 0.0, "line_tilt_gain_mm": 0.0, "line_tilt_gain_deg": 0.0}
     best: dict[str, tuple[float, LineTilt] | None] = {name: None for name in metrics}
+    # Поправка на доворот — только если строки от неё в среднем прямее.
+    if rot_adjust_deg and tilts:
+        plain = float(np.median([abs(t.tilt_a) for t in tilts]))
+        moved = float(np.median([abs(t.tilt_a - rot_adjust_deg) for t in tilts]))
+        if moved >= plain:
+            rot_adjust_deg = 0.0
     for item in tilts:
         tilt_a = item.tilt_a - rot_adjust_deg
         dev = item.length_mm * (np.sin(np.radians(abs(tilt_a))) - np.sin(np.radians(abs(item.tilt_b))))
@@ -121,7 +129,10 @@ def projection_tilt(ink: np.ndarray, x0: int, y0: int, x1: int, y1: int, height:
     band = ink[y0:y1, x0:x1]
     if band.size == 0 or band.mean() < 1.0 or (x1 - x0) < 4 * (y1 - y0):
         return None
-    band = band.astype(np.float32)
+    # На бинарном рендере при нулевом угле сдвига нет и интерполяция ничего не размывает —
+    # профиль там всегда резче (так «профильный deskew» и был отвергнут в docs/status.md).
+    # Размытие полосы до перебора уравнивает углы: интерполяция размытого не меняет резкость.
+    band = cv2.GaussianBlur(band.astype(np.float32), (0, 0), TILT_BLUR_PX)
     h, w = band.shape
     cx = w / 2.0
 

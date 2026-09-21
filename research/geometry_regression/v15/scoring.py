@@ -2,11 +2,10 @@
 
 Отличия от ``ocr_utils.geometry_regression.scoring``:
 
-* новые метрики порчи — перекос по полю (``field_shear_p90_deg``, подтверждается кромкой
-  строк ``edge_shear_delta_mm`` ≥ ``SHEAR_CONFIRM_MM`` (0.6 мм: на 28 страницах «равнение» кромка по
-  тем же строкам даёт 0.65–5 мм, шир относительно строк занижает уход, когда строки сами
-  наклонены), а без измеренных кромок — только при
-  запасе ``SHEAR_ALONE_FACTOR``), сдвиг граф таблицы (``vstroke_tilt_wmean_delta``, при ≥ 2
+* новые метрики порчи — перекос выключенного блока (``edge_shear_delta_mm``: уход кромки по
+  тем же строкам, считается при сдвиге по полю ``field_shear_p90_deg`` ≥ ``SHEAR_MIN_DEG``;
+  без сдвига по полю уход кромки — шум сегментации, без выключенных блоков перекос не
+  ставится), сдвиг граф таблицы (``vstroke_tilt_wmean_delta``, при ≥ 2
   вертикалях), наклон фото по снимку целиком (``raster_photo_tilt_mm``, не непрощаемый);
 * одиночный штрих (единственная пара своей ориентации — подчёркивание рубрики 1968/04 с.90)
   и равномерный уход всех линеек ориентации на один угол (графы таблицы сдвинуты целиком —
@@ -14,7 +13,7 @@
   «баш на баш», mixed);
 * новые выигрыши — доворот страницы, подтверждённый текстом (``page_deskew_gain_deg``), и
   выигрыш по строкам внутри таблиц (те же ``text_*_gain``, взятые максимумом);
-* пороги выигрыша подняты до «заметно глазом» (прогиб 0.4 мм, разброс 0.8°, наклон отдельной
+* пороги выигрыша подняты до «заметно глазом» (прогиб 0.4 мм, разброс 0.65°, наклон отдельной
   строки 1.0°): на страницах «равнение перекосило» выигрыш 0.3 мм / 0.5° пользователь не
   видит (1968/03 с.8); стартовые числа — по p95 пака, калибруются в ``report --thr``.
 """
@@ -33,19 +32,32 @@ DEFAULT_THRESHOLDS: dict[str, tuple[float, str]] = {
     "vstroke_tilt_wmean_delta": (0.35, "vmean"),
     "parallel_spread_delta_max": (1.5, "parallel"),
     "stroke_bend_dev_mm": (0.8, "bend"),
+    # мм; излом длинной линии — кусок сдвинут вбок от продолжения прямой без краски между
+    # (1974/10 с.30 — 3.9 мм); в B у той же линии излома нет.
+    "stroke_jog_dev_mm": (1.5, "jog"),
     "field_lineart_weak_frac": (0.45, "lineart"),
     "raster_edge_bend_mm": (0.8, "photo_bend"),
     "raster_photo_tilt_mm": (1.5, "photo_tilt"),
     "line_tilt_dev_max_mm": (0.9, "line"),
     "line_glyph_wobble_max": (0.05, "wobble"),
     "line_stretch_mm_max": (0.2, "stretch"),
-    # градусы; p90 |сдвига| по тайлам текста: 28 страниц «равнение» — медиана 0.96, случайные
-    # ok — p90 0.67, p95 0.74; калибровать по поясам.
-    "field_shear_p90_deg": (0.75, "shear"),
-    # мм; уход кромки блока по тем же строкам сверх наклона строк — самостоятельный флаг
-    # только при большом уходе, иначе подтверждение перекоса по полю.
-    "edge_shear_delta_mm": (2.5, "edge"),
+    # мм; перекос выключенного блока: уход кромки по тем же строкам сверх наклона строк, при
+    # подтверждении сдвигом по полю (``field_shear_p90_deg`` ≥ SHEAR_MIN_DEG). Порог 0.6 мм —
+    # нижняя граница на 28 страницах «равнение» (0.65–5 мм); балл — от кромки в мм, чтобы
+    # против выигрыша (в мм и градусах) стоял уход, а не угол: снятая трапеция 1975/05 с.61
+    # даёт сдвиг по полю 2.3° при уходе кромки 1.5 мм и выигрыше 7.9 мм.
+    "edge_shear_delta_mm": (0.6, "shear"),
 }
+# Балл перекоса: от порога 0.6 мм до SHEAR_SCALE_MM балл равен 1 (bad — только при выигрыше
+# ниже 1.33), дальше растёт как уход/SHEAR_SCALE_MM: страницы с законной большой правкой
+# (1967/10 с.30 — уход 3.8 мм при выпрямленных строках, выигрыш 4.5) остаются mixed, а перекос
+# «в обмен на ничего» (1967/07 с.17 — 4.4 мм при выигрыше 1.4) — bad.
+SHEAR_SCALE_MM = 1.2
+# Растяжение заголовка считается только при кривизне строки относительно её длины не ниже:
+# по четырём страницам пользователя (1967/03 с.36 — 0.0024, 1968/05 с.44 — 0.0011 порча;
+# 1968/02 с.92 и 1975/05 с.47 — 0.0004 не порча) сам клин в мм и относительно высоты (0.043–0.066)
+# их не разделяет; правило слабое, проверять по паку.
+STRETCH_MIN_WOBBLE_LEN = 0.0008
 
 UNFORGIVABLE = ("hstroke_tilt_wmean_delta", "field_lineart_weak_frac", "raster_edge_bend_mm")
 UNFORGIVABLE_MIN_HSTROKE_PAIRS = 2
@@ -59,13 +71,21 @@ LONE_PAIRS = {"hstroke_dev_max_delta_mm": "hstroke_pairs", "vstroke_dev_max_delt
 UNIFORM = {"hstroke_dev_max_delta_mm": "hstroke_uniform", "vstroke_dev_max_delta_mm": "vstroke_uniform"}
 MIN_UNIFORM = 0.7
 SOFT = ("vstroke_tilt_wmean_delta",)
-# Перекос по полю подтверждается кромкой строк не меньше этого (мм); без кромок — запасом порога.
-SHEAR_CONFIRM_MM = 0.6
-SHEAR_ALONE_FACTOR = 1.3
+# Уход кромки считается перекосом только при сдвиге по полю не меньше SHEAR_MIN_DEG (градусы), а
+# при сильном уходе кромки (от SHEAR_STRONG_MM) — от SHEAR_MIN_WEAK_DEG: на 28 страницах
+# «равнение» p90 сдвига по тайлам 0.5–1.8, и у трёх страниц с уходом кромки 1.8–2.4 мм он лишь
+# 0.52–0.54 (1968/12 с.27, 1969/02 с.51, 1969/10 с.49). Без сдвига по полю уход кромки — шум
+# сегментации строк; без измеренных кромок (нет выключенных блоков) перекос не ставится.
+SHEAR_MIN_DEG = 0.75
+SHEAR_MIN_WEAK_DEG = 0.5
+SHEAR_STRONG_MM = 1.5
 
 GAIN_THRESHOLDS: dict[str, tuple[float, str]] = {
     "text_sag_gain_mm": (0.4, "sag"),
-    "text_spread_gain_deg": (0.8, "spread"),
+    "text_spread_gain_deg": (
+        0.65,
+        "spread",
+    ),  # эталонный good 1968/05 с.55: разброс 1.64° против линейки врезки 1.27 мм — mixed
     "line_tilt_gain_mm": (0.9, "line"),
     "line_tilt_gain_deg": (1.0, "line_deg"),
     "hstroke_gain_mm": (0.8, "htilt"),
@@ -126,12 +146,21 @@ class Thresholds15:
         if name in MIN_PAIRS:
             key, minimum = MIN_PAIRS[name]
             return float(metrics.get(key, 0.0) or 0.0) >= minimum
-        if name == "field_shear_p90_deg":
-            edges = float(metrics.get("edges_matched", 0.0) or 0.0)
-            confirmed = float(metrics.get("edge_shear_delta_mm", 0.0) or 0.0) >= SHEAR_CONFIRM_MM
-            alone = float(metrics.get(name, 0.0) or 0.0) >= SHEAR_ALONE_FACTOR * self.values[name]
-            return confirmed if edges > 0 else alone
+        if name == "edge_shear_delta_mm":
+            field = float(metrics.get("field_shear_p90_deg", 0.0) or 0.0)
+            strong = float(metrics.get(name, 0.0) or 0.0) >= SHEAR_STRONG_MM
+            return field >= SHEAR_MIN_DEG or (strong and field >= SHEAR_MIN_WEAK_DEG)
+        if name == "line_stretch_mm_max":
+            return float(metrics.get("line_glyph_wobble_len_max", 0.0) or 0.0) >= STRETCH_MIN_WOBBLE_LEN
         return True
+
+    def _score(self, name: str, value: float, threshold: float) -> float:
+        """Балл метрики: отношение к порогу; у перекоса — пологая шкала выше порога."""
+        if threshold <= 0:
+            return 0.0
+        if name == "edge_shear_delta_mm" and value >= threshold:
+            return max(1.0, value / SHEAR_SCALE_MM)
+        return value / threshold
 
     def _soft(self, name: str, metrics: dict[str, float]) -> bool:
         """Мягкая порча: единственный штрих своей ориентации и метрики из ``SOFT``."""
@@ -150,7 +179,7 @@ class Thresholds15:
             if not self._applicable(name, metrics):
                 continue
             value = float(metrics.get(name, 0.0) or 0.0)
-            score = value / threshold if threshold > 0 else 0.0
+            score = self._score(name, value, threshold)
             if score >= 1.0:
                 flags[name] = score
                 if name in self.unforgivable and not (name.startswith("hstroke") and few_hstrokes):
@@ -179,7 +208,7 @@ class Thresholds15:
         lines.append(
             f"hard = {self.hard:g}, min_gain = {self.min_gain:g}, ratio = {self.ratio:g}, "
             f"непрощаемые: {', '.join(self.unforgivable)}; одиночный штрих — мягкая порча; "
-            f"перекос по полю подтверждается кромкой ≥ {SHEAR_CONFIRM_MM:g} мм"
+            f"перекос кромки считается при сдвиге по полю ≥ {SHEAR_MIN_DEG:g}°"
         )
         return "\n".join(lines)
 

@@ -75,7 +75,7 @@ def test_heading_tilt_by_projection():
     heading = [t for t in tilts if t.heading]
     assert heading, "заголовок должен быть отдельной строкой"
     metrics, _ = tilt_summary(tilts)
-    assert 1.2 < metrics["line_tilt_dev_max_mm"] < 2.5
+    assert 1.0 < metrics["line_tilt_dev_max_mm"] < 2.5
     assert metrics["line_tilt_gain_deg"] < 0.3
 
 
@@ -154,5 +154,7 @@ def test_scoring_lone_stroke_is_soft_and_uniform_shift_is_soft():
     assert thr.apply(ragged).verdict == "bad"
     shear_alone = {"field_shear_p90_deg": 0.8, "edges_matched": 2.0, "edge_shear_delta_mm": 0.3}
     assert thr.apply(shear_alone).verdict == "ok"
+    edge_alone = {"field_shear_p90_deg": 0.2, "edges_matched": 2.0, "edge_shear_delta_mm": 1.2}
+    assert thr.apply(edge_alone).verdict == "ok"
     shear_confirmed = {**shear_alone, "edge_shear_delta_mm": 1.2}
     assert thr.apply(shear_confirmed).verdict == "bad"
