@@ -169,6 +169,7 @@ class PageLayout:
         find: Iterable[Find] | None = None,
         options: LayoutOptions = LayoutOptions(),
         order_index: int | None = None,
+        known: dict[Find, list[Region]] | None = None,
     ) -> None:
         """
         Args:
@@ -176,11 +177,16 @@ class PageLayout:
             find: Что искать; ``None`` — всё.
             options: Пороги и переключатели.
             order_index: Номер полосы в выпуске с нуля — нужен правилу обложки; ``None`` — не первая.
+            known: Уже известные области семейств, которые сейчас НЕ ищутся (растр, таблицы из
+                базы при пересчёте одного line art): они нужны как исключения — line art вне растра
+                и таблиц, повёрнутый текст вне таблиц. Без них пересчёт одного семейства нашёл бы
+                штрих внутри фотографии.
         """
         self.image = image
         self.find: frozenset[Find] = frozenset(find) if find is not None else ALL_FINDS
         self.options = options
         self.order_index = order_index
+        self.known: dict[Find, list[Region]] = {k: list(v) for k, v in (known or {}).items()}
 
         self.blocks: LayoutBlocks | None = None  # surya в пикселях кадра surya
         self.surya_used = False
@@ -338,14 +344,22 @@ class PageLayout:
 
         if Find.RASTER in self.find and self._raster is not None:
             self._finish_raster(blocks)
-        raster_work = [r.box.scaled(1.0 / native) for r in self.raster_pics + self.stamp_suspects]
+            raster_known = self.raster_pics + self.stamp_suspects
+        else:
+            raster_known = [r for r in self.known.get(Find.RASTER, []) if r.kind.is_raster]
+        raster_work = [r.box.scaled(1.0 / native) for r in raster_known]
 
         if Find.TABLES in self.find or Find.LINE_ART in self.find:
             found = detect_tables(image.gray_at(work_dpi), work_dpi, layout=work_blocks)
             self._table_boxes = [t for t in found if not _covered_by(t.box, raster_work, 0.5)]
             if Find.TABLES in self.find:
                 self.tables = [_table_region(t, native, image) for t in self._table_boxes if t.kind == TABLE_KIND_RU]
-        table_work = [t.box for t in self._table_boxes if t.kind == TABLE_KIND_RU]
+        if Find.TABLES in self.find:
+            table_work = [t.box for t in self._table_boxes if t.kind == TABLE_KIND_RU]
+        else:
+            # Таблицы не пересчитывались — исключаем известные из базы (детектор таблиц всё же
+            # прогнан ради затравок line art, но его находки не заменяют выверенные человеком).
+            table_work = [r.box.scaled(1.0 / native) for r in self.known.get(Find.TABLES, [])]
 
         if Find.LINE_ART in self.find:
             inputs = LineArtInputs(

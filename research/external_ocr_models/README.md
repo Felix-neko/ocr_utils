@@ -7,8 +7,8 @@
 ```bash
 # распознать папку картинок одной моделью; структура папок выхода повторяет входную
 uv run python -m research.external_ocr_models run \
-    --in-dir /mnt/SYSTEM/raw/mts/pack1_background_blurred_v2/sharpened \
-    --out-dir /mnt/SYSTEM/raw/mts/pack1_external_ocr/gemini-31-flash-lite \
+    --in-dir /mnt/system/raw/mts/pack1_background_blurred_v2/sharpened \
+    --out-dir /mnt/system/raw/mts/pack1_external_ocr/gemini-31-flash-lite \
     --model gemini-31-flash-lite \
     --pages run_scripts/external_ocr_models/probe_pages_1966_03.txt   # или без --pages: всё под --in-dir
     [--strips 2] [--max-side 2200] [--output-mode json|markdown] [--reasoning off|low|medium]
@@ -16,10 +16,10 @@ uv run python -m research.external_ocr_models run \
 
 # сводка по готовым выходам (ничего не запрашивает, можно гонять сколько угодно)
 uv run python -m research.external_ocr_models report \
-    --out-root /mnt/SYSTEM/raw/mts/pack1_external_ocr \
+    --out-root /mnt/system/raw/mts/pack1_external_ocr \
     --in-dir .../sharpened --issue 1966/03 \
-    --reference-pdf /mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg/full_1966_03.pdf \
-    --rotated-info-dir /mnt/SYSTEM/raw/mts/pack1_rotated_tables/info \
+    --reference-pdf /mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg/full_1966_03.pdf \
+    --rotated-info-dir /mnt/system/raw/mts/pack1_rotated_tables/info \
     --report reports/external_ocr_models_probe.md
 
 uv run python -m research.external_ocr_models models    # реестр с ценами

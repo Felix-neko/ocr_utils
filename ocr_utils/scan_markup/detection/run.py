@@ -535,6 +535,11 @@ def _collect_jobs(
         # Считается только то, что нужно этой полосе. Растр там, где он свежий, не
         # пересчитывается: это не только CPU по полному кадру, но и замена областей в базе,
         # а ориентация — заметная трата: tesseract OSD стоит две с половиной секунды на полосу.
+        # Семейство, которое сейчас не считается, отдаёт свои области из базы как исключения:
+        # line art ищется вне растра и таблиц, а при пересчёте одного line art растр иначе
+        # был бы невидим (случай 1977/01 0040_1L: три «штриха» внутри фотографии).
+        known_raster = () if need_regions else _known(page, RASTER_KINDS)
+        known_tables = () if need_tables else _known(page, TABLE_KINDS)
         job_options = dataclasses.replace(
             options,
             orientation=need_orientation,
@@ -542,10 +547,17 @@ def _collect_jobs(
             tables=need_tables,
             line_art=need_line_art,
             rotated_text=need_rotated,
+            known_raster=known_raster,
+            known_tables=known_tables,
         )
         known_digest = page.file_hash if stale_stat_only else None
         jobs.append(_Job(path, page.source_rel_path, page.order_index, job_options, known_digest))
     return jobs, by_rel
+
+
+def _known(page: Page, kinds) -> tuple[tuple[int, int, int, int, str], ...]:
+    """Области полосы заданных видов из базы (и авто, и ручные) — исключения для других семейств."""
+    return tuple((r.x1, r.y1, r.x2, r.y2, r.kind) for r in page.rect_regions if r.kind in kinds)
 
 
 def run_detect(params: DetectParams, session_factory) -> DetectStats:

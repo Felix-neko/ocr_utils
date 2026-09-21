@@ -12,7 +12,7 @@ from ocr_utils.page_layout.surya.blocks import (
     LayoutBlocks,
 )
 from ocr_utils.page_layout.surya.cache import CACHE_VERSION, SuryaCache
-from ocr_utils.page_layout.surya.source import OnMiss, SuryaMissing, SuryaSource
+from ocr_utils.page_layout.surya.source import OnMiss, SuryaMissing, SuryaSource, SuryaSourceConfig
 
 __all__ = [
     "Block",
@@ -27,6 +27,7 @@ __all__ = [
     "SuryaCache",
     "SuryaMissing",
     "SuryaSource",
+    "SuryaSourceConfig",
     "TABLE_LABELS",
     "TEXT_LABELS",
 ]

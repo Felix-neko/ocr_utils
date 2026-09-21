@@ -183,8 +183,27 @@ def effective_jobs(jobs: int, reserve_cpu_cores: int) -> int:
     type=float,
     help="минимальная длина строки в попарных метриках",
 )
+@click.option(
+    "--layout-cache",
+    "layout_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="корень кэша surya page_layout: рамки таблиц и line art — разбором page_layout по варианту fr_nogeo; "
+    "перед пулом кэш набивается здесь же (GPU в родителе). Без него — по одним пикселям.",
+)
 def run(
-    geo_dir, nogeo_dir, out_dir, jobs, reserve_cpu_cores, only, pages, limit, skip_done, stroke_min_mm, line_min_mm
+    geo_dir,
+    nogeo_dir,
+    out_dir,
+    jobs,
+    reserve_cpu_cores,
+    only,
+    pages,
+    limit,
+    skip_done,
+    stroke_min_mm,
+    line_min_mm,
+    layout_cache_dir,
 ) -> None:
     """Померить все пары страниц → JSON на страницу и metrics.csv."""
     from tqdm import tqdm
@@ -197,14 +216,26 @@ def run(
         pairs = pairs[:limit]
     for note in notes:
         logger.warning(note)
-    params = Params(stroke_min_mm=stroke_min_mm, line_min_mm=line_min_mm)
+    params = Params(stroke_min_mm=stroke_min_mm, line_min_mm=line_min_mm, layout_cache_dir=layout_cache_dir)
+    if layout_cache_dir is not None:
+        # Surya в пул не заворачивается: кэш набивается ЗДЕСЬ, в родителе, до создания пула.
+        from ocr_utils.page_layout.image import Variant
+        from ocr_utils.page_layout.prefill import pdf_requests, prefill
+        from ocr_utils.page_layout.surya.cache import SuryaCache
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
+
+        requests = list(pdf_requests([pair.nogeo for pair in pairs], Variant.FR_NOGEO))
+        stats = prefill(requests, SuryaCache(layout_cache_dir), SuryaLayoutModel(), jobs=jobs)
+        click.echo(
+            f"Кэш surya: страниц {stats.requested}, уже было {stats.cached}, размечено {stats.done}, ошибок {stats.failed}"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run.json").write_text(
         json.dumps(
             {
                 "geo_dir": str(geo_dir),
                 "nogeo_dir": str(nogeo_dir),
-                "params": asdict(params),
+                "params": {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(params).items()},
                 "version": VERSION,
                 "notes": notes,
             },
@@ -556,19 +587,33 @@ def vlm_report(out_dir, labels, md_report) -> None:
 @click.option("--thr", multiple=True, help="перекрытие порога: имя=число")
 @click.option("--stroke-min-mm", default=Params.stroke_min_mm, show_default=True, type=float)
 @click.option("--line-min-mm", default=Params.line_min_mm, show_default=True, type=float)
-def regress(geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, line_min_mm) -> None:
+@click.option(
+    "--layout-cache",
+    "layout_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="корень кэша surya page_layout; промахи досчитываются моделью прямо здесь и пишутся в кэш",
+)
+def regress(geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, line_min_mm, layout_cache_dir) -> None:
     """Регрессия на эталоне: вердикты прошлого прогона против текущего кода, страница за страницей."""
     import fitz
+
+    from ocr_utils.geometry_regression.cache import surya_source_for
 
     label_map = load_labels(labels)
     old_rows = {r.key: r for r in read_csv(old_dir / "metrics_flagged.csv")} if old_dir else {}
     thresholds = Thresholds.parse(tuple(thr))
-    params = Params(stroke_min_mm=stroke_min_mm, line_min_mm=line_min_mm)
+    params = Params(stroke_min_mm=stroke_min_mm, line_min_mm=line_min_mm, layout_cache_dir=layout_cache_dir)
+    surya = None
+    if layout_cache_dir is not None:
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
+
+        surya = surya_source_for(params, SuryaLayoutModel())
     lines = ["| страница | метка | старое (вердикт, порча, выигрыш) | новое | итог |", "|---|---|---|---|---|"]
     hits_old = hits_new = 0
     for (pdf, page), (label, _) in sorted(label_map.items()):
         with fitz.open(nogeo_dir / f"{pdf}.pdf") as nogeo, fitz.open(geo_dir / f"{pdf}.pdf") as geo:
-            measure = measure_page(geo, nogeo, page, params)
+            measure = measure_page(geo, nogeo, page, params, surya)
         new = thresholds.apply(measure.metrics)
         old = old_rows.get((pdf, page))
         ok_new = (new.verdict == "bad") == (label == "bad")

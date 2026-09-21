@@ -18,6 +18,7 @@ import fitz
 
 from ocr_utils.geometry_regression import VERSION
 from ocr_utils.geometry_regression.metrics import PageMeasure, Params, measure_pair
+from ocr_utils.geometry_regression.regions import layout_boxes
 from ocr_utils.geometry_regression.render import render_gray
 from ocr_utils.geometry_regression.scoring import Thresholds, Verdict
 
@@ -62,7 +63,15 @@ def save_page_cache(path: Path, measure: PageMeasure) -> None:
         measure: Результат :func:`measure_pair`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": VERSION, "metrics": measure.metrics, "culprits": measure.culprits, "raw": measure.raw}
+    from ocr_utils.page_layout import version_tag
+
+    payload = {
+        "version": VERSION,
+        "page_layout": version_tag(),
+        "metrics": measure.metrics,
+        "culprits": measure.culprits,
+        "raw": measure.raw,
+    }
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
@@ -76,7 +85,18 @@ class PageVerdict:
     seconds: float  # время измерения (0 при попадании в кэш)
 
 
-def measure_page(geo_doc: fitz.Document, nogeo_doc: fitz.Document, page: int, params: Params) -> PageMeasure:
+def surya_source_for(params: Params, model=None):
+    """Источник surya по параметрам: кэш из ``params.layout_cache_dir`` (+ модель в родителе) или ``None``."""
+    from ocr_utils.page_layout.surya.source import OnMiss, SuryaSourceConfig
+
+    if params.layout_cache_dir is None:
+        return None
+    return SuryaSourceConfig(Path(params.layout_cache_dir), OnMiss(params.layout_on_miss)).open(model)
+
+
+def measure_page(
+    geo_doc: fitz.Document, nogeo_doc: fitz.Document, page: int, params: Params, surya=None
+) -> PageMeasure:
     """Измерить одну пару страниц (без коррекции → с коррекцией).
 
     Args:
@@ -84,13 +104,19 @@ def measure_page(geo_doc: fitz.Document, nogeo_doc: fitz.Document, page: int, pa
         nogeo_doc: Открытый PDF без коррекции («было», B).
         page: Номер страницы, с единицы (одинаковый в обоих PDF).
         params: Параметры детектора.
+        surya: Источник блоков surya для разбора ``page_layout``; ``None`` — собрать из ``params``
+            (кэш только для чтения), а если кэша нет — разбор без surya (детектор таблиц + пятна).
 
     Returns:
         :class:`PageMeasure` с полем ``metrics["seconds"]``.
     """
     started = time.time()
-    measure = measure_pair(render_gray(nogeo_doc, page - 1), render_gray(geo_doc, page - 1), params)
+    if surya is None:
+        surya = surya_source_for(params)
+    lineart = layout_boxes(nogeo_doc, page - 1, params.dpi, surya)
+    measure = measure_pair(render_gray(nogeo_doc, page - 1), render_gray(geo_doc, page - 1), params, lineart)
     measure.metrics["seconds"] = round(time.time() - started, 2)
+    measure.metrics["layout_surya"] = float(surya is not None)
     return measure
 
 
@@ -102,6 +128,7 @@ def verdict_for_page(
     nogeo_doc: fitz.Document,
     thresholds: Thresholds | None = None,
     params: Params | None = None,
+    surya=None,
 ) -> PageVerdict:
     """Вердикт «испортил ли FineReader геометрию страницы»: из кэша, при промахе — измерение.
 
@@ -124,7 +151,7 @@ def verdict_for_page(
     if cached is not None:
         metrics = cached["metrics"]
         return PageVerdict(thresholds.apply(metrics), metrics, True, 0.0)
-    measure = measure_page(geo_doc, nogeo_doc, page, params)
+    measure = measure_page(geo_doc, nogeo_doc, page, params, surya)
     if path is not None:
         save_page_cache(path, measure)
     return PageVerdict(thresholds.apply(measure.metrics), measure.metrics, False, measure.metrics["seconds"])

@@ -58,6 +58,14 @@ RENAMES: "tuple[tuple[str, str, str], ...]" = (
     ("pages", "strokes_detected_at", "line_art_detected_at"),
 )
 
+# Колонки, которые после переименования ОБНУЛЯЮТСЯ: ключ — строка из ``RENAMES`` (``таблица.старое``),
+# значение — колонки, чьё содержимое относилось к прежнему детектору. Версия крупного штриха
+# равна версии единого line art (обе 1), и без обнуления ``--skip-detected`` счёл бы line art
+# посчитанным, хотя его находки только что удалены.
+RESET_AFTER_RENAME: "dict[str, tuple[str, ...]]" = {
+    "pages.stroke_detector_version": ("line_art_version", "line_art_detected_at")
+}
+
 # Строки, УБРАННЫЕ из данных: (таблица, колонка, значения). Виды ``stroke_table`` и
 # ``stroke_drawing`` жили один прогон (детектор крупного штриха на detect) и заменены
 # единым ``line_art_schema``; их автоматические находки в базе ничего не значат.
@@ -154,6 +162,8 @@ def rename_columns(db_path: Path, dry_run: bool = False) -> MigrationReport:
                 continue
             if not dry_run:
                 connection.execute(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}"')
+                for reset in RESET_AFTER_RENAME.get(f"{table}.{old}", ()):
+                    connection.execute(f'UPDATE "{table}" SET "{reset}" = NULL')
             report.renamed.append(f"{table}.{old} -> {new}")
         for table, column in DROPS:
             columns = _table_columns(connection, table)

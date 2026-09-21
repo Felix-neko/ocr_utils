@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Шаг 8: миграция схемы баз разметки под сборку PDF.
+# Шаг 8: миграция схемы баз разметки пака-2 (та же, что у пака-1).
 #
 # Что делает. Переименовывает колонки (packs.root_path -> source_pics_root,
 # pages.file_name -> source_file_name, pages.rel_path -> source_rel_path; с 2026-09-21 —

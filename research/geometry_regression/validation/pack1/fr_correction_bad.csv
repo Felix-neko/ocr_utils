@@ -1,31 +1,31 @@
 название	путь	аннотация
-full_1966_01 с.78	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_01_p078_d1.52_g1.38_parallel.jpg	шкаф: полки погнуты
-full_1966_01 с.95	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_01_p095_d1.18_g1.48_vtilt.jpg	вертикальные рамки наклонились
-full_1966_05 с.70	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1966_05.pdf#page=70	дробные черты формул наклонились (короткие
-full_1966_06 с.58	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_06_p058_d3.37_g1.64_hmean.jpg	дробные черты формул наклонились
-full_1967_01 с.35	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p035_d4.00_g1.94_stretch.jpg	крупный заголовок наклонён на 0.8°
-full_1967_01 с.38	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p038_d1.41_g1.39_vtilt.jpg	вертикали таблиц наклонились
-full_1967_01 с.80	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p080_d1.32_g0.47_lineart.jpg	блок-схема погнута
-full_1967_01 с.85	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p085_d2.01_g0.78_htilt.jpg	дробные черты формул наклонены
-full_1967_02 с.57	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=57	левая кромка верхнего блока наклонилась
-full_1967_03 с.11	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_03_p011_d2.16_g0.87_line.jpg	заголовок в разрядку заплясал
-full_1967_03 с.36	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_03_p036_d1.09_g0.45_stretch.jpg	крупный заголовок: верх букв уходит вверх (0.25 мм — ниже шума детектора)
-full_1967_05 с.26	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_05.pdf#page=26	заголовок статьи растянут и наклонён
-full_1967_06 с.39	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_06_p039_d1.24_g0.40_hmean.jpg	дробные черты всех формул наклонились
-full_1967_07 с.73	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_07_p073_d3.87_g1.05_htilt.jpg	таблицу перекорёжило
-full_1967_10 с.74	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_10_p074_d3.10_g3.23_parallel.jpg	линии блок-схемы погнуты
-full_1968_01 с.29	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_01_p029_d2.40_g0.66_parallel.jpg	дробные черты формул наклонились
-full_1968_02 с.78	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_02_p078_d3.45_g1.23_parallel.jpg	line art: наклонная крышка агрегата стала горизонтальной
-full_1968_04 с.86	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_04_p086_d1.15_g1.16_hmean.jpg	заголовок стал ещё более наклонным
-full_1968_05 с.44	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_05_p044_d1.40_g0.51_stretch.jpg	заголовок стал ещё более наклонным
-full_1968_05 с.74	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_05_p074_d3.67_g1.60_parallel.jpg	без коррекции лучше
-full_1968_05 с.75	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_05_p075_d4.10_g3.32_parallel.jpg	без коррекции лучше
-full_1968_06 с.40	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_06_p040_d1.48_g0.23_htilt.jpg	прямые линии line art покорёжило
-full_1970_10 с.71	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1970/full_1970_10_p071_d1.67_g0.46_lineart.jpg	хрестоматийный случай: фото и текст покорёжены
-full_1971_04 с.44	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_04_p044_d1.22_g0.59_lineart.jpg	хрестоматийный случай: фото и подпись «И. К. Талат» перекошены
-full_1971_07 с.43	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_07_p043_d1.51_g0.48_lineart.jpg	фото и строка над ним («среднем уровне») покорёжены
-full_1971_08 с.79	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_08_p079_d2.36_g0.57_htilt.jpg	таблица наклонилась
-full_1971_11 с.70	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_11_p070_d1.29_g0.50_line.jpg	прямые линии line art (кран-штабелер) сильно покорёжены
-full_1974_10 с.30	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_10_p030_d5.12_g0.60_parallel.jpg	лучи номограммы изогнуты
-full_1974_12 с.34	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_12_p034_d4.56_g2.67_parallel.jpg	блок-схема: рамки и линии покорёжены
-full_1974_12 с.42	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_12_p042_d2.08_g0.44_parallel.jpg	блок-схема: рамки и стрелки покорёжены
+full_1966_01 с.78	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_01_p078_d1.52_g1.38_parallel.jpg	шкаф: полки погнуты
+full_1966_01 с.95	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_01_p095_d1.18_g1.48_vtilt.jpg	вертикальные рамки наклонились
+full_1966_05 с.70	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1966_05.pdf#page=70	дробные черты формул наклонились (короткие
+full_1966_06 с.58	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_06_p058_d3.37_g1.64_hmean.jpg	дробные черты формул наклонились
+full_1967_01 с.35	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p035_d4.00_g1.94_stretch.jpg	крупный заголовок наклонён на 0.8°
+full_1967_01 с.38	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p038_d1.41_g1.39_vtilt.jpg	вертикали таблиц наклонились
+full_1967_01 с.80	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p080_d1.32_g0.47_lineart.jpg	блок-схема погнута
+full_1967_01 с.85	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p085_d2.01_g0.78_htilt.jpg	дробные черты формул наклонены
+full_1967_02 с.57	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=57	левая кромка верхнего блока наклонилась
+full_1967_03 с.11	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_03_p011_d2.16_g0.87_line.jpg	заголовок в разрядку заплясал
+full_1967_03 с.36	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_03_p036_d1.09_g0.45_stretch.jpg	крупный заголовок: верх букв уходит вверх (0.25 мм — ниже шума детектора)
+full_1967_05 с.26	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_05.pdf#page=26	заголовок статьи растянут и наклонён
+full_1967_06 с.39	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_06_p039_d1.24_g0.40_hmean.jpg	дробные черты всех формул наклонились
+full_1967_07 с.73	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_07_p073_d3.87_g1.05_htilt.jpg	таблицу перекорёжило
+full_1967_10 с.74	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_10_p074_d3.10_g3.23_parallel.jpg	линии блок-схемы погнуты
+full_1968_01 с.29	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_01_p029_d2.40_g0.66_parallel.jpg	дробные черты формул наклонились
+full_1968_02 с.78	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_02_p078_d3.45_g1.23_parallel.jpg	line art: наклонная крышка агрегата стала горизонтальной
+full_1968_04 с.86	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_04_p086_d1.15_g1.16_hmean.jpg	заголовок стал ещё более наклонным
+full_1968_05 с.44	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_05_p044_d1.40_g0.51_stretch.jpg	заголовок стал ещё более наклонным
+full_1968_05 с.74	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_05_p074_d3.67_g1.60_parallel.jpg	без коррекции лучше
+full_1968_05 с.75	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_05_p075_d4.10_g3.32_parallel.jpg	без коррекции лучше
+full_1968_06 с.40	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_06_p040_d1.48_g0.23_htilt.jpg	прямые линии line art покорёжило
+full_1970_10 с.71	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1970/full_1970_10_p071_d1.67_g0.46_lineart.jpg	хрестоматийный случай: фото и текст покорёжены
+full_1971_04 с.44	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_04_p044_d1.22_g0.59_lineart.jpg	хрестоматийный случай: фото и подпись «И. К. Талат» перекошены
+full_1971_07 с.43	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_07_p043_d1.51_g0.48_lineart.jpg	фото и строка над ним («среднем уровне») покорёжены
+full_1971_08 с.79	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_08_p079_d2.36_g0.57_htilt.jpg	таблица наклонилась
+full_1971_11 с.70	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1971/full_1971_11_p070_d1.29_g0.50_line.jpg	прямые линии line art (кран-штабелер) сильно покорёжены
+full_1974_10 с.30	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_10_p030_d5.12_g0.60_parallel.jpg	лучи номограммы изогнуты
+full_1974_12 с.34	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_12_p034_d4.56_g2.67_parallel.jpg	блок-схема: рамки и линии покорёжены
+full_1974_12 с.42	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_12_p042_d2.08_g0.44_parallel.jpg	блок-схема: рамки и стрелки покорёжены

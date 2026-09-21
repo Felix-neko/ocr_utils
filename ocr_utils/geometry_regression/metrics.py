@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -27,6 +28,12 @@ class Params:
     """Размеры, привязанные к бумаге. Умолчания — для пака-1 (журнальная полоса ~170×260 мм)."""
 
     dpi: float = WORK_DPI
+    # Корень кэша surya (``page_layout``): рамки таблиц и line art берутся разбором page_layout
+    # по варианту ``fr_nogeo``; ``None`` — по одним пикселям (как в v12). В воркерах кэш только
+    # читается, промах при ``layout_on_miss="fail"`` — ошибка страницы: кэш набивает
+    # ``page_layout prefill-surya`` заранее.
+    layout_cache_dir: "Path | None" = None
+    layout_on_miss: str = "fail"
     # Штрих короче не считается прямым штрихом: дробные черты формул от 5 мм (1966/05 с.70),
     # линейки таблиц от 30 мм, а у текста прямых кромок такой длины почти нет.
     stroke_min_mm: float = 4.0
@@ -79,14 +86,27 @@ def _scale_culprits(culprits: dict, k: float) -> dict:
     return {name: {side: scale(value) for side, value in pair.items()} for name, pair in culprits.items()}
 
 
-def measure_pair(gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = Params()) -> PageMeasure:
-    """Метрики пары «без коррекции (B) | с коррекцией (A)» по рендерам 300 dpi."""
+def measure_pair(
+    gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = Params(), lineart: list | None = None
+) -> PageMeasure:
+    """Метрики пары «без коррекции (B) | с коррекцией (A)» по рендерам 300 dpi.
+
+    Args:
+        gray300_b: Рендер страницы без коррекции (B), 300 dpi.
+        gray300_a: Рендер страницы с коррекцией (A), 300 dpi.
+        params: Размеры, привязанные к бумаге.
+        lineart: Рамки таблиц и line art на B в пикселях ``params.dpi`` (от ``page_layout``,
+            см. :func:`regions.layout_boxes`); ``None`` — найти по одним пикселям (запасной ход v12).
+
+    Returns:
+        :class:`PageMeasure`: метрики «стало − было», виновники, сырые ряды.
+    """
     dpi = params.dpi
     b = to_work(gray300_b)
     a = to_work(gray300_a)
     out = PageMeasure()
 
-    lineart = lineart_boxes(b, dpi)
+    lineart = lineart_boxes(b, dpi) if lineart is None else [tuple(int(v) for v in box) for box in lineart]
     warp = estimate_field(b, a, dpi, lineart)
     lines_b, separators_b = text_lines(gray300_b, dpi)
     lines_a, separators_a = text_lines(gray300_a, dpi)

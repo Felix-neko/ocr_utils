@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from ocr_utils.page_layout.image import PageImage
 from ocr_utils.page_layout.surya.blocks import LayoutBlocks
@@ -29,6 +31,29 @@ class OnMiss(str, Enum):
 
 class SuryaMissing(RuntimeError):
     """В кэше нет блоков для страницы, а модели в этом процессе нет — кэш не набит."""
+
+
+@dataclass(frozen=True)
+class SuryaSourceConfig:
+    """Описание источника, которое переживает pickle (уезжает в воркеры): корень кэша и политика промаха.
+
+    ``cache_root`` — корень кэша или ``None`` (surya выключена осознанно); ``on_miss`` —
+    что делать воркеру при промахе. Модель в описание не входит: её открывает родитель
+    через :meth:`open`.
+    """
+
+    cache_root: Path | None = None
+    on_miss: OnMiss = OnMiss.FAIL
+
+    @property
+    def enabled(self) -> bool:
+        return self.cache_root is not None
+
+    def open(self, model=None, readonly: bool = True) -> "SuryaSource | None":
+        """Источник: кэш (только чтение в воркере) плюс модель, если она передана."""
+        if self.cache_root is None:
+            return None
+        return SuryaSource(SuryaCache(self.cache_root, readonly=readonly and model is None), model, self.on_miss)
 
 
 class SuryaSource:
@@ -75,4 +100,4 @@ class SuryaSource:
         )
 
 
-__all__ = ["OnMiss", "SuryaMissing", "SuryaSource"]
+__all__ = ["OnMiss", "SuryaMissing", "SuryaSource", "SuryaSourceConfig"]

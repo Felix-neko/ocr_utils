@@ -20,7 +20,8 @@ from pathlib import Path
 from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
 from ocr_utils.page_layout.image import PageImage, Variant
 from ocr_utils.page_layout.orientation.detectors.base import ROTATIONS, Verdict
-from ocr_utils.page_layout.regions import Region
+from ocr_utils.page_layout.geometry import Box
+from ocr_utils.page_layout.regions import Region, RegionKind
 from ocr_utils.page_layout.surya.cache import SuryaCache, scan_cache_name
 from ocr_utils.scan_markup.hashing import FileStamp, full_stamp
 
@@ -53,6 +54,11 @@ class PageOptions:
 
     # Пороги детекторов (растр и др.) и правило обложки.
     layout: LayoutOptions = LayoutOptions()
+
+    # Известные из базы области семейств, которые в ЭТОМ прогоне не считаются, — исключения
+    # для line art и повёрнутого текста: ``(x1, y1, x2, y2, kind)`` в пикселях оригинала.
+    known_raster: tuple[tuple[int, int, int, int, str], ...] = ()
+    known_tables: tuple[tuple[int, int, int, int, str], ...] = ()
 
     def finds(self) -> set[Find]:
         wanted = set()
@@ -133,6 +139,11 @@ class PageResult:
         return out
 
 
+def _known_region(item: tuple[int, int, int, int, str]) -> Region:
+    x1, y1, x2, y2, kind = item
+    return Region(Box(int(x1), int(y1), int(max(x1, x2)), int(max(y1, y2))), RegionKind(kind), None, "db")
+
+
 def analyse_page(
     path: Path, rel_path: str, order_index: int, options: PageOptions, known_digest: str | None = None
 ) -> PageAnalysis:
@@ -149,7 +160,11 @@ def analyse_page(
             return analysis
         image = PageImage.from_file(path, Variant.SCAN, scan_cache_name(rel_path), options.default_dpi)
         cache = SuryaCache(options.layout_cache_dir, readonly=True) if options.layout_cache_dir is not None else None
-        layout = PageLayout(image, options.finds(), options.layout_options(), order_index)
+        known = {
+            Find.RASTER: [_known_region(item) for item in options.known_raster],
+            Find.TABLES: [_known_region(item) for item in options.known_tables],
+        }
+        layout = PageLayout(image, options.finds(), options.layout_options(), order_index, known)
         analysis.layout = layout.prepare(cache if options.use_surya_layout else None)
         return analysis
     except Exception as exc:  # noqa: BLE001 — одна битая полоса не должна валить прогон

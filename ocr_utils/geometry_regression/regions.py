@@ -1,9 +1,12 @@
-"""Области страницы на рендере без коррекции: line art и строки текста.
+"""Области страницы на рендере без коррекции: line art (с таблицами) и строки текста.
 
-Рамки штриховых рисунков даёт ``ocr_utils.line_art_detection`` — он заведён под тот же
-случай (с.80 в 1967/01) и работает на бинарном рендере; surya-layout здесь не нужен, GPU
-не трогаем. Строки текста — сегментация ``curved_lines.detectors.line_fit.line_samples``,
-она же кормит попарные метрики строк и кромки колонок.
+Рамки таблиц и line art с v13 даёт единый разбор ``ocr_utils.page_layout`` — тот же, что на
+этапе ``detect`` и в правке текстового слоя: детектор таблиц, блоки surya (из кэша по
+варианту ``fr_nogeo``, GPU в воркерах не нужен) и связные пятна/скопления линеек, всё через
+пиксельную проверку. Пиксельный запасной ход (:func:`lineart_boxes`, одни пятна и линейки,
+как в v12) остаётся для страниц без surya и для тестов. Строки текста — сегментация
+``curved_lines.detectors.line_fit.line_samples``, она же кормит попарные метрики строк и
+кромки колонок.
 """
 
 from __future__ import annotations
@@ -78,9 +81,37 @@ class TextLine:
 
 
 def lineart_boxes(gray: np.ndarray, dpi: float = WORK_DPI) -> list[Box]:
-    """Рамки крупного штриха (x0, y0, x1, y1) на рабочей копии."""
+    """Рамки крупного штриха (x0, y0, x1, y1) на рабочей копии — одни пиксели, без surya (запасной ход)."""
     findings = analyse_gray(gray, params_for_dpi(int(round(dpi))))
     return [tuple(int(v) for v in box) for box in findings.boxes]
+
+
+def layout_boxes(document, page_index: int, dpi: float = WORK_DPI, surya=None) -> list[Box]:
+    """Рамки таблиц и line art страницы PDF без коррекции в пикселях ``dpi`` — разбором ``page_layout``.
+
+    Args:
+        document: Открытый ``fitz.Document`` без коррекции геометрии (B).
+        page_index: Номер страницы с нуля.
+        dpi: Разрешение рабочей копии, в котором отдаются рамки.
+        surya: ``SuryaSource`` (кэш только для чтения в воркере, кэш + модель в родителе) или
+            ``None`` — без surya, по одним пикселям.
+
+    Returns:
+        Рамки ``(x0, y0, x1, y1)`` таблиц и line art; таблица для детектора порчи — та же
+        «нетекстовая геометрия», что и рисунок: её линейки нельзя ни наклонять, ни гнуть.
+    """
+    from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
+    from ocr_utils.page_layout.image import PageImage, Variant
+
+    image = PageImage.from_pdf_page(document, page_index, Variant.FR_NOGEO)
+    options = LayoutOptions(use_surya=surya is not None and surya.enabled)
+    layout = PageLayout(image, {Find.TABLES, Find.LINE_ART}, options).process(surya)
+    k = dpi / image.dpi
+    boxes: list[Box] = []
+    for region in layout.tables + layout.line_arts:
+        box = region.box.scaled(k)
+        boxes.append((int(box.x0), int(box.y0), int(box.x1), int(box.y1)))
+    return boxes
 
 
 def text_lines(gray300: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[TextLine], list[tuple[int, int]]]:

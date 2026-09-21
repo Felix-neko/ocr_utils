@@ -1,41 +1,41 @@
 название	путь	аннотация
-full_1966_04 с.2	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1966/full_1966_04_p002_d1.62_g0.75_line.jpg	трапеция шапки убрана
-full_1966_06 с.62	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1966/full_1966_06_p062_d1.06_g2.23_vtilt.jpg	вертикаль таблицы чуть наклонилась
-full_1967_01 с.17	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_01.pdf#page=17	FineReader страницу не менял
-full_1967_01 с.71	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1967/full_1967_01_p071_d1.94_g2.73_htilt.jpg	подчёркивание рубрики наклонилось
-full_1967_02 с.2	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=2	правый край текста стал ровнее
-full_1967_02 с.29	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=29	кончики строк выпрямились
-full_1967_02 с.55	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=55	строки и таблицы выпрямились
-full_1967_02 с.97	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=97	разницы нет; ловилось ошибкой сопоставления строк
-full_1967_09 с.81	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1967/full_1967_09_p081_d1.01_g3.19_edge.jpg	волнистые строки внизу выправлены (кромка чуть ушла — допустимо)
-full_1967_10 с.30	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_10.pdf#page=30	наклонные строки сверху и снизу выправлены
-full_1968_01 с.15	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_01.pdf#page=15	заголовок чуть хуже
-full_1968_01 с.96	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_01.pdf#page=96	заголовок стал прямее
-full_1968_02 с.69	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_02.pdf#page=69	трапециевидные искажения ушли
-full_1968_02 с.92	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_02_p092_d1.26_g0.69_stretch.jpg	наклонный заголовок рубрики стал горизонтальным
-full_1968_03 с.89	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_03.pdf#page=89	наклонный заголовок рубрики стал горизонтальнее
-full_1968_05 с.55	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p055_d2.55_g3.09_edge.jpg	изогнутые строки сверху страницы стали горизонтальными
-full_1968_05 с.72	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p072_d1.11_g3.86_parallel.jpg	волнистые строки внизу выправлены; формулы покорёжило незначительно
-full_1968_05 с.95	/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_05.pdf#page=95	волнистые строки сверху и снизу стали горизонтальными
-full_1968_08 с.86	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_08_p086_d2.67_g3.50_wobble.jpg	ложная тревога: строка распалась в A на куски, куски зацепились за соседнюю строку — «волна»; коррекция нормальная
-full_1970_04 с.25	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1970/full_1970_04_p025_d1.11_g2.87_lineart.jpg	виньетка «100 лет» — не рисунок; строки выправлены
-full_1970_04 с.26	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1970/full_1970_04_p026_d3.62_g7.71_vtilt.jpg	сильная трапеция убрана; линейка врезки наклонилась на 2.5 мм — приемлемо
-full_1970_04 с.28	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1970/full_1970_04_p028_d2.19_g7.03_vtilt.jpg	сильная трапеция убрана; линейка врезки наклонилась — приемлемо
-full_1970_04 с.32	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1970/full_1970_04_p032_d2.22_g5.71_lineart.jpg	сильная трапеция убрана
-full_1970_11 с.82	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1970/full_1970_11_p082_d2.29_g1.89_hmean.jpg	волнистые строки и наклонная подпись автора выправлены
-full_1973_01 с.96	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1973/full_1973_01_p096_d2.22_g2.43_lineart.jpg	логотип рубрики — не рисунок; строки выправлены
-full_1974_02 с.85	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1974/full_1974_02_p085_d1.96_g3.31_hmean.jpg	ложное срабатывание (линейка колонтитула)
-full_1974_02 с.95	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1974/full_1974_02_p095_d1.10_g4.74_htilt.jpg	ложное срабатывание (бланк с линейками для заполнения)
-full_1975_04 с.95	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1975/full_1975_04_p095_d1.83_g1.28_htilt.jpg	ложная тревога: волнистый росчерк логотипа рубрики принят за линейку; коррекция нормальная
-full_1976_02 с.84	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1976/full_1976_02_p084_d1.68_g1.98_wobble.jpg	ложная тревога: строка склеена через межколонник, колонки выправлены по-разному — «волна»; правая колонка выпрямлена
-full_1976_07 с.92	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1976/full_1976_07_p092_d1.04_g0.50_vtilt.jpg	клякса-брусок у правого края принята за линейку; коррекция нормальная
-full_1976_08 с.85	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1976/full_1976_08_p085_d1.43_g0.69_vtilt.jpg	клякса-брусок у левого края принята за линейку; коррекция нормальная
-full_1975_07 с.78	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1975/full_1975_07_p078_d1.79_g0.98_vtilt.jpg	ложная тревога: тень корешка у правого края (24 мм, толщина 1.0–1.3 мм) принята за линейку
-full_1967_07 с.75	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_07_p075_d1.11_g0.52_vtilt.jpg	ложная тревога: карандашная скобка на левом поле принята за вертикальную линейку; коррекция страницу почти не тронула
-full_1973_01 с.56	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_01_p056_d4.53_g1.95_bend.jpg	ложная тревога: поле без тайлов в верхней половине (A растянута на 7–12 %), прогноз линейки шапки лёг на строку текста — «изгиб» 3.75 мм из букв
-full_1973_05 с.91	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_05_p091_d5.02_g3.29_hmean.jpg	ложная тревога: росчерк логотипа рубрики «Письма читателей» (5–6° в B) сошёл за черты формул
-full_1973_06 с.65	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_06_p065_d1.55_g3.16_hmean.jpg	ложная тревога: росчерк логотипа «Экономическое образование кадров» как черты формул
-full_1973_07 с.67	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_07_p067_d2.22_g2.41_lineart.jpg	ложная тревога: логотип рубрики FineReader оставил на месте, а текст сдвинул — все тайлы логотипа «без пары», сам логотип цел
-full_1975_07 с.44	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1975/full_1975_07_p044_d2.99_g0.66_bend.jpg	ложная тревога: прогноз вертикали таблицы по полю мимо на 2 мм, проба изгиба цеплялась за точки отточий
-full_1975_08 с.95	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1975/full_1975_08_p095_d3.34_g0.98_bend.jpg	ложная тревога: кромка кадра у левого края (26 мм от края, под 2.7°) прошла за линейку — в её верх упираются обломки линейки шапки
-full_1975_05 с.61	/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v11/pairs/bad/1975/full_1975_05_p061_d3.24_g1.12_bend.jpg	ложная тревога: FineReader убрал трапецию, растянув верх страницы на 6–10 %; тайлы поля там не совпадали, прогноз линейки шапки лёг на строку текста
+full_1966_04 с.2	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1966/full_1966_04_p002_d1.62_g0.75_line.jpg	трапеция шапки убрана
+full_1966_06 с.62	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1966/full_1966_06_p062_d1.06_g2.23_vtilt.jpg	вертикаль таблицы чуть наклонилась
+full_1967_01 с.17	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_01.pdf#page=17	FineReader страницу не менял
+full_1967_01 с.71	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1967/full_1967_01_p071_d1.94_g2.73_htilt.jpg	подчёркивание рубрики наклонилось
+full_1967_02 с.2	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=2	правый край текста стал ровнее
+full_1967_02 с.29	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=29	кончики строк выпрямились
+full_1967_02 с.55	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=55	строки и таблицы выпрямились
+full_1967_02 с.97	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_02.pdf#page=97	разницы нет; ловилось ошибкой сопоставления строк
+full_1967_09 с.81	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1967/full_1967_09_p081_d1.01_g3.19_edge.jpg	волнистые строки внизу выправлены (кромка чуть ушла — допустимо)
+full_1967_10 с.30	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1967_10.pdf#page=30	наклонные строки сверху и снизу выправлены
+full_1968_01 с.15	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_01.pdf#page=15	заголовок чуть хуже
+full_1968_01 с.96	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_01.pdf#page=96	заголовок стал прямее
+full_1968_02 с.69	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_02.pdf#page=69	трапециевидные искажения ушли
+full_1968_02 с.92	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_02_p092_d1.26_g0.69_stretch.jpg	наклонный заголовок рубрики стал горизонтальным
+full_1968_03 с.89	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_03.pdf#page=89	наклонный заголовок рубрики стал горизонтальнее
+full_1968_05 с.55	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p055_d2.55_g3.09_edge.jpg	изогнутые строки сверху страницы стали горизонтальными
+full_1968_05 с.72	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p072_d1.11_g3.86_parallel.jpg	волнистые строки внизу выправлены; формулы покорёжило незначительно
+full_1968_05 с.95	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_05.pdf#page=95	волнистые строки сверху и снизу стали горизонтальными
+full_1968_08 с.86	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_08_p086_d2.67_g3.50_wobble.jpg	ложная тревога: строка распалась в A на куски, куски зацепились за соседнюю строку — «волна»; коррекция нормальная
+full_1970_04 с.25	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1970/full_1970_04_p025_d1.11_g2.87_lineart.jpg	виньетка «100 лет» — не рисунок; строки выправлены
+full_1970_04 с.26	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1970/full_1970_04_p026_d3.62_g7.71_vtilt.jpg	сильная трапеция убрана; линейка врезки наклонилась на 2.5 мм — приемлемо
+full_1970_04 с.28	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1970/full_1970_04_p028_d2.19_g7.03_vtilt.jpg	сильная трапеция убрана; линейка врезки наклонилась — приемлемо
+full_1970_04 с.32	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1970/full_1970_04_p032_d2.22_g5.71_lineart.jpg	сильная трапеция убрана
+full_1970_11 с.82	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1970/full_1970_11_p082_d2.29_g1.89_hmean.jpg	волнистые строки и наклонная подпись автора выправлены
+full_1973_01 с.96	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1973/full_1973_01_p096_d2.22_g2.43_lineart.jpg	логотип рубрики — не рисунок; строки выправлены
+full_1974_02 с.85	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1974/full_1974_02_p085_d1.96_g3.31_hmean.jpg	ложное срабатывание (линейка колонтитула)
+full_1974_02 с.95	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1974/full_1974_02_p095_d1.10_g4.74_htilt.jpg	ложное срабатывание (бланк с линейками для заполнения)
+full_1975_04 с.95	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1975/full_1975_04_p095_d1.83_g1.28_htilt.jpg	ложная тревога: волнистый росчерк логотипа рубрики принят за линейку; коррекция нормальная
+full_1976_02 с.84	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1976/full_1976_02_p084_d1.68_g1.98_wobble.jpg	ложная тревога: строка склеена через межколонник, колонки выправлены по-разному — «волна»; правая колонка выпрямлена
+full_1976_07 с.92	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1976/full_1976_07_p092_d1.04_g0.50_vtilt.jpg	клякса-брусок у правого края принята за линейку; коррекция нормальная
+full_1976_08 с.85	/mnt/system/raw/mts/pack1_geometry_regression/pack1/pairs/bad/1976/full_1976_08_p085_d1.43_g0.69_vtilt.jpg	клякса-брусок у левого края принята за линейку; коррекция нормальная
+full_1975_07 с.78	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1975/full_1975_07_p078_d1.79_g0.98_vtilt.jpg	ложная тревога: тень корешка у правого края (24 мм, толщина 1.0–1.3 мм) принята за линейку
+full_1967_07 с.75	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_07_p075_d1.11_g0.52_vtilt.jpg	ложная тревога: карандашная скобка на левом поле принята за вертикальную линейку; коррекция страницу почти не тронула
+full_1973_01 с.56	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_01_p056_d4.53_g1.95_bend.jpg	ложная тревога: поле без тайлов в верхней половине (A растянута на 7–12 %), прогноз линейки шапки лёг на строку текста — «изгиб» 3.75 мм из букв
+full_1973_05 с.91	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_05_p091_d5.02_g3.29_hmean.jpg	ложная тревога: росчерк логотипа рубрики «Письма читателей» (5–6° в B) сошёл за черты формул
+full_1973_06 с.65	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_06_p065_d1.55_g3.16_hmean.jpg	ложная тревога: росчерк логотипа «Экономическое образование кадров» как черты формул
+full_1973_07 с.67	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1973/full_1973_07_p067_d2.22_g2.41_lineart.jpg	ложная тревога: логотип рубрики FineReader оставил на месте, а текст сдвинул — все тайлы логотипа «без пары», сам логотип цел
+full_1975_07 с.44	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1975/full_1975_07_p044_d2.99_g0.66_bend.jpg	ложная тревога: прогноз вертикали таблицы по полю мимо на 2 мм, проба изгиба цеплялась за точки отточий
+full_1975_08 с.95	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v10/pairs/bad/1975/full_1975_08_p095_d3.34_g0.98_bend.jpg	ложная тревога: кромка кадра у левого края (26 мм от края, под 2.7°) прошла за линейку — в её верх упираются обломки линейки шапки
+full_1975_05 с.61	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v11/pairs/bad/1975/full_1975_05_p061_d3.24_g1.12_bend.jpg	ложная тревога: FineReader убрал трапецию, растянув верх страницы на 6–10 %; тайлы поля там не совпадали, прогноз линейки шапки лёг на строку текста

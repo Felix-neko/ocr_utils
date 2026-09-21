@@ -161,3 +161,26 @@ def test_rect_kinds_have_cvat_rectangle_labels() -> None:
     names = {label["name"]: label for label in LABELS}
     for kind in TABLE_KINDS + LINE_ART_KINDS + ROTATED_TEXT_KINDS:
         assert LABEL_BY_KIND[kind] in names and names[LABEL_BY_KIND[kind]]["type"] == "rectangle"
+
+
+def test_line_art_rerun_excludes_raster_known_from_db(tmp_path: Path) -> None:
+    """Пересчёт одного line art видит растр из базы: штриха внутри фотографии не появляется."""
+    pack = tmp_path / "пак-2"
+    _write(pack / "1977" / "01" / "0010_2R.tif")
+    db = tmp_path / "m.sqlite"
+    _run(pack, db)
+    with open_db(db)() as session:
+        page = session.scalars(select(Page)).one()
+        # Растр «уточнён человеком» и накрывает рисунок целиком; line art помечен устаревшим.
+        page.rect_regions = [r for r in page.rect_regions if r.kind not in ("grayscale", "color")] + [
+            RectRegion(
+                x1=DRAWING[0], y1=DRAWING[1], x2=DRAWING[2], y2=DRAWING[3], kind=KIND_GRAYSCALE, source=SOURCE_CVAT
+            )
+        ]
+        page.line_art_version = LINE_ART_VERSION - 1
+        session.commit()
+    _run(pack, db, "--skip-detected")
+    page = _page(db)
+    arts = [r for r in page.rect_regions if r.kind == KIND_LINE_ART_SCHEMA]
+    assert all(_iou(r, DRAWING) < 0.1 for r in arts), "рисунок накрыт ручным растром — line art там не ищется"
+    assert any(r.kind == KIND_GRAYSCALE and r.source == SOURCE_CVAT for r in page.rect_regions)
