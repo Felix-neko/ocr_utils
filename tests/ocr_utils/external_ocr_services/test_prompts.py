@@ -22,7 +22,15 @@ def test_toc_stage_prompt():
         assert old not in text, old
     # v15: картинки трёх видов — fenced-блок с видом первой строкой, без XML-обёртки и без «> »;
     # имена тегов без подчёркиваний; сноски — в теге.
-    for piece in ("[блок-схема]", "[фотография]", "[графика]", "<footnote>[^1]:", "ось X", "ось Y", "```"):
+    for piece in (
+        "[блок-схема]",
+        "[фотография]",
+        "[графика]",
+        "<footnote>¹ текст сноски</footnote>",
+        "ось X",
+        "ось Y",
+        "```",
+    ):
         assert piece in text, piece
     for old in (
         "<schema>",

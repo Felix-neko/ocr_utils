@@ -335,3 +335,13 @@ def test_bad_backslash_escapes_are_repaired_and_counted():
     assert parse_json_text('{"content_markdown": "чисто \\n"}').repaired_escapes == 0
     with pytest.raises(ParseError):
         parse_json_text('{"content_markdown": "оборвано \\u')
+
+
+def test_footnote_marks_become_superscript_digits():
+    """`[^1]` в тексте и `[^1]:` в сноске → надстрочные цифры; повторный разбор ничего не меняет; `^` вне сносок не трогается."""
+    body = "Норма¹ уже есть, а ссылка[^2] и ещё одна [^12] в тексте, запасов [^3]: два.\n\n<footnote>[^2]: Текст сноски.</footnote>\n\n[^12]: Голая.\n\nСтепень x^2 и [^не сноска]."
+    result = parse_json_text(json.dumps({"content_markdown": body}, ensure_ascii=False))
+    assert result.content_markdown == (
+        "Норма¹ уже есть, а ссылка² и ещё одна ¹² в тексте, запасов ³: два.\n\n<footnote>² Текст сноски.</footnote>\n\n¹² Голая.\n\nСтепень x^2 и [^не сноска]."
+    )
+    assert parse_json_text(result.to_json()).content_markdown == result.content_markdown

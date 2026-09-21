@@ -63,6 +63,7 @@ from ocr_utils.external_ocr_services.reconcile import (
 )
 from ocr_utils.external_ocr_services.render import _yaml_value, space_author_tags
 from ocr_utils.external_ocr_services.schema import (
+    SUPERSCRIPT_DIGITS,
     BlockTag,
     DamageTag,
     ParseError,
@@ -86,7 +87,7 @@ _DAMAGE_TAGS = re.compile(rf"</?(?:{'|'.join(tag.value for tag in DamageTag)})>"
 _LEADING_TAG = re.compile(r"^<(?P<name>[a-z][\w-]*)")
 _DAMAGE_TAG_NAMES = frozenset(tag.value for tag in DamageTag)
 # Начала абзацев, которые не сшиваются: заголовки, цитаты, таблицы в markdown, fenced-блоки, списки.
-_NOT_PLAIN_START = re.compile(r"^(?:#|>|\||```|[-*+] |\d+[.)] |\[\^)")
+_NOT_PLAIN_START = re.compile(rf"^(?:#|>|\||```|[-*+] |\d+[.)] |\[\^|[{SUPERSCRIPT_DIGITS}]+\s)")
 _TOC_OPEN = re.compile(rf"<{BlockTag.TOC}>")
 _TOC_CLOSE = re.compile(rf"</{BlockTag.TOC}>")
 _TABLE_OPEN = re.compile(r"<table\b", re.IGNORECASE)
@@ -96,7 +97,7 @@ _TABLE_CLOSE = re.compile(r"</table>", re.IGNORECASE)
 # `> [картинка…]`), таблицы (HTML и markdown), их подписи («Рис. 2.», «Таблица 3») и примечания
 # к таблицам («*Примечание.* …»).
 _FLOATING_START = re.compile(
-    rf"^(?:<{BlockTag.FOOTNOTE}>|\[\^\w+\]:|<{StructureTag.MARKER}>|```|> \[|<table\b|\||"
+    rf"^(?:<{BlockTag.FOOTNOTE}>|\[\^\w+\]:|[{SUPERSCRIPT_DIGITS}]+\s|<{StructureTag.MARKER}>|```|> \[|<table\b|\||"
     r"Рис(?:\.|\s)|Фиг\.|Табл(?:\.|ица\b)|Схема\s*\d|График\s*\d|\*?Примечани[ея])",
     re.IGNORECASE,
 )

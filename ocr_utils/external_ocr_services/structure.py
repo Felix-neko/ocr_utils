@@ -15,7 +15,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from ocr_utils.external_ocr_services.schema import FORMULA_TAG, AuthorArticle, AuthorPrinted, StructureTag
+from ocr_utils.external_ocr_services.schema import (
+    FORMULA_TAG,
+    SUPERSCRIPT_DIGITS,
+    AuthorArticle,
+    AuthorPrinted,
+    StructureTag,
+)
 from ocr_utils.external_ocr_services.toc import (  # noqa: F401
     TITLE_MATCH_RATIO,
     best_title_match,
@@ -461,7 +467,9 @@ def place_rubrics(body: str, articles: list[dict], report: StructureReport, rubr
 
 # Абзацы, над которыми восстановленный `#` не ставится: ведущие рубрика/маркер (идут перед `#`),
 # иллюстрация (fenced-блок) и сноска — плавающие блоки в начале полосы.
-_ABOVE_HEADING = re.compile(rf"^(?:<{StructureTag.RUBRIC}>|<{StructureTag.MARKER}>|```|<footnote>|\[\^\w+\]:)")
+_ABOVE_HEADING = re.compile(
+    rf"^(?:<{StructureTag.RUBRIC}>|<{StructureTag.MARKER}>|```|<footnote>|\[\^\w+\]:|[{SUPERSCRIPT_DIGITS}]+\s)"
+)
 
 
 def restore_heading_from_refs(body: str, model_headings: list[dict], titles: list[str], report: StructureReport) -> str:

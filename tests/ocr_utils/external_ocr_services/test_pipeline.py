@@ -397,7 +397,11 @@ def test_page_from_older_prompt_is_not_done(tmp_path):
     assert is_done(tmp_path / "out", PageJob(rel))
     meta_path = tmp_path / "out" / ISSUE / "IMG_0002.meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["prompt_version"] = meta["prompt_version"] - 1
+    # v20 совместима с текущей (разбор приводит сноски к надстрочным цифрам) — полоса готова; v19 — нет.
+    meta["prompt_version"] = 20
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert is_done(tmp_path / "out", PageJob(rel))
+    meta["prompt_version"] = 19
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert not is_done(tmp_path / "out", PageJob(rel))
 

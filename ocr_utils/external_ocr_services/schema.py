@@ -721,6 +721,7 @@ def _coerce(payload: dict, stage: Stage) -> PageResult:
     # Нормализация тегов и старых форматов, затем маскирование мусора (чужие теги, невидимые символы,
     # одиночные `*`/`_`) — всё, что читается через parse_json_text, чистое; повтор ничего не меняет.
     body = expand_gaps(modernize_illustrations(modernize_tags(normalize_tags(unspace_letters(body)))))
+    body = superscript_footnotes(body)
     body, mask_report = sanitize(body, MARKDOWN_TAGS)
     headings = _refs(payload, "headings", "article_id", ARTICLE_ID_PREFIX, payload.get("title"))
     rubrics = _refs(payload, "rubrics", "rubric_id", RUBRIC_ID_PREFIX, payload.get("rubric"))
@@ -805,7 +806,7 @@ def _refs(payload: dict, key: str, id_key: str, prefix: str, legacy_text: object
     items = payload.get(key)
     if not isinstance(items, list):
         text = _text_or_none(legacy_text)
-        return [{"text": text, id_key: None}] if text else []
+        return [{"text": superscript_footnotes(text), id_key: None}] if text else []
     refs = []
     for item in items:
         if isinstance(item, str):  # модель дала голый текст вместо объекта
@@ -814,7 +815,7 @@ def _refs(payload: dict, key: str, id_key: str, prefix: str, legacy_text: object
             continue
         text = _text_or_none(item.get("text"))
         if text:
-            refs.append({"text": text, id_key: normalize_ref(item.get(id_key), prefix)})
+            refs.append({"text": superscript_footnotes(text), id_key: normalize_ref(item.get(id_key), prefix)})
     return refs
 
 
@@ -1108,6 +1109,33 @@ def _modern_illustration(match: re.Match) -> str:
         lines = lines[1:]
     out.extend(lines)
     return "```\n" + "\n".join(out) + "\n```"
+
+
+# Знак сноски — надстрочные цифры: ⁰¹²³⁴⁵⁶⁷⁸⁹ (в Unicode они не подряд).
+SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+_SUPERSCRIPT = str.maketrans("0123456789", SUPERSCRIPT_DIGITS)
+# Определение `[^12]:` — в начале абзаца или сразу после `<footnote>` (снимается первым); всё
+# остальное `[^12]` — ссылка в тексте, в том числе перед двоеточием предложения («запасов [^1]:»).
+_FOOTNOTE_REF = re.compile(r"\[\^(\d{1,3})\]")
+_FOOTNOTE_DEF = re.compile(rf"(^|<{BlockTag.FOOTNOTE}>)[ \t]*\[\^(\d{{1,3}})\]:[ \t]*", re.M)
+
+
+def superscript_footnotes(text: str) -> str:
+    """Знаки сносок `[^1]` → надстрочные цифры: в тексте «слово¹», в сноске «<footnote>¹ текст</footnote>».
+
+    До промпта v21 модель писала сноски в разметке markdown (`[^1]`, `[^1]: текст`); вьюеры
+    показывают её ссылкой, а в тексте для чтения и поиска нужен знак как напечатан. Разбор приводит
+    к надстрочным цифрам и старые `.json`, и ответы по памяти прежнего формата; повтор ничего не
+    меняет (`[^` в результате нет).
+
+    Args:
+        text: Тело полосы.
+
+    Returns:
+        Тело с надстрочными знаками сносок.
+    """
+    text = _FOOTNOTE_DEF.sub(lambda m: f"{m.group(1)}{m.group(2).translate(_SUPERSCRIPT)} ", text)
+    return _FOOTNOTE_REF.sub(lambda m: m.group(1).translate(_SUPERSCRIPT), text)
 
 
 def modernize_illustrations(text: str) -> str:

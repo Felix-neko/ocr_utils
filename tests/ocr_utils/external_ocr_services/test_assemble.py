@@ -109,11 +109,13 @@ def test_floating_blocks_are_skipped_and_kept_in_place(tmp_path):
     text = assembly.text
     assert "грузоподъемность автомобилей ниже. Далее текст." in text
     assert (
-        "Далее текст.\n\n<footnote>[^1]: Сноска.</footnote>\n\nТаблица 3\n\nНазвание таблицы\n\n<table>" in text
-    ), "сноска за абзацем, таблица следом"
+        "Далее текст.\n\n<footnote>¹ Сноска.</footnote>\n\nТаблица 3\n\nНазвание таблицы\n\n<table>" in text
+    ), "сноска за абзацем (знак — надстрочной цифрой), таблица следом"
     assert "</table>\n\n*Примечание.* К таблице.\n\n```" in text
     assert "без точки и его продолжение." in text
-    assert text.index("[^2]: Голая сноска.") > text.index("и его продолжение.")
+    assert text.index("² Голая сноска.") > text.index(
+        "и его продолжение."
+    ), "голая сноска надстрочной цифрой — плавающий блок"
     assert [j.kind for j in assembly.joins] == [JoinKind.PARAGRAPH, JoinKind.PARAGRAPH]
 
 
@@ -259,3 +261,19 @@ def test_toc_blocks_of_continuation_pages_are_merged(tmp_path):
     assert _page_text(assembly, 1).startswith("- Б. Вторая") and _page_text(assembly, 2).startswith("- В. Третья")
     assert not assembly.joins, "строки списка не сшиваются с обычной полосой"
     assert assembly.as_dict()["toc_merged"] == assembly.toc_merged
+
+
+def test_normalize_command_rewrites_page_files_with_current_parse(tmp_path):
+    """`normalize`: старые .json переразбираются (сноски `[^1]` → ¹), .md переписывается, meta не трогается."""
+    _page(tmp_path, "IMG_0001", "Текст[^1] со сноской.\n\n<footnote>[^1]: Сноска.</footnote>", "2")
+    (tmp_path / ISSUE / "IMG_0001.json").write_text(
+        (tmp_path / ISSUE / "IMG_0001.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    result = CliRunner().invoke(cli.main, ["normalize", "--out-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "Полос переразобрано: 1, из них изменилось: 1" in result.output
+    body = json.loads((tmp_path / ISSUE / "IMG_0001.json").read_text(encoding="utf-8"))["content_markdown"]
+    assert body == "Текст¹ со сноской.\n\n<footnote>¹ Сноска.</footnote>"
+    assert "Текст¹ со сноской." in (tmp_path / ISSUE / "IMG_0001.md").read_text(encoding="utf-8")
+    again = CliRunner().invoke(cli.main, ["normalize", "--out-dir", str(tmp_path)])
+    assert "из них изменилось: 0" in again.output, "повтор ничего не меняет"
