@@ -21,7 +21,7 @@ surya layout) в один подпакет `ocr_utils/page_layout` с одним
 * Кэш surya: `/mnt/system/raw/mts/pack1_page_layout/{scan,sharpened,fr_nogeo,fr_geo}`,
   `/mnt/system/raw/mts/pack2_page_layout/scan`; страницы PDF — ~0.7 с GPU на страницу
   (при двух моделях на одном GPU ~1.2 стр/с), `--jobs 12`.
-* Код: `46322b3` (ветка `zonal_defocus_with_surya`), 2026-09-21.
+* Код: `4fceeca` и далее (ветка `zonal_defocus_with_surya`), 2026-09-21.
 
 ## Метод
 
@@ -67,6 +67,23 @@ Surya по бинарным рендерам FineReader (риск из план�
   под снятой трапецией законно растягивается. Таблицы и рисунки теперь порознь: штрихи и
   изгиб линеек меряются в обоих, поле смещений и строки — только в рисунках.
 * Формулы (surya `Equation`) в рамки не входят: три регрессии `hmean` (см. «отвергли»).
+
+### Геометрия по паку (`run_pack1.sh`, `pack1_v13`, 12 135 страниц, 12 воркеров, ~1 ч)
+
+| | v12 | v13 |
+|---|---|---|
+| bad | 424 | 422 |
+| mixed | 86 | 85 |
+| ok | 11 625 | 11 628 |
+
+Сменили вердикт **46 страниц (0.38 %)**: bad→ok 20, ok→bad 19, bad→mixed 2, mixed→ok 3,
+ok→mixed 1, mixed→bad 1. У новых `bad` причины: lineart 6, bend 4, line 3, wobble 2,
+parallel 2, hmean 2; у ушедших из `bad`: lineart 8, vtilt 7, bend 3, hmean 2, htilt 2 — то
+есть перемены там, где поменялись рамки (line art и таблицы от `page_layout`), а не в
+текстовых метриках. Пары «было | стало» v12 и v13 по каждой из 46 страниц:
+`~/Projects/mts_markup/pack1_page_layout_review/geometry_changed/<v12>_to_<v13>/`, список —
+`geometry_v12_v13_changed.csv` там же. Это и есть «каждый изменившийся вердикт разобран
+глазами» — смотреть пользователю.
 
 ### Таблицы, 190 полос (`run_compare_detector.sh`)
 
@@ -123,6 +140,8 @@ table 32 — равны снимку до переезда. Line art: 63 (был
 
 ## Что дальше
 
-* `run_scripts/geometry_regression/run_pack1.sh` (v13 по паку, кэш fr_nogeo набит) — идёт;
-  кэш `fr_geo` на весь пак и `run_final_pdfs.sh` на пробном выпуске — следующим шагом.
+* Просмотр 46 пар геометрии с изменившимся вердиктом; `run_report.sh` по `pack1_v13` для
+  штатных сводок и картинок по годам.
+* Кэш `fr_geo` на весь пак (`page_layout prefill-surya --variant fr_geo`, ~1.8 ч GPU; 1050
+  страниц выборки уже есть) и `run_final_pdfs.sh` на пробном выпуске.
 * Ложные line art на рамках рубрик — общая слабость `ink`-источника; отдельная задача.
