@@ -159,9 +159,22 @@ def ridge_along(
     ts, runs_per_sample = _profile_runs(gray, p0, u, n, length, dpi)
     # Первый проход — прогон, ближайший к прогнозу; медиана найденного даёт сдвиг прогноза
     # (поле ошибается на 1–2 мм у края тайлов), второй проход — прогон, ближайший к этому сдвигу.
+    # Сдвиг берётся по пробам с ЕДИНСТВЕННЫМ прогоном: там, где рядом с линией идёт вторая
+    # (кривая графика, сходящаяся к оси: 1975/07 с.59), ближайший к прогнозу прогон — то ось,
+    # то кривая, и медиана по всем пробам ложилась между ними, а второй проход шёл по кривой.
+    # Окно поиска при этом переносится на найденный сдвиг: линия, лежащая у края окна, в части
+    # проб из него выпадает, и там окно видит одну кривую (та же с.59 — ось внизу графика).
     offsets = _pick_nearest(runs_per_sample, 0.0)
-    if np.isfinite(offsets).sum() >= BEND_MIN_SAMPLES:
-        offsets = _pick_nearest(runs_per_sample, float(np.nanmedian(offsets)))
+    lone = np.array([c[0] if len(c) == 1 else np.nan for c in runs_per_sample])
+    anchor = lone if np.isfinite(lone).sum() >= BEND_MIN_SAMPLES else offsets
+    if np.isfinite(anchor).sum() >= BEND_MIN_SAMPLES:
+        shift = float(np.nanmedian(anchor))
+        p0 = p0 + shift * n
+        ts, runs_per_sample = _profile_runs(gray, p0, u, n, length, dpi)
+        lone = np.array([c[0] if len(c) == 1 else np.nan for c in runs_per_sample])
+        anchor = lone if np.isfinite(lone).sum() >= BEND_MIN_SAMPLES else _pick_nearest(runs_per_sample, 0.0)
+        target = float(np.nanmedian(anchor)) if np.isfinite(anchor).sum() >= BEND_MIN_SAMPLES else 0.0
+        offsets = _pick_nearest(runs_per_sample, target)
     ok = ~np.isnan(offsets)
     ok &= _continuous(gray, p0, u, n, ts, offsets)
     coverage = float(ok.mean()) if len(ts) else 0.0

@@ -1,12 +1,14 @@
-"""Области страницы на рендере без коррекции: line art (с таблицами) и строки текста.
+"""Области страницы на рендере без коррекции: растр, таблицы, line art и строки текста.
 
 Рамки таблиц и line art с v13 даёт единый разбор ``ocr_utils.page_layout`` — тот же, что на
 этапе ``detect`` и в правке текстового слоя: детектор таблиц, блоки surya (из кэша по
 варианту ``fr_nogeo``, GPU в воркерах не нужен) и связные пятна/скопления линеек, всё через
-пиксельную проверку. Пиксельный запасной ход (:func:`lineart_boxes`, одни пятна и линейки,
-как в v12) остаётся для страниц без surya и для тестов. Строки текста — сегментация
-``curved_lines.detectors.line_fit.line_samples``, она же кормит попарные метрики строк и
-кромки колонок.
+пиксельную проверку. С v14 разбор ищет и растр (фотографии): на бинарном рендере FineReader
+фотография — россыпь точек, и без растра она шла в line art, а её тайлы «без пары» под
+коррекцией давали ложную порчу (1970/12 с.76, 1975/04 с.2). Пиксельный запасной ход
+(:func:`lineart_boxes`, одни пятна и линейки, как в v12) остаётся для страниц без surya и для
+тестов. Строки текста — сегментация ``curved_lines.detectors.line_fit.line_samples``, она же
+кормит попарные метрики строк и кромки колонок.
 """
 
 from __future__ import annotations
@@ -86,20 +88,48 @@ def lineart_boxes(gray: np.ndarray, dpi: float = WORK_DPI) -> list[Box]:
     return [tuple(int(v) for v in box) for box in findings.boxes]
 
 
+# Тонкий вид line art, который на деле таблица: бланк (surya ``Form``) — подчёркивания с
+# текстом между ними; текст под коррекцией законно растягивается, и правило «тайлы без пары»
+# к бланку неприменимо (1974/06 с.96: 67 % тайлов бланка без пары при выправленных строках).
+TABLE_LIKE_KINDS = ("бланк",)
+
+
+@dataclass(frozen=True)
+class PageRegions:
+    """Рамки страницы без коррекции в пикселях рабочей копии, по семействам.
+
+    ``tables`` — таблицы детектора и бланки; ``drawings`` — line art (схемы, рисунки, графики,
+    штрих); ``raster`` — фотографии и прочий растр, внутри которого ни штрихи, ни строки не
+    меряются. Все рамки ``(x0, y0, x1, y1)``.
+    """
+
+    tables: list[Box]
+    drawings: list[Box]
+    raster: list[Box]
+
+    @property
+    def all_boxes(self) -> list[Box]:
+        """Таблицы и line art одним списком."""
+        return self.tables + self.drawings
+
+
 def layout_boxes(document, page_index: int, dpi: float = WORK_DPI, surya=None) -> list[Box]:
     """Все рамки таблиц и line art одним списком (см. :func:`layout_regions`)."""
-    tables, drawings = layout_regions(document, page_index, dpi, surya)
-    return tables + drawings
+    return layout_regions(document, page_index, dpi, surya).all_boxes
 
 
-def layout_regions(document, page_index: int, dpi: float = WORK_DPI, surya=None) -> tuple[list[Box], list[Box]]:
-    """Рамки таблиц и line art страницы PDF без коррекции в пикселях ``dpi`` — разбором ``page_layout``.
+def layout_regions(document, page_index: int, dpi: float = WORK_DPI, surya=None) -> PageRegions:
+    """Рамки растра, таблиц и line art страницы PDF без коррекции в пикселях ``dpi`` — разбором ``page_layout``.
 
     Таблицы и рисунки отдаются ПОРОЗНЬ: у обоих линейки нельзя ни наклонять, ни гнуть
     (штрихи и изгиб меряются внутри тех и других), но содержимое таблицы — текст, и он под
     коррекцией FineReader законно растягивается; правило «тайлы внутри рисунка без пары —
     порча» (``field_lineart_weak_frac``) к таблицам не применяется (1975/07 с.44: хорошо
-    выправленная таблица давала 2.1 по этому правилу).
+    выправленная таблица давала 2.1 по этому правилу). Бланки (``TABLE_LIKE_KINDS``) идут к
+    таблицам. Растр (фотографии, на бинарном рендере — россыпь точек) отдаётся отдельно:
+    line art внутри него не ищется (это делает сам ``page_layout``), а штрихи и строки внутри
+    него ``measure_pair`` выбрасывает — у точечной россыпи нет ни линеек, ни строк, зато LSD
+    находит в ней «штрихи», которые в A не спариваются (1973/03 с.58 — изгиб 0.86 мм внутри фото).
 
     Args:
         document: Открытый ``fitz.Document`` без коррекции геометрии (B).
@@ -109,8 +139,7 @@ def layout_regions(document, page_index: int, dpi: float = WORK_DPI, surya=None)
             ``None`` — без surya, по одним пикселям.
 
     Returns:
-        ``(таблицы, рисунки)`` — рамки ``(x0, y0, x1, y1)``. ФОРМУЛЫ (блок surya ``Equation``)
-        сюда не входят: дробные черты — текстовые штрихи, и правила штрихов (``strokes.py``)
+        :class:`PageRegions`. ФОРМУЛЫ (блок surya ``Equation``) в рисунки не входят: дробные черты — текстовые штрихи, и правила штрихов (``strokes.py``)
         считают их наклон именно как у текста; внутри рамки рисунка та же черта без
         перпендикуляра сошла бы за росчерк и выпала из метрики (регрессия v13 на 1966/06 с.58,
         1967/01 с.85, 1968/01 с.29 — все «hmean»).
@@ -120,19 +149,25 @@ def layout_regions(document, page_index: int, dpi: float = WORK_DPI, surya=None)
 
     image = PageImage.from_pdf_page(document, page_index, Variant.FR_NOGEO)
     options = LayoutOptions(use_surya=surya is not None and surya.enabled)
-    layout = PageLayout(image, {Find.TABLES, Find.LINE_ART}, options).process(surya)
+    layout = PageLayout(image, {Find.RASTER, Find.TABLES, Find.LINE_ART}, options).process(surya)
     k = dpi / image.dpi
+    drawings = [r for r in layout.line_arts if "surya:Equation" not in r.info.get("sources", ())]
+    table_like = [r for r in drawings if r.info.get("kind") in TABLE_LIKE_KINDS]
+    drawings = [r for r in drawings if r.info.get("kind") not in TABLE_LIKE_KINDS]
+    return PageRegions(
+        tables=_scaled_boxes(layout.tables + table_like, k),
+        drawings=_scaled_boxes(drawings, k),
+        raster=_scaled_boxes(layout.raster_pics + layout.stamp_suspects, k),
+    )
 
-    def scaled(regions) -> list[Box]:
-        out: list[Box] = []
-        for region in regions:
-            if "surya:Equation" in region.info.get("sources", ()):
-                continue
-            box = region.box.scaled(k)
-            out.append((int(box.x0), int(box.y0), int(box.x1), int(box.y1)))
-        return out
 
-    return scaled(layout.tables), scaled(layout.line_arts)
+def _scaled_boxes(regions, k: float) -> list[Box]:
+    """Рамки областей ``page_layout`` в пикселях рабочей копии (масштаб ``k``)."""
+    out: list[Box] = []
+    for region in regions:
+        box = region.box.scaled(k)
+        out.append((int(box.x0), int(box.y0), int(box.x1), int(box.y1)))
+    return out
 
 
 def text_lines(gray300: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[TextLine], list[tuple[int, int]]]:

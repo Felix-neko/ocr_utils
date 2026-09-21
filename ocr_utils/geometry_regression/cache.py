@@ -113,8 +113,15 @@ def measure_page(
     started = time.time()
     if surya is None:
         surya = surya_source_for(params)
-    tables, lineart = layout_regions(nogeo_doc, page - 1, params.dpi, surya)
-    measure = measure_pair(render_gray(nogeo_doc, page - 1), render_gray(geo_doc, page - 1), params, lineart, tables)
+    regions = layout_regions(nogeo_doc, page - 1, params.dpi, surya)
+    measure = measure_pair(
+        render_gray(nogeo_doc, page - 1),
+        render_gray(geo_doc, page - 1),
+        params,
+        regions.drawings,
+        regions.tables,
+        regions.raster,
+    )
     measure.metrics["seconds"] = round(time.time() - started, 2)
     measure.metrics["layout_surya"] = float(surya is not None)
     return measure

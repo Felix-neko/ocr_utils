@@ -317,10 +317,29 @@ def estimate_field(
     return Field(before.shape[1], before.shape[0], dpi, tiles, affine, resid, weight, failed)
 
 
-def field_metrics(field: Field | None, lineart_boxes: list, text_boxes: list) -> dict[str, float]:
-    """Метрики поля: аффинная часть, остатки (в мм бумаги) по всей странице и по типам областей."""
+def field_metrics(
+    field: Field | None, lineart_boxes: list, text_boxes: list, raster_boxes: list | None = None
+) -> dict[str, float]:
+    """Метрики поля: аффинная часть, остатки (в мм бумаги) по всей странице и по типам областей.
+
+    Args:
+        field: Поле смещений или ``None`` (тогда только ``field_tiles = 0``).
+        lineart_boxes: Рамки рисунков на B: доля их тайлов без пары — ``field_lineart_weak_frac``.
+        text_boxes: Рамки строк текста на B.
+        raster_boxes: Рамки растра (фотографий) на B: доля их тайлов без пары —
+            ``field_raster_weak_frac``, отдельно от рисунков и только для сводок: фотография —
+            растровая сетка, и часть её тайлов не находит пару и без всякой порчи (1970/12
+            с.76, 1975/04 с.2 — по 50 % при целом снимке), у перекошенного — 55–75 % (1971/04
+            с.44, 1970/10 с.71, 1971/07 с.43); порог тут не ставится, порчу снимка ловят
+            кромки (``raster.py``).
+
+    Returns:
+        Плоский словарь метрик ``field_*``.
+    """
     if field is None:
         return {"field_tiles": 0.0}
+    raster_boxes = list(raster_boxes or [])
+    weak_raster, raster_total = field.weak_frac_inside(raster_boxes)
     mm = px_to_mm(1.0, field.dpi)
     norm = field.resid_norm[field.weight > 0] * mm
     u = field.tiles[:, 2:4]
@@ -352,6 +371,8 @@ def field_metrics(field: Field | None, lineart_boxes: list, text_boxes: list) ->
         "field_resid_lineart_p90_mm": p90(lineart),
         "field_resid_lineart_max_mm": float(lineart.max()) if lineart.size else 0.0,
         "field_lineart_weak_frac": weak_lineart if lineart_total >= MIN_LINEART_TILES else 0.0,
+        "field_raster_tiles": float(raster_total),
+        "field_raster_weak_frac": weak_raster if raster_total >= MIN_LINEART_TILES else 0.0,
         "field_text_tiles": float(text_total),
         "field_resid_text_p90_mm": p90(text),
         "field_text_weak_frac": weak_text,
