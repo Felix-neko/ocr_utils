@@ -54,26 +54,31 @@ class TruthPage:
     boxes: tuple[Box, ...]
 
 
-def truth_pages(markup_db: Path, index: dict, dpi: int = 600) -> dict[tuple[str, int], TruthPage]:
-    """Эталонные области по страницам no-geo PDF.
+def truth_pages(
+    markup_db: Path, index: dict, dpi: int = 600, kinds: tuple[str, ...] = ("line_art_schema",)
+) -> dict[tuple[str, int], TruthPage]:
+    """Области заданных видов из базы по страницам no-geo PDF (эталон line art либо растр-исключения).
 
     Args:
         markup_db: База разметки (только чтение).
         index: ``(год, выпуск, полоса) → PageRef`` из :func:`pages.page_index_map`.
         dpi: Разрешение сканов (поля переводятся в пиксели по нему).
+        kinds: Виды ``rect_regions``; по умолчанию — эталон line art.
 
     Returns:
         Словарь ``(pdf, page) → TruthPage`` с рамками в пикселях страницы no-geo PDF.
     """
     connection = sqlite3.connect(f"file:{markup_db}?mode=ro", uri=True)
+    marks = ",".join("?" for _ in kinds)
     rows = connection.execute(
-        """
+        f"""
         select y.year, i.name, p.source_file_name, p.source_rel_path, p.width, p.height, coalesce(p.rotate_cw, 0),
                r.x1, r.y1, r.x2, r.y2
         from rect_regions r join pages p on p.id = r.page_id
         join issues i on i.id = p.issue_id join year_packages y on y.id = i.year_package_id
-        where r.kind = 'line_art_schema'
-        """
+        where r.kind in ({marks})
+        """,
+        kinds,
     ).fetchall()
     connection.close()
     dx, dy = mm_to_px(DEFAULT_MARGIN_X_MM, dpi), mm_to_px(DEFAULT_MARGIN_Y_MM, dpi)
@@ -121,7 +126,7 @@ def source_boxes(
     dpi: int,
     cached: "LayoutBlocks | None",
     scan_size: "tuple[int, int] | None",
-    layout=None,
+    structure=None,
 ) -> dict[str, list[Box]]:
     """Рамки line art страницы от каждого источника (пиксели растра страницы).
 
@@ -131,7 +136,7 @@ def source_boxes(
         dpi: Разрешение растра.
         cached: Разметка surya полосы из кэша (в пикселях скана) или None.
         scan_size: Размер скана ``(width, height)`` для масштабирования разметки surya.
-        layout: Готовый ``page_layout.PageLayout`` по рендеру этой страницы или None.
+        structure: Готовый ``page_layout.PageLayout`` по рендеру этой страницы или None.
 
     Returns:
         Словарь ``источник → рамки``, включая объединение ``union``.
@@ -154,12 +159,12 @@ def source_boxes(
     result["surya"] = surya
     result["surya_render"] = []
     result["page_layout"] = []
-    if layout is not None:
-        if layout.raw_surya_content is not None:
+    if structure is not None:
+        if structure.raw_surya_content is not None:
             result["surya_render"] = [
-                b.box.clipped(width, height) for b in layout.raw_surya_content.by_label(FIGURE_LABELS)
+                b.box.clipped(width, height) for b in structure.raw_surya_content.by_label(FIGURE_LABELS)
             ]
-        result["page_layout"] = [r.box.clipped(width, height) for r in layout.line_arts]
+        result["page_layout"] = [r.box.clipped(width, height) for r in structure.line_arts]
     result["union"] = _merge_overlapping([b for name in ("figures", "detector", "ink", "surya") for b in result[name]])
     return result
 
@@ -271,16 +276,23 @@ def score_page(truth: list[Box], predictions: dict[str, list[Box]], scores: dict
 
 
 def evaluate_page(
-    doc: fitz.Document, index: int, truth: "TruthPage | None", layout_dir: "Path | None", rel_path: "str | None"
+    doc: fitz.Document,
+    index: int,
+    truth: "TruthPage | None",
+    layout_dir: "Path | None",
+    rel_path: "str | None",
+    raster_truth: "TruthPage | None" = None,
 ) -> tuple[dict[str, list[Box]], list[Box]]:
     """Предсказания всех источников и эталон одной страницы no-geo PDF.
 
     ``layout_dir`` — корень кэша surya page_layout: вариант ``scan`` даёт источник ``surya``
     (по сканам, сдвиг на поля), вариант ``fr_nogeo`` — ``surya_render`` и ``page_layout`` (по
-    рендеру; кэш набивается заранее, промах — без surya).
+    рендеру; кэш набивается заранее, промах — без surya). ``raster_truth`` — растровые области полосы из
+    базы: ``page_layout`` получает их как известные исключения, ровно как на ``detect``.
     """
     from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
     from ocr_utils.page_layout.image import PageImage, SourceStat
+    from ocr_utils.page_layout.regions import Region, RegionKind
     from ocr_utils.page_layout.surya.source import OnMiss, SuryaSourceConfig
 
     page = doc[index]
@@ -293,7 +305,12 @@ def evaluate_page(
             gray, int(round(raster.dpi)), Variant.FR_NOGEO, f"{path.stem}/p{index:04d}", SourceStat.of(path, index)
         )
         surya = SuryaSourceConfig(Path(layout_dir), OnMiss.SKIP).open()
-        layout = PageLayout(image, {Find.TABLES, Find.LINE_ART}, LayoutOptions()).process(surya)
+        known = (
+            {Find.RASTER: [Region(b, RegionKind.GRAYSCALE, None, "db") for b in raster_truth.boxes]}
+            if raster_truth
+            else None
+        )
+        layout = PageLayout(image, {Find.TABLES, Find.LINE_ART}, LayoutOptions(), known=known).process(surya)
     cached = (
         SuryaCache(layout_dir, readonly=True).blocks_of(Variant.SCAN, scan_cache_name(rel_path))
         if (layout_dir and rel_path)

@@ -18,8 +18,11 @@
 
 1. схема/рисунок детектора таблиц (``tables.detector.detect`` с видом не «таблица») — уже
    выращены по штриховой краске и проверены по линейкам;
-2. блоки surya ``Figure``, ``Form``, ``Equation`` и ``Picture`` — последний только если его не
-   подтвердил растр (штрих surya зовёт ``Picture`` на 28 полосах из 31);
+2. блоки surya ``Figure``, ``Form`` и ``Picture`` — последний только если его не подтвердил
+   растр (штрих surya зовёт ``Picture`` на 28 полосах из 31). ``Equation`` НЕ затравка: формула в
+   словаре проекта — текст (метка CVAT «Схема или line art» её не включает, а детектор порчи
+   геометрии считает дробные черты текстовыми штрихами); на эталоне из 221 области блоки
+   ``Equation`` дали 19 ложных областей на 200 контрольных страницах и ни одного совпадения;
 3. связные пятна и скопления линеек ``features.analyse_gray`` по битональной копии.
 
 Все три идут в один вызов ``analyse_gray``: (1) и (2) — как ``extra_boxes`` с меткой источника,
@@ -41,7 +44,7 @@ from ocr_utils.page_layout.line_art.features import (
     params_for_dpi,
 )
 from ocr_utils.page_layout.regions import Region, RegionKind
-from ocr_utils.page_layout.surya.blocks import EQUATION_LABELS, FIGURE_LABELS, FORM_LABELS, LayoutBlocks
+from ocr_utils.page_layout.surya.blocks import FIGURE_LABELS, FORM_LABELS, LayoutBlocks
 
 # Тонкий вид рамки — по источнику самого «сильного» кандидата; пишется в detector_info.
 FINE_KIND_BY_SOURCE = {
@@ -57,6 +60,9 @@ FINE_KIND_BY_SOURCE = {
 
 # Сколько ИСТОЧНИКОВ бывает у рамки максимум: таблицы, surya, пиксели. Уверенность — доля.
 SOURCE_FAMILIES = ("tables", "surya", "pixels")
+
+# Блоки surya, которые идут в затравки line art (формулы — нет, см. докстринг модуля).
+SEED_LABELS = FIGURE_LABELS + FORM_LABELS
 
 # Доля площади, при которой блок surya ``Picture`` считается подтверждённым растром и в
 # затравки line art не идёт.
@@ -102,7 +108,7 @@ def seeds_from(inputs: LineArtInputs) -> list[tuple[tuple[int, int, int, int], s
     for table in inputs.table_drawings:
         seeds.append((table.box.as_tuple(), f"tables:{table.kind}"))
     if inputs.blocks is not None:
-        for block in inputs.blocks.by_label(FIGURE_LABELS + FORM_LABELS + EQUATION_LABELS):
+        for block in inputs.blocks.by_label(SEED_LABELS):
             box = block.box.clipped(inputs.blocks.width, inputs.blocks.height)
             if block.label == "Picture" and _covered(box, inputs.raster, PICTURE_RASTER_COVER):
                 continue  # это фотография, её уже забрал растр
@@ -141,7 +147,7 @@ def to_regions(findings: PageFindings, inputs: LineArtInputs) -> list[Region]:
                 sources.add(f"tables:{table.kind}")
         surya_conf = None
         if inputs.blocks is not None:
-            hit = inputs.blocks.covering(box, FIGURE_LABELS + FORM_LABELS + EQUATION_LABELS, share=0.5)
+            hit = inputs.blocks.covering(box, SEED_LABELS, share=0.5)
             if hit is None:
                 hit = _block_inside(box, inputs.blocks)
             if hit is not None:
@@ -177,7 +183,7 @@ def _agrees(box: Box, other: Box, share: float = 0.5) -> bool:
 def _block_inside(box: Box, blocks: LayoutBlocks):
     """Самый уверенный блок surya нужного вида, лежащий внутри рамки хотя бы наполовину своей площади."""
     best = None
-    for block in blocks.by_label(FIGURE_LABELS + FORM_LABELS + EQUATION_LABELS):
+    for block in blocks.by_label(SEED_LABELS):
         common = intersection(block.box, box)
         if common is None or common.area < 0.5 * max(1, block.box.area):
             continue

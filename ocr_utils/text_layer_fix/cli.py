@@ -898,7 +898,7 @@ def _eval_chunk(args: tuple) -> tuple[list[dict], dict[str, dict]]:
 
     from ocr_utils.text_layer_fix.lineart_eval import SOURCES, SourceScore, evaluate_page, score_page
 
-    path, pages, truths, layout_dir, rel_paths = args
+    path, pages, truths, layout_dir, rel_paths, rasters = args
     scores = {name: SourceScore() for name in SOURCES}
     rows: list[dict] = []
     with fitz.open(path) as doc:
@@ -906,7 +906,12 @@ def _eval_chunk(args: tuple) -> tuple[list[dict], dict[str, dict]]:
             truth = truths.get(index)
             try:
                 predictions, boxes = evaluate_page(
-                    doc, index, truth, Path(layout_dir) if layout_dir else None, rel_paths.get(index)
+                    doc,
+                    index,
+                    truth,
+                    Path(layout_dir) if layout_dir else None,
+                    rel_paths.get(index),
+                    rasters.get(index),
                 )
             except Exception as error:  # noqa: BLE001
                 rows.append(
@@ -969,6 +974,8 @@ def eval_lineart(nogeo_dir, out_dir, probe_db, markup_db, layout_dir, controls, 
     jobs = effective_jobs(jobs, reserve_cpu_cores)
     index = page_index_map(probe_db)
     truths = truth_pages(markup_db, index)
+    # Растр из базы — известные исключения для page_layout (как на detect): фотографии не line art.
+    rasters = truth_pages(markup_db, index, kinds=("color", "grayscale", "stamp_suspect", "color_text"))
     connection = sqlite3.connect(f"file:{markup_db}?mode=ro", uri=True)
     rel_by_key = {
         (str(y), str(i), Path(f).stem): rel
@@ -1000,6 +1007,7 @@ def eval_lineart(nogeo_dir, out_dir, probe_db, markup_db, layout_dir, controls, 
                     {p: page_truths[p] for p in chunk if p in page_truths},
                     str(layout_dir) if layout_dir else "",
                     {p: rels[p] for p in chunk},
+                    {p: rasters[(pdf_name, p)] for p in chunk if (pdf_name, p) in rasters},
                 )
             )
     total = sum(len(t[1]) for t in tasks)
