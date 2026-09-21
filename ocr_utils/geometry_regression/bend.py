@@ -42,6 +42,11 @@ BEND_MIN_SAMPLES = 5
 BEND_MAX_STEP_MM = 0.4
 # Ширина медианного фильтра по пробам (нечётная): убирает скачки до двух проб подряд.
 BEND_MEDIAN_WIDTH = 5
+# Линия непрерывна: между центрами соседних проб краска лежит сплошь. У букв, стоящих рядом с
+# линейкой, между пробами бумага — доля краски на отрезке между центрами меньше этой. Ловит
+# случай, когда линейка в A обрывается (шапка таблицы), а окно поиска ещё находит краску:
+# трасса уходила в текст «Цех костроплит…» и рисовала крюк 2.6 мм (1975/07 с.44, v13).
+BEND_MIN_CONTINUITY = 0.6
 # Сагитта — размах остатка между этими перцентилями: одиночная проба, зацепившая засечку
 # буквы, размах не задирает.
 SAG_PERCENTILES = (2.0, 98.0)
@@ -95,6 +100,30 @@ def _pick_nearest(runs_per_sample: list[list[float]], target: float) -> np.ndarr
     return np.array([min(runs, key=lambda c: abs(c - target)) if runs else np.nan for runs in runs_per_sample])
 
 
+def _continuous(
+    gray: np.ndarray, p0: np.ndarray, u: np.ndarray, n: np.ndarray, ts: np.ndarray, offsets: np.ndarray
+) -> np.ndarray:
+    """Пробы, чей центр краски связан сплошной краской хотя бы с одним соседом (см. ``BEND_MIN_CONTINUITY``)."""
+    points = p0[None, :] + ts[:, None] * u[None, :] + np.nan_to_num(offsets)[:, None] * n[None, :]
+    valid = ~np.isnan(offsets)
+    linked = np.zeros(len(ts), dtype=bool)
+    for i in range(len(ts) - 1):
+        if not (valid[i] and valid[i + 1]):
+            continue
+        if _ink_fraction(gray, points[i], points[i + 1]) >= BEND_MIN_CONTINUITY:
+            linked[i] = linked[i + 1] = True
+    return linked
+
+
+def _ink_fraction(gray: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    """Доля краски (яркость < 128) на отрезке между точками ``a`` и ``b``."""
+    count = max(2, int(np.hypot(*(b - a))) + 1)
+    xs = np.linspace(a[0], b[0], count).astype(np.float32)[None, :]
+    ys = np.linspace(a[1], b[1], count).astype(np.float32)[None, :]
+    values = cv2.remap(gray, xs, ys, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    return float((values < 128).mean())
+
+
 def _despike(offsets: np.ndarray) -> np.ndarray:
     """Медианный фильтр шириной ``BEND_MEDIAN_WIDTH`` по пробам: одиночные скачки убираются.
 
@@ -134,6 +163,7 @@ def ridge_along(
     if np.isfinite(offsets).sum() >= BEND_MIN_SAMPLES:
         offsets = _pick_nearest(runs_per_sample, float(np.nanmedian(offsets)))
     ok = ~np.isnan(offsets)
+    ok &= _continuous(gray, p0, u, n, ts, offsets)
     coverage = float(ok.mean()) if len(ts) else 0.0
     if ok.sum() < BEND_MIN_SAMPLES or coverage < BEND_MIN_COVERAGE:
         return None

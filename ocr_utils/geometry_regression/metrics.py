@@ -87,7 +87,11 @@ def _scale_culprits(culprits: dict, k: float) -> dict:
 
 
 def measure_pair(
-    gray300_b: np.ndarray, gray300_a: np.ndarray, params: Params = Params(), lineart: list | None = None
+    gray300_b: np.ndarray,
+    gray300_a: np.ndarray,
+    params: Params = Params(),
+    lineart: list | None = None,
+    tables: list | None = None,
 ) -> PageMeasure:
     """Метрики пары «без коррекции (B) | с коррекцией (A)» по рендерам 300 dpi.
 
@@ -95,8 +99,10 @@ def measure_pair(
         gray300_b: Рендер страницы без коррекции (B), 300 dpi.
         gray300_a: Рендер страницы с коррекцией (A), 300 dpi.
         params: Размеры, привязанные к бумаге.
-        lineart: Рамки таблиц и line art на B в пикселях ``params.dpi`` (от ``page_layout``,
-            см. :func:`regions.layout_boxes`); ``None`` — найти по одним пикселям (запасной ход v12).
+        lineart: Рамки line art (рисунков) на B в пикселях ``params.dpi`` (от ``page_layout``,
+            см. :func:`regions.layout_regions`); ``None`` — найти по одним пикселям (запасной ход v12).
+        tables: Рамки таблиц на B: внутри них меряются штрихи и изгиб линеек (как в рисунках), но
+            поле смещений и строки текста считаются как у текста — содержимое таблицы текст.
 
     Returns:
         :class:`PageMeasure`: метрики «стало − было», виновники, сырые ряды.
@@ -107,6 +113,8 @@ def measure_pair(
     out = PageMeasure()
 
     lineart = lineart_boxes(b, dpi) if lineart is None else [tuple(int(v) for v in box) for box in lineart]
+    tables = [tuple(int(v) for v in box) for box in tables or []]
+    ruled = lineart + tables  # где штрихам разрешена толщина рисунка и где линейки нельзя гнуть
     warp = estimate_field(b, a, dpi, lineart)
     lines_b, separators_b = text_lines(gray300_b, dpi)
     lines_a, separators_a = text_lines(gray300_a, dpi)
@@ -120,11 +128,12 @@ def measure_pair(
     lineart_body = [box for box in lineart if (box[1] + box[3]) / 2.0 >= top]
     out.metrics.update(field_metrics(warp, lineart_body, text_boxes(lines_b)))
     out.metrics["lineart_boxes"] = float(len(lineart))
+    out.metrics["table_boxes"] = float(len(tables))
 
-    # Рамки рисунков даны на копии B; для A они переносятся аффинной частью поля.
-    lineart_a = _transform_boxes(lineart, warp)
-    strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI, lineart, dpi)
-    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, lineart_a, dpi, drop_lone=False)
+    # Рамки рисунков и таблиц даны на копии B; для A они переносятся аффинной частью поля.
+    ruled_a = _transform_boxes(ruled, warp)
+    strokes_b = find_strokes(gray300_b, params.stroke_min_mm, RENDER_DPI, ruled, dpi)
+    strokes_a = find_strokes(gray300_a, params.stroke_min_mm, RENDER_DPI, ruled_a, dpi, drop_lone=False)
     pairs = match_strokes(strokes_b, strokes_a, warp, RENDER_DPI, dpi)
     metrics, culprits = stroke_metrics(strokes_b, strokes_a, pairs, warp.rot_deg if warp else 0.0, RENDER_DPI)
     out.metrics.update(metrics)
@@ -151,6 +160,7 @@ def measure_pair(
         "size_b": [int(b.shape[1]), int(b.shape[0])],
         "size_a": [int(a.shape[1]), int(a.shape[0])],
         "lineart": _boxes(lineart),
+        "tables": _boxes(tables),
         "field": (
             None
             if warp is None

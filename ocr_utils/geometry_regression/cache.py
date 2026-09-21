@@ -18,7 +18,7 @@ import fitz
 
 from ocr_utils.geometry_regression import VERSION
 from ocr_utils.geometry_regression.metrics import PageMeasure, Params, measure_pair
-from ocr_utils.geometry_regression.regions import layout_boxes
+from ocr_utils.geometry_regression.regions import layout_regions
 from ocr_utils.geometry_regression.render import render_gray
 from ocr_utils.geometry_regression.scoring import Thresholds, Verdict
 
@@ -113,8 +113,8 @@ def measure_page(
     started = time.time()
     if surya is None:
         surya = surya_source_for(params)
-    lineart = layout_boxes(nogeo_doc, page - 1, params.dpi, surya)
-    measure = measure_pair(render_gray(nogeo_doc, page - 1), render_gray(geo_doc, page - 1), params, lineart)
+    tables, lineart = layout_regions(nogeo_doc, page - 1, params.dpi, surya)
+    measure = measure_pair(render_gray(nogeo_doc, page - 1), render_gray(geo_doc, page - 1), params, lineart, tables)
     measure.metrics["seconds"] = round(time.time() - started, 2)
     measure.metrics["layout_surya"] = float(surya is not None)
     return measure
