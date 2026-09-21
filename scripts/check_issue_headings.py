@@ -5,9 +5,10 @@
 ровно столько `#`, сколько заголовков списков на полосах оглавления плюс найденных статей; скрипт
 считает это по всем выпускам папки выхода и печатает, что сверка удалила, понизила и восстановила.
 
-    uv run python scripts/check_issue_headings.py --out-dir /mnt/system/raw/mts/pack1_external_ocr_services/out [--verbose]
+    uv run python scripts/check_issue_headings.py --pages-dir …/pages --issues-dir …/out [--verbose]
 
-Читает ``{год}/{выпуск}.md``, ``{выпуск}.pages.json`` и ``{выпуск}/toc.json``; ничего не пишет.
+Читает md выпусков ``{год}/{год}_{выпуск}.md`` из папки выпусков, sidecar ``{год}_{выпуск}.pages.json`` и
+``{год}/{выпуск}/toc.json`` из папки полос; ничего не пишет.
 Кроме счёта `#` проверяет структуру: дубли id в комментариях, порядок статей по оглавлению,
 место `#` относительно страницы из оглавления (расхождение ≥ 2), рубрика перед первой статьёй своего
 раздела. Код возврата 1, если хоть в одном выпуске `#` больше, чем положено, или есть замечания по
@@ -27,20 +28,22 @@ _H1 = re.compile(r"^# (.+)$", re.M)
 _LIST_HEADING = re.compile(r"содержание|оглавление|указатель|перечень", re.IGNORECASE)
 
 
-def check_issue(md: Path, verbose: bool) -> bool:
+def check_issue(md: Path, pages_dir: Path, verbose: bool) -> bool:
     """Один выпуск: посчитать `#`, сравнить с оглавлением и sidecar, напечатать строку итога.
 
     Args:
-        md: Файл выпуска ``{год}/{выпуск}.md``.
+        md: Файл выпуска ``{год}/{год}_{выпуск}.md`` в папке выпусков.
+        pages_dir: Папка полос — sidecar и ``toc.json``.
         verbose: Печатать ли каждый фантом, восстановление и статью без заголовка.
 
     Returns:
         ``True``, если лишних `#` нет и замечаний по структуре нет.
     """
-    key = f"{md.parent.name}/{md.stem}"
+    year, issue = md.parent.name, md.stem.split("_", 1)[1]
+    key = f"{year}/{issue}"
     text = md.read_text(encoding="utf-8")
-    side = json.loads(md.with_name(md.stem + ".pages.json").read_text(encoding="utf-8"))
-    toc_path = md.parent / md.stem / "toc.json"
+    side = json.loads((pages_dir / year / (md.stem + ".pages.json")).read_text(encoding="utf-8"))
+    toc_path = pages_dir / year / issue / "toc.json"
     toc = json.loads(toc_path.read_text(encoding="utf-8")) if toc_path.is_file() else {}
     articles_in_toc = sum(len(s["articles"]) for s in toc.get("contents", {}).get("sections", []))
     headings = _H1.findall(text)
@@ -129,14 +132,15 @@ def _structure_problems(text: str, side: dict, toc: dict) -> list[str]:
 
 
 @click.command()
-@click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--pages-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--issues-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--verbose", is_flag=True, help="Печатать фантомы, восстановления и статьи без заголовка.")
-def main(out_dir: Path, verbose: bool) -> None:
-    """Проверить все собранные выпуски под ``--out-dir``."""
-    issues = sorted(out_dir.glob("*/[0-9][0-9].md"))
+def main(pages_dir: Path, issues_dir: Path, verbose: bool) -> None:
+    """Проверить все собранные выпуски: md из ``--issues-dir``, sidecar и оглавления из ``--pages-dir``."""
+    issues = sorted(issues_dir.glob("*/*_[0-9][0-9].md"))
     if not issues:
-        raise click.ClickException(f"в {out_dir} нет файлов выпусков")
-    bad = [md for md in issues if not check_issue(md, verbose)]
+        raise click.ClickException(f"в {issues_dir} нет файлов выпусков")
+    bad = [md for md in issues if not check_issue(md, pages_dir, verbose)]
     print(f"выпусков {len(issues)}, с лишними `#` или замечаниями по структуре — {len(bad)}")
     sys.exit(1 if bad else 0)
 

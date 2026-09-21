@@ -7,7 +7,8 @@
 # («Оглавление» / «Годовой указатель» / вето «Не оглавление») и забрать from-cvat.
 #
 # ЧИТАЕТ  SHARPENED_DIR (144 ГиБ, SSD), DB_REVIEWED (только чтение).
-# ПИШЕТ   EXTERNAL_OCR_SERVICES_OUT (полосы и на выпуск <год>/<номер>.md + .pages.json),
+# ПИШЕТ   EXTERNAL_OCR_SERVICES_PAGES (полосы, toc.json, sidecar, summary.csv, run.log),
+#         EXTERNAL_OCR_SERVICES_OUT (только md выпусков <год>/<год>_<номер>.md),
 #         EXTERNAL_OCR_SERVICES_DEBUG (≈ 7 ГиБ тайлов и ответов), EXTERNAL_OCR_SERVICES_CACHE (≈ 0.5 ГиБ).
 # ОРИЕНТИР: 12 135 полос, ~$12 и ~8 часов при 4 потоках (7 с на запрос в стенде).
 # Запуск в фон из сессии агента:
@@ -18,7 +19,8 @@ source "$(dirname "$0")/common.sh"
 
 uv run python -m ocr_utils.external_ocr_services run \
     --in-dir "$SHARPENED_DIR" \
-    --out-dir "$EXTERNAL_OCR_SERVICES_OUT" \
+    --pages-dir "$EXTERNAL_OCR_SERVICES_PAGES" \
+    --issues-dir "$EXTERNAL_OCR_SERVICES_OUT" \
     --debug-dir "$EXTERNAL_OCR_SERVICES_DEBUG" \
     --cache-dir "$EXTERNAL_OCR_SERVICES_CACHE" \
     --db "$DB_REVIEWED" \

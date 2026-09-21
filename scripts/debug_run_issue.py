@@ -43,7 +43,8 @@ def main() -> None:
     options = RunOptions(source=SOURCE, debug_dir=DEBUG_DIR)  # тайлы, потолки и второй проход — по умолчанию
     params = PipelineParams(
         in_dir=IN_DIR,
-        out_dir=OUT_DIR,
+        pages_dir=OUT_DIR,
+        issues_dir=OUT_DIR.with_name(OUT_DIR.name + "_issues"),  # md выпусков — отдельно от полос
         options=options,
         flags=flags,
         jobs=JOBS,

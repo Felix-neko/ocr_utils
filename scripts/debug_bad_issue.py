@@ -150,7 +150,8 @@ def main() -> None:
     options = RunOptions(source=SOURCE, debug_dir=debug_dir, second_pass=SECOND_PASS)
     params = PipelineParams(
         in_dir=IN_DIR,
-        out_dir=out_dir,
+        pages_dir=out_dir,
+        issues_dir=out_dir.with_name(out_dir.name + "_issues"),  # md выпусков — отдельно от полос
         options=options,
         flags=flags,
         jobs=JOBS,

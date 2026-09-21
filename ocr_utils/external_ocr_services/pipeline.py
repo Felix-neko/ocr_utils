@@ -178,7 +178,7 @@ class PipelineParams:
     """Параметры прогона из CLI: пути, теги полос, параллелизм, отбор входа, поведение fallback."""
 
     in_dir: Path  # корень входа с раскладкой {год}/{выпуск}/{полоса}
-    out_dir: Path  # корень выхода той же раскладки: .md, .json, .meta.json, toc.*, summary.csv
+    pages_dir: Path  # папка полос той же раскладки: .md, .json, .meta.json, toc.*, sidecar, summary.csv, run.log
     options: RunOptions  # всё, что касается одного запроса: тайлы, модель, второй проход, debug-dir
     flags: dict[str, PageFlags] | None = None  # из базы или списков; None — база не задана
     jobs: int = 4  # потоков на сетевые запросы внутри этапа; ограничение — лимиты провайдера, не CPU
@@ -189,9 +189,11 @@ class PipelineParams:
     only_year: str | None = None  # --only-year / --only-issue: отбор по первым папкам пути
     only_issue: str | None = None
     limit: int | None = None  # --limit: первые N полос после отбора, для проб
-    # После каждого выпуска собирать его в один markdown (`assemble.py`): `{год}/{выпуск}.md` и
-    # sidecar `.pages.json` рядом с папкой полос. Выключается ``--no-assemble``.
+    # После каждого выпуска собирать его в один markdown (`assemble.py`): `{год}/{год}_{выпуск}.md` в
+    # ``issues_dir`` (там только конечные md) и sidecar `.pages.json` рядом с полосами. Выключается
+    # ``--no-assemble``; с ним ``issues_dir`` не нужна.
     assemble: bool = True
+    issues_dir: Path | None = None  # папка md выпусков; обязательна при assemble
     # При сборке показывать сомнительные стыки полос модели — один запрос на выпуск, полоски строк
     # обеих полос (`boundary.py`). Выключается ``--no-check-boundaries``.
     check_boundaries: bool = True
@@ -294,7 +296,7 @@ def _recognize_one(
     # Второй проход (по умолчанию выключен, ``--second-pass``) — обёртка над recognize_page: та же полоса ещё раз
     # с подсказками первого ответа, если модель сочла её повреждённой; выбор финала — внутри.
     recognize = recognize_with_second_pass if params.options.second_pass else recognize_page
-    meta, result = recognize(client, spec, params.in_dir / job.rel, job, params.out_dir, params.options)
+    meta, result = recognize(client, spec, params.in_dir / job.rel, job, params.pages_dir, params.options)
     return job, meta, result
 
 
@@ -323,8 +325,8 @@ def _recognize_many(
     for job in jobs:
         # Готовая полоса: выход на месте, без ошибки, тот же этап, тот же вид/отпечаток списков.
         # Её .json перечитывается тем же разбором, что и ответ модели; битый файл — в очередь.
-        if reuse and is_done(params.out_dir, job):
-            results[job.rel] = load_result(params.out_dir, job)
+        if reuse and is_done(params.pages_dir, job):
+            results[job.rel] = load_result(params.pages_dir, job)
             if results[job.rel] is not None:
                 stats.reused += 1
                 continue
@@ -407,15 +409,15 @@ def build_issue_toc(
     return tocs
 
 
-def _write_issue_toc(out_dir: Path, issue_key: str, tocs: dict[TocKind, toc_module.IssueToc]) -> None:
+def _write_issue_toc(pages_dir: Path, issue_key: str, tocs: dict[TocKind, toc_module.IssueToc]) -> None:
     """``toc.json`` и ``toc.md`` в папку выпуска; перезаписываются на каждом проходе выпуска.
 
     Args:
-        out_dir: Корень выхода.
-        issue_key: Ключ выпуска (``«1966/03»``) — папка под out_dir.
+        pages_dir: Корень выхода.
+        issue_key: Ключ выпуска (``«1966/03»``) — папка под pages_dir.
         tocs: Оглавления выпуска по видам из ``build_issue_toc``.
     """
-    issue_dir = out_dir / issue_key
+    issue_dir = pages_dir / issue_key
     issue_dir.mkdir(parents=True, exist_ok=True)
     # JSON — полная структура (рубрики → статьи с авторами, список полос) для повторов и сборки
     # выпуска; indent=1 — чтобы diff между прогонами читался построчно.
@@ -465,32 +467,32 @@ def decide_redo(mode: OnMissedToc, issue_key: str, missed: list[tuple[Path, TocK
     return click.confirm(f"Перераспознать выпуск {issue_key} с этими полосами как оглавлением?", default=False)
 
 
-def _append_demoted(out_dir: Path, issue_key: str, demoted: list[Path]) -> None:
+def _append_demoted(pages_dir: Path, issue_key: str, demoted: list[Path]) -> None:
     """Дописать понижённые полосы в ``demoted_toc.txt`` (файл копится между прогонами, как ``missed_toc.txt``).
 
     Args:
-        out_dir: Корень выхода — файл лежит в нём.
+        pages_dir: Корень выхода — файл лежит в нём.
         issue_key: Ключ выпуска — в комментарий строки.
         demoted: Полосы, которые модель не признала оглавлением.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with (out_dir / DEMOTED_LIST).open("a", encoding="utf-8") as handle:
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    with (pages_dir / DEMOTED_LIST).open("a", encoding="utf-8") as handle:
         for rel in demoted:
             handle.write(f"{rel.as_posix()}  # в базе оглавление, модель: none, выпуск {issue_key}\n")
 
 
-def _append_missed(out_dir: Path, issue_key: str, missed: list[tuple[Path, TocKind]]) -> None:
+def _append_missed(pages_dir: Path, issue_key: str, missed: list[tuple[Path, TocKind]]) -> None:
     """Дописать полосы с оглавлением вне базы в ``missed_toc.txt`` (файл копится между прогонами).
 
     Args:
-        out_dir: Корень выхода — файл лежит в нём.
+        pages_dir: Корень выхода — файл лежит в нём.
         issue_key: Ключ выпуска — в комментарий строки.
         missed: Полосы и вид оглавления по мнению модели.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
+    pages_dir.mkdir(parents=True, exist_ok=True)
     # Режим «a», не «w»: прогон с --skip-done видит только часть выпусков, а список должен
     # накапливать все находки; при повторной находке той же полосы строка задвоится — это терпимо.
-    with (out_dir / MISSED_LIST).open("a", encoding="utf-8") as handle:
+    with (pages_dir / MISSED_LIST).open("a", encoding="utf-8") as handle:
         for rel, kind in missed:
             handle.write(f"{rel.as_posix()}  # {kind}, выпуск {issue_key}\n")
 
@@ -575,7 +577,7 @@ def redo_reason(
 
 
 def keep_unchanged_pages(
-    out_dir: Path, regular: list[Path], demoted: set[Path], digest: str, start_pages: set[str]
+    pages_dir: Path, regular: list[Path], demoted: set[Path], digest: str, start_pages: set[str]
 ) -> tuple[list[Path], dict[Path, RedoReason]]:
     """Круг повтора по ``--redo-scope structured``: разделить обычные полосы на «оставить» и «заново».
 
@@ -584,7 +586,7 @@ def keep_unchanged_pages(
     ``articles_in_prompt`` не трогается: список в их промпте был старый, и это должно быть видно.
 
     Args:
-        out_dir: Корень выхода — там лежат .json/.meta.json первого круга.
+        pages_dir: Корень выхода — там лежат .json/.meta.json первого круга.
         regular: Обычные полосы выпуска (включая понижённые).
         demoted: Понижённые полосы — идут заново всегда.
         digest: Отпечаток новых списков (``toc.toc_hash``).
@@ -597,16 +599,16 @@ def keep_unchanged_pages(
     redo: dict[Path, RedoReason] = {}
     for rel in regular:
         job = PageJob(rel, Stage.PAGE)
-        meta = read_meta(out_dir, rel)
+        meta = read_meta(pages_dir, rel)
         # Битая или сбойная полоса первого круга — как «нет результата»: пойдёт заново.
-        result = load_result(out_dir, job) if meta and not (meta.get("error") or meta.get("parse_error")) else None
+        result = load_result(pages_dir, job) if meta and not (meta.get("error") or meta.get("parse_error")) else None
         reason = redo_reason(result, meta, start_pages, rel in demoted)
         if reason is not None:
             redo[rel] = reason
             continue
         meta = dict(meta)
         meta.update(toc_hash=digest, redo_kept=True)
-        write_meta(output_paths(out_dir, rel).meta, meta)
+        write_meta(output_paths(pages_dir, rel).meta, meta)
         kept.append(rel)
     return kept, redo
 
@@ -629,7 +631,7 @@ def run_issue(
     обычной полосе увидела оглавление, которого в базе нет, — предупреждение и, по
     ``params.on_missed_toc``, один повторный вызов самой себя с этими полосами как оглавлением; по
     ``params.redo_scope`` на этом круге заново идут либо все обычные полосы, либо только те, где
-    списки могут что-то изменить (:func:`redo_reason`). Файлы — под ``params.out_dir``.
+    списки могут что-то изменить (:func:`redo_reason`). Файлы — под ``params.pages_dir``.
 
     Args:
         client: Клиент OpenRouter; общий на весь прогон, потокобезопасный (ходит из пула потоков).
@@ -691,11 +693,11 @@ def run_issue(
     # обычная. Ответ этапа toc сохраняется в .toc.json — повтор с --skip-done прочтёт его без запроса.
     demoted = [rel for rel in pages if (result := toc_results.get(rel)) is not None and result.toc_kind is TocKind.NONE]
     for rel in demoted:
-        save_demoted_toc(params.out_dir, rel, toc_results[rel])
+        save_demoted_toc(params.pages_dir, rel, toc_results[rel])
     # На круге повтора понижённые полосы те же (их ответ этапа toc взят с диска) — отчитаны первым кругом.
     if demoted and extra_toc is None:
         stats.demoted_toc.append(f"{issue_key}: " + ", ".join(rel.name for rel in demoted))
-        _append_demoted(params.out_dir, issue_key, demoted)
+        _append_demoted(params.pages_dir, issue_key, demoted)
         logger.warning(
             "%s: модель не считает оглавлением полосы %s — они пойдут как обычные; проверьте теги в CVAT (см. %s)",
             issue_key,
@@ -705,13 +707,13 @@ def run_issue(
     if not toc_pages:
         # Полос оглавления в этом прогоне нет (--pages со списком обычных полос, повтор сбойных): списки
         # берутся из toc.json прошлого прогона, иначе полосы пошли бы без структуры и без понижения `#`.
-        saved = params.out_dir / issue_key / "toc.json"
+        saved = params.pages_dir / issue_key / "toc.json"
         if saved.is_file():
             tocs = toc_module.from_dict(json.loads(saved.read_text(encoding="utf-8")))
             logger.info("%s: оглавление взято из %s (полос оглавления в прогоне нет)", issue_key, saved)
     if toc_pages:
         # toc.json (машинный, для повторов и сборки) и toc.md (глазами) в папку выпуска под out-dir.
-        _write_issue_toc(params.out_dir, issue_key, tocs)
+        _write_issue_toc(params.pages_dir, issue_key, tocs)
         for toc_kind, issue_toc in tocs.items():
             logger.info(
                 "%s: %s — рубрик %d, статей %d, полос %d (продолжений %d)",
@@ -736,7 +738,7 @@ def run_issue(
     # новому оглавлению), получают новый toc_hash в meta и ниже берутся с диска; остальные — заново.
     if extra_toc is not None and params.redo_scope is RedoScope.STRUCTURED:
         start_pages = article_start_pages(tocs.get(TocKind.CONTENTS))
-        kept, redo = keep_unchanged_pages(params.out_dir, regular, set(demoted), digest, start_pages)
+        kept, redo = keep_unchanged_pages(params.pages_dir, regular, set(demoted), digest, start_pages)
         stats.redo_kept += len(kept)
         logger.info(
             "%s: круг повтора — заново %d полос, оставлено без повтора %d:\n%s",
@@ -782,15 +784,15 @@ def run_issue(
         stats = stats + redo_stats
     else:
         # Без повтора: полосы в missed_toc.txt — человеку на разметку в CVAT; в базу не пишем.
-        _append_missed(params.out_dir, issue_key, missed)
+        _append_missed(params.pages_dir, issue_key, missed)
     return stats
 
 
-def collect_meta(out_dir: Path) -> list[dict]:
-    """Все .meta.json под out_dir: сводка строится по ним, а не по одному прогону.
+def collect_meta(pages_dir: Path) -> list[dict]:
+    """Все .meta.json под pages_dir: сводка строится по ним, а не по одному прогону.
 
     Args:
-        out_dir: Корень выхода; обходится рекурсивно.
+        pages_dir: Корень выхода; обходится рекурсивно.
 
     Returns:
         Список meta-словарей (по одному на полосу) в порядке путей; битые файлы пропущены.
@@ -798,7 +800,7 @@ def collect_meta(out_dir: Path) -> list[dict]:
     rows: list[dict] = []
     # Битый или недописанный meta (прогон прервали на записи) — предупреждение, не остановка:
     # сводка по остальным полосам всё равно нужна.
-    for path in sorted(out_dir.rglob("*.meta.json")):
+    for path in sorted(pages_dir.rglob("*.meta.json")):
         try:
             rows.append(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
@@ -806,17 +808,17 @@ def collect_meta(out_dir: Path) -> list[dict]:
     return rows
 
 
-def write_summary(out_dir: Path, rows: list[dict]) -> Path:
-    """``summary.csv`` в корне out_dir: по строке на полосу, колонки — :data:`SUMMARY_FIELDS`.
+def write_summary(pages_dir: Path, rows: list[dict]) -> Path:
+    """``summary.csv`` в корне pages_dir: по строке на полосу, колонки — :data:`SUMMARY_FIELDS`.
 
     Args:
-        out_dir: Корень выхода — файл лежит в нём.
+        pages_dir: Корень выхода — файл лежит в нём.
         rows: Meta всех полос из ``collect_meta``.
 
     Returns:
         Путь к записанному ``summary.csv``.
     """
-    path = out_dir / "summary.csv"
+    path = pages_dir / "summary.csv"
     with path.open("w", newline="", encoding="utf-8") as handle:
         # extrasaction="ignore": в meta есть вложенные словари (tiling, structure, second_pass),
         # в плоскую таблицу они не идут; отсутствующая колонка пишется пустой.
@@ -862,6 +864,8 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         params.options.max_src_tile,
         params.options.max_model_tile,
     )
+    if params.assemble and params.issues_dir is None:
+        raise ValueError("сборка выпусков включена, а папка md выпусков (issues_dir) не задана")
     # Проверка стыков полос при сборке — тем же клиентом и моделью, один запрос на выпуск.
     checker = None
     heading_checker = None
@@ -877,14 +881,14 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         # Выпуск целиком в один markdown — по готовым .json с диска, после круга повтора, если он был.
         if params.assemble:
             assembly = assemble_issue(
-                params.out_dir,
+                params.pages_dir,
                 issue_key,
                 pages,
                 join_hyphens=params.options.join_hyphens,
                 checker=checker,
                 heading_checker=heading_checker,
             )
-            log_assembly(assembly, write_issue(params.out_dir, assembly))
+            log_assembly(assembly, write_issue(params.pages_dir, params.issues_dir, assembly))
             stats = stats + PipelineStats(
                 cost_usd=assembly.checked.cost_usd + assembly.heading_checked.cost_usd,
                 boundary_requests=assembly.checked.requests,
@@ -896,8 +900,8 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
             )
     # Сводка строится по ВСЕМ .meta.json под out-dir, а не по этому прогону: с --skip-done прогон
     # видел только недоделанные полосы, а summary.csv должен описывать папку целиком.
-    rows = collect_meta(params.out_dir)
-    summary = write_summary(params.out_dir, rows)
+    rows = collect_meta(params.pages_dir)
+    summary = write_summary(params.pages_dir, rows)
     # Доля токенов входа, взятых провайдером из кэша префикса: по ней видно, что кэш работает
     # (одинаковое начало системного промпта внутри выпуска) и сколько он экономит.
     prompt_total = sum(int(r.get("prompt_tokens") or 0) for r in rows)

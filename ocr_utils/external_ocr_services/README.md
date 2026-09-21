@@ -11,7 +11,8 @@
 ```bash
 uv run python -m ocr_utils.external_ocr_services run \
     --in-dir /mnt/system/raw/mts/pack1_background_blurred_v2/sharpened \
-    --out-dir /mnt/system/raw/mts/pack1_external_ocr_services/out \
+    --pages-dir /mnt/system/raw/mts/pack1_external_ocr_services/pages \
+    --issues-dir /mnt/system/raw/mts/pack1_external_ocr_services/out \
     --debug-dir /mnt/system/raw/mts/pack1_external_ocr_services/debug \
     --cache-dir /mnt/system/raw/mts/pack1_external_ocr_services/cache \
     --db ~/Projects/mts_markup/pack1_reviewed.sqlite --pack-name пак-1 \
@@ -21,9 +22,9 @@ uv run python -m ocr_utils.external_ocr_services run \
     [--on-missed-toc redo|ask|skip] [--redo-scope structured|all] [--pages список.txt]
     [--second-pass] [--second-pass-transcript] [--no-assemble]
 
-uv run python -m ocr_utils.external_ocr_services assemble --out-dir …/out --in-dir …/sharpened --cache-dir …/cache \
-    [--only-year 1966 --only-issue 03] [--no-check-boundaries]   # пересобрать выпуски в один md; к модели — только сомнительные стыки
-uv run python -m ocr_utils.external_ocr_services normalize --out-dir …/out [--only-year --only-issue]   # переразобрать готовые .json текущим разбором (сноски, теги, escape) без запросов
+uv run python -m ocr_utils.external_ocr_services assemble --pages-dir …/pages --issues-dir …/out --in-dir …/sharpened --cache-dir …/cache \
+    [--only-year 1966 --only-issue 03] [--no-check-boundaries] [--check-headings]   # пересобрать выпуски в один md; к модели — только сомнительные стыки и статьи без заголовка
+uv run python -m ocr_utils.external_ocr_services normalize --pages-dir …/pages [--only-year --only-issue]   # переразобрать готовые .json текущим разбором (сноски, теги, escape) без запросов
 uv run python -m ocr_utils.external_ocr_services models    # реестр с ценами
 uv run python -m ocr_utils.external_ocr_services balance   # баланс ключа OpenRouter
 ```
@@ -38,9 +39,10 @@ uv run python -m ocr_utils.external_ocr_services balance   # баланс клю
 
 | опция | что делает |
 |---|---|
-| `--in-dir`, `--out-dir`, `--debug-dir` | вход `{год}/{выпуск}/{полоса}`; выход той же раскладки; отладка (сырые ответы, промпты, тайлы, оба прохода) |
+| `--in-dir`, `--pages-dir`, `--debug-dir` | вход `{год}/{выпуск}/{полоса}`; рабочий выход той же раскладки (полосы, `toc.json`, sidecar, `summary.csv`, `run.log`); отладка (сырые ответы, промпты, тайлы, оба прохода) |
+| `--issues-dir` | папка конечных md выпусков `{год}/{год}_{выпуск}.md` — и больше ничего в ней не лежит (у `run` обязательна при `--assemble`, у `assemble` всегда; см. «Что лежит в выходе») |
 | `--cache-dir` | кэш запросов: каждый запрос к модели — своя папка с промптами и ответом, тот же запрос второй раз берётся с диска (см. «Кэш запросов») |
-| `--assemble/--no-assemble` | после каждого выпуска собирать его в один markdown `{год}/{выпуск}.md` с sidecar `.pages.json` (по умолчанию включено; см. «Сборка выпуска») |
+| `--assemble/--no-assemble` | после каждого выпуска собирать его в один markdown `{год}/{год}_{выпуск}.md` в `--issues-dir` с sidecar `{год}_{выпуск}.pages.json` в `--pages-dir` (по умолчанию включено; см. «Сборка выпуска») |
 | `--check-boundaries/--no-check-boundaries` | при сборке показывать сомнительные стыки полос модели — один запрос на выпуск (по умолчанию включено; см. «Проверка стыков моделью») |
 | `--db`, `--pack-name` | база разметки (обычно `DB_REVIEWED`): флаги оглавления `is_toc` / `is_year_index` и вето `force_is_not_toc`; читается через ORM `ocr_utils.db` с `open_db(create=False)` — без создания таблиц и дописывания колонок, одним `select`, ничего не пишется |
 | `--toc-lists` | запасной вход без базы: корень списков `<год>/<выпуск>/toc_pages.txt` от `scan_markup toc-pages` |
@@ -477,8 +479,8 @@ cache/{год}/{выпуск}/{полоса}/errors.jsonl
 ## Сборка выпуска
 
 После каждого выпуска (`--assemble`, по умолчанию включено) или отдельно командой `assemble` из
-готовых `.json` (`assemble.py`): `out/{год}/{выпуск}.md` — весь выпуск одним markdown, рядом
-`{выпуск}.pages.json` — привязка к полосам. В тело идут полосы по порядку имён файлов (как в
+готовых `.json` (`assemble.py`): `{issues_dir}/{год}/{год}_{выпуск}.md` — весь выпуск одним markdown, в папке
+полос `{pages_dir}/{год}/{год}_{выпуск}.pages.json` — привязка к полосам и итог сверки (`assemble.issue_paths`). В тело идут полосы по порядку имён файлов (как в
 `toc.json`): у полосы оглавления — ответ этапа `toc` с блоком `<toc>`, у понижённой — этапа `page`;
 YAML-шапки полос отбрасываются, колонтитулы в тело не идут. **Маркеров границ полос в тексте
 нет** — так решено 19.09.2026; полоса находится по sidecar: `pages[].offset` — смещение первого
@@ -589,7 +591,7 @@ YAML-шапки полос отбрасываются, колонтитулы в
   ≈ 1500 полос, $1.51 в льготные часы — 0.10 ¢ на полосу против 0.097 ¢ у v19): фантомов от модели 0 (кроме лозунга под фото), id от модели у
   всех `#` (0 % по названию), 6 лекций восстановлены из «Тема: …», без заголовка осталась одна статья
   («Важная служба» 1966/03 — названия на полосе модель не увидела); проверка по всем выпускам —
-  `scripts/check_issue_headings.py --out-dir out [--verbose]`.
+  `scripts/check_issue_headings.py --pages-dir …/pages --issues-dir …/out [--verbose]`.
 
 **Повторы рубрик.** Последняя страховка после сверки: две одинаковые `<rubric>` подряд (хотя бы и
 через другой контент) идти не могут — вторая и следующие с тем же текстом убираются
@@ -714,6 +716,11 @@ A/B версий промпта — `scripts/replay_page.py`: N повторов
 
 ## Что лежит в выходе
 
+Выход разнесён по двум папкам. `--issues-dir` (`EXTERNAL_OCR_SERVICES_OUT`, `…/out`) — только конечные
+md выпусков `{год}/{год}_{выпуск}.md`, ничего другого туда не пишется. `--pages-dir`
+(`EXTERNAL_OCR_SERVICES_PAGES`, `…/pages`) — всё рабочее: папки полос `{год}/{выпуск}/`, sidecar
+`{год}/{год}_{выпуск}.pages.json`, `summary.csv`, `run.log`, списки пропусков. Ниже — что именно.
+
 В md (полосы и выпуска) одинарный перевод строки сразу перед `<author>`/`<position>` и сразу после
 `</author>`/`</position>` удваивается (`render.space_author_tags`): иначе вьюер markdown склеивает
 подряд идущих авторов и должности в одну строку; двойной перевод и любой другой символ рядом с тегом
@@ -725,8 +732,8 @@ A/B версий промпта — `scripts/replay_page.py`: N повторов
 `second_pass` (если включён), `blocks`, `toc_check`, ошибки). Поле `messages` в `.json`/`.md` — замечания
 пост-обработки (сверка оглавления и т. п.). При сбое разбора рядом `имя.raw.txt`; у понижённой
 полосы — `имя.toc.json` с ответом этапа `toc`. На выпуск `toc.json`
-и `toc.md`, рядом с папкой выпуска — `{выпуск}.md` (весь выпуск одним файлом) и `{выпуск}.pages.json`
-(см. «Сборка выпуска»). В корне `summary.csv`, `run.log`, `missed_toc.txt`, `demoted_toc.txt`. В `--debug-dir`: `имя.raw.json`
+и `toc.md`, рядом с папкой выпуска — `{год}_{выпуск}.pages.json` (привязка md выпуска к полосам, см. «Сборка
+выпуска»); сам md выпуска — в `--issues-dir`. В корне папки полос `summary.csv`, `run.log`, `missed_toc.txt`, `demoted_toc.txt`. В `--debug-dir`: `имя.raw.json`
 (всегда: ответ модели, отформатированный для чтения — отступы 4 пробела, кириллица без escape; если JSON в ответе
 не нашлось — вместо него `имя.raw.txt` дословно), `имя.prompt.txt`, `имя.tile_{столбец}{строка}.jpg`, при втором проходе `имя.pass1.*`,
 `имя.pass2.*`. В `summary.csv` есть колонка `is_damaged` — по ней видно долю полос, которые модель
@@ -734,7 +741,7 @@ A/B версий промпта — `scripts/replay_page.py`: N повторов
 
 ## Идемпотентность
 
-`--skip-done`: полоса готова, если есть `.json`, meta без ошибки, та же `prompt_version`, тот же
+`--skip-done`: полоса готова, если в `--pages-dir` есть `.json`, meta без ошибки, та же `prompt_version`, тот же
 этап и тот же `toc_hash` — отпечаток списков рубрик и статей, с которыми её распознавали. Сменился
 промпт — все полосы устарели (с v18), кроме версий из `ocr.COMPATIBLE_PROMPT_VERSIONS`: их выход разбор
 приводит к текущему виду (v20 → v21: сноски), и они считаются готовыми. Сменился список

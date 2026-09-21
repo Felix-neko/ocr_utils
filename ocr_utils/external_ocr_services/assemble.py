@@ -1,9 +1,10 @@
 """Сборка выпуска в один markdown: полосы по порядку, переносы и оборванные абзацы сшиты через границу полос.
 
 Вход — готовые ``имя.json`` полос выпуска (у полосы оглавления — ответ этапа ``toc`` с блоком ``<toc>``,
-у понижённой — этапа ``page``). Тела полос идут подряд без маркеров границ; привязка к полосам —
-в sidecar ``{выпуск}.pages.json`` (смещение первого символа каждой полосы в тексте, список склеек,
-пропущенные полосы). Полоса без результата оставляет в тексте HTML-комментарий — единственное
+у понижённой — этапа ``page``). Файл выпуска — ``{год}/{год}_{выпуск}.md`` в папке выпусков (там
+только конечные md); тела полос идут подряд без маркеров границ; привязка к полосам — в sidecar
+``{год}_{выпуск}.pages.json`` рядом с полосами (смещение первого символа каждой полосы в тексте,
+список склеек, пропущенные полосы). Полоса без результата оставляет в тексте HTML-комментарий — единственное
 исключение из «без маркеров», иначе пропуск невидим.
 
 Граница двух соседних полос A и B. Хвост — последний абзац A без замыкающих сносок и маркеров,
@@ -255,16 +256,16 @@ def _blocks_of(body: str) -> list[_Block]:
     return blocks
 
 
-def _read_page(out_dir: Path, rel: Path) -> _PageBody:
+def _read_page(pages_dir: Path, rel: Path) -> _PageBody:
     """Полоса с диска: ``.json`` тем же разбором, что и ответ модели; нет или битая — причина.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         rel: Путь полосы относительно корня (с любым суффиксом).
     """
-    paths = output_paths(out_dir, rel)
+    paths = output_paths(pages_dir, rel)
     file = rel.with_suffix("").as_posix()
-    meta = read_meta(out_dir, rel) or {}
+    meta = read_meta(pages_dir, rel) or {}
     if not paths.json.is_file():
         return _PageBody(file, rel, reason=meta.get("error") or meta.get("parse_error") or "нет .json")
     if meta.get("error") or meta.get("parse_error"):
@@ -428,7 +429,7 @@ def _assemble_pass(
 
 
 def assemble_issue(
-    out_dir: Path,
+    pages_dir: Path,
     issue_key: str,
     page_rels: list[Path],
     *,
@@ -446,7 +447,7 @@ def assemble_issue(
     вердикты поверх эвристик. Без сомнительных стыков запроса нет.
 
     Args:
-        out_dir: Корень выхода с ``{год}/{выпуск}/{полоса}.json``.
+        pages_dir: Корень выхода с ``{год}/{выпуск}/{полоса}.json``.
         issue_key: «год/выпуск».
         page_rels: Полосы выпуска по порядку (пути относительно корня, суффикс любой).
         join_hyphens: Сшивать слова с дефисом на границе (иначе граница с дефисом — как без него).
@@ -463,14 +464,14 @@ def assemble_issue(
     """
     morph = default_morph() if join_hyphens else None  # словарь грузится один раз на процесс
     checker_start = replace(checker.stats) if checker is not None else CheckerStats()  # снимок счётчиков до выпуска
-    bodies = [_read_page(out_dir, rel) for rel in page_rels]
+    bodies = [_read_page(pages_dir, rel) for rel in page_rels]
     result = _assemble_pass(bodies, morph, rule, join_paragraphs_across, checker is not None, None)
     if checker is not None and result.seams:
         verdicts = checker.check_issue(issue_key, result.seams)
         result = _assemble_pass(bodies, morph, rule, join_paragraphs_across, False, verdicts)
     # Сверка `#` и `<rubric>` с оглавлением выпуска: один заголовок на статью, одна рубрика на раздел;
     # номера полос без напечатанного номера выводятся по соседям.
-    toc = toc_contents(out_dir, issue_key) if toc is None else toc
+    toc = toc_contents(pages_dir, issue_key) if toc is None else toc
     heading_start = replace(heading_checker.stats) if heading_checker is not None else CheckerStats()
     hints = None
     if heading_checker is not None and toc is not None:
@@ -583,14 +584,14 @@ def _heading_hints(
     return hints
 
 
-def toc_contents(out_dir: Path, issue_key: str) -> IssueToc | None:
+def toc_contents(pages_dir: Path, issue_key: str) -> IssueToc | None:
     """«Содержание» выпуска из ``toc.json`` рядом с полосами (с id статей и рубрик); нет файла — ``None``.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         issue_key: «год/выпуск».
     """
-    path = out_dir / issue_key / "toc.json"
+    path = pages_dir / issue_key / "toc.json"
     if not path.is_file():
         return None
     try:
@@ -786,71 +787,79 @@ def _header(issue_key: str, pages: int, missing: int) -> str:
     return "\n".join(lines)
 
 
-def issue_paths(out_dir: Path, issue_key: str) -> tuple[Path, Path]:
-    """Где лежат файл выпуска и его sidecar: ``out_dir/{год}/{выпуск}.md`` и ``.pages.json``.
+def issue_paths(pages_dir: Path, issues_dir: Path, issue_key: str) -> tuple[Path, Path]:
+    """Где лежат файл выпуска и его sidecar.
+
+    Файл выпуска — ``issues_dir/{год}/{год}_{выпуск}.md`` (в папке выпусков только конечные md, имя
+    как у финальных PDF); sidecar — ``pages_dir/{год}/{год}_{выпуск}.pages.json``, рядом с полосами:
+    он нужен нарезке и проверкам, а не читателю.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Папка полос (рабочий выход).
+        issues_dir: Папка md выпусков.
         issue_key: «год/выпуск».
     """
-    base = out_dir / issue_key
-    return base.with_name(base.name + ISSUE_MD_SUFFIX), base.with_name(base.name + ISSUE_PAGES_SUFFIX)
+    year, _, issue = issue_key.partition("/")
+    name = f"{year}_{issue}"
+    return issues_dir / year / (name + ISSUE_MD_SUFFIX), pages_dir / year / (name + ISSUE_PAGES_SUFFIX)
 
 
-def write_issue(out_dir: Path, assembly: IssueAssembly) -> Path:
-    """Записать файл выпуска и sidecar.
+def write_issue(pages_dir: Path, issues_dir: Path, assembly: IssueAssembly) -> Path:
+    """Записать файл выпуска (в папку выпусков) и sidecar (в папку полос).
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Папка полос.
+        issues_dir: Папка md выпусков.
         assembly: Итог :func:`assemble_issue`.
 
     Returns:
         Путь файла выпуска.
     """
-    md_path, pages_path = issue_paths(out_dir, assembly.issue)
+    md_path, pages_path = issue_paths(pages_dir, issues_dir, assembly.issue)
     md_path.parent.mkdir(parents=True, exist_ok=True)
+    pages_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(assembly.text, encoding="utf-8")
     pages_path.write_text(json.dumps(assembly.as_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
     return md_path
 
 
-def issue_pages(out_dir: Path, issue_key: str) -> list[Path]:
+def issue_pages(pages_dir: Path, issue_key: str) -> list[Path]:
     """Полосы выпуска по готовым ``.json`` в папке выхода (для сборки без прогона).
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         issue_key: «год/выпуск».
 
     Returns:
         Пути относительно корня (с суффиксом ``.json``) по порядку имён; служебные ``.meta.json``,
         ``.toc.json`` и ``toc.json`` выпуска не в счёт.
     """
-    issue_dir = out_dir / issue_key
+    issue_dir = pages_dir / issue_key
     rels = []
     for path in sorted(issue_dir.glob("*.json")):
         if path.name == "toc.json" or path.name.endswith((".meta.json", ".toc.json")):
             continue
-        rels.append(path.relative_to(out_dir))
+        rels.append(path.relative_to(pages_dir))
     return rels
 
 
-def list_issues(out_dir: Path, only_year: str | None = None, only_issue: str | None = None) -> list[str]:
+def list_issues(pages_dir: Path, only_year: str | None = None, only_issue: str | None = None) -> list[str]:
     """Выпуски в папке выхода: ``{год}/{выпуск}`` с хотя бы одним ``.json`` полосы.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         only_year: Только этот год.
         only_issue: Только этот выпуск.
     """
     keys = []
-    for year_dir in sorted(p for p in out_dir.iterdir() if p.is_dir()):
+    for year_dir in sorted(p for p in pages_dir.iterdir() if p.is_dir()):
         if only_year and year_dir.name != only_year:
             continue
         for issue_dir in sorted(p for p in year_dir.iterdir() if p.is_dir()):
             if only_issue and issue_dir.name != only_issue:
                 continue
             key = f"{year_dir.name}/{issue_dir.name}"
-            if issue_pages(out_dir, key):
+            if issue_pages(pages_dir, key):
                 keys.append(key)
     return keys
 

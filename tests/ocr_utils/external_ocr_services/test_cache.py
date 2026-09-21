@@ -80,7 +80,7 @@ def test_second_run_with_cache_sends_nothing_and_keeps_every_pass(tmp_path):
     assert "data:image" not in json.dumps(request["payload"])
     response = json.loads((entries[0] / RESPONSE_FILE).read_text(encoding="utf-8"))
     assert response["verdict"] == CacheVerdict.OK and response["cost_usd"] == 0.001
-    meta = json.loads((params.out_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
+    meta = json.loads((params.pages_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
     assert meta["cache_hit"] is False and meta["cache_entry"].startswith(f"{ISSUE}/IMG_0002/page.")
 
     # Второй прогон БЕЗ --skip-done: все четыре запроса находятся в кэше, сеть не нужна, стоимость 0.
@@ -89,9 +89,9 @@ def test_second_run_with_cache_sends_nothing_and_keeps_every_pass(tmp_path):
     params2.options.cache_dir = cache_dir
     stats2 = run_pipeline(again, resolve("deepseek-v41-flash"), params2)
     assert (stats2.requests, stats2.cache_hits, stats2.failed) == (4, 4, 0) and stats2.cost_usd == 0
-    meta = json.loads((params.out_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
+    meta = json.loads((params.pages_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
     assert meta["cache_hit"] is True and meta["cost_usd"] == 0.001, "цена в meta историческая"
-    summary = (params.out_dir / "summary.csv").read_text(encoding="utf-8")
+    summary = (params.pages_dir / "summary.csv").read_text(encoding="utf-8")
     assert "cache_hit" in summary.splitlines()[0] and ",True," in summary
 
 
@@ -109,6 +109,7 @@ def test_demoted_page_keeps_both_passes_in_cache(tmp_path):
         _flags(toc=("IMG_0001", "IMG_0002", "IMG_0003")),
         jobs=1,
         on_missed_toc="skip",
+        issues_dir=tmp_path / "issues",
     )
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.requests == 6

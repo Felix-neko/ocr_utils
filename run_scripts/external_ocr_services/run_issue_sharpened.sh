@@ -5,8 +5,9 @@
 #
 # Аргументы: выпуск как год/номер (по умолчанию 1966/03); остальное уходит команде run.
 # ЧИТАЕТ  SHARPENED_DIR/<выпуск>, DB_REVIEWED (только чтение).
-# ПИШЕТ   EXTERNAL_OCR_SERVICES_OUT/<выпуск>/… (полосы; рядом <год>/<номер>.md — весь выпуск одним
-#         файлом и <номер>.pages.json), EXTERNAL_OCR_SERVICES_DEBUG/<выпуск>/…,
+# ПИШЕТ   EXTERNAL_OCR_SERVICES_PAGES/<выпуск>/… (полосы, toc.json; рядом <год>/<год>_<номер>.pages.json),
+#         EXTERNAL_OCR_SERVICES_OUT/<год>/<год>_<номер>.md (весь выпуск одним файлом — и только md),
+#         EXTERNAL_OCR_SERVICES_DEBUG/<выпуск>/…,
 #         EXTERNAL_OCR_SERVICES_CACHE/<выпуск>/… (кэш запросов: повтор с тем же промптом бесплатен).
 # Тайлы: шаг 4500 px исходника (обычная полоса 1×2, разворот 2×2), 2200 px модели — замер по базе
 # пака-1, см. docstring ocr_utils/external_ocr_services/tiling.py. Оглавление, найденное
@@ -23,7 +24,8 @@ NUMBER="${ISSUE#*/}"
 
 uv run python -m ocr_utils.external_ocr_services run \
     --in-dir "$SHARPENED_DIR" \
-    --out-dir "$EXTERNAL_OCR_SERVICES_OUT" \
+    --pages-dir "$EXTERNAL_OCR_SERVICES_PAGES" \
+    --issues-dir "$EXTERNAL_OCR_SERVICES_OUT" \
     --debug-dir "$EXTERNAL_OCR_SERVICES_DEBUG" \
     --cache-dir "$EXTERNAL_OCR_SERVICES_CACHE" \
     --db "$DB_REVIEWED" \

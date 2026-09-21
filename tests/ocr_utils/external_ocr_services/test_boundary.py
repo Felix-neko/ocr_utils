@@ -272,22 +272,30 @@ def test_run_pipeline_checks_boundaries_once_per_issue(tmp_path):
         _flags(),
         jobs=1,
         on_missed_toc="skip",
+        issues_dir=tmp_path / "issues",
     )
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     boundary_payloads = [p for p in fake.payloads if "seams" in p["messages"][0]["content"]]
     assert len(boundary_payloads) == 1 and stats.boundary_requests == 1 and stats.boundary_rewritten == 0
     assert stats.cost_usd == 0.005, "4 полосы + 1 запрос по стыкам"
-    text = (tmp_path / "out" / "1966" / "03.md").read_text(encoding="utf-8")
+    text = (tmp_path / "issues" / "1966" / "1966_03.md").read_text(encoding="utf-8")
     assert "были направлены на смотр." in text
-    sidecar = json.loads((tmp_path / "out" / "1966" / "03.pages.json").read_text(encoding="utf-8"))
+    sidecar = json.loads((tmp_path / "out" / "1966" / "1966_03.pages.json").read_text(encoding="utf-8"))
     assert sidecar["joins"][0]["reason"] == "duplicate" and sidecar["joins"][0]["model"]["status"] == "confirmed"
     assert (tmp_path / "cache" / ISSUE / "_boundaries").is_dir()
     # Без проверки — запроса по стыкам нет, эвристика та же.
     fake.payloads.clear()
     order = iter(["IMG_0002", "IMG_0003", "IMG_0004"])
     params = PipelineParams(
-        tmp_path / "in", tmp_path / "out2", RunOptions(), _flags(), jobs=1, on_missed_toc="skip", check_boundaries=False
+        tmp_path / "in",
+        tmp_path / "out2",
+        RunOptions(),
+        _flags(),
+        jobs=1,
+        on_missed_toc="skip",
+        check_boundaries=False,
+        issues_dir=tmp_path / "issues2",
     )
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.boundary_requests == 0 and not [p for p in fake.payloads if "seams" in p["messages"][0]["content"]]
-    assert "были направлены на смотр." in (tmp_path / "out2" / "1966" / "03.md").read_text(encoding="utf-8")
+    assert "были направлены на смотр." in (tmp_path / "issues2" / "1966" / "1966_03.md").read_text(encoding="utf-8")

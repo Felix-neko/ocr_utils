@@ -440,14 +440,14 @@ class DebugPaths:
     md: Path
 
 
-def output_paths(out_dir: Path, rel: Path) -> OutputPaths:
-    """Файлы полосы под out_dir: путь полосы без суффикса плюс ``.json`` / ``.md`` / ``.meta.json`` / ``.raw.txt``.
+def output_paths(pages_dir: Path, rel: Path) -> OutputPaths:
+    """Файлы полосы под pages_dir: путь полосы без суффикса плюс ``.json`` / ``.md`` / ``.meta.json`` / ``.raw.txt``.
 
     Args:
-        out_dir: Корень выхода.
-        rel: Путь полосы относительно корня входа (та же раскладка сохраняется под out_dir).
+        pages_dir: Корень выхода.
+        rel: Путь полосы относительно корня входа (та же раскладка сохраняется под pages_dir).
     """
-    base = out_dir / rel.with_suffix("")
+    base = pages_dir / rel.with_suffix("")
     return OutputPaths(
         json=base.with_suffix(".json"),
         md=base.with_suffix(".md"),
@@ -478,14 +478,14 @@ def debug_paths(debug_dir: Path, rel: Path, chosen: PassChoice | None = None) ->
     )
 
 
-def read_meta(out_dir: Path, rel: Path) -> dict | None:
+def read_meta(pages_dir: Path, rel: Path) -> dict | None:
     """``.meta.json`` полосы; нет файла или он битый — ``None`` (полоса считается не сделанной).
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         rel: Путь полосы относительно корня входа.
     """
-    path = output_paths(out_dir, rel).meta
+    path = output_paths(pages_dir, rel).meta
     if not path.is_file():
         return None
     try:
@@ -494,21 +494,21 @@ def read_meta(out_dir: Path, rel: Path) -> dict | None:
         return None
 
 
-def is_done(out_dir: Path, job: PageJob) -> bool:
+def is_done(pages_dir: Path, job: PageJob) -> bool:
     """Сделано = .json на месте, .meta.json без ошибки, та же версия промпта, тот же этап и тот же отпечаток списков.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         job: Задание на полосу: этап, вид оглавления и отпечаток списков, с которыми сравнивается meta.
 
     Returns:
         ``True`` — полосу можно взять с диска и не запрашивать.
     """
-    meta = read_meta(out_dir, job.rel)
+    meta = read_meta(pages_dir, job.rel)
     # Сбойная полоса (сеть или разбор) сделанной не считается: --skip-done её догонит.
     if meta is None or meta.get("error") or meta.get("parse_error"):
         return False
-    paths = output_paths(out_dir, job.rel)
+    paths = output_paths(pages_dir, job.rel)
     if not paths.json.is_file():
         return False
     # Полоса, распознанная промптом другой версии, устарела: разметка и теги могли измениться
@@ -530,16 +530,16 @@ def is_done(out_dir: Path, job: PageJob) -> bool:
     return meta.get("toc_hash") == job.toc_hash
 
 
-def load_result(out_dir: Path, job: PageJob) -> PageResult | None:
+def load_result(pages_dir: Path, job: PageJob) -> PageResult | None:
     """Готовый результат полосы из её .json (тот же разбор, что у ответа модели); битый файл — ``None``.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         job: Задание на полосу — путь и этап (у ``TOC`` разбирается объект ``toc``).
     """
-    paths = output_paths(out_dir, job.rel)
+    paths = output_paths(pages_dir, job.rel)
     # У понижённой полосы ответ этапа toc лежит отдельно (см. is_done); её .json — уже этап page.
-    meta = read_meta(out_dir, job.rel) or {}
+    meta = read_meta(pages_dir, job.rel) or {}
     path = paths.toc_json if job.stage is Stage.TOC and meta.get("toc_demoted") else paths.json
     try:
         return parse_json_text(path.read_text(encoding="utf-8"), job.stage)
@@ -547,7 +547,7 @@ def load_result(out_dir: Path, job: PageJob) -> PageResult | None:
         return None
 
 
-def save_demoted_toc(out_dir: Path, rel: Path, result: PageResult) -> Path:
+def save_demoted_toc(pages_dir: Path, rel: Path, result: PageResult) -> Path:
     """Сохранить ответ этапа toc понижённой полосы в ``.toc.json`` рядом с её файлами.
 
     Полоса дальше идёт этапом page, и её .json/.md/.meta.json перезапишутся; вклад в оглавление
@@ -555,14 +555,14 @@ def save_demoted_toc(out_dir: Path, rel: Path, result: PageResult) -> Path:
     его без запроса.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         rel: Путь полосы относительно корня входа.
         result: Разобранный ответ этапа toc.
 
     Returns:
         Путь записанного ``.toc.json``.
     """
-    path = output_paths(out_dir, rel).toc_json
+    path = output_paths(pages_dir, rel).toc_json
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(result.to_json(), encoding="utf-8")
     return path
@@ -709,7 +709,7 @@ def _chat_cached(
 
 
 def recognize_page(
-    client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, out_dir: Path, options: RunOptions
+    client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, pages_dir: Path, options: RunOptions
 ) -> tuple[dict, PageResult | None]:
     """Распознать одну полосу и записать выходы. Возвращает (meta, результат или None при сбое).
 
@@ -723,7 +723,7 @@ def recognize_page(
         spec: Модель из реестра.
         in_path: Файл полосы на диске (``in_dir / job.rel``).
         job: Задание: путь, этап, вид оглавления, списки выпуска, подсказка второго прохода.
-        out_dir: Корень выхода; файлы полосы лягут под ``out_dir / job.rel`` без суффикса.
+        pages_dir: Корень выхода; файлы полосы лягут под ``pages_dir / job.rel`` без суффикса.
         options: Настройки запроса: тайлы, потолок токенов, рассуждения, описание издания, debug-dir.
 
     Returns:
@@ -731,7 +731,7 @@ def recognize_page(
         цена, ``structure``, ошибки); result — разобранный ответ или ``None`` при сбое (причина в
         ``meta["error"]`` / ``meta["parse_error"]``).
     """
-    paths = output_paths(out_dir, job.rel)
+    paths = output_paths(pages_dir, job.rel)
     paths.meta.parent.mkdir(parents=True, exist_ok=True)
     # Meta заводится до запроса: если что-то упадёт, на диске останется запись с причиной, и
     # сводка покажет полосу как сбойную, а не как отсутствующую.
@@ -1039,16 +1039,16 @@ def write_meta(path: Path, meta: dict) -> None:
     path.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def _write_outputs(out_dir: Path, rel: Path, result: PageResult, meta: dict) -> None:
+def _write_outputs(pages_dir: Path, rel: Path, result: PageResult, meta: dict) -> None:
     """Финальные .json/.md/.meta.json полосы — тем же набором, что пишет :func:`recognize_page`.
 
     Args:
-        out_dir: Корень выхода.
+        pages_dir: Корень выхода.
         rel: Путь полосы относительно корня входа.
         result: Результат, выбранный финалом (первый или второй проход).
         meta: Meta финала (с блоком ``second_pass``).
     """
-    paths = output_paths(out_dir, rel)
+    paths = output_paths(pages_dir, rel)
     paths.json.write_text(result.to_json(), encoding="utf-8")
     paths.md.write_text(to_markdown(result), encoding="utf-8")
     write_meta(paths.meta, meta)
@@ -1072,7 +1072,7 @@ def _write_debug_copy(options: RunOptions, rel: Path, chosen: PassChoice, result
 
 
 def recognize_with_second_pass(
-    client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, out_dir: Path, options: RunOptions
+    client: OpenRouterClient, spec: ModelSpec, in_path: Path, job: PageJob, pages_dir: Path, options: RunOptions
 ) -> tuple[dict, PageResult | None]:
     """Первый проход; если он счёл полосу повреждённой — второй с подсказкой из его ответа.
 
@@ -1085,7 +1085,7 @@ def recognize_with_second_pass(
         spec: Модель из реестра.
         in_path: Файл полосы на диске.
         job: Задание первого прохода; второй получает его копию с ``second_pass``.
-        out_dir: Корень выхода — финал перезаписывает файлы полосы целиком.
+        pages_dir: Корень выхода — финал перезаписывает файлы полосы целиком.
         options: Настройки прогона: ``second_pass`` (по умолчанию выключен, ``--second-pass``),
             ``second_pass_transcript`` (слать ли текст первого прохода), debug-dir.
 
@@ -1095,7 +1095,7 @@ def recognize_with_second_pass(
         ``cost_usd`` — сумма обоих запросов.
     """
     # Первый проход — обычный запрос; его выход уже лежит под out-dir.
-    meta1, result1 = recognize_page(client, spec, in_path, job, out_dir, options)
+    meta1, result1 = recognize_page(client, spec, in_path, job, pages_dir, options)
     # Сбой, этап TOC (оглавление не восстанавливаем) или проход выключен (умолчание) — без второго.
     if result1 is None or job.stage is not Stage.PAGE or not options.second_pass:
         return meta1, result1
@@ -1115,7 +1115,7 @@ def recognize_with_second_pass(
     _write_debug_copy(options, job.rel, PassChoice.PASS1, result1)
     # Та же полоса, тот же этап и списки, плюс подсказка; второй проход перезапишет .json/.md/meta.
     job2 = replace(job, second_pass=hint)
-    meta2, result2 = recognize_page(client, spec, in_path, job2, out_dir, options)
+    meta2, result2 = recognize_page(client, spec, in_path, job2, pages_dir, options)
     tags2 = tag_counts(result2.content_markdown) if result2 is not None else None
     chosen, why = choose_final(tags1, tags2)
     # Всё о втором проходе — в meta финала под ключом second_pass; плоские second_pass_reason /
@@ -1143,7 +1143,7 @@ def recognize_with_second_pass(
     meta = dict(meta)
     meta.update(second_pass=info, second_pass_reason=reason, second_pass_chosen=chosen, cost_usd=total_cost)
     # Второй проход мог записать сбойную meta или чужой результат — финал перезаписывается целиком.
-    _write_outputs(out_dir, job.rel, result, meta)
+    _write_outputs(pages_dir, job.rel, result, meta)
     logger.info(
         "%s: второй проход (%s): %s → %s, оставлен %s%s",
         job.rel,

@@ -27,17 +27,17 @@ from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAU
 logger = logging.getLogger("ocr_utils.external_ocr_services")
 
 
-def _setup_logging(out_dir: Path | None, level: str) -> None:
-    """Лог в терминал и, если задан ``out_dir``, ещё и в ``run.log`` рядом с выходом.
+def _setup_logging(pages_dir: Path | None, level: str) -> None:
+    """Лог в терминал и, если задан ``pages_dir``, ещё и в ``run.log`` рядом с выходом.
 
     Args:
-        out_dir: Корень выхода прогона; ``None`` — только терминал (команды без выхода на диск).
+        pages_dir: Корень выхода прогона; ``None`` — только терминал (команды без выхода на диск).
         level: Имя уровня logging (``INFO``, ``DEBUG`` …); неизвестное — INFO.
     """
     handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if out_dir is not None:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(out_dir / "run.log", encoding="utf-8"))
+    if pages_dir is not None:
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(pages_dir / "run.log", encoding="utf-8"))
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -61,10 +61,16 @@ def main(log_level: str) -> None:
     help="Полосы: {год}/{выпуск}/{полоса}.",
 )
 @click.option(
-    "--out-dir",
+    "--pages-dir",
     type=click.Path(file_okay=False, path_type=Path),
     required=True,
-    help="Выход той же раскладки: .md, .json, .meta.json; на выпуск toc.json/toc.md.",
+    help="Папка полос той же раскладки: .md, .json, .meta.json; на выпуск toc.json/toc.md и sidecar; summary.csv, run.log.",
+)
+@click.option(
+    "--issues-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Папка md выпусков: только {год}/{год}_{выпуск}.md. Обязательна, если сборка не выключена (--no-assemble).",
 )
 @click.option(
     "--debug-dir",
@@ -200,7 +206,8 @@ def main(log_level: str) -> None:
 @click.option("--log-level", default="INFO", show_default=True)
 def run(
     in_dir: Path,
-    out_dir: Path,
+    pages_dir: Path,
+    issues_dir: Path | None,
     debug_dir: Path | None,
     cache_dir: Path | None,
     db_path: Path | None,
@@ -233,7 +240,9 @@ def run(
     log_level: str,
 ) -> None:
     """Прогнать папку полос по выпускам: оглавление, потом остальные полосы со списком статей."""
-    _setup_logging(out_dir, log_level)
+    if assemble and issues_dir is None:
+        raise click.UsageError("нужна --issues-dir (папка md выпусков) или --no-assemble")
+    _setup_logging(pages_dir, log_level)
     # Модель — по короткому имени из реестра; неизвестное имя — понятная ошибка со списком.
     try:
         spec = registry.resolve(model_name)
@@ -271,7 +280,8 @@ def run(
     # Всё, что относится к прогону целиком: пути, флаги, отбор входа, параллелизм, fallback.
     params = PipelineParams(
         in_dir=in_dir,
-        out_dir=out_dir,
+        pages_dir=pages_dir,
+        issues_dir=issues_dir,
         options=options,
         flags=flags,
         jobs=max(1, jobs),
@@ -319,10 +329,16 @@ def run(
 
 @main.command("assemble")
 @click.option(
-    "--out-dir",
+    "--pages-dir",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     required=True,
-    help="Выход прогона run: {год}/{выпуск}/{полоса}.json; сюда же ложатся {год}/{выпуск}.md и .pages.json.",
+    help="Папка полос прогона run: {год}/{выпуск}/{полоса}.json; сюда же ложится sidecar {год}_{выпуск}.pages.json.",
+)
+@click.option(
+    "--issues-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="Папка md выпусков: {год}/{год}_{выпуск}.md — и больше ничего.",
 )
 @click.option(
     "--in-dir",
@@ -368,7 +384,8 @@ def run(
 )
 @click.option("--log-level", default="INFO", show_default=True)
 def assemble_command(
-    out_dir: Path,
+    pages_dir: Path,
+    issues_dir: Path,
     in_dir: Path | None,
     cache_dir: Path | None,
     check_boundaries: bool,
@@ -382,10 +399,10 @@ def assemble_command(
     log_level: str,
 ) -> None:
     """Собрать выпуски в один markdown каждый из готовых .json полос; к модели — только сомнительные стыки."""
-    _setup_logging(out_dir, log_level)
-    keys = list_issues(out_dir, only_year, only_issue)
+    _setup_logging(pages_dir, log_level)
+    keys = list_issues(pages_dir, only_year, only_issue)
     if not keys:
-        raise click.ClickException(f"в {out_dir} нет выпусков с готовыми .json полос")
+        raise click.ClickException(f"в {pages_dir} нет выпусков с готовыми .json полос")
     # Проверка стыков: нужны полосы на входе (полоски строк) и ключ; без --in-dir — только эвристики.
     checker = None
     heading_checker = None
@@ -409,15 +426,15 @@ def assemble_command(
     restored_by_model = 0
     for key in keys:
         assembly = assemble_issue(
-            out_dir,
+            pages_dir,
             key,
-            issue_pages(out_dir, key),
+            issue_pages(pages_dir, key),
             join_hyphens=join_hyphens,
             join_paragraphs_across=join_paragraphs,
             checker=checker,
             heading_checker=heading_checker,
         )
-        log_assembly(assembly, write_issue(out_dir, assembly))
+        log_assembly(assembly, write_issue(pages_dir, issues_dir, assembly))
         for kind in JoinKind:
             totals[kind] += assembly.count(kind)
         missing += len(assembly.missing)
@@ -442,26 +459,26 @@ def assemble_command(
 
 
 @main.command("normalize")
-@click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--pages-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--only-year", default=None)
 @click.option("--only-issue", default=None)
 @click.option("--log-level", default="INFO", show_default=True)
-def normalize_command(out_dir: Path, only_year: str | None, only_issue: str | None, log_level: str) -> None:
+def normalize_command(pages_dir: Path, only_year: str | None, only_issue: str | None, log_level: str) -> None:
     """Переразобрать готовые .json полос текущим разбором и переписать .json/.md — без запросов к модели.
 
     Разбор приводит старые форматы к текущему (сноски `[^1]` → надстрочные цифры, старые теги,
     escape); md выпуска и так собирается через разбор, а полосные файлы иначе остались бы в старом
     виде. Meta не трогается; полоса без .json или с ошибкой пропускается.
     """
-    _setup_logging(out_dir, log_level)
-    keys = list_issues(out_dir, only_year, only_issue)
+    _setup_logging(pages_dir, log_level)
+    keys = list_issues(pages_dir, only_year, only_issue)
     if not keys:
-        raise click.ClickException(f"в {out_dir} нет выпусков с готовыми .json полос")
+        raise click.ClickException(f"в {pages_dir} нет выпусков с готовыми .json полос")
     pages = changed = 0
     for key in keys:
-        for rel in issue_pages(out_dir, key):
-            paths = output_paths(out_dir, rel)
-            meta = read_meta(out_dir, rel) or {}
+        for rel in issue_pages(pages_dir, key):
+            paths = output_paths(pages_dir, rel)
+            meta = read_meta(pages_dir, rel) or {}
             if meta.get("error") or meta.get("parse_error"):
                 continue
             try:

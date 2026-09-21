@@ -176,13 +176,15 @@ def test_missing_page_leaves_comment_and_sidecar_lists_it(tmp_path):
     assert assembly.missing == [{"file": "1966/03/IMG_0002", "reason": "запрос не удался"}]
     assert not assembly.joins, "через пропущенную полосу ничего не сшивается"
     assert "missing: 1\n" in assembly.text
-    path = write_issue(tmp_path, assembly)
-    assert path == tmp_path / "1966" / "03.md" and path.read_text(encoding="utf-8") == assembly.text
-    sidecar = json.loads((tmp_path / "1966" / "03.pages.json").read_text(encoding="utf-8"))
+    issues = tmp_path / "issues"
+    path = write_issue(tmp_path, issues, assembly)
+    assert path == issues / "1966" / "1966_03.md" and path.read_text(encoding="utf-8") == assembly.text
+    assert [p.name for p in issues.rglob("*") if p.is_file()] == ["1966_03.md"], "в папке выпусков только md"
+    sidecar = json.loads((tmp_path / "1966" / "1966_03.pages.json").read_text(encoding="utf-8"))
     assert sidecar["counts"] == {kind.value: 0 for kind in JoinKind} and len(sidecar["pages"]) == 3
     assert sidecar["missing"] == assembly.missing and sidecar["pages"][2]["file"] == "1966/03/IMG_0003"
     # Повторная сборка воспроизводит файл байт в байт.
-    assert write_issue(tmp_path, _assemble(tmp_path)).read_text(encoding="utf-8") == assembly.text
+    assert write_issue(tmp_path, issues, _assemble(tmp_path)).read_text(encoding="utf-8") == assembly.text
 
 
 def test_assemble_command_lists_issues_and_writes_files(tmp_path):
@@ -191,14 +193,17 @@ def test_assemble_command_lists_issues_and_writes_files(tmp_path):
     (tmp_path / "1966" / "03" / "toc.json").write_text("{}", encoding="utf-8")  # служебный файл выпуска — не полоса
     assert list_issues(tmp_path) == [ISSUE] and list_issues(tmp_path, only_year="1970") == []
     assert [r.name for r in issue_pages(tmp_path, ISSUE)] == ["IMG_0001.json", "IMG_0002.json"]
-    result = CliRunner().invoke(cli.main, ["assemble", "--out-dir", str(tmp_path)])
+    issues = tmp_path / "issues"
+    result = CliRunner().invoke(cli.main, ["assemble", "--pages-dir", str(tmp_path), "--issues-dir", str(issues)])
     assert result.exit_code == 0, result.output
     assert "Выпусков собрано: 1; переносов через границу: 1" in result.output
-    assert "снабжения продолжается." in (tmp_path / "1966" / "03.md").read_text(encoding="utf-8")
+    assert "снабжения продолжается." in (issues / "1966" / "1966_03.md").read_text(encoding="utf-8")
     # Без переносов: граница остаётся, абзацы не сшиваются (хвост с дефисом — не конец предложения, но
     # голова строчная, а дефис остаётся как есть).
-    result = CliRunner().invoke(cli.main, ["assemble", "--out-dir", str(tmp_path), "--no-join-hyphens"])
-    assert result.exit_code == 0 and "снаб- жения" in (tmp_path / "1966" / "03.md").read_text(encoding="utf-8")
+    result = CliRunner().invoke(
+        cli.main, ["assemble", "--pages-dir", str(tmp_path), "--issues-dir", str(issues), "--no-join-hyphens"]
+    )
+    assert result.exit_code == 0 and "снаб- жения" in (issues / "1966" / "1966_03.md").read_text(encoding="utf-8")
 
 
 def test_author_tags_spaced_and_offsets_kept(tmp_path):
@@ -269,11 +274,11 @@ def test_normalize_command_rewrites_page_files_with_current_parse(tmp_path):
     (tmp_path / ISSUE / "IMG_0001.json").write_text(
         (tmp_path / ISSUE / "IMG_0001.json").read_text(encoding="utf-8"), encoding="utf-8"
     )
-    result = CliRunner().invoke(cli.main, ["normalize", "--out-dir", str(tmp_path)])
+    result = CliRunner().invoke(cli.main, ["normalize", "--pages-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "Полос переразобрано: 1, из них изменилось: 1" in result.output
     body = json.loads((tmp_path / ISSUE / "IMG_0001.json").read_text(encoding="utf-8"))["content_markdown"]
     assert body == "Текст¹ со сноской.\n\n<footnote>¹ Сноска.</footnote>"
     assert "Текст¹ со сноской." in (tmp_path / ISSUE / "IMG_0001.md").read_text(encoding="utf-8")
-    again = CliRunner().invoke(cli.main, ["normalize", "--out-dir", str(tmp_path)])
+    again = CliRunner().invoke(cli.main, ["normalize", "--pages-dir", str(tmp_path)])
     assert "из них изменилось: 0" in again.output, "повтор ничего не меняет"

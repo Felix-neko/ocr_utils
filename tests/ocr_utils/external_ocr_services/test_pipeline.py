@@ -111,6 +111,8 @@ def _flags(toc=("IMG_0001",), veto=()):
 
 
 def _params(tmp_path, **kwargs):
+    """Параметры прогона: полосы в ``out`` (как папка полос), md выпусков — в ``issues``."""
+    kwargs.setdefault("issues_dir", tmp_path / "issues")
     return PipelineParams(
         tmp_path / "in", tmp_path / "out", RunOptions(debug_dir=tmp_path / "dbg"), _flags(), jobs=2, **kwargs
     )
@@ -140,39 +142,44 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
         for s in page_prompts
     )
     assert all("«Первые шаги»" not in p["messages"][0]["content"] for p in fake.payloads[1:])
-    toc = json.loads((params.out_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
+    toc = json.loads((params.pages_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
     assert [a["title"] for a in toc["contents"]["sections"][0]["articles"]] == ["Первые шаги", "Второй шаг"]
-    assert "## Опыт работы" in (params.out_dir / ISSUE / "toc.md").read_text(encoding="utf-8")
+    assert "## Опыт работы" in (params.pages_dir / ISSUE / "toc.md").read_text(encoding="utf-8")
     for name in PAGES:
-        base = params.out_dir / ISSUE / name[:-4]
+        base = params.pages_dir / ISSUE / name[:-4]
         assert base.with_suffix(".md").is_file() and base.with_suffix(".json").is_file()
         meta = json.loads(base.with_suffix(".meta.json").read_text(encoding="utf-8"))
         assert meta["tiling"]["nrows"] == 1 and meta["cost_usd"] == 0.001 and meta["cached_tokens"] == 900
-    meta = json.loads((params.out_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
+    meta = json.loads((params.pages_dir / ISSUE / "IMG_0002.meta.json").read_text(encoding="utf-8"))
     assert meta["stage"] == "page" and meta["articles_in_prompt"] == 2 and len(meta["toc_hash"]) == 12
     # «Заголовок» не из списка [Первые шаги, Второй шаг] — понижен кодом, title_in_list пересчитан.
     assert meta["structure"]["demoted_headings"] == ["Заголовок"] and meta["title_in_list"] is False
-    assert (params.out_dir / ISSUE / "IMG_0002.md").read_text(encoding="utf-8").count("\n## Заголовок") == 1
+    assert (params.pages_dir / ISSUE / "IMG_0002.md").read_text(encoding="utf-8").count("\n## Заголовок") == 1
     # Сырой ответ в debug — JSON с отступами в 4 пробела, кириллица без escape.
     raw = (tmp_path / "dbg" / ISSUE / "IMG_0002.raw.json").read_text(encoding="utf-8")
     assert raw.startswith('{\n    "') and "\\u" not in raw and json.loads(raw)["content_markdown"]
     assert not (tmp_path / "dbg" / ISSUE / "IMG_0002.raw.txt").exists()
     assert (tmp_path / "dbg" / ISSUE / "IMG_0002.tile_00.jpg").is_file()
     assert "=== user ===" in (tmp_path / "dbg" / ISSUE / "IMG_0002.prompt.txt").read_text(encoding="utf-8")
-    summary = (params.out_dir / "summary.csv").read_text(encoding="utf-8")
+    summary = (params.pages_dir / "summary.csv").read_text(encoding="utf-8")
     assert summary.count("\n") == 5 and "cached_tokens" in summary.splitlines()[0] and ",900," in summary
-    assert not (params.out_dir / "missed_toc.txt").exists()
+    assert not (params.pages_dir / "missed_toc.txt").exists()
     # Выпуск собран в один markdown рядом с папкой полос, sidecar — привязка полос.
-    issue_md = (params.out_dir / "1966" / "03.md").read_text(encoding="utf-8")
+    # Md выпуска — в папке выпусков под именем {год}_{выпуск}.md, и больше там ничего нет; sidecar — у полос.
+    assert sorted(p.relative_to(tmp_path / "issues").as_posix() for p in (tmp_path / "issues").rglob("*")) == [
+        "1966",
+        "1966/1966_03.md",
+    ]
+    issue_md = (tmp_path / "issues" / "1966" / "1966_03.md").read_text(encoding="utf-8")
     assert issue_md.startswith('---\nyear: "1966"') and issue_md.count("## Заголовок") == 3
-    sidecar = json.loads((params.out_dir / "1966" / "03.pages.json").read_text(encoding="utf-8"))
+    sidecar = json.loads((params.pages_dir / "1966" / "1966_03.pages.json").read_text(encoding="utf-8"))
     assert [p["file"] for p in sidecar["pages"]] == [f"{ISSUE}/{name[:-4]}" for name in PAGES]
 
     # Повтор с --skip-done ничего не шлёт, а слитое оглавление читается из готовых .json.
     before = len(fake.payloads)
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), _params(tmp_path, skip_done=True, on_missed_toc="skip"))
     assert len(fake.payloads) == before and stats.reused == 4
-    assert (params.out_dir / ISSUE / "toc.md").is_file()
+    assert (params.pages_dir / ISSUE / "toc.md").is_file()
 
 
 def test_pages_subset_without_toc_pages_reuses_saved_toc(tmp_path):
@@ -207,16 +214,16 @@ def test_missed_toc_skip_writes_list_and_veto_silences(tmp_path):
     params = _params(tmp_path, on_missed_toc="skip")
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.missed and not stats.redone_issues
-    listed = (params.out_dir / "missed_toc.txt").read_text(encoding="utf-8")
+    listed = (params.pages_dir / "missed_toc.txt").read_text(encoding="utf-8")
     assert "# index" in listed and ISSUE in listed
 
     # То же с вето на всех обычных полосах — тревоги нет.
     fake.payloads.clear()
     params = _params(tmp_path, on_missed_toc="skip")
     params.flags = _flags(veto=("IMG_0002", "IMG_0003", "IMG_0004"))
-    (params.out_dir / "missed_toc.txt").unlink()
+    (params.pages_dir / "missed_toc.txt").unlink()
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
-    assert not stats.missed and not (params.out_dir / "missed_toc.txt").exists()
+    assert not stats.missed and not (params.pages_dir / "missed_toc.txt").exists()
 
 
 @pytest.mark.parametrize("redo_scope", [RedoScope.ALL, RedoScope.STRUCTURED])
@@ -247,18 +254,18 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognizes(tmp_path, redo_scope):
     # 1 toc + 3 page + 1 toc (найденная) + 2 page заново = 7 запросов; первая toc-полоса переиспользована.
     # При structured обе обычные полосы тоже идут заново: у них в теле есть `# Заголовок`.
     assert stats.requests == 7 and stats.reused == 1 and stats.redo_kept == 0
-    toc = json.loads((params.out_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
+    toc = json.loads((params.pages_dir / ISSUE / "toc.json").read_text(encoding="utf-8"))
     titles = [a["title"] for s in toc["contents"]["sections"] for a in s["articles"]]
     assert titles == ["Первые шаги", "Третий шаг"] and toc["contents"]["continuations"] == 1
     last_prompts = [p["messages"][1]["content"][0]["text"] for p in fake.payloads[-2:]]
     assert all("«Третий шаг»" in s for s in last_prompts)
     metas = {
-        name: json.loads((params.out_dir / ISSUE / f"{name[:-4]}.meta.json").read_text(encoding="utf-8"))
+        name: json.loads((params.pages_dir / ISSUE / f"{name[:-4]}.meta.json").read_text(encoding="utf-8"))
         for name in PAGES
     }
     assert metas["IMG_0001.jpg"]["stage"] == "toc" and metas["IMG_0003.jpg"]["stage"] == "page"
     assert len({metas[n]["toc_hash"] for n in ("IMG_0003.jpg", "IMG_0004.jpg")}) == 1
-    assert not (params.out_dir / "missed_toc.txt").exists()
+    assert not (params.pages_dir / "missed_toc.txt").exists()
 
 
 def test_missed_toc_redo_structured_keeps_plain_pages(tmp_path):
@@ -291,7 +298,7 @@ def test_missed_toc_redo_structured_keeps_plain_pages(tmp_path):
     assert stats.redone_issues == [ISSUE]
     assert (stats.requests, stats.reused, stats.redo_kept) == (6, 2, 1)
     metas = {
-        name: json.loads((params.out_dir / ISSUE / f"{name[:-4]}.meta.json").read_text(encoding="utf-8"))
+        name: json.loads((params.pages_dir / ISSUE / f"{name[:-4]}.meta.json").read_text(encoding="utf-8"))
         for name in PAGES
     }
     # У оставленной полосы — новый toc_hash (тот же, что у перезапрошенной) и пометка redo_kept;
@@ -363,7 +370,7 @@ def test_ask_without_tty_behaves_like_skip(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline.sys.stdin, "isatty", lambda: False)
     params = _params(tmp_path, on_missed_toc="ask")
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
-    assert stats.missed and not stats.redone_issues and (params.out_dir / "missed_toc.txt").is_file()
+    assert stats.missed and not stats.redone_issues and (params.pages_dir / "missed_toc.txt").is_file()
 
 
 def test_continuation_toc_page_loses_h1(tmp_path):
@@ -477,7 +484,7 @@ def test_cli_run_with_db_and_toc_lists(tmp_path, monkeypatch):
             "run",
             "--in-dir",
             str(tmp_path / "in"),
-            "--out-dir",
+            "--pages-dir",
             str(tmp_path / "out"),
             "--toc-lists",
             str(tmp_path / "lists"),
@@ -493,19 +500,41 @@ def test_cli_run_with_db_and_toc_lists(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Выпусков: 1, полос: 4 (оглавление/указатель по базе: 1), запросов: 4" in result.output
     assert "из кэша запросов: 0" in result.output and (tmp_path / "cache" / ISSUE / "IMG_0001").is_dir()
-    assert not (tmp_path / "out" / "1966" / "03.md").exists(), "--no-assemble"
+    assert not list((tmp_path / "out").rglob("*_03.md")), "--no-assemble: md выпуска нет, --issues-dir не нужна"
     assert fake.stage_of(fake.payloads[0]) == "toc"
     assert "Второй проход" not in result.output, "по умолчанию второго прохода нет — и строки о нём тоже"
     summary = (tmp_path / "out" / "summary.csv").read_text(encoding="utf-8")
     assert "is_damaged" in summary.splitlines()[0]
     with_pass = CliRunner().invoke(
         cli.main,
-        ["run", "--in-dir", str(tmp_path / "in"), "--out-dir", str(tmp_path / "out2"), "--second-pass", "--jobs", "1"],
+        [
+            "run",
+            "--in-dir",
+            str(tmp_path / "in"),
+            "--pages-dir",
+            str(tmp_path / "out2"),
+            "--issues-dir",
+            str(tmp_path / "issues2"),
+            "--second-pass",
+            "--jobs",
+            "1",
+        ],
     )
     assert with_pass.exit_code == 0, with_pass.output
     assert "Второй проход: 0 полос" in with_pass.output, "флаг включает проход; на чистых полосах он не срабатывает"
     bad = CliRunner().invoke(
-        cli.main, ["run", "--in-dir", str(tmp_path / "in"), "--out-dir", str(tmp_path / "out"), "--model", "нет"]
+        cli.main,
+        [
+            "run",
+            "--in-dir",
+            str(tmp_path / "in"),
+            "--pages-dir",
+            str(tmp_path / "out"),
+            "--issues-dir",
+            str(tmp_path / "issues"),
+            "--model",
+            "нет",
+        ],
     )
     assert bad.exit_code != 0 and "неизвестная модель" in bad.output
 
@@ -697,7 +726,13 @@ def test_toc_page_demoted_when_model_disagrees(tmp_path):
     fake.page_of = lambda payload: next(order, "IMG_0009")
     flags = _flags(toc=("IMG_0001", "IMG_0002", "IMG_0003"))
     params = PipelineParams(
-        tmp_path / "in", tmp_path / "out", RunOptions(second_pass=False), flags, jobs=1, on_missed_toc="skip"
+        tmp_path / "in",
+        tmp_path / "out",
+        RunOptions(second_pass=False),
+        flags,
+        jobs=1,
+        on_missed_toc="skip",
+        issues_dir=tmp_path / "issues",
     )
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     # 3 запроса этапа toc + 1 обычная полоса + 2 понижённые этапом page = 6.

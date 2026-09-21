@@ -7,7 +7,7 @@
 запрос идёт через ``ocr.recognize_page`` — тот же код, что в прогоне: тайлы, цепочка режимов
 JSON, ``reasoning.effort none``, разбор, теги из ``edge_words``, доводка структуры — только без
 второго прохода; оглавление выпуска (список статей и рубрик с id) уходит в промпт, если задан
-``--toc-root`` — корень выхода боевого прогона с ``{год}/{выпуск}/toc.json`` (v20: по нему в
+``--toc-root`` — папка полос боевого прогона с ``{год}/{выпуск}/toc.json`` (v20: по нему в
 сводке видно, сколько `#` получили id от модели, а сколько код присвоил по названию).
 
 Команды::
@@ -22,7 +22,7 @@ JSON, ``reasoning.effort none``, разбор, теги из ``edge_words``, д�
 
     # полосы пака со списком статей выпуска в промпте (toc.json из выхода боевого прогона)
     uv run python scripts/replay_page.py run --in-dir .../sharpened --pages полосы.txt \
-        --toc-root /mnt/system/raw/mts/pack1_external_ocr_services/out --out-dir .../headings_v20 --repeats 2
+        --toc-root /mnt/system/raw/mts/pack1_external_ocr_services/pages --out-dir .../headings_v20 --repeats 2
 
     # сводка по повторам (и сходство с другим прогоном тех же полос)
     uv run python scripts/replay_page.py summarize --out-dir .../damaged_v16 [--baseline-dir .../damaged_v15]
