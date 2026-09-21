@@ -45,7 +45,7 @@ from ocr_utils.scan_markup.table_detection.ruling import (
     find_lines,
     mm_to_px,
 )
-from ocr_utils.scan_markup.table_detection.geometry import (
+from ocr_utils.page_layout.geometry import (
     KIND_DIAGRAM,
     KIND_DRAWING,
     KIND_TABLE,

@@ -18,7 +18,7 @@ import numpy as np
 import pikepdf
 
 from ocr_utils.rotated_text.tables.ocr import LANGUAGES
-from ocr_utils.scan_markup.table_detection.geometry import KIND_TABLE, Box
+from ocr_utils.page_layout.geometry import KIND_TABLE, Box
 
 from ocr_utils.text_layer_fix import VERSION, WORK_DPI
 from ocr_utils.text_layer_fix.classify import VerdictCounts, WordVerdict, classify_words

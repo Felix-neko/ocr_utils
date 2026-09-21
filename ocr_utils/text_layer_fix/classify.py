@@ -17,7 +17,7 @@ from typing import Callable
 
 import fitz
 
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 from ocr_utils.text_layer_fix import px_to_mm
 from ocr_utils.text_layer_fix.text_layer import SpanShape, TextLayer

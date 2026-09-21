@@ -84,7 +84,7 @@ def test_rewrite_replaces_rotated_header(tmp_path: Path):
 
 def test_sideways_table_goes_rotate_first(tmp_path: Path, monkeypatch):
     """Таблица боком целиком: сперва поворот; ячейки, чей поворот совпал, не набираются."""
-    from ocr_utils.scan_markup.table_detection.geometry import Box, Cell, Grid
+    from ocr_utils.page_layout.geometry import Box, Cell, Grid
 
     from ocr_utils.rotated_text.tables.source import TableCrop
 
@@ -143,7 +143,7 @@ def test_sideways_table_goes_rotate_first(tmp_path: Path, monkeypatch):
 def test_rotation_refused_when_a_standing_cell_cannot_be_reread(tmp_path: Path, monkeypatch):
     """Прямая ячейка, прочитанная ненадёжно, делает поворот невозможным: после поворота
     она легла бы, и FineReader её не прочёл бы."""
-    from ocr_utils.scan_markup.table_detection.geometry import Box, Cell, Grid
+    from ocr_utils.page_layout.geometry import Box, Cell, Grid
 
     from ocr_utils.rotated_text.tables.ocr import CellText
     from ocr_utils.rotated_text.tables.source import TableCrop

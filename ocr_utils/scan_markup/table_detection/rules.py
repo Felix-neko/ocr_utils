@@ -42,7 +42,7 @@ from ocr_utils.scan_markup.table_detection.ruling import (
     binarize,
     mm_to_px,
 )
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 # Ядро поиска фрагмента: 3 мм. Короче — и тире, перекладины «Т» и «Г» становятся фрагментами
 # сотнями; длиннее — и загнутый конец линейки снова теряется. Одиночный фрагмент в линейку не

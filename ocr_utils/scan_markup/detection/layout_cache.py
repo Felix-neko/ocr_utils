@@ -29,7 +29,7 @@ import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 from ocr_utils.scan_markup.table_detection.layout import PageLayout
 
 logger = logging.getLogger(__name__)

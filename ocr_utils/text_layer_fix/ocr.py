@@ -18,7 +18,7 @@ from ocr_utils.rotated_text.tables.ocr import LANGUAGES, CellText, read_cell
 from ocr_utils.rotated_text.tables.orientation import LETTER, has_word, looks_like_text
 from ocr_utils.rotated_text.tables.pipeline import CONFIDENCE_REPLACE, JUNK_TOKEN_SHARE, NUMERIC_CONFIDENCE, junk_share
 from ocr_utils.rotated_text.tables.structure import strip_stubs
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 from ocr_utils.text_layer_fix.zones import RotatedZone, ZoneKind, rotate_crop
 

@@ -11,7 +11,7 @@ import pytest
 from ocr_utils.scan_markup.detection import layout_cache
 from ocr_utils.scan_markup.detection.layout_cache import CachedLayout, load, picture_boxes, save
 from ocr_utils.scan_markup.detection.page import PageAnalysis, PageOptions, page_layout_for
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 from ocr_utils.scan_markup.table_detection.layout import Block, PageLayout
 
 REL = "1966/01/IMG_0017_2R.tif"

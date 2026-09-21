@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 from ocr_utils.scan_markup.table_detection.layout import Block, PageLayout
 from ocr_utils.scan_markup.tesseract import Word
 from ocr_utils.scan_markup.toc.features import (

@@ -38,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
-from ocr_utils.scan_markup.table_detection.geometry import Box, Cell, Grid
+from ocr_utils.page_layout.geometry import Box, Cell, Grid
 from ocr_utils.scan_markup.table_detection.ruling import mm_to_px
 
 from ocr_utils.rotated_text.tables.dpi import MAX_DPI, MIN_FONT_EM_PX, font_cap_px, font_px_for_dpi, required_dpi

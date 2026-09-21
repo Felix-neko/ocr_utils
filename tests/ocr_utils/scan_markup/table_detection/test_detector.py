@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from ocr_utils.scan_markup.table_detection import detector, kind, quality, refine, ruling, rules
-from ocr_utils.scan_markup.table_detection.geometry import KIND_DIAGRAM, KIND_TABLE, Box
+from ocr_utils.page_layout.geometry import KIND_DIAGRAM, KIND_TABLE, Box
 from ocr_utils.scan_markup.table_detection.grid import text_ink
 from tests.ocr_utils.scan_markup.table_detection import synthetic
 from tests.ocr_utils.scan_markup.table_detection.synthetic import load_font
@@ -243,7 +243,7 @@ def test_regions_scale_to_original_and_carry_kind_and_info() -> None:
 
     from ocr_utils.db.models import KIND_LINE_ART_SCHEMA, KIND_TABLE as DB_TABLE
     from ocr_utils.scan_markup.table_detection import to_regions
-    from ocr_utils.scan_markup.table_detection.geometry import KIND_DRAWING, TableBox
+    from ocr_utils.page_layout.geometry import KIND_DRAWING, TableBox
 
     table = TableBox(Box(10, 20, 110, 220), score=0.9, skew_deg=0.4, metrics={"cells": 9.0}, kind=KIND_TABLE)
     drawing = TableBox(Box(0, 300, 200, 420), kind=KIND_DRAWING, rule_box=Box(5, 305, 190, 400))

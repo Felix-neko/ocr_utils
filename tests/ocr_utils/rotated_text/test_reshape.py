@@ -3,7 +3,7 @@
 import numpy as np
 
 from ocr_utils.scan_markup.rotation import rotate_cw
-from ocr_utils.scan_markup.table_detection.geometry import Box, Cell, Grid
+from ocr_utils.page_layout.geometry import Box, Cell, Grid
 
 from ocr_utils.rotated_text.tables.reshape import rotate_grid, widen_columns
 from ocr_utils.rotated_text.tables.structure import scale_grid

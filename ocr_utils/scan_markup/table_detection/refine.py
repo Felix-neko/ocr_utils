@@ -34,7 +34,7 @@ import numpy as np
 
 from ocr_utils.scan_markup.table_detection.quality import straddling
 from ocr_utils.scan_markup.table_detection.ruling import Lines, Segment, mm_to_px
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 # --- 1. Паразитная линейка у края скана -------------------------------------
 

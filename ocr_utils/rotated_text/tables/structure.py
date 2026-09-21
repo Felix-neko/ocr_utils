@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_markup.rotation import rotate_cw
-from ocr_utils.scan_markup.table_detection.geometry import Box, Cell, Grid
+from ocr_utils.page_layout.geometry import Box, Cell, Grid
 from ocr_utils.scan_markup.table_detection.grid import NO_RULE_PAD_MM, WORK_DPI, grid_from_lines, text_ink
 from ocr_utils.scan_markup.table_detection.ruling import Lines, binarize, find_lines, mm_to_px
 from ocr_utils.scan_markup.table_detection.verify import glyph_mask

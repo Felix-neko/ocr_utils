@@ -22,7 +22,7 @@ from typing import Sequence
 
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.geometry import Box, intersection
+from ocr_utils.page_layout.geometry import Box, intersection
 
 # Метки surya, которые означают «это не текст, а нечто с линиями»: рисунок, схема, бланк.
 FIGURE_LABELS = ("Figure", "Picture")

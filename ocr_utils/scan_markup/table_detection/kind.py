@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from ocr_utils.scan_markup.table_detection.refine import crosses
 from ocr_utils.scan_markup.table_detection.ruling import Segment, mm_to_px
 from ocr_utils.scan_markup.table_detection.verify import FLOOR_FILLED_CELLS, FLOOR_GLYPH_OF_INK, Features
-from ocr_utils.scan_markup.table_detection.geometry import KIND_DIAGRAM, KIND_DRAWING, KIND_TABLE, Box
+from ocr_utils.page_layout.geometry import KIND_DIAGRAM, KIND_DRAWING, KIND_TABLE, Box
 
 # Допуск, с которым две вертикали считаются стоящими на одном x (одна графа): 1 мм.
 ALIGN_TOL_MM = 1.0

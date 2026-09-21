@@ -120,7 +120,7 @@ def sheets_with_rotated_tables(summary_csv: Path) -> set[tuple[str, str, str]]:
     """Полосы с таблицами, где прогон ``rotated_text`` нашёл боковые ячейки.
 
     Args:
-        summary_csv: ``summary.csv`` прогона (``/mnt/SYSTEM/raw/mts/pack1_rotated_tables``).
+        summary_csv: ``summary.csv`` прогона (``/mnt/system/raw/mts/pack1_rotated_tables``).
 
     Returns:
         Множество ключей ``(год, выпуск, полоса)``.

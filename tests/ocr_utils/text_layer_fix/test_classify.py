@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fitz
 
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 from ocr_utils.text_layer_fix.classify import Verdict, classify_words, looks_like_junk
 from ocr_utils.text_layer_fix.text_layer import Glyph, SpanShape, TextLayer, Word

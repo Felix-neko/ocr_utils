@@ -21,7 +21,7 @@ from ocr_utils.rotated_text.tables import second_opinion as surya
 from ocr_utils.rotated_text.tables.ocr import CellText
 from ocr_utils.rotated_text.tables.structure import strip_stubs
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 from ocr_utils.text_layer_fix.cache import load_page, save_page
 from ocr_utils.text_layer_fix.ocr import TABLE_KINDS, acceptable

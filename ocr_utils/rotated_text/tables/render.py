@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 from ocr_utils.rotated_text.tables.fit import Fit, line_height, load_font, text_width
 

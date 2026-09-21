@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-from ocr_utils.scan_markup.table_detection.geometry import Grid
+from ocr_utils.page_layout.geometry import Grid
 
 from ocr_utils.rotated_text.tables.fit import load_font
 from ocr_utils.rotated_text.tables.pipeline import CellRecord

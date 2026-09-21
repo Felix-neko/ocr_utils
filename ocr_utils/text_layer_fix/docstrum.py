@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ocr_utils.scan_markup.table_detection.geometry import Box
+from ocr_utils.page_layout.geometry import Box
 
 from ocr_utils.text_layer_fix import mm_to_px
 

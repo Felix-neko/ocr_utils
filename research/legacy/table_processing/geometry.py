@@ -1,10 +1,10 @@
 """Общие типы стенда: рамка, таблица, ячейка, сетка.
 
-ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.scan_markup.table_detection.geometry``: здесь остался реэкспорт, чтобы стенд исследований
+ЖИВОЙ КОД ПЕРЕЕХАЛ в ``ocr_utils.page_layout.geometry``: здесь остался реэкспорт, чтобы стенд исследований
 (сравнение версий, добыча, отчёты) мерил тот же детектор, что стоит в конвейере.
 """
 
-from ocr_utils.scan_markup.table_detection.geometry import (  # noqa: F401 — реэкспорт для стенда
+from ocr_utils.page_layout.geometry import (  # noqa: F401 — реэкспорт для стенда
     Box,
     union,
     intersection,

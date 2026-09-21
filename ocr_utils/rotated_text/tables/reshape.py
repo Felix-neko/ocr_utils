@@ -21,7 +21,7 @@ from dataclasses import replace
 import numpy as np
 
 from ocr_utils.scan_markup.rotation import rotate_box
-from ocr_utils.scan_markup.table_detection.geometry import Box, Cell, Grid
+from ocr_utils.page_layout.geometry import Box, Cell, Grid
 
 # Что считать краской при разборе вставки и какая доля строки должна быть краской, чтобы
 # строка считалась линейкой. Линейка идёт через всю колонку — доля близка к единице;

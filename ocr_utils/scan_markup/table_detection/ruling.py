@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.scan_markup.table_detection.geometry import Box, TableBox, intersection, union
+from ocr_utils.page_layout.geometry import Box, TableBox, intersection, union
 
 logger = logging.getLogger(__name__)
 
