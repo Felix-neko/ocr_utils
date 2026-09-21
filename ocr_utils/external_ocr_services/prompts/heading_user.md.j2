@@ -1,0 +1,12 @@
+{#- Пользовательское сообщение вспомогательного запроса по заголовкам. Переменные: toc — все статьи
+    оглавления [{id, title, authors, page}]; queries — статьи без заголовка [{article_id, title,
+    authors, page, lines: [{number, page_number, text}]}] со строками-кандидатами по порядку номеров. -#}
+Table of contents of the issue ({{ toc | length }} entries):
+{% for entry in toc %}- {{ entry.id }}: «{{ entry.title }}»{% if entry.authors %} — {{ entry.authors | join(", ") }}{% endif %}{% if entry.page %} (p. {{ entry.page }}){% endif %}
+{% endfor %}
+{{ queries | length }} article(s) whose title was not found in the text:
+{% for query in queries %}
+Article {{ query.article_id }}: «{{ query.title }}»{% if query.authors %} — {{ query.authors | join(", ") }}{% endif %}{% if query.page %}, starts on p. {{ query.page }}{% endif %}. Candidate lines:
+{% for line in query.lines %}{{ line.number }}. [p. {{ line.page_number if line.page_number is not none else "?" }}] {{ line.text }}
+{% endfor %}{% endfor %}
+Reply with the JSON object only.

@@ -21,10 +21,11 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
 
-from ocr_utils.external_ocr_services.schema import Stage, StructureTag
+from ocr_utils.external_ocr_services.schema import Stage, StructureTag, TocArticle
 from ocr_utils.external_ocr_services.structure import _H1, _MARKER_TEXT, _RUBRIC, header_key
 from ocr_utils.external_ocr_services.toc import IssueToc, best_title_match, normalize_title, title_matches
 
@@ -170,6 +171,112 @@ class ReconcileReport:
         }
 
 
+@dataclass(frozen=True)
+class HeadingHint:
+    """Подсказка вспомогательного запроса по статье без заголовка: блок с названием (или ``None``) и вердикт для sidecar."""
+
+    block: int | None
+    verdict: dict
+
+
+# Запись оглавления, которую искать в тексте бессмысленно: выходные данные, принятые за статью.
+_IMPRINT = re.compile(r"подписано к печати|сдано в набор|формат \d+\s*[×x]\s*\d+|тираж \d|заказ \d", re.IGNORECASE)
+
+
+def skip_reason(article: TocArticle, articles: list[TocArticle]) -> str | None:
+    """Почему статью без заголовка не стоит искать дальше: мусор оглавления.
+
+    Args:
+        article: Статья.
+        articles: Все статьи оглавления по порядку (для проверки «хвост предыдущей записи»).
+
+    Returns:
+        Причина или ``None``, если запись похожа на настоящую статью.
+    """
+    title = article.title.strip()
+    if _IMPRINT.search(title):
+        return "выходные данные приняты за статью"
+    # Хвост названия предыдущей статьи, разрезанного переносом на две записи: со строчной буквы, без авторов.
+    index = next((i for i, item in enumerate(articles) if item.id == article.id), None)
+    if index and title and title[0].islower() and not article.authors:
+        return f"хвост названия предыдущей записи ({articles[index - 1].id})"
+    return None
+
+
+def candidate_lines(
+    blocks: list[str],
+    floating: list[bool],
+    plain: list[bool],
+    page_of: list[int],
+    pages: list[PageRefs],
+    toc_page: int | None,
+    limit: int,
+) -> list[tuple[int, bool, str]]:
+    """Строки-кандидаты для вспомогательного запроса по статье без заголовка.
+
+    В окне «страница статьи ±1» — заголовки `##`, жирные/курсивные абзацы, маркеры и первые два абзаца
+    каждой полосы; без окна (номер не выведен) — только заголовочные строки со всех полос. Готовые
+    `#` не в счёт — они принадлежат другим статьям.
+
+    Args:
+        blocks: Тексты блоков.
+        floating: Плавающие ли блоки.
+        plain: Простой ли текст.
+        page_of: Полоса каждого блока.
+        pages: Данные полос.
+        toc_page: Страница статьи по оглавлению; ``None`` — окна нет.
+        limit: Потолок строк.
+
+    Returns:
+        ``[(индекс блока, в окне ли, текст без разметки)]`` по порядку выпуска.
+    """
+    found: list[tuple[int, bool, str]] = []
+    seen_plain: dict[int, int] = {}  # полоса → сколько простых абзацев уже взято
+    for index, text in enumerate(blocks):
+        page = pages[page_of[index]]
+        in_window = toc_page is not None and page.number is not None and abs(page.number - toc_page) <= 1
+        if toc_page is not None and not in_window:
+            continue
+        if _H1.match(text) or (floating[index] and not _MARKER_TEXT.match(text)):
+            continue
+        marker = _MARKER_TEXT.match(text)
+        heading_like = marker is not None or bool(re.match(r"^(?:#{2,6}\s|\*\*|\*|_|<u>)", text.strip()))
+        if not heading_like:
+            if toc_page is None or not plain[index] or seen_plain.get(page_of[index], 0) >= 2:
+                continue
+            seen_plain[page_of[index]] = seen_plain.get(page_of[index], 0) + 1
+        cleaned = marker.group(1) if marker is not None else (_body_title(text) or " ".join(text.split()))
+        found.append((index, in_window or toc_page is None, cleaned[:LINE_MAX_CHARS]))
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _restore_from_hint(
+    blocks: list[str], page_of: list[int], pages: list[PageRefs], article_id: str, block: int, edits: BlockEdits
+) -> tuple[int, str, int, str] | None:
+    """Абзац, указанный вспомогательным запросом, становится `#` статьи.
+
+    Args:
+        blocks: Тексты блоков.
+        page_of: Полоса каждого блока.
+        pages: Данные полос.
+        article_id: Статья.
+        block: Индекс блока по подсказке.
+        edits: Правки — сюда пишется замена и якорь.
+
+    Returns:
+        ``(индекс полосы, текст, индекс блока, "model")`` или ``None``, если блок уже тронут или не годится.
+    """
+    if block >= len(blocks) or block in edits.delete or block in edits.replace or _H1.match(blocks[block]):
+        return None
+    marker = _MARKER_TEXT.match(blocks[block])
+    text = marker.group(1) if marker is not None else (_body_title(blocks[block]) or " ".join(blocks[block].split()))
+    edits.replace[block] = f"# {text}"
+    edits.anchors.append((("article", article_id), block))
+    return page_of[block], text, block, "model"
+
+
 @dataclass
 class _Candidate:
     """`#` или `<rubric>` в тексте выпуска, отнесённый к статье или рубрике."""
@@ -255,6 +362,7 @@ def reconcile_headings(
     page_of: list[int],
     pages: list[PageRefs],
     toc: IssueToc | None,
+    hints: dict[str, HeadingHint] | None = None,
 ) -> tuple[BlockEdits, ReconcileReport]:
     """Сверить `#` и `<rubric>` выпуска с оглавлением и подготовить правки.
 
@@ -265,10 +373,14 @@ def reconcile_headings(
         page_of: Индекс полосы для каждого блока.
         pages: Данные полос по порядку.
         toc: «Содержание» выпуска с id; ``None`` — сверять не с чем, правятся только полосы оглавления.
+        hints: Подсказки вспомогательного запроса (``heading_check``): id статьи → блок с её названием
+            и вердикт; применяются к статьям, у которых ни `#`, ни восстановления из тела и
+            колонтитула. ``None`` — без подсказок.
 
     Returns:
         ``(правки, отчёт)``.
     """
+    hints = hints or {}
     edits = BlockEdits()
     report = ReconcileReport()
     page_start: dict[int, int] = {}  # полоса → индекс её первого блока
@@ -366,16 +478,30 @@ def reconcile_headings(
             # Сначала по телу страницы статьи (название набрано жирным или `##`), потом по колонтитулу.
             restored = _restore_from_body(
                 blocks, floating, page_of, pages, page_start, page_end, article.id, article.title, toc_page, edits
-            ) or _restore_heading(
-                blocks, floating, page_of, pages, page_start, page_end, article.id, article.title, toc_page, edits
             )
+            if restored is None:
+                from_header = _restore_heading(
+                    blocks, floating, page_of, pages, page_start, page_end, article.id, article.title, toc_page, edits
+                )
+                restored = (*from_header, "running_header") if from_header is not None else None
+            hint = hints.get(article.id)
+            if restored is None and hint is not None and hint.block is not None:
+                # Подсказка модели: указанный абзац становится `#` (текст без разметки, маркер — текст тега).
+                restored = _restore_from_hint(blocks, page_of, pages, article.id, hint.block, edits)
+                entry["model"] = hint.verdict
+            elif hint is not None:
+                entry["model"] = hint.verdict
             if restored is not None:
-                page_index, text, at = restored
+                page_index, text, at, source = restored
                 primary_of[article.id] = at
                 page = pages[page_index]
-                entry.update(status="restored", page=page.file, page_number=page.number, text=text)
+                entry.update(status="restored", source=source, page=page.file, page_number=page.number, text=text)
             else:
-                entry.update(status="missing", page=None, page_number=None, text=None)
+                skip = skip_reason(article, articles)
+                if skip is not None:
+                    entry.update(status="skipped", reason=skip, page=None, page_number=None, text=None)
+                else:
+                    entry.update(status="missing", page=None, page_number=None, text=None)
         report.articles.append(entry)
 
     # 3. Рубрики: кандидаты по id, настоящий — перед `#` первой статьи раздела.
@@ -520,6 +646,7 @@ def _restore_heading(
 _BODY_TITLE_MARKUP = re.compile(r"^(?:#{2,6}\s+|\*{1,2}|_{1,2}|<u>)|(?:\*{1,2}|_{1,2}|</u>)$", re.IGNORECASE)
 _TOPIC_PREFIX = re.compile(r"^Тема\s*\d*\s*[:.]\s*", re.IGNORECASE)  # «Тема:», «Тема.», «Тема 11.»
 BODY_TITLE_MAX_CHARS = 300
+LINE_MAX_CHARS = 200  # строка-кандидат для вспомогательного запроса длиннее не бывает названием
 
 
 def _body_title(text: str) -> str | None:
@@ -553,6 +680,67 @@ def _title_key(text: str) -> str:
     return _TOPIC_PREFIX.sub("", text).strip()
 
 
+# Похожесть, с которой абзац в окне «страница статьи по оглавлению ±1» принимается за её название
+# (после того как строгий `title_matches` — равенство, вхождение, ≥ 0.75 — не сработал): «НА ОДНОМ
+# ИЗ ГЛАВНЫХ НАПРАВЛЕНИЙ» ↔ «На главном направлении» — 0.72 (1973/11). Ниже — только модели.
+BODY_TITLE_MIN_RATIO = 0.6
+# Второй по похожести кандидат на той же полосе должен отставать хотя бы на столько — иначе выбор
+# неоднозначен и абзац оставляется вспомогательному запросу.
+BODY_TITLE_MIN_GAP = 0.1
+
+
+@dataclass(frozen=True)
+class _BodyCandidate:
+    """Абзац полосы, годный в название: индекс, текст без разметки, похожесть на название, из тега ли."""
+
+    index: int
+    text: str
+    ratio: float
+    from_tag: bool  # `<marker>`/`<rubric>` — раздел, который оглавление считает статьёй
+
+
+def _body_candidates(
+    blocks: list[str], floating: list[bool], start: int, end: int, title: str, edits: BlockEdits
+) -> list[_BodyCandidate]:
+    """Абзацы полосы, похожие на название статьи: заголовки, жирный/курсив и маркеры.
+
+    Args:
+        blocks: Тексты блоков.
+        floating: Плавающие ли блоки.
+        start: Первый блок полосы.
+        end: Конец (не включая) блоков полосы.
+        title: Название из оглавления.
+        edits: Правки — блоки, уже удалённые или заменённые, не в счёт.
+
+    Returns:
+        Кандидаты по убыванию похожести; готовые `#` (кандидаты других статей) не входят.
+    """
+    key = normalize_title(title)
+    found: list[_BodyCandidate] = []
+    for index in range(start, end):
+        if index in edits.delete or index in edits.replace or _H1.match(blocks[index]):
+            continue
+        # `<rubric>` не кандидат: тег уже принадлежит разделу перед `#` другой статьи; маркер — да
+        # (шапка раздела, которую оглавление считает статьёй, а на полосе за ней нет `#`); маркер —
+        # плавающий блок, остальные плавающие (сноски, таблицы, иллюстрации) в названия не годятся.
+        tag = _MARKER_TEXT.match(blocks[index])
+        if tag is None and floating[index]:
+            continue
+        text = tag.group(1) if tag is not None else _body_title(blocks[index])
+        if text is None:
+            continue
+        candidate_key = normalize_title(_title_key(text))
+        if not candidate_key:
+            continue
+        if title_matches(_title_key(text), [title]):
+            ratio = 1.0
+        else:
+            ratio = difflib.SequenceMatcher(None, candidate_key, key).ratio()
+        if ratio >= BODY_TITLE_MIN_RATIO:
+            found.append(_BodyCandidate(index, text, ratio, tag is not None))
+    return sorted(found, key=lambda c: -c.ratio)
+
+
 def _restore_from_body(
     blocks: list[str],
     floating: list[bool],
@@ -564,12 +752,16 @@ def _restore_from_body(
     title: str,
     toc_page: int | None,
     edits: BlockEdits,
-) -> tuple[int, str, int] | None:
-    """Статья без `#`: на её странице по оглавлению абзац с её названием (жирным, `##`, «Тема: …») становится `#`.
+) -> tuple[int, str, int, str] | None:
+    """Статья без `#`: на её странице по оглавлению (или ±1) абзац с её названием становится `#`.
 
     Модель не делает `#` из названия, набранного не как заголовок (лекции «Экономического образования
-    кадров»: «**Тема: …**» под названием курса), хотя оно совпадает со списком. Ищется только на
-    полосах с номером страницы статьи — иначе похожий абзац из текста другой статьи стал бы заголовком.
+    кадров»: «**Тема: …**» под названием курса), пишет его с другой формулировкой («НА ОДНОМ ИЗ ГЛАВНЫХ
+    НАПРАВЛЕНИЙ» при «На главном направлении» в оглавлении) или маркером раздела («ИНФОРМАЦИЯ»,
+    «Наш стол справок» — оглавление считает раздел статьёй). Ищется только в окне страницы статьи:
+    сначала полосы с её номером, затем ±1 — иначе похожий абзац другой статьи стал бы заголовком.
+    Строгое совпадение (:func:`title_matches`) берётся сразу; ослабленное (≥ ``BODY_TITLE_MIN_RATIO``)
+    — только если второй кандидат на полосе отстаёт на ``BODY_TITLE_MIN_GAP``.
 
     Args:
         blocks: Тексты блоков.
@@ -584,23 +776,25 @@ def _restore_from_body(
         edits: Правки — сюда пишется замена и якорь.
 
     Returns:
-        ``(индекс полосы, текст заголовка, индекс блока)`` или ``None``.
+        ``(индекс полосы, текст заголовка, индекс блока, источник)`` — источник ``body`` (строгое
+        совпадение), ``body_loose`` (ослабленное) или ``marker`` (из тега раздела); ``None`` — не найдено.
     """
     if toc_page is None:
         return None
-    for page_index, page in enumerate(pages):
-        if page.number != toc_page or page_index not in page_start:
-            continue
-        for index in range(page_start[page_index], page_end[page_index]):
-            # Готовый `#` — кандидат другой статьи (оглавление разрезало название по переносу на две
-            # статьи, 1976/08), его не трогаем.
-            if floating[index] or index in edits.delete or index in edits.replace or _H1.match(blocks[index]):
+    for distance in (0, 1):
+        for page_index, page in enumerate(pages):
+            if page.number is None or abs(page.number - toc_page) != distance or page_index not in page_start:
                 continue
-            text = _body_title(blocks[index])
-            if text is not None and title_matches(_title_key(text), [title]):
-                edits.replace[index] = f"# {text}"
-                edits.anchors.append((("article", article_id), index))
-                return page_index, text, index
+            candidates = _body_candidates(blocks, floating, page_start[page_index], page_end[page_index], title, edits)
+            if not candidates:
+                continue
+            best = candidates[0]
+            if best.ratio < 1.0 and len(candidates) > 1 and candidates[1].ratio > best.ratio - BODY_TITLE_MIN_GAP:
+                continue  # два похожих абзаца — пусть решает вспомогательный запрос
+            edits.replace[best.index] = f"# {best.text}"
+            edits.anchors.append((("article", article_id), best.index))
+            source = "marker" if best.from_tag else "body" if best.ratio >= 1.0 else "body_loose"
+            return page_index, best.text, best.index, source
     return None
 
 

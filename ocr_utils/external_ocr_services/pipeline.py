@@ -37,6 +37,7 @@ import click
 from ocr_utils.external_ocr_services import toc as toc_module
 from ocr_utils.external_ocr_services.assemble import assemble_issue, log_assembly, write_issue
 from ocr_utils.external_ocr_services.boundary import BoundaryChecker, JoinKind
+from ocr_utils.external_ocr_services.heading_check import HeadingChecker
 from ocr_utils.external_ocr_services.client import OpenRouterClient
 from ocr_utils.external_ocr_services.models import ModelSpec
 from ocr_utils.external_ocr_services.ocr import (
@@ -194,6 +195,8 @@ class PipelineParams:
     # При сборке показывать сомнительные стыки полос модели — один запрос на выпуск, полоски строк
     # обеих полос (`boundary.py`). Выключается ``--no-check-boundaries``.
     check_boundaries: bool = True
+    # Спрашивать модель текстом о статьях без `#` после сверки с оглавлением (`heading_check.py`).
+    check_headings: bool = True
 
     def __post_init__(self) -> None:
         # Строка из старых вызовов («redo») → перечисление; чужое значение падает сразу.
@@ -227,6 +230,9 @@ class PipelineStats:
     boundary_requests: int = 0  # запросов по стыкам полос при сборке (по одному на выпуск с сомнительными стыками)
     boundary_rewritten: int = 0  # стыков, переписанных по вердикту модели
     boundary_cost_usd: float = 0.0  # их стоимость (входит и в cost_usd)
+    heading_requests: int = 0  # вспомогательных запросов по статьям без `#` при сборке
+    heading_restored: int = 0  # статей, получивших `#` по ответу модели
+    heading_cost_usd: float = 0.0  # их стоимость (входит и в cost_usd)
 
     def __add__(self, other: PipelineStats) -> PipelineStats:
         """Сумма счётчиков двух прогонов (этапов, выпусков): числа складываются, списки склеиваются.
@@ -263,6 +269,9 @@ class PipelineStats:
             boundary_requests=self.boundary_requests + other.boundary_requests,
             boundary_rewritten=self.boundary_rewritten + other.boundary_rewritten,
             boundary_cost_usd=self.boundary_cost_usd + other.boundary_cost_usd,
+            heading_requests=self.heading_requests + other.heading_requests,
+            heading_restored=self.heading_restored + other.heading_restored,
+            heading_cost_usd=self.heading_cost_usd + other.heading_cost_usd,
         )
 
 
@@ -693,6 +702,13 @@ def run_issue(
             ", ".join(rel.name for rel in demoted),
             DEMOTED_LIST,
         )
+    if not toc_pages:
+        # Полос оглавления в этом прогоне нет (--pages со списком обычных полос, повтор сбойных): списки
+        # берутся из toc.json прошлого прогона, иначе полосы пошли бы без структуры и без понижения `#`.
+        saved = params.out_dir / issue_key / "toc.json"
+        if saved.is_file():
+            tocs = toc_module.from_dict(json.loads(saved.read_text(encoding="utf-8")))
+            logger.info("%s: оглавление взято из %s (полос оглавления в прогоне нет)", issue_key, saved)
     if toc_pages:
         # toc.json (машинный, для повторов и сборки) и toc.md (глазами) в папку выпуска под out-dir.
         _write_issue_toc(params.out_dir, issue_key, tocs)
@@ -848,8 +864,11 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     )
     # Проверка стыков полос при сборке — тем же клиентом и моделью, один запрос на выпуск.
     checker = None
+    heading_checker = None
     if params.assemble and params.check_boundaries:
         checker = BoundaryChecker(client, spec, params.in_dir, params.options.cache_dir, params.options.quality)
+    if params.assemble and params.check_headings:
+        heading_checker = HeadingChecker(client, spec, params.options.cache_dir)
     # Выпуски идут строго по одному: этап page зависит от этапа toc того же выпуска, а полосы
     # внутри этапа распараллеливает run_issue своим пулом потоков.
     for issue_key, pages in groups.items():
@@ -858,14 +877,22 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
         # Выпуск целиком в один markdown — по готовым .json с диска, после круга повтора, если он был.
         if params.assemble:
             assembly = assemble_issue(
-                params.out_dir, issue_key, pages, join_hyphens=params.options.join_hyphens, checker=checker
+                params.out_dir,
+                issue_key,
+                pages,
+                join_hyphens=params.options.join_hyphens,
+                checker=checker,
+                heading_checker=heading_checker,
             )
             log_assembly(assembly, write_issue(params.out_dir, assembly))
             stats = stats + PipelineStats(
-                cost_usd=assembly.checked.cost_usd,
+                cost_usd=assembly.checked.cost_usd + assembly.heading_checked.cost_usd,
                 boundary_requests=assembly.checked.requests,
                 boundary_rewritten=assembly.count(JoinKind.MODEL),
                 boundary_cost_usd=assembly.checked.cost_usd,
+                heading_requests=assembly.heading_checked.requests,
+                heading_restored=sum(1 for a in assembly.reconcile.articles if a.get("source") == "model"),
+                heading_cost_usd=assembly.heading_checked.cost_usd,
             )
     # Сводка строится по ВСЕМ .meta.json под out-dir, а не по этому прогону: с --skip-done прогон
     # видел только недоделанные полосы, а summary.csv должен описывать папку целиком.
@@ -940,6 +967,13 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
             stats.boundary_requests,
             stats.boundary_rewritten,
             stats.boundary_cost_usd,
+        )
+    if stats.heading_requests:
+        logger.info(
+            "заголовки без `#`: запросов %d, восстановлено по ответу модели %d, $%.4f",
+            stats.heading_requests,
+            stats.heading_restored,
+            stats.heading_cost_usd,
         )
     if stats.missed:
         logger.warning("оглавления вне базы (%d выпусков): %s", len(stats.missed), "; ".join(stats.missed))

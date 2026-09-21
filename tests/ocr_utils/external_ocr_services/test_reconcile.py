@@ -258,4 +258,24 @@ def test_toc_list_heading_is_not_a_candidate_for_a_lecture_title_and_body_restor
     assert "<!-- article A2 -->\n\n# Тема 11. Планирование — центральное звено. Содержание планов\n\nЛекция." in text
     assert text.count("# О разработке") == 1 and "# # О разработке" not in text
     statuses = {a["id"]: a["status"] for a in assembly.reconcile.articles}
-    assert statuses == {"A1": "found", "A2": "restored", "A3": "found", "A4": "missing"}
+    assert statuses == {"A1": "found", "A2": "restored", "A3": "found", "A4": "skipped"}, "хвост названия — skipped"
+
+
+def test_loose_title_match_only_in_toc_page_window_and_marker_section_becomes_heading(tmp_path):
+    """Похожесть 0.6–0.75 принимается только на странице статьи (±1) и без второго близкого кандидата; маркер-раздел → `#`."""
+    _toc(tmp_path, [(None, [("На главном направлении", "3"), ("Информация", "6"), ("Двоякая роль", "8")])])
+    _page(tmp_path, "IMG_0001", "## НА ОДНОМ ИЗ ГЛАВНЫХ НАПРАВЛЕНИЙ\n\nПовтор не на своей странице.", "1")
+    _page(tmp_path, "IMG_0003", "<marker>*АСУ МТС*</marker>\n\n## НА ОДНОМ ИЗ ГЛАВНЫХ НАПРАВЛЕНИЙ\n\nТекст.", "3")
+    _page(tmp_path, "IMG_0006", "<marker>*ИНФОРМАЦИЯ*</marker>\n\n## У нас в гостях\n\nЗаметка.", "6")
+    # Два кандидата почти одинаковой похожести — неоднозначно, не восстанавливать.
+    _page(tmp_path, "IMG_0008", "## Двоякая позиция\n\nТекст.\n\n## Двоякая политика\n\nЕщё.", "8")
+    assembly = _assemble(tmp_path)
+    text = assembly.text
+    assert "<!-- article A1 -->\n\n# НА ОДНОМ ИЗ ГЛАВНЫХ НАПРАВЛЕНИЙ\n\nТекст." in text
+    assert text.count("\n# НА ОДНОМ") == 1 and "## НА ОДНОМ ИЗ ГЛАВНЫХ НАПРАВЛЕНИЙ\n\nПовтор" in text
+    assert "<!-- article A2 -->\n\n# ИНФОРМАЦИЯ\n\n## У нас в гостях" in text and "<marker>*ИНФОРМАЦИЯ*" not in text
+    assert "\n# Двоякая" not in text, "два близких кандидата — не восстанавливать"
+    by_id = {a["id"]: a for a in assembly.reconcile.articles}
+    assert (by_id["A1"]["status"], by_id["A1"]["source"]) == ("restored", "body_loose")
+    assert (by_id["A2"]["status"], by_id["A2"]["source"]) == ("restored", "marker")
+    assert by_id["A3"]["status"] == "missing"

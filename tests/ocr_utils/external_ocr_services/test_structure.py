@@ -308,3 +308,11 @@ def test_heading_restored_from_model_headings_when_body_has_none():
         body, [{"id": "A13", "title": "Важная служба", "rubric": "Опыт"}], ["Опыт"], [], model_headings=refs
     )
     assert out == "```\n[фотография]\nсклад\n```\n\n<rubric>*ОПЫТ*</rubric>\n\n# Важная служба\n\nТекст статьи.\n"
+
+
+def test_multiline_masthead_heading_is_demoted_by_whole_paragraph():
+    """Шапка журнала в три строки: «Материально-» одной строкой входит в название статьи, абзац целиком — нет → `##`."""
+    body = "# Материально-\nтехническое\nснабжение\n\n# Планирование снабжения с применением ЭВМ\n\nТекст."
+    out, report = apply(body, ["Планирование снабжения с применением ЭВМ"], [], [])
+    assert out.startswith("## Материально-\nтехническое\nснабжение\n\n# Планирование")
+    assert report.demoted_headings == ["Материально- техническое снабжение"] and report.title_in_list is True

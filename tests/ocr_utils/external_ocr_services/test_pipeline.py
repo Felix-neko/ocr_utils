@@ -175,6 +175,23 @@ def test_two_stages_lists_in_prompt_and_outputs(tmp_path):
     assert (params.out_dir / ISSUE / "toc.md").is_file()
 
 
+def test_pages_subset_without_toc_pages_reuses_saved_toc(tmp_path):
+    """Повтор отдельных полос списком --pages: полос оглавления в нём нет, списки берутся из toc.json на диске."""
+    _make_pages(tmp_path / "in")
+    fake = FakeClient(lambda p: None)
+    fake.reply = _default_reply(fake)
+    run_pipeline(fake, resolve("deepseek-v41-flash"), _params(tmp_path, on_missed_toc="skip"))
+    assert (tmp_path / "out" / ISSUE / "toc.json").is_file()
+    pages_file = tmp_path / "pages.txt"
+    pages_file.write_text(f"{ISSUE}/IMG_0003.jpg\n", encoding="utf-8")
+    again = FakeClient(lambda p: None)
+    again.reply = _default_reply(again)
+    run_pipeline(again, resolve("deepseek-v41-flash"), _params(tmp_path, on_missed_toc="skip", pages_file=pages_file))
+    assert len(again.payloads) == 1 and "A1: «Первые шаги»" in again.payloads[0]["messages"][1]["content"][0]["text"]
+    meta = json.loads((tmp_path / "out" / ISSUE / "IMG_0003.meta.json").read_text(encoding="utf-8"))
+    assert meta["articles_in_prompt"] == 2 and meta["structure"]["demoted_headings"] == ["Заголовок"]
+
+
 def test_missed_toc_skip_writes_list_and_veto_silences(tmp_path):
     _make_pages(tmp_path / "in")
     fake = FakeClient(lambda p: None)

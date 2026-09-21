@@ -14,6 +14,7 @@ import click
 from ocr_utils.external_ocr_services import models as registry
 from ocr_utils.external_ocr_services.assemble import assemble_issue, issue_pages, list_issues, log_assembly, write_issue
 from ocr_utils.external_ocr_services.boundary import BoundaryChecker, CheckerStats, JoinKind
+from ocr_utils.external_ocr_services.heading_check import HeadingChecker
 from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
 from ocr_utils.external_ocr_services.models import Reasoning
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions
@@ -174,6 +175,12 @@ def main(log_level: str) -> None:
     help="При сборке показывать сомнительные стыки полос модели (полоски строк обеих полос, один запрос на выпуск).",
 )
 @click.option(
+    "--check-headings/--no-check-headings",
+    default=True,
+    show_default=True,
+    help="При сборке спрашивать модель (текстом, без картинок) о статьях, оставшихся без `#` после сверки с оглавлением.",
+)
+@click.option(
     "--on-missed-toc",
     type=click.Choice([mode.value for mode in OnMissedToc]),
     default=OnMissedToc.REDO.value,
@@ -217,6 +224,7 @@ def run(
     skip_done: bool,
     assemble: bool,
     check_boundaries: bool,
+    check_headings: bool,
     on_missed_toc: str,
     redo_scope: str,
     api_key: str | None,
@@ -268,6 +276,7 @@ def run(
         skip_done=skip_done,
         assemble=assemble,
         check_boundaries=check_boundaries,
+        check_headings=check_headings,
         on_missed_toc=OnMissedToc(on_missed_toc),
         redo_scope=RedoScope(redo_scope),
         pages_file=pages_file,
@@ -332,6 +341,12 @@ def run(
     help="Показывать сомнительные стыки модели (один запрос на выпуск); нужен --in-dir и ключ OpenRouter.",
 )
 @click.option(
+    "--check-headings/--no-check-headings",
+    default=True,
+    show_default=True,
+    help="Спрашивать модель текстом о статьях без `#` после сверки с оглавлением (один запрос на выпуск); нужен ключ OpenRouter.",
+)
+@click.option(
     "--model", "model_name", default=registry.DEFAULT_MODEL, show_default=True, help="Модель для проверки стыков."
 )
 @click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
@@ -355,6 +370,7 @@ def assemble_command(
     in_dir: Path | None,
     cache_dir: Path | None,
     check_boundaries: bool,
+    check_headings: bool,
     model_name: str,
     api_key: str | None,
     only_year: str | None,
@@ -370,19 +386,25 @@ def assemble_command(
         raise click.ClickException(f"в {out_dir} нет выпусков с готовыми .json полос")
     # Проверка стыков: нужны полосы на входе (полоски строк) и ключ; без --in-dir — только эвристики.
     checker = None
+    heading_checker = None
     if check_boundaries and in_dir is None:
         logger.warning("без --in-dir стыки полос модели не показываются — только словарные эвристики")
-    elif check_boundaries:
+    if (check_boundaries and in_dir is not None) or check_headings:
         try:
             spec = registry.resolve(model_name)
             client = OpenRouterClient(api_key_from(api_key))
         except Exception as error:
             raise click.ClickException(str(error)) from None
-        checker = BoundaryChecker(client, spec, in_dir, cache_dir)
+        if check_boundaries and in_dir is not None:
+            checker = BoundaryChecker(client, spec, in_dir, cache_dir)
+        if check_headings:
+            heading_checker = HeadingChecker(client, spec, cache_dir)
     # Каждый выпуск — по своим .json в порядке имён файлов; итоги в лог и в терминал одной строкой.
     totals = {kind: 0 for kind in JoinKind}
     missing = 0
     checked = CheckerStats()
+    heading_checked = CheckerStats()
+    restored_by_model = 0
     for key in keys:
         assembly = assemble_issue(
             out_dir,
@@ -391,12 +413,15 @@ def assemble_command(
             join_hyphens=join_hyphens,
             join_paragraphs_across=join_paragraphs,
             checker=checker,
+            heading_checker=heading_checker,
         )
         log_assembly(assembly, write_issue(out_dir, assembly))
         for kind in JoinKind:
             totals[kind] += assembly.count(kind)
         missing += len(assembly.missing)
         checked = checked + assembly.checked
+        heading_checked = heading_checked + assembly.heading_checked
+        restored_by_model += sum(1 for a in assembly.reconcile.articles if a.get("source") == "model")
     click.echo(
         f"Выпусков собрано: {len(keys)}; переносов через границу: {totals[JoinKind.HYPHEN]} "
         f"(составных {totals[JoinKind.COMPOUND]}, дублей половины {totals[JoinKind.DUPLICATE]}), "
@@ -406,6 +431,11 @@ def assemble_command(
         click.echo(
             f"Стыки полос: запросов {checked.requests} (из кэша {checked.cache_hits}), переписано {totals[JoinKind.MODEL]}, "
             f"сбоев {checked.errors}, ${checked.cost_usd:.4f}."
+        )
+    if heading_checker is not None:
+        click.echo(
+            f"Заголовки без `#`: запросов {heading_checked.requests} (из кэша {heading_checked.cache_hits}), "
+            f"восстановлено по ответу модели {restored_by_model}, сбоев {heading_checked.errors}, ${heading_checked.cost_usd:.4f}."
         )
 
 

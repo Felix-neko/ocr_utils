@@ -72,6 +72,25 @@ def boundary_prompts(seams: list[dict]) -> tuple[str, str]:
     return render("boundary_system.md.j2"), render("boundary_user.md.j2", seams=seams)
 
 
+# Промпт вспомогательного запроса по заголовкам (heading_check.py) — тоже своя версия: в запросы
+# полос не входит. Поднимать при любой правке heading_*.md.j2.
+HEADING_PROMPT_VERSION = 1
+
+
+def heading_prompts(toc: list[dict], queries: list[dict]) -> tuple[str, str]:
+    """Системный и пользовательский промпты сопоставления статей без заголовка со строками текста (один запрос).
+
+    Args:
+        toc: Все статьи оглавления: ``{"id", "title", "authors": [имена], "page"}``.
+        queries: Статьи без заголовка: ``{"article_id", "title", "authors", "page",
+            "lines": [{"number", "page_number", "text"}]}`` — строки-кандидаты с номерами с 1.
+
+    Returns:
+        ``(system, user)``; картинок в этом запросе нет.
+    """
+    return render("heading_system.md.j2"), render("heading_user.md.j2", toc=toc, queries=queries)
+
+
 def system_prompt(stage: Stage, source: str = "", has_list: bool = False) -> str:
     """Системный промпт этапа — один на весь пак: без списка статей выпуска, поэтому кэшируется провайдером
     как префикс между выпусками и годами; общие правила идут первыми, чтобы toc и page делили префикс.

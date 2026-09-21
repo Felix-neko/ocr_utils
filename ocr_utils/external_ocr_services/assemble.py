@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -45,7 +46,21 @@ from ocr_utils.external_ocr_services.boundary import (
 from ocr_utils.external_ocr_services.hyphen_join import JoinRule, Morph, default_morph
 from ocr_utils.external_ocr_services.numbering import NumberSource, suggest_page_numbers
 from ocr_utils.external_ocr_services.ocr import output_paths, read_meta
-from ocr_utils.external_ocr_services.reconcile import BlockEdits, PageRefs, ReconcileReport, reconcile_headings
+from ocr_utils.external_ocr_services.heading_check import (
+    LINES_PER_ARTICLE,
+    CandidateLine,
+    HeadingChecker,
+    HeadingQuery,
+    HintStatus,
+)
+from ocr_utils.external_ocr_services.reconcile import (
+    BlockEdits,
+    HeadingHint,
+    PageRefs,
+    ReconcileReport,
+    candidate_lines,
+    reconcile_headings,
+)
 from ocr_utils.external_ocr_services.render import _yaml_value, space_author_tags
 from ocr_utils.external_ocr_services.schema import (
     BlockTag,
@@ -56,8 +71,8 @@ from ocr_utils.external_ocr_services.schema import (
     TocKind,
     parse_json_text,
 )
-from ocr_utils.external_ocr_services.structure import _RUBRIC, join_paragraphs, paragraphs_of
-from ocr_utils.external_ocr_services.toc import IssueToc, from_dict as toc_from_dict, normalize_title
+from ocr_utils.external_ocr_services.structure import _MARKER_TEXT, _RUBRIC, join_paragraphs, paragraphs_of
+from ocr_utils.external_ocr_services.toc import IssueToc, from_dict as toc_from_dict, normalize_title, title_matches
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +156,7 @@ class IssueAssembly:
     repeated_rubrics: list[dict] = field(default_factory=list)  # убранные повторы <rubric>: {"rubric", "page"}
     toc_merged: list[dict] = field(default_factory=list)  # слитые блоки <toc> полос-продолжений: {"after", "before"}
     reconcile: ReconcileReport = field(default_factory=ReconcileReport)  # сверка `#`/<rubric> с оглавлением
+    heading_checked: CheckerStats = field(default_factory=CheckerStats)  # вспомогательные запросы по заголовкам
 
     def count(self, kind: JoinKind) -> int:
         """Сколько склеек данного вида.
@@ -161,6 +177,7 @@ class IssueAssembly:
             "missing": self.missing,
             "counts": {kind.value: self.count(kind) for kind in JoinKind},
             "checked": vars(self.checked),
+            "heading_checked": vars(self.heading_checked),
             "repeated_rubrics": self.repeated_rubrics,
             "toc_merged": self.toc_merged,
             **self.reconcile.as_dict(),
@@ -419,6 +436,7 @@ def assemble_issue(
     rule: JoinRule = JoinRule.E,
     checker: BoundaryChecker | None = None,
     toc: IssueToc | None = None,
+    heading_checker: HeadingChecker | None = None,
 ) -> IssueAssembly:
     """Собрать текст выпуска из готовых полос (в память; запись — :func:`write_issue`).
 
@@ -435,6 +453,8 @@ def assemble_issue(
         rule: Правило склейки переносов.
         checker: Проверка сомнительных стыков моделью (``boundary.BoundaryChecker``); ``None`` — только эвристики.
         toc: «Содержание» выпуска для сверки заголовков; ``None`` — читается из ``toc.json`` рядом с полосами.
+        heading_checker: Вспомогательный текстовый запрос по статьям, оставшимся без заголовка после
+            сверки (``heading_check.HeadingChecker``); ``None`` — без него.
 
     Returns:
         :class:`IssueAssembly`: текст файла, смещения полос, склейки, пропуски, счётчики проверки,
@@ -450,7 +470,15 @@ def assemble_issue(
     # Сверка `#` и `<rubric>` с оглавлением выпуска: один заголовок на статью, одна рубрика на раздел;
     # номера полос без напечатанного номера выводятся по соседям.
     toc = toc_contents(out_dir, issue_key) if toc is None else toc
-    anchors, reconciled = _reconcile(result, bodies, toc)
+    heading_start = replace(heading_checker.stats) if heading_checker is not None else CheckerStats()
+    hints = None
+    if heading_checker is not None and toc is not None:
+        # Первый проход сверки — на копии: узнать, кому не хватило заголовка; подсказки модели идут
+        # во второй проход по исходным блокам (индексы подсказок — по ним).
+        trial = deepcopy(result)
+        _, trial_report = _reconcile(trial, bodies, toc)
+        hints = _heading_hints(result, bodies, toc, trial_report, heading_checker, issue_key)
+    anchors, reconciled = _reconcile(result, bodies, toc, hints)
     repeated = drop_repeated_rubrics(result)
     header = _header(issue_key, len(result.pages), len(result.missing))
     # Переводы строк у тегов автора удваиваются в самом конце — по ним же режется на абзацы выше.
@@ -476,9 +504,82 @@ def assemble_issue(
                 entry_dict["offset"] = offsets[block]
                 entry_dict["line"] = text.count("\n", 0, offsets[block]) + 1
     checked = checker.stats - checker_start if checker is not None else CheckerStats()
+    heading_checked = heading_checker.stats - heading_start if heading_checker is not None else CheckerStats()
     return IssueAssembly(
-        issue_key, text, result.pages, result.joins, result.missing, checked, repeated, result.toc_merged, reconciled
+        issue_key,
+        text,
+        result.pages,
+        result.joins,
+        result.missing,
+        checked,
+        repeated,
+        result.toc_merged,
+        reconciled,
+        heading_checked,
     )
+
+
+def _heading_hints(
+    result: _Pass,
+    bodies: list[_PageBody],
+    toc: IssueToc,
+    trial: ReconcileReport,
+    checker: HeadingChecker,
+    issue_key: str,
+) -> dict[str, HeadingHint]:
+    """Спросить модель о статьях, оставшихся без заголовка после пробной сверки.
+
+    Args:
+        result: Исходный итог сборки (до правок сверки) — индексы блоков в подсказках относятся к нему.
+        bodies: Прочитанные полосы.
+        toc: «Содержание» выпуска.
+        trial: Отчёт пробной сверки — статьи со ``status: missing`` уходят в запрос.
+        checker: Вспомогательный запрос.
+        issue_key: «год/выпуск».
+
+    Returns:
+        ``{id статьи: подсказка}`` — по всем статьям запроса, в том числе отклонённым (для sidecar).
+    """
+    missing = [entry for entry in trial.articles if entry["status"] == "missing"]
+    if not missing:
+        return {}
+    refs, page_of = _page_refs(result, bodies)
+    blocks = [block.text for block in result.blocks]
+    plain = [block.plain for block in result.blocks]
+    floating = [block.floating for block in result.blocks]
+    queries: list[HeadingQuery] = []
+    for entry in missing:
+        article = toc.article_by_id(entry["id"])
+        if article is None:
+            continue
+        lines = [
+            CandidateLine(number, block, refs[page_of[block]].file, refs[page_of[block]].number, text, in_window)
+            for number, (block, in_window, text) in enumerate(
+                candidate_lines(blocks, floating, plain, page_of, refs, entry["toc_page"], LINES_PER_ARTICLE), 1
+            )
+        ]
+        authors = [author["name"] for author in article.authors if author.get("name")]
+        queries.append(HeadingQuery(article.id, article.title, authors, article.page, lines))
+    if not queries:
+        return {}
+    toc_entries = [
+        {"id": a.id, "title": a.title, "authors": [x["name"] for x in a.authors if x.get("name")], "page": a.page}
+        for a in toc.articles
+    ]
+    verdicts = checker.check_issue(issue_key, toc_entries, queries)
+    rubric_titles = [entry["title"] for entry in toc.rubric_entries]
+    hints: dict[str, HeadingHint] = {}
+    for article_id, verdict in verdicts.items():
+        block = verdict.block if verdict.status is HintStatus.ACCEPTED else None
+        # Маркер с названием рубрики оглавления — это шапка раздела, а не название статьи (1976/10:
+        # «ОФИЦИАЛЬНЫЙ ОТДЕЛ» за «Типовые положения…»); годится, только если статья так и называется.
+        if block is not None and (marker := _MARKER_TEXT.match(blocks[block])) is not None:
+            article = toc.article_by_id(article_id)
+            if title_matches(marker.group(1), rubric_titles) and not title_matches(marker.group(1), [article.title]):
+                verdict.status, verdict.notes = HintStatus.REJECTED, f"маркер рубрики, не название; {verdict.notes}"
+                block = None
+        hints[article_id] = HeadingHint(block, verdict.as_dict())
+    return hints
 
 
 def toc_contents(out_dir: Path, issue_key: str) -> IssueToc | None:
@@ -500,7 +601,7 @@ def toc_contents(out_dir: Path, issue_key: str) -> IssueToc | None:
 
 
 def _reconcile(
-    result: _Pass, bodies: list[_PageBody], toc: IssueToc | None
+    result: _Pass, bodies: list[_PageBody], toc: IssueToc | None, hints: dict[str, HeadingHint] | None = None
 ) -> tuple[dict[tuple[str, str], int], ReconcileReport]:
     """Сверить заголовки и рубрики выпуска с оглавлением и применить правки к блокам на месте.
 
@@ -511,9 +612,37 @@ def _reconcile(
         result: Итог прохода сборки; ``blocks``, ``starts`` правятся на месте, ``pages`` дополняются номерами.
         bodies: Прочитанные полосы (в том же порядке, что ``result.pages``).
         toc: «Содержание» выпуска; ``None`` — правятся только полосы оглавления.
+        hints: Подсказки вспомогательного запроса по заголовкам (``_heading_hints``); ``None`` — без них.
 
     Returns:
         ``(якоря, отчёт)``: якоря — индексы блоков настоящих `#`/`<rubric>` после правок по метке.
+    """
+    refs, page_of = _page_refs(result, bodies)
+    edits, report = reconcile_headings(
+        [block.text for block in result.blocks],
+        [block.plain for block in result.blocks],
+        [block.floating for block in result.blocks],
+        page_of,
+        refs,
+        toc,
+        hints,
+    )
+    anchors = _apply_edits(result, edits)
+    return anchors, report
+
+
+def _page_refs(result: _Pass, bodies: list[_PageBody]) -> tuple[list[PageRefs], list[int]]:
+    """Данные полос для сверки (с номерами по соседям) и полоса каждого блока.
+
+    Номера: напечатанные проверяются по соседям, отсутствующие выводятся (``numbering``) и пишутся в
+    записи sidecar (``result.pages``).
+
+    Args:
+        result: Итог прохода сборки.
+        bodies: Прочитанные полосы (в том же порядке, что ``result.pages``).
+
+    Returns:
+        ``(данные полос, индекс полосы для каждого блока)``.
     """
     guesses = suggest_page_numbers([body.page_number for body in bodies])
     merged_into_previous = {item["before"] for item in result.toc_merged}
@@ -533,16 +662,7 @@ def _reconcile(
         while current + 1 < len(starts) and starts[current + 1] <= index:
             current += 1
         page_of.append(current)
-    edits, report = reconcile_headings(
-        [block.text for block in result.blocks],
-        [block.plain for block in result.blocks],
-        [block.floating for block in result.blocks],
-        page_of,
-        refs,
-        toc,
-    )
-    anchors = _apply_edits(result, edits)
-    return anchors, report
+    return refs, page_of
 
 
 def _apply_edits(result: _Pass, edits: BlockEdits) -> dict[tuple[str, str], int]:
@@ -744,7 +864,7 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
     logger.info(
         "выпуск %s собран: %d полос, переносов через границу %d (составных %d, дублей половины %d), "
         "абзацев сшито %d, стыков проверено моделью %d (из кэша %d, переписано %d, сбоев %d, $%.4f), "
-        "статей с `#` %d из %d (восстановлено %d), фантомов `#` убрано %d, лишних <rubric> %d, "
+        "статей с `#` %d из %d (восстановлено %d, запросов по заголовкам %d, из кэша %d, $%.4f), фантомов `#` убрано %d, лишних <rubric> %d, "
         "повторов рубрик убрано %d, блоков toc слито %d, пропущено %d → %s",
         assembly.issue,
         len(assembly.pages),
@@ -757,9 +877,12 @@ def log_assembly(assembly: IssueAssembly, path: Path) -> None:
         assembly.count(JoinKind.MODEL),
         assembly.checked.errors,
         assembly.checked.cost_usd,
-        sum(1 for entry in assembly.reconcile.articles if entry["status"] != "missing"),
+        sum(1 for entry in assembly.reconcile.articles if entry["status"] in ("found", "restored")),
         len(assembly.reconcile.articles),
         sum(1 for entry in assembly.reconcile.articles if entry["status"] == "restored"),
+        assembly.heading_checked.requests,
+        assembly.heading_checked.cache_hits,
+        assembly.heading_checked.cost_usd,
         len(assembly.reconcile.phantom_headings),
         len(assembly.reconcile.phantom_rubrics),
         len(assembly.repeated_rubrics),

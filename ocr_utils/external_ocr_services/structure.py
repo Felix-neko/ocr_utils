@@ -160,20 +160,22 @@ def demote_unlisted_headings(body: str, titles: list[str], report: StructureRepo
     """
     if not titles:
         return body
-    lines = body.split("\n")
-    for index, line in enumerate(lines):
-        match = _H1.match(line)
-        if match is None:
+    # По абзацам, а не по строкам: шапка журнала «# Материально-\nтехническое\nснабжение» одной первой
+    # строкой «Материально-» входила в название статьи и оставалась `#` (1972/04).
+    paragraphs = paragraphs_of(body)
+    for index, paragraph in enumerate(paragraphs):
+        if not paragraph.startswith("# "):
             continue
-        if title_matches(match.group(1), titles):
+        text = " ".join(paragraph[2:].split())
+        if title_matches(text, titles):
             report.title_in_list = True
             continue
-        lines[index] = "#" + line  # `# ` → `## `
-        report.demoted_headings.append(match.group(1))
+        paragraphs[index] = "#" + paragraph  # `# ` → `## `
+        report.demoted_headings.append(text)
     # Были `#`, и ни один не совпал — заголовок точно не из списка.
     if report.title_in_list is None and report.demoted_headings:
         report.title_in_list = False
-    return "\n".join(lines)
+    return join_paragraphs(paragraphs)
 
 
 def normalize_name(name: str) -> str:
