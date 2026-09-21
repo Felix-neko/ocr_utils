@@ -17,8 +17,9 @@ from ocr_utils.scan_markup.cvat import shapes
 from ocr_utils.scan_markup.cvat.client import CvatSettings
 from ocr_utils.scan_markup.cvat.export import ExportParams, copy_regions, run_export
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
-from ocr_utils.db.models import RECT_KINDS, TABLE_KINDS
+from ocr_utils.db.models import LINE_ART_KINDS, RECT_KINDS, ROTATED_TEXT_KINDS, TABLE_KINDS
 from ocr_utils.db.session import open_db
+from ocr_utils.page_layout.analysis import LayoutOptions
 from ocr_utils.page_layout.raster.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
 from ocr_utils.page_layout.raster.color_kind import CHROMA_SELF_FRAC_THR, CHROMA_SPREAD_THR, CHROMA_THR, COLOR_FRAC_THR
 from ocr_utils.scan_markup.detection.recolor import RecolorParams, run_mark_covers, run_recolor
@@ -147,10 +148,10 @@ def main() -> None:
     "layout_cache_dir",
     default=None,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Каталог кэша разметки surya layout: pickle на полосу с той же раскладкой папок, что "
-    "у пака. Разбор полосы уже есть — берётся с диска, модель не зовётся; файла нет, он битый "
-    "или чужой — полоса разбирается заново и файл перезаписывается. Разметка общая для растра "
-    "и таблиц; при попадании таблицы считаются прямо в воркерах.",
+    help="Корень кэша surya (page_layout.surya.SuryaCache): <корень>/scan/<путь полосы>.json. "
+    "Запись есть и подходит по отпечатку файла — берётся с диска, модель не зовётся, и вся "
+    "полоса достраивается в воркере; нет, битая или чужая — родитель зовёт модель и пишет "
+    "запись заново. Старый кэш pickle переносится командой page_layout import-legacy-cache.",
 )
 @click.option(
     "--raster/--no-raster",
@@ -163,18 +164,23 @@ def main() -> None:
     "--tables/--no-tables",
     default=True,
     show_default=True,
-    help="Искать таблицы и блок-схемы (page_layout.tables) по копии 1/4 тем же чтением "
-    "полосы. Своя версия детектора: при --skip-detected пересчитываются только полосы, где "
-    "таблиц ещё не искали или искали прежней версией.",
+    help="Искать таблицы (page_layout.tables) по копии 150 dpi тем же чтением полосы. Своя версия "
+    "детектора: при --skip-detected пересчитываются только полосы, где таблиц ещё не искали или "
+    "искали прежней версией.",
 )
 @click.option(
-    "--strokes/--no-strokes",
+    "--line-art/--no-line-art",
     default=True,
     show_default=True,
-    help="Искать крупный штрих детектором ocr_utils.line_art_detection — тем же, которым детектор "
-    "порчи геометрии при сборке финальных PDF решает, где на странице рисунок, — по бинаризованной "
-    "копии 1/4 (150 dpi). Два вида: stroke_table (скопление линеек) и stroke_drawing (связное "
-    "пятно). Своя версия детектора; surya и GPU не нужны.",
+    help="Искать line art (схемы, чертежи, графики, рисунки штрихом) единым детектором page_layout — "
+    "тем же, что решает судьбу страницы при сборке финальных PDF: схемы детектора таблиц + блоки "
+    "surya + связные пятна, все через пиксельную проверку, только ВНЕ растра и таблиц. Своя версия.",
+)
+@click.option(
+    "--rotated-text/--no-rotated-text",
+    default=True,
+    show_default=True,
+    help="Искать зоны повёрнутого текста вне таблиц (Docstrum по глифам, без стороны). Своя версия.",
 )
 @click.option(
     "--first-page-is-cover/--no-first-page-is-cover",
@@ -401,7 +407,7 @@ def main() -> None:
 )
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_level: str, **kwargs) -> None:
-    """Предварительная детекция растровых областей, таблиц, схем и ориентации по оригиналам."""
+    """Предварительная детекция растра, таблиц, line art, повёрнутого текста и ориентации по оригиналам (page_layout)."""
     _set_log_level(log_level)
     debug_dir = kwargs.pop("debug_dir")
     if debug_dir is not None:
@@ -416,8 +422,8 @@ def detect_command(pack_dir: Path, db_path: Path, pack_name: str | None, log_lev
         f"Файлов изменилось с прошлого прогона: {stats.changed}.\n"
         f"Растровых областей: {stats.regions} (цветных {stats.color}, серых {stats.grayscale}, "
         f"во всю полосу {stats.full_page}).\n"
-        f"Таблиц: {stats.tables}, схем и line art: {stats.line_art}.\n"
-        f"Крупный штрих: таблиц {stats.stroke_tables}, рисунков {stats.stroke_drawings}.\n"
+        f"Подозрений на печать: {stats.stamp_suspects}.\n"
+        f"Таблиц: {stats.tables}, line art: {stats.line_art}, зон повёрнутого текста: {stats.rotated_text}.\n"
         f"Полос под поворот: {stats.rotated}."
     )
 
@@ -565,7 +571,16 @@ def validate_command(
     по паку идёт часы, и крутить пороги по нему нельзя.
     """
     _set_log_level(log_level)
-    options = PageOptions(need_digest=False, **kwargs)
+    # Проверяется РАСТРОВЫЙ детектор: остальные семейства выключены, surya — как в бою.
+    options = PageOptions(
+        need_digest=False,
+        tables=False,
+        line_art=False,
+        rotated_text=False,
+        orientation=False,
+        use_surya_layout=use_surya_layout,
+        layout=LayoutOptions(**kwargs),
+    )
     params = ValidateParams(
         pack_dir=pack_dir,
         cases_root=cases_dir,
@@ -722,8 +737,8 @@ def fix_pen_marks_command(
     "--append-kinds",
     default="",
     show_default=True,
-    help="Виды прямоугольников через запятую (например, table,line_art_schema,stroke_table,"
-    "stroke_drawing), которые ДОБАВИТЬ "
+    help="Виды прямоугольников через запятую (например, table,line_art_schema,rotated_text), "
+    "которые ДОБАВИТЬ "
     "в уже существующие задачи: PATCH, а не замена — ручная разметка и теги целы. Только на "
     "кадры, где шейпов с такими метками ещё нет, так что повторный прогон ничего не удваивает.",
 )
@@ -857,8 +872,8 @@ def from_cvat_command(
     click.echo(
         f"Полос: {stats.pages}. Прямоугольных областей: {stats.regions} "
         f"(цветных {stats.color}, серых {stats.grayscale}, цветного текста {stats.color_text}, "
-        f"таблиц {stats.table}, схем и line art {stats.line_art}, крупного штриха {stats.stroke_table} + "
-        f"{stats.stroke_drawing}, во всю полосу {stats.full_page}). "
+        f"таблиц {stats.table}, line art {stats.line_art}, повёрнутого текста {stats.rotated_text}, "
+        f"во всю полосу {stats.full_page}). "
         f"Масок под удаление: {stats.masks}, точек экслибриса: {stats.points}.\n"
         f"Полос под поворот: {stats.rotated}"
         + (f" (с конфликтом тегов: {stats.conflicting_rotations})" if stats.conflicting_rotations else "")
@@ -881,7 +896,7 @@ def from_cvat_command(
 @click.option("--pack-name", required=True, help="Имя пака в обеих базах.")
 @click.option(
     "--kinds",
-    default=",".join(TABLE_KINDS),
+    default=",".join(TABLE_KINDS + LINE_ART_KINDS + ROTATED_TEXT_KINDS),
     show_default=True,
     help="Виды прямоугольников через запятую. В целевой базе заменяются ТОЛЬКО они; остальное не трогается.",
 )
@@ -920,7 +935,7 @@ def copy_regions_command(db_path: Path, out_db_path: Path, pack_name: str, kinds
     "layout_cache_dir",
     default=None,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Кэш разметки surya (тот же, что у detect). Без него признак surya равен нулю.",
+    help="Корень кэша surya (тот же, что у detect; читается вариант scan). Без него признак surya равен нулю.",
 )
 @click.option(
     "--image-root",

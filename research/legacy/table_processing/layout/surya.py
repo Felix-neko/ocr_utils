@@ -1,9 +1,9 @@
 """Surya layout для стенда: блоки полосы с видом и их кэш на диске.
 
 ТИПЫ И РАЗБОР ОТВЕТА ПЕРЕЕХАЛИ в ``ocr_utils.page_layout.surya.blocks``, кэш — в
-``ocr_utils.scan_markup.detection.layout_cache`` (формат тот же; конвейер читает кэш, набитый
-командой ``layout-pack``). Здесь — реэкспорт, обёртки кэша со старой сигнатурой и ``Predictor``
-для ``layout-pack``.
+``ocr_utils.page_layout.surya.cache`` (JSON по варианту картинки; старые pickle читаются, а
+набивать кэш штатно — ``page_layout prefill-surya``, команда ``layout-pack`` устарела). Здесь —
+реэкспорт, обёртки кэша со старой сигнатурой и ``Predictor`` для ``layout-pack``.
 
 ЗАЧЕМ. Детектор по линейкам точен в геометрии, но не знает, ЧТО обвёл: кусок блок-схемы
 для него — маленькая таблица. Surya смотрит на полосу целиком и отвечает на другой вопрос —
@@ -29,7 +29,8 @@ from typing import Sequence
 
 import numpy as np
 
-from ocr_utils.scan_markup.detection import layout_cache
+from ocr_utils.page_layout.image import Variant
+from ocr_utils.page_layout.surya.cache import CacheEntry, SuryaCache, read_legacy_pickle, scan_cache_name
 from ocr_utils.page_layout.surya.model import BATCH  # noqa: F401 — реэкспорт для стенда
 from ocr_utils.page_layout.surya.blocks import (  # noqa: F401 — реэкспорт для стенда
     FIGURE_LABELS,
@@ -44,19 +45,41 @@ from ocr_utils.page_layout.surya.blocks import (  # noqa: F401 — реэксп�
 
 
 def cache_path(cache_dir: Path, scan_rel_path: str) -> Path:
-    """Файл кэша полосы: та же структура подпапок, что у копий полос, расширение ``.pkl``."""
-    return layout_cache.cache_path(cache_dir, scan_rel_path)
+    """Файл старого кэша полосы (pickle): та же структура подпапок, что у копий полос."""
+    return Path(cache_dir) / Path(scan_rel_path).with_suffix(".pkl")
 
 
 def load(cache_dir: "Path | None", scan_rel_path: str) -> "LayoutBlocks | None":
-    """Разметка полосы из кэша или ``None``, если её там нет (тогда детектор идёт без неё)."""
-    cached = layout_cache.load(cache_dir, scan_rel_path)
-    return cached.layout if cached is not None else None
+    """Разметка полосы из кэша или ``None``, если её там нет (тогда детектор идёт без неё).
+
+    Понимает оба формата: старый pickle (``<dir>/<rel>.pkl``) и новый JSON ``page_layout``
+    (``<dir>`` — папка варианта внутри корня кэша, например ``pack1_page_layout/sharpened``).
+    """
+    if cache_dir is None:
+        return None
+    cache_dir = Path(cache_dir)
+    pickled = cache_path(cache_dir, scan_rel_path)
+    if pickled.is_file():
+        try:
+            return read_legacy_pickle(pickled)[2]
+        except Exception:  # noqa: BLE001 — битый файл = промах
+            return None
+    try:
+        variant = Variant(cache_dir.name)
+    except ValueError:
+        return None
+    return SuryaCache(cache_dir.parent, readonly=True).blocks_of(variant, scan_cache_name(scan_rel_path))
 
 
 def save(cache_dir: Path, scan_rel_path: str, layout: LayoutBlocks, raw: object = None, dpi: int = 0) -> Path:
-    """Сохранить разметку полосы: наш разбор и СЫРОЙ ответ surya рядом (для других детекторов)."""
-    return layout_cache.save(cache_dir, scan_rel_path, layout_cache.CachedLayout(layout, dpi, raw))
+    """Сохранить разметку полосы в НОВЫЙ кэш (``<dir>`` — папка варианта корня ``page_layout``).
+
+    Сырой ответ surya больше не хранится: набивать кэш штатно — ``page_layout prefill-surya``.
+    """
+    cache_dir = Path(cache_dir)
+    variant = Variant(cache_dir.name)
+    entry = CacheEntry(variant, scan_cache_name(scan_rel_path), layout, dpi, None, None, True, "legacy layout-pack")
+    return SuryaCache(cache_dir.parent).write(entry)
 
 
 class Predictor:

@@ -24,7 +24,9 @@ from ocr_utils.page_layout.geometry import KIND_TABLE as KIND_TABLE_RU
 from ocr_utils.page_layout.geometry import TableBox
 from ocr_utils.page_layout.surya.blocks import LayoutBlocks
 
-TABLE_DETECTOR_VERSION = 1
+from ocr_utils.page_layout import (
+    TABLES_VERSION as TABLE_DETECTOR_VERSION,
+)  # noqa: E402 — единый номер живёт в page_layout
 
 
 @dataclass(frozen=True)

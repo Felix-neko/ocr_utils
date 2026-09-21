@@ -17,9 +17,8 @@ from ocr_utils.db.models import (
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
     KIND_LINE_ART_SCHEMA,
+    KIND_ROTATED_TEXT,
     KIND_STAMP_SUSPECT,
-    KIND_STROKE_DRAWING,
-    KIND_STROKE_TABLE,
     KIND_TABLE,
 )
 
@@ -41,8 +40,7 @@ BOX_COLORS = {
     KIND_COLOR_TEXT: (98, 17, 197),  # #C51162
     KIND_TABLE: (254, 79, 48),  # #304FFE
     KIND_LINE_ART_SCHEMA: (65, 76, 109),  # #6D4C41
-    KIND_STROKE_TABLE: (92, 105, 0),  # #00695C
-    KIND_STROKE_DRAWING: (140, 20, 74),  # #4A148C
+    KIND_ROTATED_TEXT: (92, 105, 0),  # #00695C
 }
 UNKNOWN_KIND_COLOR = (255, 255, 255)
 
@@ -61,12 +59,21 @@ def overlay_to_rel_path(name: str) -> str:
 
 
 def region_label(region) -> str:
-    """Подпись к прямоугольнику: тип, разброс хроматичности и признак «во всю полосу»."""
-    parts = [region.kind]
-    if region.chroma_spread is not None:
-        parts.append(f"{region.chroma_spread:.1f}")
-    if region.dot_frac is not None:
-        parts.append(f"d{region.dot_frac:.2f}")
+    """Подпись к прямоугольнику: вид, разброс хроматичности / уверенность и признак «во всю полосу».
+
+    ``region`` — ``page_layout.regions.Region``: вид — enum, признаки растра лежат в ``info``.
+    """
+    kind = region.kind.value if hasattr(region.kind, "value") else str(region.kind)
+    info = getattr(region, "info", {}) or {}
+    parts = [kind]
+    if info.get("chroma_spread") is not None:
+        parts.append(f"{info['chroma_spread']:.1f}")
+    if info.get("dot_frac") is not None:
+        parts.append(f"d{info['dot_frac']:.2f}")
+    if getattr(region, "confidence", None) is not None and info.get("chroma_spread") is None:
+        parts.append(f"{region.confidence:.2f}")
+    if info.get("kind") and info["kind"] != kind:
+        parts.append(str(info["kind"]))
     if region.full_page:
         parts.append("FULL")
     return " ".join(parts)
@@ -81,8 +88,9 @@ def write_debug_overlay(debug_dir: Path, rel_path: str, image_path: Path, region
     scale = OVERLAY_SIDE / max(bgr.shape[:2])
     small = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     for region in regions:
-        x1, y1, x2, y2 = region.box
-        color = BOX_COLORS.get(region.kind, UNKNOWN_KIND_COLOR)
+        x1, y1, x2, y2 = region.box.as_tuple() if hasattr(region.box, "as_tuple") else region.box
+        kind = region.kind.value if hasattr(region.kind, "value") else str(region.kind)
+        color = BOX_COLORS.get(kind, UNKNOWN_KIND_COLOR)
         p1 = (int(x1 * scale), int(y1 * scale))
         p2 = (int(x2 * scale), int(y2 * scale))
         cv2.rectangle(small, p1, p2, color, 2)

@@ -4,15 +4,16 @@ import pytest
 
 from ocr_utils.db.models import KIND_COLOR, KIND_GRAYSCALE
 from ocr_utils.scan_markup.detection.overlay import overlay_name, overlay_to_rel_path
-from ocr_utils.scan_markup.detection.page import DetectedRegion
+from ocr_utils.page_layout.geometry import Box
+from ocr_utils.page_layout.regions import Region, RegionKind
 from ocr_utils.scan_markup.validation.cases import BY_FOLDER, DEFECTS, collect_cases
 from ocr_utils.scan_markup.validation.checks import expectation_holds
 
 REL_PATH = "1969/12/IMG_0115_2R.tif"
 
 
-def _region(kind: str = KIND_GRAYSCALE) -> DetectedRegion:
-    return DetectedRegion(box=(0, 0, 10, 10), kind=kind, full_page=False)
+def _region(kind: str = KIND_GRAYSCALE) -> Region:
+    return Region(Box(0, 0, 10, 10), RegionKind(kind), None, "raster", False)
 
 
 def test_overlay_name_round_trip() -> None:

@@ -25,6 +25,9 @@ class _LabelsApi:
     def list(self, project_id: int, page_size: int = 100):  # noqa: ARG002 — сигнатура SDK
         return _Page(self.labels), None
 
+    def destroy(self, label_id: int) -> None:
+        self.labels[:] = [label for label in self.labels if label.id != label_id]
+
 
 class _ProjectsApi:
     def __init__(self, owner) -> None:
@@ -187,3 +190,14 @@ def test_every_rect_kind_has_a_rectangle_label_and_back() -> None:
         assert by_name[name]["type"] == "rectangle", kind
         assert KIND_BY_LABEL[name] == kind
     assert LABEL_BY_KIND[KIND_TABLE] != LABEL_BY_KIND[KIND_LINE_ART_SCHEMA]
+
+
+def test_obsolete_labels_are_removed_from_an_existing_project() -> None:
+    """Метки крупного штриха, если проект их застал, удаляются при следующем to-cvat."""
+    from ocr_utils.scan_markup.cvat.project import OBSOLETE_LABELS, remove_labels
+
+    have = [label["name"] for label in LABELS] + list(OBSOLETE_LABELS)
+    client = _Client([_Project(1, "пак-2")], have)
+    assert remove_labels(client, 1) == list(OBSOLETE_LABELS)
+    assert [label.name for label in client.api_client.labels] == [label["name"] for label in LABELS]
+    assert remove_labels(client, 1) == []

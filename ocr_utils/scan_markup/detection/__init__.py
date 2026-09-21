@@ -15,4 +15,4 @@
 на результат не влияет (сообщения, отладочные оверлеи).
 """
 
-DETECTOR_VERSION = 10
+from ocr_utils.page_layout import RASTER_VERSION as DETECTOR_VERSION  # noqa: E402 — единый номер живёт в page_layout

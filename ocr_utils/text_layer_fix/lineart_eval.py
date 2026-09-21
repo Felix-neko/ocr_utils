@@ -20,7 +20,9 @@ import fitz
 import numpy as np
 
 from ocr_utils.pdf_utils.intermediate_pdfs import DEFAULT_MARGIN_X_MM, DEFAULT_MARGIN_Y_MM
-from ocr_utils.scan_markup.detection import layout_cache
+from ocr_utils.page_layout.image import Variant
+from ocr_utils.page_layout.surya.blocks import LayoutBlocks
+from ocr_utils.page_layout.surya.cache import SuryaCache, scan_cache_name
 from ocr_utils.scan_markup.rotation import rotate_box
 from ocr_utils.page_layout.geometry import KIND_TABLE, Box, iou, union
 from ocr_utils.page_layout.surya.blocks import FIGURE_LABELS
@@ -109,11 +111,7 @@ def _merge_overlapping(boxes: list[Box]) -> list[Box]:
 
 
 def source_boxes(
-    page: fitz.Page,
-    gray: np.ndarray,
-    dpi: int,
-    cached: "layout_cache.CachedLayout | None",
-    scan_size: "tuple[int, int] | None",
+    page: fitz.Page, gray: np.ndarray, dpi: int, cached: "LayoutBlocks | None", scan_size: "tuple[int, int] | None"
 ) -> dict[str, list[Box]]:
     """Рамки line art страницы от каждого источника (пиксели растра страницы).
 
@@ -140,7 +138,7 @@ def source_boxes(
     surya: list[Box] = []
     if cached is not None and scan_size is not None:
         dx, dy = mm_to_px(DEFAULT_MARGIN_X_MM, dpi), mm_to_px(DEFAULT_MARGIN_Y_MM, dpi)
-        layout = layout_cache.scaled_to(cached, scan_size[0], scan_size[1])
+        layout = cached.scaled_to(scan_size[0], scan_size[1])
         surya = [b.box.shifted(dx, dy).clipped(width, height) for b in layout.blocks if b.label in FIGURE_LABELS]
     result["surya"] = surya
     result["union"] = _merge_overlapping([b for name in ("figures", "detector", "ink", "surya") for b in result[name]])
@@ -260,7 +258,11 @@ def evaluate_page(
     page = doc[index]
     raster = page_raster(page)
     gray = render_gray(page, raster)
-    cached = layout_cache.load(layout_dir, rel_path) if (layout_dir and rel_path) else None
+    cached = (
+        SuryaCache(layout_dir, readonly=True).blocks_of(Variant.SCAN, scan_cache_name(rel_path))
+        if (layout_dir and rel_path)
+        else None
+    )
     scan_size = (truth.scan_width, truth.scan_height) if truth else None
     predictions = source_boxes(page, gray, int(round(raster.dpi)), cached, scan_size)
     return predictions, list(truth.boxes) if truth else []

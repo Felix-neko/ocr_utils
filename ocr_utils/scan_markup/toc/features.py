@@ -29,7 +29,8 @@ import numpy as np
 
 from ocr_utils.scan_cropping.image_io import read_dpi
 from ocr_utils.scan_markup import tesseract
-from ocr_utils.scan_markup.detection import layout_cache
+from ocr_utils.page_layout.image import Variant
+from ocr_utils.page_layout.surya.cache import SuryaCache, scan_cache_name
 from ocr_utils.page_layout.surya.blocks import LayoutBlocks
 from ocr_utils.scan_markup.tesseract import Word
 from ocr_utils.scan_markup.toc import WORK_DPI
@@ -328,8 +329,12 @@ def page_features(
     """Все признаки полосы. Исключения не выпускает — кладёт их в ``error``."""
     features = PageFeatures(rel_path, order_index, idx_from_end)
     try:
-        cached = layout_cache.load(layout_cache_dir, rel_path) if layout_cache_dir is not None else None
-        features = replace(features, **surya_features(cached.layout if cached is not None else None))
+        blocks = (
+            SuryaCache(layout_cache_dir, readonly=True).blocks_of(Variant.SCAN, scan_cache_name(rel_path))
+            if layout_cache_dir is not None
+            else None
+        )
+        features = replace(features, **surya_features(blocks))
         gray = read_gray(path, default_dpi)
         if want_thumbnail:
             features = replace(features, thumbnail=thumbnail_jpeg(gray))

@@ -36,11 +36,10 @@ DB="$PACK_WORK/pack2.sqlite"
 DB_REVIEWED="$PACK_WORK/pack2_reviewed.sqlite"
 DEBUG_DIR="$PACK_WORK/debug"
 
-# Кэш разметки surya layout по сырым TIFF: pickle на полосу с той же раскладкой папок, что у
-# пака. В отличие от пака-1, готового кэша нет — его набивает сам detect (модель зовётся на
-# каждую полосу без файла, ~1 с GPU на полосу, то есть около 10 минут на пак). Повторный
-# прогон разметку берёт отсюда и модель не зовёт.
-LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack2_layout_surya"
+# Кэш surya layout (ocr_utils.page_layout.surya.SuryaCache): <корень>/<вариант>/<полоса>.json, см.
+# пак-1. Вариант scan перенесён из старого pickle-кэша (591 полоса, 2026-09-21); остальное
+# набивает detect сам (модель зовётся на полосу без записи, ~1 с GPU) либо `page_layout prefill-surya`.
+LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack2_page_layout"
 
 # Очистка пака (шаг 7): закрас разметки и размытие фона. Результат — на SSD, а не на
 # /mnt/dump3: корень /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы

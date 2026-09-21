@@ -52,6 +52,17 @@ RENAMES: "tuple[tuple[str, str, str], ...]" = (
     ("packs", "root_path", "source_pics_root"),
     ("pages", "file_name", "source_file_name"),
     ("pages", "rel_path", "source_rel_path"),
+    # Детектор крупного штриха (stroke_*) заменён единым line art из page_layout; пара
+    # версия/время переименована под него, находки прежних видов удаляются (DELETES).
+    ("pages", "stroke_detector_version", "line_art_version"),
+    ("pages", "strokes_detected_at", "line_art_detected_at"),
+)
+
+# Строки, УБРАННЫЕ из данных: (таблица, колонка, значения). Виды ``stroke_table`` и
+# ``stroke_drawing`` жили один прогон (детектор крупного штриха на detect) и заменены
+# единым ``line_art_schema``; их автоматические находки в базе ничего не значат.
+DELETES: "tuple[tuple[str, str, tuple[str, ...]], ...]" = (
+    ("rect_regions", "kind", ("stroke_table", "stroke_drawing")),
 )
 
 # Колонки, УБРАННЫЕ из схемы: (таблица, колонка). Сиротская колонка базе не мешает —
@@ -69,6 +80,7 @@ class MigrationReport:
     backup: "Path | None" = None
     renamed: "list[str]" = field(default_factory=list)
     dropped: "list[str]" = field(default_factory=list)
+    deleted: "list[str]" = field(default_factory=list)
     already: "list[str]" = field(default_factory=list)
     added: "list[str]" = field(default_factory=list)
     missing_tables: "list[str]" = field(default_factory=list)
@@ -80,6 +92,8 @@ class MigrationReport:
         out.append(f"  переименовано: {', '.join(self.renamed) if self.renamed else '(нечего)'}")
         if self.dropped:
             out.append(f"  убрано колонок: {', '.join(self.dropped)}")
+        if self.deleted:
+            out.append(f"  удалено строк: {'; '.join(self.deleted)}")
         if self.already:
             out.append(f"  уже было переименовано: {', '.join(self.already)}")
         if self.missing_tables:
@@ -148,6 +162,19 @@ def rename_columns(db_path: Path, dry_run: bool = False) -> MigrationReport:
             if not dry_run:
                 connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')  # SQLite 3.35+
             report.dropped.append(f"{table}.{column}")
+        for table, column, values in DELETES:
+            columns = _table_columns(connection, table)
+            if columns is None or column not in columns:
+                continue
+            marks = ",".join("?" for _ in values)
+            count = connection.execute(
+                f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" IN ({marks})', values
+            ).fetchone()[0]
+            if not count:
+                continue
+            if not dry_run:
+                connection.execute(f'DELETE FROM "{table}" WHERE "{column}" IN ({marks})', values)
+            report.deleted.append(f"{table}.{column} in {values}: {count}")
     return report
 
 

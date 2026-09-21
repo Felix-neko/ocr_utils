@@ -34,8 +34,7 @@ from ocr_utils.db.models import (
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
     KIND_LINE_ART_SCHEMA,
-    KIND_STROKE_DRAWING,
-    KIND_STROKE_TABLE,
+    KIND_ROTATED_TEXT,
     KIND_STAMP_SUSPECT,
     KIND_TABLE,
     MASK_HANDWRITING,
@@ -76,22 +75,19 @@ LABEL_EXLIBRIS = "Экслибрис"
 # Прямоугольник, потому что это область страницы, а не объект со сложным контуром.
 LABEL_COLOR_TEXT = "Цветной текст или штрих"
 
-# Таблица с линейками и блок-схема / штриховой рисунок (line art). Ставит детектор таблиц
-# (``page_layout.tables``), разметчик уточняет рамку: границы должны обходить
+# Таблица с линейками и line art (схема, чертёж, график, рисунок штрихом). Ставит разбор
+# ``page_layout`` (таблицы — детектор таблиц, line art — единый детектор поверх него, surya и
+# связных пятен), разметчик уточняет рамку: границы должны обходить
 # буквы и не захватывать чужой текст. Две метки, а не атрибут, по той же причине, что и у
 # растра: вид виден по цвету рамки с одного взгляда. Схема и рисунок (график, чертёж) —
 # одна метка: обходятся с ними одинаково, а различать их глазами разметчику незачем.
 LABEL_TABLE = "Таблица"
 LABEL_LINE_ART = "Схема или line art"
 
-# Крупный штрих — находки ВТОРОГО детектора (``ocr_utils.line_art_detection``), того, которым
-# при сборке финальных PDF решается, где на странице рисунок. Ставятся на этапе ``detect``
-# рядом с двумя метками выше и часто накрывают те же объекты — это не дубль, а сравнение:
-# разметчик правит рамки под этими метками отдельно, и уточнённая база становится эталоном
-# для оценки именно этого детектора. Две метки по источнику находки: скопление линеек
-# (таблица) и связное пятно (рисунок, схема, график).
-LABEL_STROKE_TABLE = "Таблица (крупный штрих)"
-LABEL_STROKE_DRAWING = "Рисунок (крупный штрих)"
+# Повёрнутый текст ВНЕ таблиц: боковые подписи осей и надписи на схемах, повёрнутые врезки.
+# Ставит ``page_layout.rotated_text`` (Docstrum по глифам); при правке текстового слоя такие
+# зоны читаются и вписываются в слой. Прямоугольник, потому что это область страницы.
+LABEL_ROTATED_TEXT = "Повёрнутый текст"
 
 # Цвета разнесены по кругу и все насыщенные: сканы жёлто-бежевые, и бледное на них теряется.
 # Занятые тона — зелёный 150°, голубой 200°, пурпур 290°, оранжевый 25°, жёлтый 55°,
@@ -138,11 +134,9 @@ LABELS = [
     # тёмных тона читаются как рамка, а не как пятно.
     {"name": LABEL_TABLE, "type": "rectangle", "color": "#304FFE"},  # тёмно-синий
     {"name": LABEL_LINE_ART, "type": "rectangle", "color": "#6D4C41"},  # коричневый
-    # Крупный штрих — восьмой и девятый прямоугольник, снова по светлоте: тёмно-бирюзовый
-    # 174° против зелёного 150° и тёмно-фиолетовый 270° против пурпурной маски 290° (маска
-    # рисуется заливкой и с рамкой не спутается).
-    {"name": LABEL_STROKE_TABLE, "type": "rectangle", "color": "#00695C"},  # тёмно-бирюзовый
-    {"name": LABEL_STROKE_DRAWING, "type": "rectangle", "color": "#4A148C"},  # тёмно-фиолетовый
+    # Повёрнутый текст — восьмой прямоугольник, снова по светлоте: тёмно-бирюзовый 174°
+    # против зелёного 150°.
+    {"name": LABEL_ROTATED_TEXT, "type": "rectangle", "color": "#00695C"},  # тёмно-бирюзовый
     # Теги на холсте не рисуются, поэтому их цвета ни с чем не конкурируют и взяты просто
     # различимыми между собой — они видны только в панели объектов.
     {"name": LABEL_ROTATE_CW90, "type": "tag", "color": "#1DE9B6"},
@@ -161,8 +155,7 @@ LABEL_BY_KIND = {
     KIND_COLOR_TEXT: LABEL_COLOR_TEXT,
     KIND_TABLE: LABEL_TABLE,
     KIND_LINE_ART_SCHEMA: LABEL_LINE_ART,
-    KIND_STROKE_TABLE: LABEL_STROKE_TABLE,
-    KIND_STROKE_DRAWING: LABEL_STROKE_DRAWING,
+    KIND_ROTATED_TEXT: LABEL_ROTATED_TEXT,
 }
 KIND_BY_LABEL = {label: kind for kind, label in LABEL_BY_KIND.items()}
 MASK_KIND_BY_LABEL = {
@@ -206,6 +199,7 @@ def ensure_project(client, name: str) -> object:
         if project.name == name:
             logger.info("Проект %r уже есть (id=%s), переиспользую", name, project.id)
             add_missing_labels(client, project.id)
+            remove_labels(client, project.id)
             return project
 
     project = client.projects.create(
@@ -239,6 +233,27 @@ def add_missing_labels(client, project_id: int) -> list[str]:
     names = [label["name"] for label in missing]
     logger.warning("В проект id=%s дописаны метки: %s", project_id, ", ".join(names))
     return names
+
+
+# Метки, которых в проекте быть НЕ должно: жили один прогон (детектор крупного штриха на
+# detect) и заменены единым line art. Удаление метки удаляет и её шейпы — ручной правки под
+# ними не было, это были автоматические находки на сравнение.
+OBSOLETE_LABELS = ("Таблица (крупный штрих)", "Рисунок (крупный штрих)")
+
+
+def remove_labels(client, project_id: int, names: "tuple[str, ...]" = OBSOLETE_LABELS) -> list[str]:
+    """Удаляет из проекта метки с именами ``names`` (через ``labels_api.destroy``). Возвращает удалённые."""
+    present = project_label_ids(client, project_id)
+    removed = []
+    for name in names:
+        label_id = present.get(name)
+        if label_id is None:
+            continue
+        client.api_client.labels_api.destroy(label_id)
+        removed.append(name)
+    if removed:
+        logger.warning("Из проекта id=%s удалены устаревшие метки: %s", project_id, ", ".join(removed))
+    return removed
 
 
 def project_label_ids(client, project_id: int) -> dict[str, int]:

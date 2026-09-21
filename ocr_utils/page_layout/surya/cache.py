@@ -99,6 +99,11 @@ class CacheEntry:
         return self.legacy
 
 
+def scan_cache_name(rel_path: str) -> str:
+    """Имя полосы скана в кэше: путь внутри пака без расширения (``1966/01/IMG_0003_2R``)."""
+    return Path(rel_path).with_suffix("").as_posix()
+
+
 class SuryaCache:
     """Кэш на диске под корнем ``root``; ``readonly`` запрещает запись (воркеры пула)."""
 
@@ -127,6 +132,11 @@ class SuryaCache:
                 "%s: кэш surya не читается (%s: %s), страница будет размечена заново", path, type(error).__name__, error
             )
             return None
+
+    def blocks_of(self, variant: Variant, cache_name: str) -> LayoutBlocks | None:
+        """Блоки записи как есть, без сверки с картинкой — для потребителей, у которых картинки нет."""
+        entry = self.read(variant, cache_name)
+        return entry.blocks if entry is not None else None
 
     def load(self, image: PageImage) -> LayoutBlocks | None:
         """Блоки для этой картинки (в пикселях её кадра surya) или ``None`` — промах."""
@@ -237,4 +247,4 @@ def import_legacy(src_dir: Path, variant: Variant, cache: SuryaCache, overwrite:
     return done, skipped, broken
 
 
-__all__ = ["CACHE_VERSION", "CacheEntry", "SuryaCache", "import_legacy", "read_legacy_pickle"]
+__all__ = ["CACHE_VERSION", "CacheEntry", "SuryaCache", "import_legacy", "read_legacy_pickle", "scan_cache_name"]

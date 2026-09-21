@@ -34,10 +34,10 @@ from ocr_utils.db.models import (
     KIND_COLOR_TEXT,
     KIND_GRAYSCALE,
     KIND_LINE_ART_SCHEMA,
-    KIND_STROKE_DRAWING,
-    KIND_STROKE_TABLE,
+    KIND_ROTATED_TEXT,
     KIND_TABLE,
-    STROKE_KINDS,
+    LINE_ART_KINDS,
+    ROTATED_TEXT_KINDS,
     TABLE_KINDS,
     SOURCE_CVAT,
     Issue,
@@ -83,9 +83,7 @@ class ExportStats:
     # вопрос — сколько из автоматических находок разметчик оставил.
     table: int = 0
     line_art: int = 0
-    # Крупный штрих (детектор line_art_detection) — третий детектор, свой счёт.
-    stroke_table: int = 0
-    stroke_drawing: int = 0
+    rotated_text: int = 0
     full_page: int = 0
     masks: int = 0
     points: int = 0
@@ -201,8 +199,10 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         detector_version=src_page.detector_version,
                         table_detector_version=src_page.table_detector_version,
                         tables_detected_at=src_page.tables_detected_at,
-                        stroke_detector_version=src_page.stroke_detector_version,
-                        strokes_detected_at=src_page.strokes_detected_at,
+                        line_art_version=src_page.line_art_version,
+                        line_art_detected_at=src_page.line_art_detected_at,
+                        rotated_text_version=src_page.rotated_text_version,
+                        rotated_text_detected_at=src_page.rotated_text_detected_at,
                         is_toc=src_page.is_toc,
                         is_year_index=src_page.is_year_index,
                         toc_score=src_page.toc_score,
@@ -379,8 +379,7 @@ def import_task(
                 stats.color_text += region.kind == KIND_COLOR_TEXT
                 stats.table += region.kind == KIND_TABLE
                 stats.line_art += region.kind == KIND_LINE_ART_SCHEMA
-                stats.stroke_table += region.kind == KIND_STROKE_TABLE
-                stats.stroke_drawing += region.kind == KIND_STROKE_DRAWING
+                stats.rotated_text += region.kind == KIND_ROTATED_TEXT
                 stats.full_page += bool(region.full_page)
             elif shape_type == "mask" and name in MASK_KIND_BY_LABEL:
                 mask = shape_to_mask(shape, page)
@@ -492,9 +491,12 @@ def copy_regions(src_session: Session, dst_session: Session, pack_name: str, kin
                 if any(kind in TABLE_KINDS for kind in kinds):
                     twin.table_detector_version = page.table_detector_version
                     twin.tables_detected_at = page.tables_detected_at
-                if any(kind in STROKE_KINDS for kind in kinds):
-                    twin.stroke_detector_version = page.stroke_detector_version
-                    twin.strokes_detected_at = page.strokes_detected_at
+                if any(kind in LINE_ART_KINDS for kind in kinds):
+                    twin.line_art_version = page.line_art_version
+                    twin.line_art_detected_at = page.line_art_detected_at
+                if any(kind in ROTATED_TEXT_KINDS for kind in kinds):
+                    twin.rotated_text_version = page.rotated_text_version
+                    twin.rotated_text_detected_at = page.rotated_text_detected_at
                 stats.pages += 1
                 stats.regions += len(regions)
     dst_session.commit()

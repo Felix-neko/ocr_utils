@@ -297,6 +297,7 @@ def test_replace_rect_regions_by_kinds_keeps_other_kinds(pack_dir: Path, session
         KIND_GRAYSCALE,
         KIND_LINE_ART_SCHEMA,
         KIND_TABLE,
+        LINE_ART_KINDS,
         RASTER_KINDS,
         SOURCE_CVAT,
         TABLE_KINDS,
@@ -314,7 +315,10 @@ def test_replace_rect_regions_by_kinds_keeps_other_kinds(pack_dir: Path, session
             ],
         )
         replace_rect_regions(
-            session, page, [RectRegion(x1=5, y1=5, x2=6, y2=6, kind=KIND_LINE_ART_SCHEMA)], kinds=TABLE_KINDS
+            session,
+            page,
+            [RectRegion(x1=5, y1=5, x2=6, y2=6, kind=KIND_LINE_ART_SCHEMA)],
+            kinds=TABLE_KINDS + LINE_ART_KINDS,
         )
         session.commit()
         kinds = sorted((r.kind, r.x1) for r in page.rect_regions)
@@ -326,6 +330,6 @@ def test_replace_rect_regions_by_kinds_keeps_other_kinds(pack_dir: Path, session
                 session, page, [RectRegion(x1=7, y1=7, x2=8, y2=8, kind=KIND_TABLE)], kinds=RASTER_KINDS
             )
         # Пустая замена по видам вычищает только своё семейство.
-        replace_rect_regions(session, page, [], kinds=TABLE_KINDS)
+        replace_rect_regions(session, page, [], kinds=TABLE_KINDS + LINE_ART_KINDS)
         session.commit()
         assert [r.kind for r in page.rect_regions] == [KIND_GRAYSCALE]

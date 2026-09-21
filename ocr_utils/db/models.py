@@ -58,38 +58,33 @@ KIND_COLOR_TEXT = "color_text"
 # набор, а картинка или оттиск»: только их он и заменяет при пересчёте полосы.
 RASTER_KINDS = (KIND_COLOR, KIND_GRAYSCALE, KIND_STAMP_SUSPECT, KIND_COLOR_TEXT)
 
-# Таблица с линейками и блок-схема / штриховой рисунок (line art). Ставит детектор таблиц
-# ``table_detection`` (тот же этап ``detect``, но своя версия и свои колонки у полосы —
-# см. ``Page.table_detector_version``). В PDF картинкой не вырезаются: это набор, его
-# распознают, а рамка нужна, чтобы обойтись с таблицей и схемой иначе, чем со сплошным
-# текстом (не распрямлять строки, не расширять графы схемы). Оба вида — прямоугольники в
-# ``rect_regions`` рядом с растром, потому что структура у них та же, а в CVAT это те же
-# rectangle-метки, которые разметчик уточняет тем же инструментом.
+# Таблица с линейками и line art (схема, чертёж, график, рисунок штрихом). Ставит разбор
+# структуры страницы ``ocr_utils.page_layout`` — те же детекторы, что решают судьбу страницы
+# при сборке финальных PDF (детектор порчи геометрии, правка текстового слоя): ``tables`` даёт
+# таблицы, единый детектор line art — схемы детектора таблиц + surya + связные пятна, только
+# ВНЕ растра и таблиц. В PDF картинкой не вырезаются: это набор, его распознают, а рамка
+# нужна, чтобы обойтись с таблицей и схемой иначе, чем со сплошным текстом (не распрямлять
+# строки, не расширять графы схемы). Оба вида — прямоугольники в ``rect_regions`` рядом с
+# растром: структура та же, а в CVAT это те же rectangle-метки.
 #
-# «Схема» и «рисунок» детектора (блок-схема с текстом в коробках против сетки графика или
-# чертежа) в базе — один вид: лечат их одинаково, а тонкий вид лежит в ``detector_info``.
+# Семейства заменяются в базе порознь, у каждого своя версия и время у полосы
+# (``Page.table_detector_version``, ``Page.line_art_version``): правка одного детектора не
+# пересчитывает другой. Тонкий вид line art (схема / рисунок / формула / штрих) — в ``detector_info``.
 KIND_TABLE = "table"
 KIND_LINE_ART_SCHEMA = "line_art_schema"
 
-TABLE_KINDS = (KIND_TABLE, KIND_LINE_ART_SCHEMA)
+TABLE_KINDS = (KIND_TABLE,)
+LINE_ART_KINDS = (KIND_LINE_ART_SCHEMA,)
 
-# КРУПНЫЙ ШТРИХ — находки второго, независимого детектора: ``ocr_utils.line_art_detection``,
-# того самого, которым при сборке финальных PDF детектор порчи геометрии
-# (``geometry_regression.regions.lineart_boxes``) решает, где на странице рисунок. На этапе
-# ``detect`` он гоняется по бинаризованной копии 1/4 полосы тем же алгоритмом
-# (``scan_markup.detection.stroke_regions``), чтобы его находки можно было проверить и
-# поправить в CVAT, а потом сравнить с детектором на том же материале. Два вида по источнику
-# кандидатов: разлинованная таблица (скопление линеек) и прочий штрих — связное пятно
-# рисунка, схемы, графика. Своя версия и своё время у полосы (``Page.stroke_detector_version``),
-# своя замена в базе (``STROKE_KINDS``): с ``table``/``line_art_schema`` детектора таблиц
-# они не смешиваются, хотя часто накрывают те же объекты — в этом и смысл сравнения.
-KIND_STROKE_TABLE = "stroke_table"
-KIND_STROKE_DRAWING = "stroke_drawing"
+# Повёрнутый текст ВНЕ таблиц: боковые подписи осей и надписи на схемах, повёрнутые врезки.
+# Ставит ``page_layout.rotated_text`` (Docstrum по глифам, без определения стороны); при
+# правке текстового слоя такие зоны читаются и вписываются в слой. Своя версия у полосы.
+KIND_ROTATED_TEXT = "rotated_text"
 
-STROKE_KINDS = (KIND_STROKE_TABLE, KIND_STROKE_DRAWING)
+ROTATED_TEXT_KINDS = (KIND_ROTATED_TEXT,)
 
 # Все виды прямоугольников, которые вообще бывают в ``rect_regions``.
-RECT_KINDS = RASTER_KINDS + TABLE_KINDS + STROKE_KINDS
+RECT_KINDS = RASTER_KINDS + TABLE_KINDS + LINE_ART_KINDS + ROTATED_TEXT_KINDS
 
 # Типы, которые действительно означают ИЛЛЮСТРАЦИЮ: их вырезают из оригинала и вклеивают
 # в PDF. ``KIND_STAMP_SUSPECT`` сюда не входит намеренно.
@@ -365,19 +360,20 @@ class Page(Base):
     detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
-    # --- Таблицы и блок-схемы -------------------------------------------------
+    # --- Таблицы --------------------------------------------------------------
     # Своя версия и своё время, как у ориентации, и по той же причине: детектор таблиц
     # правится отдельно от растрового, и его правка не должна заставлять перечитывать пак
     # ради растра — и наоборот. NULL значит «таблицы на этой полосе не искали».
     table_detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
     tables_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
-    # --- Крупный штрих (детектор line_art_detection) ---------------------------
-    # Четвёртая пара «версия + время», по тому же правилу: детектор штриха живёт в своём
-    # пакете и правится отдельно, а его находки (``STROKE_KINDS``) заменяются в базе
-    # отдельно от таблиц и растра. NULL — штрих на этой полосе не искали.
-    stroke_detector_version: Mapped[int | None] = mapped_column(Integer, default=None)
-    strokes_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    # --- Line art и повёрнутый текст (``page_layout``) -------------------------
+    # Ещё две пары «версия + время» по тому же правилу: у каждого семейства свой детектор,
+    # и его находки заменяются в базе отдельно. NULL — на этой полосе не искали.
+    line_art_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    line_art_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    rotated_text_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    rotated_text_detected_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     # --- Оглавление -----------------------------------------------------------
     # Два признака, а не один «вид»: в CVAT им отвечают два тега («Оглавление» и «Годовой

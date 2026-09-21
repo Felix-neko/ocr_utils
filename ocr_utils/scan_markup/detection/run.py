@@ -17,15 +17,14 @@ SURYA ЖИВЁТ В РОДИТЕЛЕ, И ПУЛ ЭТОМУ НЕ МЕШАЕТ. В
 образом только инференс, а чтение с медленного диска и счёт по полному кадру идут в
 шестнадцать процессов, и прогон по-прежнему упирается в диск.
 
-ЧЕТЫРЕ ДЕТЕКТОРА, ЧЕТЫРЕ ВЕРСИИ. Растр (``DETECTOR_VERSION``), ориентация
-(``ORIENTATION_VERSION``), таблицы со схемами (``TABLE_DETECTOR_VERSION``) и крупный штрих
-(``STROKE_DETECTOR_VERSION`` — детектор ``line_art_detection``, тот же, что у детектора порчи
-геометрии при сборке финальных PDF) считаются одним чтением полосы, но помнят себя порознь:
-при ``--skip-detected`` пересчитывается только то, чья версия устарела или чего ещё не
-считали, а полоса, которой нужны одни таблицы, растр и ориентацию не трогает.
-Разметка surya у растра и таблиц общая и берётся из кэша ``--layout-cache``: попадание —
-воркер считает таблицы сам, промах — родитель зовёт модель и пишет в кэш. Штриху surya не
-нужна, он считается в воркере всегда.
+ПЯТЬ СЕМЕЙСТВ, ПЯТЬ ВЕРСИЙ — все из ``ocr_utils.page_layout``: растр (``RASTER_VERSION``),
+таблицы (``TABLES_VERSION``), line art (``LINE_ART_VERSION``), повёрнутый текст
+(``ROTATED_TEXT_VERSION``) и ориентация (``ORIENTATION_VERSION``) считаются одним чтением
+полосы, но помнят себя порознь: при ``--skip-detected`` пересчитывается только то, чья версия
+устарела или чего ещё не считали, а полоса, которой нужны одни таблицы, растр и ориентацию не
+трогает. Те же детекторы и версии зовёт сборка финальных PDF — оценка разметчика в CVAT
+говорит ровно о них. Surya берётся из кэша ``--layout-cache``: попадание — всё достраивается в
+воркере, промах — родитель зовёт модель и пишет в кэш.
 """
 
 import logging
@@ -41,23 +40,26 @@ from tqdm import tqdm
 from ocr_utils.db.models import (
     KIND_COLOR,
     KIND_GRAYSCALE,
-    KIND_LINE_ART_SCHEMA,
-    KIND_STROKE_DRAWING,
-    KIND_STROKE_TABLE,
-    KIND_TABLE,
+    KIND_STAMP_SUSPECT,
+    LINE_ART_KINDS,
     RASTER_KINDS,
+    ROTATED_TEXT_KINDS,
     SOURCE_AUTO,
     SOURCE_CVAT,
-    STROKE_KINDS,
     TABLE_KINDS,
     Page,
     RectRegion,
 )
 from ocr_utils.db.repo import iter_pages, replace_rect_regions, upsert_pack
-from ocr_utils.scan_markup.detection import DETECTOR_VERSION
-from ocr_utils.scan_markup.detection.stroke_regions import STROKE_DETECTOR_VERSION
-from ocr_utils.page_layout.tables import TABLE_DETECTOR_VERSION
-from ocr_utils.page_layout.orientation import ORIENTATION_VERSION
+from ocr_utils.page_layout import (
+    LINE_ART_VERSION,
+    ORIENTATION_VERSION,
+    RASTER_VERSION,
+    ROTATED_TEXT_VERSION,
+    TABLES_VERSION,
+)
+from ocr_utils.page_layout.analysis import LayoutOptions
+from ocr_utils.page_layout.regions import Region, RegionKind
 from ocr_utils.scan_markup.rotation import format_allowed
 from ocr_utils.page_layout.raster.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC
 from ocr_utils.page_layout.raster.color_kind import CHROMA_SELF_FRAC_THR, CHROMA_SPREAD_THR, CHROMA_THR, COLOR_FRAC_THR
@@ -79,17 +81,7 @@ from ocr_utils.page_layout.raster.regions import (
     SAFETY_MIN_FRAC,
     SURYA_LINEART_P99_PX,
 )
-from ocr_utils.scan_markup.detection.page import (
-    DetectedRegion,
-    orientation_image,
-    PageAnalysis,
-    PageOptions,
-    PageResult,
-    analyse_page,
-    finish_page,
-    page_layout_for,
-    surya_boxes_from,
-)
+from ocr_utils.scan_markup.detection.page import PageAnalysis, PageOptions, PageResult, analyse_page, finish_page
 from ocr_utils.scan_markup.hashing import apply_stamp, stat_matches, stat_stamp
 from ocr_utils.scan_markup.scan_tree import count_pages, scan_pack
 
@@ -114,13 +106,14 @@ class DetectParams:
     skip_detected: bool = False
     rehash_all: bool = False
     use_surya_layout: bool = True
-    # Кэш разметки surya (см. ``detection.layout_cache``); None — считать каждый раз.
+    # Корень кэша surya (``page_layout.surya.SuryaCache``, вариант ``scan``); None — считать каждый раз.
     layout_cache_dir: Path | None = None
-    # Что считать: растр, таблицы со схемами, крупный штрих. Ориентация — ниже, у неё свой
+    # Что считать: растр, таблицы, line art, повёрнутый текст. Ориентация — ниже, у неё свой
     # набор ключей.
     raster: bool = True
     tables: bool = True
-    strokes: bool = True
+    line_art: bool = True
+    rotated_text: bool = True
     first_page_is_cover: bool = False
     jobs: int = 8
     chroma_thr: float = CHROMA_THR
@@ -159,8 +152,7 @@ class DetectParams:
 
     def page_options(self) -> PageOptions:
         """Часть параметров, которая уезжает в воркер. Обязана переживать pickle."""
-        return PageOptions(
-            default_dpi=self.default_dpi,
+        layout = LayoutOptions(
             first_page_is_cover=self.first_page_is_cover,
             chroma_thr=self.chroma_thr,
             color_frac_thr=self.color_frac_thr,
@@ -185,14 +177,19 @@ class DetectParams:
             lineart_screen_peak=self.lineart_screen_peak,
             stamp_ink_contrast=self.stamp_ink_contrast,
             lineart_max_dot_frac=self.lineart_max_dot_frac,
+        )
+        return PageOptions(
+            default_dpi=self.default_dpi,
+            raster=self.raster,
+            tables=self.tables,
+            line_art=self.line_art,
+            rotated_text=self.rotated_text,
             orientation=self.orientation,
             orientation_detectors=self.cpu_orientation_detectors(),
             allowed_rotations=self.allowed_rotations(),
-            raster=self.raster,
-            tables=self.tables,
-            strokes=self.strokes,
             use_surya_layout=self.use_surya_layout,
             layout_cache_dir=self.layout_cache_dir,
+            layout=layout,
         )
 
     def detector_names(self) -> tuple[str, ...]:
@@ -253,12 +250,11 @@ class DetectStats:
     color: int = 0
     grayscale: int = 0
     full_page: int = 0
-    # Таблицы и схемы — своим счётом: их считает другой детектор.
+    stamp_suspects: int = 0
+    # Таблицы, line art и повёрнутый текст — своим счётом: у каждого свой детектор.
     tables: int = 0
     line_art: int = 0
-    # Крупный штрих — третьим счётом, детектор ``line_art_detection``.
-    stroke_tables: int = 0
-    stroke_drawings: int = 0
+    rotated_text: int = 0
 
 
 @dataclass(frozen=True)
@@ -290,7 +286,7 @@ def _needs_detection(page: Page, params: DetectParams, stamp) -> bool:
     """
     if page.detected_at is None or page.file_hash is None:
         return True
-    if page.detector_version != DETECTOR_VERSION:
+    if page.detector_version != RASTER_VERSION:
         return True
     if params.rehash_all:
         return True
@@ -299,7 +295,7 @@ def _needs_detection(page: Page, params: DetectParams, stamp) -> bool:
 
 def _tables_stale(page: Page) -> bool:
     """Устарели ли таблицы сами по себе: не считали или считали прежней версией детектора."""
-    return page.tables_detected_at is None or page.table_detector_version != TABLE_DETECTOR_VERSION
+    return page.tables_detected_at is None or page.table_detector_version != TABLES_VERSION
 
 
 def _needs_tables(page: Page, params: DetectParams, stamp) -> bool:
@@ -311,16 +307,29 @@ def _needs_tables(page: Page, params: DetectParams, stamp) -> bool:
     return not stat_matches(page, stamp)
 
 
-def _strokes_stale(page: Page) -> bool:
-    """Устарел ли крупный штрих сам по себе: не считали или считали прежней версией детектора."""
-    return page.strokes_detected_at is None or page.stroke_detector_version != STROKE_DETECTOR_VERSION
+def _line_art_stale(page: Page) -> bool:
+    """Устарел ли line art сам по себе: не считали или считали прежней версией детектора."""
+    return page.line_art_detected_at is None or page.line_art_version != LINE_ART_VERSION
 
 
-def _needs_strokes(page: Page, params: DetectParams, stamp) -> bool:
-    """То же для КРУПНОГО ШТРИХА — четвёртая независимая версия."""
-    if not params.strokes:
+def _needs_line_art(page: Page, params: DetectParams, stamp) -> bool:
+    """То же для LINE ART — своя независимая версия."""
+    if not params.line_art:
         return False
-    if _strokes_stale(page) or params.rehash_all:
+    if _line_art_stale(page) or params.rehash_all:
+        return True
+    return not stat_matches(page, stamp)
+
+
+def _rotated_text_stale(page: Page) -> bool:
+    return page.rotated_text_detected_at is None or page.rotated_text_version != ROTATED_TEXT_VERSION
+
+
+def _needs_rotated_text(page: Page, params: DetectParams, stamp) -> bool:
+    """То же для ПОВЁРНУТОГО ТЕКСТА."""
+    if not params.rotated_text:
+        return False
+    if _rotated_text_stale(page) or params.rehash_all:
         return True
     return not stat_matches(page, stamp)
 
@@ -393,91 +402,69 @@ def _apply_result(session: Session, page: Page, result: PageResult, stats: Detec
         apply_stamp(page, result.stamp)
     stats.pages += 1
 
-    # Растр: версия, время и области — только когда растр действительно считали. Иначе
-    # полоса, которой нужны были одни таблицы, выглядела бы пересчитанной растром.
-    if result.raster:
+    # Каждое семейство — только когда его действительно считали (``None`` — не считали, и
+    # колонки не трогаются). Заменяются только виды семейства: растр, в том числе уточнённый
+    # человеком, при пересчёте таблиц остаётся, и наоборот.
+    if result.raster is not None:
         page.detected_at = _utcnow()
-        page.detector_version = DETECTOR_VERSION
-        replace_rect_regions(
-            session,
-            page,
-            [
-                RectRegion(
-                    x1=region.box[0],
-                    y1=region.box[1],
-                    x2=region.box[2],
-                    y2=region.box[3],
-                    kind=region.kind,
-                    full_page=region.full_page,
-                    chroma_frac=region.chroma_frac,
-                    chroma_spread=region.chroma_spread,
-                    chroma_self_frac=region.chroma_self_frac,
-                    dot_frac=region.dot_frac,
-                    mid_frac=region.mid_frac,
-                    tone_entropy=region.tone_entropy,
-                    screen_peak=region.screen_peak,
-                    ink_contrast=region.ink_contrast,
-                    source=SOURCE_AUTO,
-                )
-                for region in result.regions
-            ],
-            kinds=RASTER_KINDS,
-        )
-        stats.regions += len(result.regions)
-        stats.color += sum(1 for region in result.regions if region.kind == KIND_COLOR)
-        stats.grayscale += sum(1 for region in result.regions if region.kind == KIND_GRAYSCALE)
-        stats.full_page += sum(1 for region in result.regions if region.full_page)
-
-    # Таблицы и схемы — то же правило: ``None`` значит «не считали», и колонки не трогаются.
-    # Заменяются только их виды: растр, в том числе уточнённый человеком, остаётся.
+        page.detector_version = RASTER_VERSION
+        replace_rect_regions(session, page, [_raster_row(r) for r in result.raster], kinds=RASTER_KINDS)
+        stats.regions += len(result.raster)
+        stats.color += sum(1 for r in result.raster if r.kind is RegionKind.COLOR)
+        stats.grayscale += sum(1 for r in result.raster if r.kind is RegionKind.GRAYSCALE)
+        stats.stamp_suspects += sum(1 for r in result.raster if r.kind is RegionKind.STAMP_SUSPECT)
+        stats.full_page += sum(1 for r in result.raster if r.full_page)
     if result.tables is not None:
         page.tables_detected_at = _utcnow()
-        page.table_detector_version = TABLE_DETECTOR_VERSION
-        replace_rect_regions(
-            session,
-            page,
-            [
-                RectRegion(
-                    x1=region.x1,
-                    y1=region.y1,
-                    x2=region.x2,
-                    y2=region.y2,
-                    kind=region.kind,
-                    full_page=False,
-                    detector_info=region.detector_info,
-                    source=SOURCE_AUTO,
-                )
-                for region in result.tables
-            ],
-            kinds=TABLE_KINDS,
-        )
-        stats.tables += sum(1 for region in result.tables if region.kind == KIND_TABLE)
-        stats.line_art += sum(1 for region in result.tables if region.kind == KIND_LINE_ART_SCHEMA)
+        page.table_detector_version = TABLES_VERSION
+        replace_rect_regions(session, page, [_info_row(r) for r in result.tables], kinds=TABLE_KINDS)
+        stats.tables += len(result.tables)
+    if result.line_art is not None:
+        page.line_art_detected_at = _utcnow()
+        page.line_art_version = LINE_ART_VERSION
+        replace_rect_regions(session, page, [_info_row(r) for r in result.line_art], kinds=LINE_ART_KINDS)
+        stats.line_art += len(result.line_art)
+    if result.rotated_text is not None:
+        page.rotated_text_detected_at = _utcnow()
+        page.rotated_text_version = ROTATED_TEXT_VERSION
+        replace_rect_regions(session, page, [_info_row(r) for r in result.rotated_text], kinds=ROTATED_TEXT_KINDS)
+        stats.rotated_text += len(result.rotated_text)
 
-    # Крупный штрих — то же правило и своя пара колонок; заменяются только ``STROKE_KINDS``.
-    if result.strokes is not None:
-        page.strokes_detected_at = _utcnow()
-        page.stroke_detector_version = STROKE_DETECTOR_VERSION
-        replace_rect_regions(
-            session,
-            page,
-            [
-                RectRegion(
-                    x1=region.x1,
-                    y1=region.y1,
-                    x2=region.x2,
-                    y2=region.y2,
-                    kind=region.kind,
-                    full_page=False,
-                    detector_info=region.detector_info,
-                    source=SOURCE_AUTO,
-                )
-                for region in result.strokes
-            ],
-            kinds=STROKE_KINDS,
-        )
-        stats.stroke_tables += sum(1 for region in result.strokes if region.kind == KIND_STROKE_TABLE)
-        stats.stroke_drawings += sum(1 for region in result.strokes if region.kind == KIND_STROKE_DRAWING)
+
+def _raster_row(region: Region) -> RectRegion:
+    """Растровая область → строка базы: признаки цвета и тона лежат в своих колонках."""
+    info = region.info
+    return RectRegion(
+        x1=region.box.x0,
+        y1=region.box.y0,
+        x2=region.box.x1,
+        y2=region.box.y1,
+        kind=region.kind.value,
+        full_page=region.full_page,
+        chroma_frac=info.get("chroma_frac"),
+        chroma_spread=info.get("chroma_spread"),
+        chroma_self_frac=info.get("chroma_self_frac"),
+        dot_frac=info.get("dot_frac"),
+        mid_frac=info.get("mid_frac"),
+        tone_entropy=info.get("tone_entropy"),
+        screen_peak=info.get("screen_peak"),
+        ink_contrast=info.get("ink_contrast"),
+        source=SOURCE_AUTO,
+    )
+
+
+def _info_row(region: Region) -> RectRegion:
+    """Таблица, line art, повёрнутый текст → строка базы: подробности детектора одним JSON."""
+    return RectRegion(
+        x1=region.box.x0,
+        y1=region.box.y0,
+        x2=region.box.x1,
+        y2=region.box.y1,
+        kind=region.kind.value,
+        full_page=region.full_page,
+        detector_info=region.detector_info_json(),
+        source=SOURCE_AUTO,
+    )
 
 
 def _collect_jobs(
@@ -516,8 +503,9 @@ def _collect_jobs(
         need_regions = params.raster and (not params.skip_detected or _needs_detection(page, params, stamp))
         need_orientation = _needs_orientation(page, params, stamp) if params.skip_detected else params.orientation
         need_tables = params.tables and (not params.skip_detected or _needs_tables(page, params, stamp))
-        need_strokes = params.strokes and (not params.skip_detected or _needs_strokes(page, params, stamp))
-        if not need_regions and not need_orientation and not need_tables and not need_strokes:
+        need_line_art = params.line_art and (not params.skip_detected or _needs_line_art(page, params, stamp))
+        need_rotated = params.rotated_text and (not params.skip_detected or _needs_rotated_text(page, params, stamp))
+        if not any((need_regions, need_orientation, need_tables, need_line_art, need_rotated)):
             stats.skipped += 1
             continue
 
@@ -529,24 +517,31 @@ def _collect_jobs(
         # версии ЛЮБОГО из детекторов совпадение хеша ничего не значит: файл прежний,
         # алгоритм новый.
         regions_current = not params.raster or (
-            page.detected_at is not None and page.detector_version == DETECTOR_VERSION
+            page.detected_at is not None and page.detector_version == RASTER_VERSION
         )
         tables_current = not params.tables or not _tables_stale(page)
-        strokes_current = not params.strokes or not _strokes_stale(page)
+        line_art_current = not params.line_art or not _line_art_stale(page)
+        rotated_current = not params.rotated_text or not _rotated_text_stale(page)
         orientation_current = not params.orientation or not _orientation_stale(page, params)
         stale_stat_only = (
             params.skip_detected
             and page.file_hash is not None
             and regions_current
             and tables_current
-            and strokes_current
+            and line_art_current
+            and rotated_current
             and orientation_current
         )
         # Считается только то, что нужно этой полосе. Растр там, где он свежий, не
         # пересчитывается: это не только CPU по полному кадру, но и замена областей в базе,
         # а ориентация — заметная трата: tesseract OSD стоит две с половиной секунды на полосу.
         job_options = dataclasses.replace(
-            options, orientation=need_orientation, raster=need_regions, tables=need_tables, strokes=need_strokes
+            options,
+            orientation=need_orientation,
+            raster=need_regions,
+            tables=need_tables,
+            line_art=need_line_art,
+            rotated_text=need_rotated,
         )
         known_digest = page.file_hash if stale_stat_only else None
         jobs.append(_Job(path, page.source_rel_path, page.order_index, job_options, known_digest))
@@ -568,9 +563,9 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
 
     detector = None
     if params.use_surya_layout:
-        from ocr_utils.background_smoothing.layout import LayoutDetector
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
 
-        detector = LayoutDetector()
+        detector = SuryaLayoutModel()  # грузится лениво, при первом промахе кэша — уже после форка пула
 
     stats = DetectStats()
     with session_factory() as session:  # type: Session
@@ -597,12 +592,10 @@ def run_detect(params: DetectParams, session_factory) -> DetectStats:
             if result.combo is not None:
                 oriented.add(result.rel_path)
             session.commit()
-            drawn = list(result.regions) + [
-                DetectedRegion((t.x1, t.y1, t.x2, t.y2), t.kind, False)
-                for t in (result.tables or []) + (result.strokes or [])
-            ]
-            if params.debug_dir is not None and drawn:
-                write_debug_overlay(params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, drawn)
+            if params.debug_dir is not None and result.regions:
+                write_debug_overlay(
+                    params.debug_dir, result.rel_path, params.pack_dir / result.rel_path, result.regions
+                )
 
         _run_arbiter(session, params, {rel: by_rel[rel] for rel in oriented}, stats)
 
@@ -699,8 +692,7 @@ def _finish(analyses, total: int, params: DetectParams, detector):
     batches = _orientation_gpu(params)
     for analysis in tqdm(analyses, total=total, desc="детекция", unit="полоса"):
         gpu = _orientation_for(analysis, batches) if batches else None
-        layout = page_layout_for(analysis, detector, options)
-        yield finish_page(analysis, options, surya_boxes_from(layout, analysis), gpu, layout)
+        yield finish_page(analysis, options, detector, gpu)
 
 
 def _orientation_for(analysis, batches) -> "dict | None":
@@ -710,9 +702,9 @@ def _orientation_for(analysis, batches) -> "dict | None":
     батча отложила бы запись в базу на всю пачку. Так уже работает Surya layout рядом, и
     цена та же — доли секунды на полосу.
     """
-    if not analysis.orientation_done or analysis.work is None:
+    if analysis.error or analysis.unchanged:
         return None
-    image = orientation_image(analysis)
+    image = analysis.orientation_image()
     if image is None:
         return None
     verdicts = {}

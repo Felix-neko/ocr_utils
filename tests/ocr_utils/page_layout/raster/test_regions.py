@@ -147,13 +147,20 @@ def test_black_line_art_never_reaches_the_markup() -> None:
     from ocr_utils.scan_markup.detection.page import PageOptions, detect_page
 
     class _Stub:
-        """Дублёр LayoutDetector: отдаёт заданные блоки, не трогая GPU и Surya."""
+        """Дублёр SuryaLayoutModel: отдаёт заданные блоки Picture в пикселях кадра surya, не трогая GPU."""
 
         def __init__(self, boxes):
             self._boxes = boxes
 
-        def picture_polygons(self, bgr, gray=None, filter_raster=True):
-            return [np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32) for x1, y1, x2, y2 in self._boxes]
+        def predict_one(self, frame):
+            from ocr_utils.page_layout.geometry import Box
+            from ocr_utils.page_layout.surya.blocks import from_boxes
+
+            return from_boxes([("Picture", 0.9, Box(*b)) for b in self._boxes], frame.shape[1], frame.shape[0])
+
+        @staticmethod
+        def name() -> str:
+            return "stub"
 
     def run(tmp: Path, ink_bgr, block_in_work) -> list:
         page = np.full((*SIZE, 3), (245, 245, 245), np.uint8)
@@ -162,15 +169,17 @@ def test_black_line_art_never_reaches_the_markup() -> None:
         Image.fromarray(page[..., ::-1]).save(tmp, dpi=(DPI, DPI))
         result = detect_page(tmp, "a.tif", 1, PageOptions(need_digest=False), _Stub([block_in_work]))
         assert result.error == "", result.error
-        return result.regions
+        return result
 
     import tempfile
 
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "a.tif"
-        block = (180 // 4, 180 // 4, 920 // 4, 1020 // 4)  # блок Surya приходит в масштабе 1/4
-        assert run(path, (30, 30, 30), block) == []
-        colored = run(path, (200, 60, 40), block)
+        block = tuple(v * 150 // DPI for v in (180, 180, 920, 1020))  # блок Surya — в пикселях кадра 150 dpi
+        black = run(path, (30, 30, 30), block)
+        assert black.raster == [], "чёрный штрих — не растр"
+        assert black.line_art and "surya:Picture" in black.line_art[0].info["sources"], "его находит детектор line art"
+        colored = run(path, (200, 60, 40), block).raster
         assert colored and all(region.kind == KIND_COLOR for region in colored)
 
 
@@ -191,11 +200,20 @@ def test_small_coloured_line_art_becomes_a_stamp_suspect() -> None:
     from ocr_utils.scan_markup.detection.page import PageOptions, detect_page
 
     class _Stub:
+        """Дублёр SuryaLayoutModel: отдаёт заданные блоки Picture в пикселях кадра surya, не трогая GPU."""
+
         def __init__(self, boxes):
             self._boxes = boxes
 
-        def picture_polygons(self, bgr, gray=None, filter_raster=True):
-            return [np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32) for x1, y1, x2, y2 in self._boxes]
+        def predict_one(self, frame):
+            from ocr_utils.page_layout.geometry import Box
+            from ocr_utils.page_layout.surya.blocks import from_boxes
+
+            return from_boxes([("Picture", 0.9, Box(*b)) for b in self._boxes], frame.shape[1], frame.shape[0])
+
+        @staticmethod
+        def name() -> str:
+            return "stub"
 
     def run(tmp: Path, patch: tuple[int, int, int, int]) -> list:
         page = np.full((*SIZE, 3), (245, 245, 245), np.uint8)
@@ -205,7 +223,7 @@ def test_small_coloured_line_art_becomes_a_stamp_suspect() -> None:
         art = synthetic.line_art((y2 - y1, x2 - x1), step=30, thickness=12) < 200
         page[y1:y2, x1:x2][art] = (200, 60, 40)  # цветная краска
         Image.fromarray(page[..., ::-1]).save(tmp, dpi=(DPI, DPI))
-        block = tuple(v // 4 for v in patch)  # блок Surya приходит в масштабе 1/4
+        block = tuple(v * 150 // DPI for v in patch)  # блок Surya — в пикселях кадра 150 dpi
         result = detect_page(tmp, "a.tif", 5, PageOptions(need_digest=False), _Stub([block]))
         assert result.error == "", result.error
         return result.regions

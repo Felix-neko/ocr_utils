@@ -21,12 +21,14 @@ DB="$MARKUP_ROOT/pack1.sqlite"
 DB_REVIEWED="$MARKUP_ROOT/pack1_reviewed.sqlite"
 DEBUG_DIR="$MARKUP_ROOT/debug"
 
-# Кэш разметки surya layout по сырым TIFF «Готовое»: pickle на полосу с той же раскладкой
-# папок, что у пака. Набит исследованием детектора таблиц (research/legacy/table_processing,
-# run_scripts/table_processing/run_layout_pack_source.sh) и полон на все 12 135 полос;
-# detect берёт разметку отсюда и модель не зовёт, а полосу без файла (или с битым файлом)
-# разбирает заново и дописывает сюда же.
-LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack1_table_research/layout_surya_готовое"
+# Кэш surya layout (ocr_utils.page_layout.surya.SuryaCache): <корень>/<вариант картинки>/<полоса>.json.
+# Вариант — часть ключа: scan (сырые TIFF «Готовое»), sharpened (заострённые JPEG), fr_geo и
+# fr_nogeo (страницы PDF FineReader с коррекцией геометрии и без — их читают детектор порчи
+# геометрии и правка текстового слоя). Варианты scan и sharpened перенесены из старых pickle
+# (pack1_table_research/layout_surya_готовое и layout_surya, 2026-09-21) записями legacy —
+# полны на все 12 135 полос; fr_* набиваются `page_layout prefill-surya` (~0.7 с GPU на страницу).
+# detect берёт разметку отсюда и модель не зовёт, а полосу без записи размечает и дописывает сюда же.
+LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack1_page_layout"
 
 # Оглавления (шаг 1, команда toc): признаки полос окна, контактные листы для разметки эталона
 # и списки полос оглавления по выпускам для внешнего OCR (--pages / --skip-pages).

@@ -13,8 +13,8 @@ from sqlalchemy.orm import selectinload
 from ocr_utils.scan_markup.cli import main
 from ocr_utils.db.models import KIND_GRAYSCALE, KIND_TABLE, SOURCE_AUTO, SOURCE_CVAT, TABLE_KINDS, Page, RectRegion
 from ocr_utils.db.session import open_db
-from ocr_utils.scan_markup.detection import DETECTOR_VERSION
-from ocr_utils.page_layout.tables import TABLE_DETECTOR_VERSION
+from ocr_utils.page_layout import RASTER_VERSION as DETECTOR_VERSION
+from ocr_utils.page_layout import TABLES_VERSION as TABLE_DETECTOR_VERSION
 from tests.ocr_utils.scan_markup import synthetic
 
 DPI = 600
@@ -55,9 +55,9 @@ def _run(pack_dir: Path, db: Path, *extra: str):
             "--no-use-surya-layout",
             "--no-first-page-is-cover",
             "--no-orientation",
-            # Крупный штрих — свой детектор со своими тестами (test_detect_strokes); здесь он бы
-            # только добавил в базу stroke_drawing на ту же сетку.
-            "--no-strokes",
+            # Line art и повёрнутый текст — свои детекторы со своими тестами (test_detect_line_art).
+            "--no-line-art",
+            "--no-rotated-text",
             *extra,
         ],
     )

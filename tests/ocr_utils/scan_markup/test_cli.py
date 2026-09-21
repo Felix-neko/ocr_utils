@@ -280,7 +280,7 @@ def test_new_detector_version_forces_a_rerun(pack_dir: Path, tmp_path: Path, mon
     _run(pack_dir, db)
     assert "пропущено: 2" in _run(pack_dir, db, "--skip-detected").output
 
-    monkeypatch.setattr("ocr_utils.scan_markup.detection.run.DETECTOR_VERSION", 999)
+    monkeypatch.setattr("ocr_utils.scan_markup.detection.run.RASTER_VERSION", 999)
     result = _run(pack_dir, db, "--skip-detected")
     assert "Полос обработано: 2" in result.output
     assert "пропущено: 0" in result.output

@@ -18,14 +18,7 @@ from tqdm import tqdm
 from ocr_utils.db.models import Issue, Page, YearPackage
 from ocr_utils.db.repo import require_pack
 from ocr_utils.scan_markup.detection.overlay import write_debug_overlay
-from ocr_utils.scan_markup.detection.page import (
-    PageAnalysis,
-    PageOptions,
-    PageResult,
-    analyse_page,
-    finish_page,
-    surya_boxes_for,
-)
+from ocr_utils.scan_markup.detection.page import PageAnalysis, PageOptions, PageResult, analyse_page, finish_page
 from ocr_utils.scan_markup.validation.cases import Case, collect_cases
 from ocr_utils.scan_markup.validation.checks import describe, expectation_holds
 
@@ -107,7 +100,7 @@ def _run_jobs(jobs: list[_Job], workers: int, desc: str, detector=None) -> dict[
     def collect(analyses):
         out = {}
         for analysis in tqdm(analyses, total=len(jobs), desc=desc, unit="полоса"):
-            out[analysis.rel_path] = finish_page(analysis, options, surya_boxes_for(analysis, detector))
+            out[analysis.rel_path] = finish_page(analysis, options, detector)
         return out
 
     if workers <= 1:
@@ -181,9 +174,9 @@ def run_validate(params: ValidateParams) -> ValidateReport:
     jobs = [_Job(case.path, case.rel_path, order_by_rel.get(case.rel_path, 1), params.options) for case in cases]
     detector = None
     if params.use_surya_layout:
-        from ocr_utils.background_smoothing.layout import LayoutDetector
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
 
-        detector = LayoutDetector()
+        detector = SuryaLayoutModel()
 
     results = _run_jobs(jobs, params.jobs, "эталоны", detector)
 
@@ -192,22 +185,22 @@ def run_validate(params: ValidateParams) -> ValidateReport:
         if result.error:
             report.outcomes.append(CaseOutcome(case, result, False, f"ОШИБКА: {result.error}"))
             continue
-        fixed = expectation_holds(case.defect.key, result.regions)
-        report.outcomes.append(CaseOutcome(case, result, fixed, describe(case.defect.key, result.regions)))
+        fixed = expectation_holds(case.defect.key, (result.raster or []))
+        report.outcomes.append(CaseOutcome(case, result, fixed, describe(case.defect.key, (result.raster or []))))
         if params.out_dir is not None:
             folder = params.out_dir / case.defect.key / ("починено" if fixed else "осталось")
             folder.mkdir(parents=True, exist_ok=True)
-            write_debug_overlay(folder, case.rel_path, case.path, result.regions)
+            write_debug_overlay(folder, case.rel_path, case.path, (result.raster or []))
 
     control_jobs, was_counts = _control_jobs(params, {case.rel_path for case in cases})
     control_results = _run_jobs(control_jobs, params.jobs, "контроль", detector)
     for rel, was in was_counts.items():
         result = control_results.get(rel)
-        now = 0 if result is None or result.error else len(result.regions)
+        now = 0 if result is None or result.error else len((result.raster or []))
         report.control.append(ControlOutcome(rel, was, now))
         if params.out_dir is not None and now == 0 and result is not None:
             folder = params.out_dir / "контроль" / "область-пропала"
             folder.mkdir(parents=True, exist_ok=True)
-            write_debug_overlay(folder, rel, params.pack_dir / rel, result.regions)
+            write_debug_overlay(folder, rel, params.pack_dir / rel, (result.raster or []))
 
     return report
