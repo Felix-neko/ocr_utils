@@ -12,9 +12,9 @@ Surya layout, найденные блоки-иллюстрации добавл�
 примерно 0.7 с на кадр (GPU) страницы «текст + фотография» перестают быть
 неприкасаемыми.
 
-Модель грузится лениво и ровно одна — LayoutPredictor. ``scan_cropping.gpu_models``
-сюда не годится: его конструктор тянет ещё YOLO-World x2, SAM и LaMa (вплоть до
-скачивания весов), а здесь не нужно ничего, кроме разметки.
+Модель — единая ``page_layout.surya.SuryaLayoutModel`` (грузится лениво, одна на прогон);
+здесь остаётся только специфика защиты фона: какие блоки брать и как притягивать их к
+настоящему растру.
 """
 
 import logging
@@ -23,6 +23,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from ocr_utils.page_layout.image import SURYA_MAX_SIDE
 from ocr_utils.background_smoothing.processing import (
     HALFTONE_DOWNSCALE,
     HALFTONE_HI,
@@ -39,11 +40,9 @@ logger = logging.getLogger(__name__)
 # прямоугольником блока.
 PICTURE_LABELS = ("Picture",)
 
-# Сторона, до которой уменьшается кадр перед прогоном layout. Surya всё равно
-# ресайзит вход под свой размер, а на 21-Мп сканах предварительное уменьшение
-# экономит секунды на одной только конвертации (то же значение и по той же причине,
-# что в ``scan_cropping.finger_removal.text_protection``).
-LAYOUT_WORK_SIDE = 2048
+# Сторона, до которой уменьшается кадр перед прогоном layout, — единая для всех
+# потребителей surya (``page_layout.image.SURYA_MAX_SIDE``).
+LAYOUT_WORK_SIDE = SURYA_MAX_SIDE
 
 # --- Притяжение блоков к реальному растру ----------------------------------
 # Surya размечает не «растровое изображение», а ВИЗУАЛЬНЫЙ БЛОК, и на смонтированной
@@ -77,22 +76,18 @@ class LayoutDetector:
     первом обращении — чтобы пустой список файлов не стоил загрузки весов.
     """
 
-    def __init__(self, labels: "tuple[str, ...]" = PICTURE_LABELS) -> None:
+    def __init__(self, labels: "tuple[str, ...]" = PICTURE_LABELS, model=None) -> None:
         self._labels = labels
-        self._predictor = None
+        self._model = model  # SuryaLayoutModel; None — завести свою при первом кадре
 
     def _load(self):
-        """Ленивая загрузка предиктора (импорт surya тоже ленивый — он не быстрый)."""
-        if self._predictor is None:
-            from surya.foundation import FoundationPredictor
-            from surya.layout import LayoutPredictor
-            from surya.settings import settings
+        """Единая модель surya (``page_layout``), ленивая: пустой список файлов не стоит загрузки весов."""
+        if self._model is None:
+            from ocr_utils.page_layout.surya.model import SuryaLayoutModel
 
             logger.info("Загружаю Surya layout (--use-surya-layout)")
-            predictor = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
-            predictor.disable_tqdm = True  # иначе на каждый кадр рвётся прогресс-бар пачки
-            self._predictor = predictor
-        return self._predictor
+            self._model = SuryaLayoutModel()
+        return self._model
 
     def picture_polygons(
         self, bgr: np.ndarray, gray: "np.ndarray | None" = None, filter_raster: bool = True
@@ -130,26 +125,31 @@ class LayoutDetector:
         return [poly for poly in candidates if is_raster_block(gray, poly)]
 
     def predict(self, bgr: np.ndarray) -> "tuple[object, float]":
-        """Сырой ответ surya (``LayoutResult``) по кадру и масштаб, в котором он ему подавался.
+        """Блоки surya (``LayoutBlocks``) по кадру и масштаб, в котором он подавался модели.
 
-        Отдельно от :meth:`picture_polygons`, потому что у ответа два потребителя:
-        блоки Picture нужны растру, а Table/Figure/Form/Text — детектору таблиц
-        (``page_layout.tables``), и модель ради них зовётся один раз. Координаты в
-        ответе — в пикселях УМЕНЬШЕННОГО кадра: делить на ``scale``.
+        Кадр уменьшается до ``LAYOUT_WORK_SIDE`` по длинной стороне; координаты в ответе —
+        в пикселях УМЕНЬШЕННОГО кадра: делить на ``scale``.
         """
-        from PIL import Image as PILImage
-
         h, w = bgr.shape[:2]
         scale = min(1.0, LAYOUT_WORK_SIDE / max(h, w))
         small = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        return self._load()([PILImage.fromarray(rgb)])[0], scale
+        return self._load().predict_one(rgb), scale
 
     @staticmethod
     def polygons_of(result: object, scale: float, labels: "tuple[str, ...]") -> "list[np.ndarray]":
-        """Полигоны блоков нужных меток из сырого ответа, пересчитанные в пиксели поданного кадра."""
-        blocks = getattr(result, "bboxes", ())
-        return [np.asarray(b.polygon, dtype=np.float32) / scale for b in blocks if b.label in labels]
+        """Полигоны блоков нужных меток из ответа, пересчитанные в пиксели поданного кадра."""
+        polygons = []
+        for block in getattr(result, "blocks", ()):
+            if block.label not in labels:
+                continue
+            if block.polygon is not None:
+                points = np.asarray(block.polygon, dtype=np.float32)
+            else:
+                b = block.box
+                points = np.array([[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]], dtype=np.float32)
+            polygons.append(points / scale)
+        return polygons
 
 
 def is_raster_block(gray: np.ndarray, polygon: np.ndarray) -> bool:

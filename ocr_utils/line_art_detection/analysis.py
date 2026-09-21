@@ -187,16 +187,29 @@ def collect_pdfs(
     return ready, fresh
 
 
-def detect_layout(pdfs: list[Path], params: LineArtParams, proposals, progress: bool = True) -> dict:
-    """Прогон Surya по всем страницам — ЭТАП ДО пула процессов.
+# Классы surya, которые считаем предложениями находки, и те, что считаем полутоновой печатью.
+FINDING_LABELS = ("Figure", "Table", "Equation", "Form")
+EXCLUDE_LABELS = ("Picture",)
+
+
+def detect_layout(pdfs: list[Path], params: LineArtParams, surya, variant, progress: bool = True) -> dict:
+    """Прогон surya по всем страницам — ЭТАП ДО пула процессов, через единый кэш ``page_layout``.
 
     Живёт в главном процессе намеренно: модели нужна видеопамять, а держать по копии в
-    каждом из шестнадцати воркеров нельзя ни по памяти, ни по здравому смыслу.
+    каждом из шестнадцати воркеров нельзя. Кадр surya и ключ кэша готовит ``PageImage`` —
+    те же, что у ``detect`` и сборки финальных PDF, так что кэш общий.
+
+    Args:
+        pdfs: Файлы PDF.
+        params: Пороги детектора (нужно ``dpi`` — в его пикселях отдаются рамки).
+        surya: ``SuryaSource`` (кэш + модель).
+        variant: Вариант картинки в кэше (``Variant``).
 
     Returns:
-        ``{путь PDF: {номер страницы: (предложения, исключения)}}``.
+        ``{путь PDF: {номер страницы: (предложения ``[(рамка, метка)]``, исключения ``[рамка]``)}}``
+        в пикселях рендера ``params.dpi``.
     """
-    from ocr_utils.line_art_detection import layout as layout_module
+    from ocr_utils.page_layout.image import PageImage
 
     result: dict = {}
     for pdf_path in tqdm(pdfs, desc="Разметка страниц (GPU)", disable=not progress):
@@ -204,11 +217,16 @@ def detect_layout(pdfs: list[Path], params: LineArtParams, proposals, progress: 
         try:
             with fitz.open(pdf_path) as doc:
                 for index in range(doc.page_count):
-                    gray = render_page(doc[index], params.dpi)
-                    pages[index] = layout_module.split(proposals.boxes(pdf_path, index, gray))
+                    image = PageImage.from_pdf_page(doc, index, variant, native_dpi=params.dpi)
+                    blocks = surya.resolve(image)
+                    if blocks is None:
+                        continue
+                    native = blocks.scaled_to(image.width, image.height)
+                    findings = [(b.box.as_tuple(), b.label) for b in native.by_label(FINDING_LABELS, 0.0)]
+                    excludes = [b.box.as_tuple() for b in native.by_label(EXCLUDE_LABELS, 0.0)]
+                    pages[index] = (findings, excludes)
         except Exception as error:  # noqa: BLE001
             logger.error("Разметка %s не удалась: %s", pdf_path, error)
-        proposals.flush(pdf_path)
         result[str(pdf_path)] = pages
     return result
 

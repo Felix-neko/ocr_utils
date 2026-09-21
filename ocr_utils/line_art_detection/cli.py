@@ -52,7 +52,19 @@ def cli() -> None:
 @click.option("--no-tables", is_flag=True, help="Не искать разлинованные таблицы по скоплениям линеек.")
 @click.option("--reject-halftone", is_flag=True, help="Отсеивать растр по пикселям (на паке-1 вредно, см. features).")
 @click.option("--use-surya-layout", is_flag=True, help="Добавить предложения Surya: таблицы без линеек и формулы.")
-@click.option("--surya-cache", type=click.Path(path_type=Path), default=None, help="Папка кэша разметки Surya.")
+@click.option(
+    "--surya-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Корень кэша surya page_layout (общий с detect и сборкой PDF); без него — модель без кэша.",
+)
+@click.option(
+    "--variant",
+    default="fr_nogeo",
+    show_default=True,
+    type=click.Choice(["fr_geo", "fr_nogeo"]),
+    help="Вариант картинки в кэше surya: какие это PDF FineReader.",
+)
 @click.option(
     "--min-age-minutes",
     type=float,
@@ -81,6 +93,7 @@ def scan(
     reject_halftone,
     use_surya_layout,
     surya_cache,
+    variant,
     min_age_minutes,
     limit,
 ) -> None:
@@ -128,9 +141,13 @@ def scan(
 
     surya_by_pdf = None
     if use_surya_layout:
-        from ocr_utils.line_art_detection.layout import LayoutProposals
+        from ocr_utils.page_layout.image import Variant
+        from ocr_utils.page_layout.surya.cache import SuryaCache
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
+        from ocr_utils.page_layout.surya.source import SuryaSource
 
-        surya_by_pdf = detect_layout(pdfs, params, LayoutProposals(surya_cache))
+        source = SuryaSource(SuryaCache(surya_cache) if surya_cache else None, SuryaLayoutModel())
+        surya_by_pdf = detect_layout(pdfs, params, source, Variant(variant))
 
     results = analyse_folder(pdfs, params, markup=markup, jobs=jobs, surya_by_pdf=surya_by_pdf)
     write_csv(csv_path, results)

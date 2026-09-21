@@ -72,10 +72,9 @@ def _pad_xy(pad_px: "int | tuple[int, int]") -> "tuple[int, int]":
 # неизбежно залез бы в соседний блок и подмешал туда заливку LaMa, т.е. испортил
 # бы контент, который мы и защищаем. Ступенька яркости на шве — меньшее зло.
 
-# Сторона, до которой уменьшается кадр перед прогоном layout. Surya всё равно
-# ресайзит вход под свой размер, а на 36-Мп сканах предварительное уменьшение
-# экономит секунды на одном только декодировании/конвертации.
-LAYOUT_WORK_SIDE = 2048
+# Сторона, до которой уменьшается кадр перед прогоном layout, — единая для всех
+# потребителей surya (``page_layout.image.SURYA_MAX_SIDE``).
+from ocr_utils.page_layout.image import SURYA_MAX_SIDE as LAYOUT_WORK_SIDE  # noqa: E402
 
 # --- Фильтр «мусорных» блоков layout ---------------------------------------
 # Surya на нетекстовых страницах (яркая обложка, пустая страница с пальцем)
@@ -164,7 +163,11 @@ def layout_polygons(rgb: np.ndarray, models) -> "list[np.ndarray]":
     book_area = _book_region_area(small)
     polys: list[np.ndarray] = []
     for box in blocks:
-        poly = np.asarray(box.polygon, dtype=np.float32)
+        if getattr(box, "polygon", None) is not None:
+            poly = np.asarray(box.polygon, dtype=np.float32)
+        else:
+            b = box.box
+            poly = np.array([[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]], dtype=np.float32)
         if _is_junk_layout_block(box.label, float(box.confidence), poly, sh, sw, book_area):
             continue
         polys.append(poly / scale)

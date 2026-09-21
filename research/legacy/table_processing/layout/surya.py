@@ -83,37 +83,23 @@ def save(cache_dir: Path, scan_rel_path: str, layout: LayoutBlocks, raw: object 
 
 
 class Predictor:
-    """Ленивая обёртка над ``surya.layout.LayoutPredictor``: модель грузится при первом вызове."""
+    """Обёртка над единой ``page_layout.surya.SuryaLayoutModel`` со старой сигнатурой стенда."""
 
     def __init__(self) -> None:
-        self._predictor = None
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
 
-    def _load(self):
-        if self._predictor is None:
-            from surya.foundation import FoundationPredictor
-            from surya.layout import LayoutPredictor
-            from surya.settings import settings
-
-            self._predictor = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
-        return self._predictor
+        self._model = SuryaLayoutModel()
 
     def predict(self, grays: Sequence[np.ndarray]) -> list[LayoutBlocks]:
         """Разметка серых полос; координаты — в пикселях поданных картинок."""
         return [layout for layout, _ in self.predict_raw(grays)]
 
     def predict_raw(self, grays: Sequence[np.ndarray]) -> list[tuple[LayoutBlocks, object]]:
-        """То же, плюс сырой ответ surya на каждую полосу — для кэша."""
-        from PIL import Image
+        """То же; «сырой ответ» больше не отдаётся (``None``) — кэш ``page_layout`` его не хранит."""
+        import cv2
 
-        predictor = self._load()
-        results: list[tuple[LayoutBlocks, object]] = []
-        for start in range(0, len(grays), BATCH):
-            chunk = grays[start : start + BATCH]
-            images = [Image.fromarray(gray).convert("RGB") for gray in chunk]
-            for gray, result in zip(chunk, predictor(images)):
-                height, width = gray.shape[:2]
-                results.append((from_surya_result(result, width, height), result))
-        return results
+        frames = [cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB) if gray.ndim == 2 else gray for gray in grays]
+        return [(blocks, None) for blocks in self._model.predict(frames)]
 
 
 __all__ = ["Block", "LayoutBlocks", "Predictor", "cache_path", "load", "save"]

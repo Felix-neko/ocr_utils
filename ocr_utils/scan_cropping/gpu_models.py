@@ -92,8 +92,8 @@ LAMA_ROI_MAX_SIDE = 512
 DOCSHADOW_DIR = MODELS_DIR / "docshadow"
 DOCSHADOW_WEIGHTS = {"sd7k": "SD7K.pth", "kligler": "Kligler.pth", "jung": "Jung.pth"}
 
-# Сторона уменьшенной копии кадра для Surya layout.
-LAYOUT_WORK_SIDE = 2048
+# Сторона уменьшенной копии кадра для Surya layout — единая для всех потребителей surya.
+from ocr_utils.page_layout.image import SURYA_MAX_SIDE as LAYOUT_WORK_SIDE  # noqa: E402
 
 
 def resolve_model_path(name: str) -> str:
@@ -524,14 +524,10 @@ class GpuModels:
     # --------------------------------------------------------
 
     def _load_layout(self):
-        """Загрузка Surya LayoutPredictor."""
-        from surya.foundation import FoundationPredictor
-        from surya.layout import LayoutPredictor
-        from surya.settings import settings
+        """Единая модель surya layout (``page_layout.surya.SuryaLayoutModel``); веса грузятся при первом кадре."""
+        from ocr_utils.page_layout.surya.model import SuryaLayoutModel
 
-        predictor = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
-        predictor.disable_tqdm = True
-        return predictor
+        return SuryaLayoutModel()
 
     def layout_blocks(self, rgb: np.ndarray) -> list:
         """Блоки разметки страницы (текст, заголовки, картинки, таблицы...).
@@ -539,9 +535,9 @@ class GpuModels:
         Аргументы:
             rgb: кадр RGB uint8 (H, W, 3) полного разрешения.
 
-        Возвращает список блоков Surya в координатах ПОДАННОГО кадра; у каждого
-        есть ``polygon`` (4 точки), ``label`` и ``confidence``. Отсев мусорных
-        блоков здесь не делается — он в ``finger_removal.text_protection``.
+        Возвращает список блоков ``page_layout.surya.blocks.Block`` в координатах
+        ПОДАННОГО кадра; у каждого есть ``polygon`` (4 точки), ``label`` и ``confidence``.
+        Отсев мусорных блоков здесь не делается — он в ``finger_removal.text_protection``.
 
         Кадр подаётся как есть; уменьшение до ``LAYOUT_WORK_SIDE`` и обратный
         пересчёт координат — задача вызывающего: фильтровать блоки удобнее в том
@@ -552,9 +548,7 @@ class GpuModels:
                 "GpuModels создан без Surya layout: пересоздайте объект с with_layout=True "
                 "(в CLI это флаг --protect-text-layout)"
             )
-        from PIL import Image as PILImage
-
-        return self._layout([PILImage.fromarray(rgb)])[0].bboxes
+        return list(self._layout.predict_one(rgb).blocks)
 
     # --------------------------------------------------------
     # Коррекция тени: DocShadow
