@@ -323,3 +323,15 @@ def test_headings_ids_parsed_normalized_and_legacy_fields_converted():
     assert legacy.title_in_list is True and legacy.running_header_rubric_id is None
     assert json_schema()["properties"]["headings"]["items"]["required"] == ["text", "article_id"]
     assert "title_in_list" not in json_schema()["properties"]
+
+
+def test_bad_backslash_escapes_are_repaired_and_counted():
+    """`\\(`, `\\н`, `\\u` без hex внутри JSON-строки чинятся при разборе; валидные escape и уже экранированные — нет."""
+    raw = '{"content_markdown": "листы \\(разборных\\) звень-\\нев \\u20 x \\n \\" \\\\ \\u2003 \\\\( done"}'
+    result = parse_json_text(raw)
+    assert result.content_markdown == 'листы \\(разборных\\) звень-\\нев \\u20 x \n " \\ \u2003 \\( done'
+    assert result.repaired_escapes == 4
+    assert parse_json_text(result.to_json()).repaired_escapes == 0, "повторный разбор починенного файла — без замен"
+    assert parse_json_text('{"content_markdown": "чисто \\n"}').repaired_escapes == 0
+    with pytest.raises(ParseError):
+        parse_json_text('{"content_markdown": "оборвано \\u')

@@ -164,6 +164,8 @@ SUMMARY_FIELDS = (
     "is_damaged",
     "hyphens_joined",
     "masked",
+    "repaired_escapes",
+    "retry_note",
     "messages",
     "parse_error",
     "error",

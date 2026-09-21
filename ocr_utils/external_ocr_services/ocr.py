@@ -65,7 +65,10 @@ logger = logging.getLogger(__name__)
 
 # Потолок выходных токенов. Полоса — 3-6 тыс. знаков ≈ 2-4 тыс. токенов, таблица в HTML вдвое
 # больше; 16k оставляет запас, но не даёт зациклившейся модели наговорить на доллар.
-DEFAULT_MAX_TOKENS = 16000
+# Потолок выходных токенов. По прогону пака-1 (10 634 ответа, 21.09.2026): медиана 1075, 99,9 % ≤ 6006,
+# максимум 6774 — 10 000 хватает любой полосе, а зацикленный ответ (до потолка) стоит вдвое дешевле,
+# чем при прежних 16 000. Входит в ключ кэша запросов: смена значения — новые записи.
+DEFAULT_MAX_TOKENS = 10000
 
 # Статусы, после которых имеет смысл повторить запрос в более простом режиме JSON.
 FALLBACK_STATUSES = frozenset({400, 404, 422})
@@ -157,6 +160,9 @@ class PageJob:
     # Полоса шла этапом TOC, но модель сочла её не оглавлением, и теперь она идёт этапом PAGE;
     # пишется в meta (``toc_demoted``), чтобы повтор с --skip-done узнал её без запроса.
     demoted_from_toc: bool = False
+    # Причина повтора после сбоя разбора (второй раунд ``recognize_page``): дописывается в конец
+    # пользовательского сообщения — при temperature 0 другой текст запроса даёт другой ответ.
+    retry_note: str | None = None
 
     def __post_init__(self) -> None:
         # Строки из старых вызовов и тестов («page», «contents») приводятся к перечислениям, чтобы
@@ -286,6 +292,7 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
         max_lines=SECOND_PASS_MAX_LINES,
         rubrics=[dict(r) if isinstance(r, dict) else r for r in job.rubrics],
         articles=[dict(a) for a in job.articles],
+        retry_note=job.retry_note,
     )
     return system, user
 
@@ -747,107 +754,162 @@ def recognize_page(
     meta["tiling"] = describe(tiles).as_dict()  # сетка и размеры — чтобы сверять с тем, что видела модель
     meta["image_bytes"] = sum(len(tile.data) for tile in tiles)
 
-    # Цепочка запасных ходов. Внешний цикл — режимы JSON от строгого к простому; внутри каждого
-    # ещё две поправки: убрать отвергнутый параметр reasoning и повторить, если ответ — эхо
-    # response_format. Каждый неудачный шаг остаётся в meta["fallbacks"] для разбора после прогона.
+    # Цепочка запасных ходов — два раунда. Раунд 1: режимы JSON от строгого к простому, внутри
+    # каждого две поправки (убрать отвергнутый reasoning; повторить после эха response_format) и
+    # переход к следующему режиму при цикле/обрыве по потолку. Если режимы исчерпаны или ответ не
+    # разобрался, раунд 2 — тот же запрос с пометкой о причине в конце пользовательского сообщения
+    # (``PageJob.retry_note``): при temperature 0 повтор того же текста дал бы тот же ответ, а другой
+    # текст — другой; ключ кэша меняется сам. Сетевой сбой второго раунда не запускает. Каждый
+    # неудачный шаг остаётся в meta["fallbacks"] для разбора после прогона.
     response: ChatResponse | None = None
+    result: PageResult | None = None
     skip_reasoning = False
     payload: dict = {}
-    chain = _fallback_chain(spec)
-    for json_mode in chain:
-        payload = build_payload(spec, tiles, options, job, json_mode, skip_reasoning)
-        try:
-            # Из кэша, если такой запрос уже был; иначе в сеть (внутри — свои повторы по 5xx/429).
-            response, verdict = _chat_cached(client, spec, options, job, json_mode, payload, tiles, meta)
-        except OpenRouterError as error:
-            meta.setdefault("fallbacks", []).append(
-                {"json_mode": json_mode, "error": str(error), "body": error.body[:300]}
-            )
-            # 4xx с упоминанием reasoning в теле: провайдер параметра не знает — тот же запрос без него.
-            if error.status in FALLBACK_STATUSES and "reasoning" in payload and "reasoning" in error.body.lower():
-                logger.warning("%s %s: параметр reasoning отвергнут (%s), повторяю без него", spec.name, job.rel, error)
-                skip_reasoning = True
-                try:
-                    payload = build_payload(spec, tiles, options, job, json_mode, True)
-                    response, verdict = _chat_cached(client, spec, options, job, json_mode, payload, tiles, meta)
-                except OpenRouterError as again:
-                    meta["fallbacks"].append({"json_mode": json_mode, "error": str(again), "body": again.body[:300]})
-                    error = again
-                else:
-                    meta["json_mode_used"] = json_mode
-                    break
-            # Другой 4xx из FALLBACK_STATUSES — скорее всего не принят response_format: режим проще.
-            if error.status in FALLBACK_STATUSES and json_mode is not JsonMode.NONE:
-                logger.warning("%s %s: режим %s отвергнут (%s), пробую проще", spec.name, job.rel, json_mode, error)
+    retry_note: str | None = None
+    for round_index in (1, 2):
+        if round_index == 2:
+            if retry_note is None or meta.get("error"):
+                break
+            job = replace(job, retry_note=retry_note)
+            meta["retry_note"] = retry_note
+            meta.setdefault("fallbacks", []).append({"round": 1, "error": retry_note})
+            if response is not None:  # ответ первого раунда оплачен зря
+                meta["cost_usd_wasted"] = round(
+                    float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6
+                )
+            logger.warning("%s %s: повтор с пометкой в запросе: %s", spec.name, job.rel, retry_note)
+            response, skip_reasoning = None, False
+        chain = _fallback_chain(spec)
+        for json_mode in chain:
+            payload = build_payload(spec, tiles, options, job, json_mode, skip_reasoning)
+            try:
+                # Из кэша, если такой запрос уже был; иначе в сеть (внутри — свои повторы по 5xx/429).
+                response, verdict = _chat_cached(client, spec, options, job, json_mode, payload, tiles, meta)
+            except OpenRouterError as error:
+                meta.setdefault("fallbacks", []).append(
+                    {"json_mode": json_mode, "error": str(error), "body": error.body[:300]}
+                )
+                # 4xx с упоминанием reasoning в теле: провайдер параметра не знает — тот же запрос без него.
+                if error.status in FALLBACK_STATUSES and "reasoning" in payload and "reasoning" in error.body.lower():
+                    logger.warning(
+                        "%s %s: параметр reasoning отвергнут (%s), повторяю без него", spec.name, job.rel, error
+                    )
+                    skip_reasoning = True
+                    try:
+                        payload = build_payload(spec, tiles, options, job, json_mode, True)
+                        response, verdict = _chat_cached(client, spec, options, job, json_mode, payload, tiles, meta)
+                    except OpenRouterError as again:
+                        meta["fallbacks"].append(
+                            {"json_mode": json_mode, "error": str(again), "body": again.body[:300]}
+                        )
+                        error = again
+                    else:
+                        meta["json_mode_used"] = json_mode
+                        break
+                # Другой 4xx из FALLBACK_STATUSES — скорее всего не принят response_format: режим проще.
+                if error.status in FALLBACK_STATUSES and json_mode is not JsonMode.NONE:
+                    logger.warning("%s %s: режим %s отвергнут (%s), пробую проще", spec.name, job.rel, json_mode, error)
+                    continue
+                # Всё остальное (лимиты, 5xx после повторов клиента, «none» тоже отвергнут) — сбой полосы.
+                meta["error"] = f"{error} {error.body[:300]}".strip()
+                break
+            meta["json_mode_used"] = json_mode
+            # Ответ пришёл, но это {"type": "json_object"} вместо страницы: деньги за него потрачены
+            # зря (считаем отдельно), запрос уходит ещё раз в следующем, более простом режиме.
+            if verdict is CacheVerdict.FORMAT_ECHO:
+                meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "эхо response_format"})
+                meta["cost_usd_wasted"] = round(
+                    float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6
+                )
+                logger.warning(
+                    "%s %s: ответ — эхо response_format, повторяю без режима %s", spec.name, job.rel, json_mode
+                )
                 continue
-            # Всё остальное (лимиты, 5xx после повторов клиента, «none» тоже отвергнут) — сбой полосы.
-            meta["error"] = f"{error} {error.body[:300]}".strip()
+            # Модель зациклилась на «▒» до потолка токенов — ответ обрезан. При temperature 0 тот же
+            # запрос даст тот же цикл, поэтому повтор идёт в следующем режиме JSON (другой контекст).
+            if verdict is CacheVerdict.GAP_RUNAWAY:
+                meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "цикл заполнителя <gap>"})
+                meta["cost_usd_wasted"] = round(
+                    float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6
+                )
+                logger.warning(
+                    "%s %s: ответ зациклился на заполнителе <gap>, повторяю без режима %s",
+                    spec.name,
+                    job.rel,
+                    json_mode,
+                )
+                continue
+            # Ответ упёрся в потолок токенов (finish_reason length) — JSON оборван, обычно из-за цикла;
+            # повтор в следующем режиме, как и при цикле заполнителя.
+            if verdict is CacheVerdict.TRUNCATED:
+                meta.setdefault("fallbacks", []).append(
+                    {"json_mode": json_mode, "error": "ответ оборван по потолку токенов"}
+                )
+                meta["cost_usd_wasted"] = round(
+                    float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6
+                )
+                logger.warning(
+                    "%s %s: ответ оборван по потолку токенов, повторяю без режима %s", spec.name, job.rel, json_mode
+                )
+                continue
             break
-        meta["json_mode_used"] = json_mode
-        # Ответ пришёл, но это {"type": "json_object"} вместо страницы: деньги за него потрачены
-        # зря (считаем отдельно), запрос уходит ещё раз в следующем, более простом режиме.
-        if verdict is CacheVerdict.FORMAT_ECHO:
-            meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "эхо response_format"})
-            meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
-            logger.warning("%s %s: ответ — эхо response_format, повторяю без режима %s", spec.name, job.rel, json_mode)
-            continue
-        # Модель зациклилась на «▒» до потолка токенов — ответ обрезан. При temperature 0 тот же
-        # запрос даст тот же цикл, поэтому повтор идёт в следующем режиме JSON (другой контекст).
-        if verdict is CacheVerdict.GAP_RUNAWAY:
-            meta.setdefault("fallbacks", []).append({"json_mode": json_mode, "error": "цикл заполнителя <gap>"})
-            meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
-            logger.warning(
-                "%s %s: ответ зациклился на заполнителе <gap>, повторяю без режима %s", spec.name, job.rel, json_mode
+        meta["reasoning_sent"] = not skip_reasoning
+        if response is None:
+            if meta.get("error"):
+                break
+            # Режимы исчерпаны: последний откат говорит, почему (обрыв по потолку, цикл, эхо).
+            last = (meta.get("fallbacks") or [{}])[-1].get("error", "")
+            retry_note = (
+                "the answer looped on the <gap> placeholder"
+                if "заполнителя" in last
+                else "the answer hit the token limit (it was looping)" if "потолку" in last else "no usable answer"
             )
             continue
-        # Ответ упёрся в потолок токенов (finish_reason length) — JSON оборван, обычно из-за цикла;
-        # повтор в следующем режиме, как и при цикле заполнителя.
-        if verdict is CacheVerdict.TRUNCATED:
-            meta.setdefault("fallbacks", []).append(
-                {"json_mode": json_mode, "error": "ответ оборван по потолку токенов"}
+        # Учёт удачного ответа: кто обслужил, сколько токенов (в том числе из кэша префикса), цена по
+        # usage.cost провайдера, число попыток клиента.
+        meta.update(
+            provider=response.provider,
+            served_model=response.model,
+            request_id=response.request_id,
+            finish_reason=response.finish_reason,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+            reasoning_tokens=response.reasoning_tokens,
+            cached_tokens=response.cached_tokens,
+            cost_usd=response.cost_usd,
+            latency_s=round(response.latency_s, 2),
+            attempts=response.attempts,
+            response_chars=len(response.text),
+        )
+        _write_debug(options, job, tiles, payload, response.text)
+        # Разбор терпимый (обрезка ```json, лишние ключи, старые поля, битые escape); не вышло — сырой
+        # текст сохраняется рядом с meta, чтобы не терять оплаченный ответ, и идёт второй раунд.
+        try:
+            result = parse_json_text(response.text, job.stage)
+            meta.pop("parse_error", None)
+            break
+        except ParseError as error:
+            meta["parse_error"] = str(error)
+            paths.raw.write_text(response.text, encoding="utf-8")
+            # В режиме без формата обрыв по потолку вердиктом не ловится — виден здесь по finish_reason.
+            retry_note = (
+                "the answer hit the token limit (it was looping)"
+                if response.finish_reason == "length"
+                else "the answer was not valid JSON (a bad backslash escape or a cut-off string)"
             )
-            meta["cost_usd_wasted"] = round(float(meta.get("cost_usd_wasted") or 0.0) + (response.cost_usd or 0.0), 6)
-            logger.warning(
-                "%s %s: ответ оборван по потолку токенов, повторяю без режима %s", spec.name, job.rel, json_mode
-            )
-            continue
-        break
-    meta["reasoning_sent"] = not skip_reasoning
     meta["seconds"] = round(time.monotonic() - started, 2)  # с тайлами и всеми повторами, в отличие от latency_s
     if response is None:
         meta.setdefault("error", "запрос не удался")
         _write_debug(options, job, tiles, payload, None)
         write_meta(paths.meta, meta)
         return meta, None
-
-    # Учёт удачного ответа: кто обслужил, сколько токенов (в том числе из кэша префикса), цена по
-    # usage.cost провайдера, число попыток клиента.
-    meta.update(
-        provider=response.provider,
-        served_model=response.model,
-        request_id=response.request_id,
-        finish_reason=response.finish_reason,
-        prompt_tokens=response.prompt_tokens,
-        completion_tokens=response.completion_tokens,
-        reasoning_tokens=response.reasoning_tokens,
-        cached_tokens=response.cached_tokens,
-        cost_usd=response.cost_usd,
-        latency_s=round(response.latency_s, 2),
-        attempts=response.attempts,
-        response_chars=len(response.text),
-    )
-    _write_debug(options, job, tiles, payload, response.text)
-    # Разбор терпимый (обрезка ```json, лишние ключи, старые поля); не вышло — сырой текст
-    # сохраняется рядом с meta, чтобы не терять оплаченный ответ, полоса — сбойная.
-    try:
-        result = parse_json_text(response.text, job.stage)
-    except ParseError as error:
-        meta["parse_error"] = str(error)
-        paths.raw.write_text(response.text, encoding="utf-8")
+    if result is None:
         write_meta(paths.meta, meta)
         return meta, None
     if result.masked:  # мусор модели, замаскированный при разборе (masking.py) — для сводки
         meta["masked"] = result.masked
+    if result.repaired_escapes:  # битые `\`-escape в JSON, починенные разбором, — тоже для сводки
+        meta["repaired_escapes"] = result.repaired_escapes
     if result.edge_words:
         # Продолжение переноса, объявленное «восстановленным» («ва-» → «ва<supplied>л</supplied>ютных»),
         # — не повреждение: тег снимается, буквы остаются.

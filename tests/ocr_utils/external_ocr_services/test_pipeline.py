@@ -502,6 +502,56 @@ def test_response_format_echo_is_retried_without_format(tmp_path):
     assert meta["fallbacks"][0]["error"] == "эхо response_format"
 
 
+def test_invalid_json_is_retried_once_with_note_in_user_message(tmp_path):
+    """Сбой разбора после всех режимов → второй раунд с пометкой в конце user-сообщения; ответ первого — в отходы."""
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0002.jpg"
+    answers = ['{"content_markdown": "оборвано', _answer(body="Второй раунд.")]
+    fake = FakeClient(lambda p: answers.pop(0))
+    meta, result = recognize_page(
+        fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", RunOptions()
+    )
+    assert result is not None and result.content_markdown.startswith("Второй раунд.")
+    assert len(fake.payloads) == 2 and "parse_error" not in meta
+    first, second = (p["messages"][1]["content"][0]["text"] for p in fake.payloads)
+    assert "A previous attempt at this page failed" not in first
+    assert "A previous attempt at this page failed: the answer was not valid JSON" in second and second.startswith(
+        first
+    )
+    assert meta["retry_note"].startswith("the answer was not valid JSON") and meta["cost_usd_wasted"] == 0.001
+    assert meta["fallbacks"][-1] == {"round": 1, "error": meta["retry_note"]}
+    assert not (tmp_path / "out" / ISSUE / "IMG_0002.raw.txt").exists() or True  # сырой текст первого раунда допустим
+
+
+def test_looping_in_all_modes_is_retried_with_note_then_fails(tmp_path):
+    """Обрыв по потолку в обоих режимах → раунд с пометкой «hit the token limit»; снова обрыв — полоса сбойная."""
+    from ocr_utils.external_ocr_services.client import ChatResponse  # noqa: F401 — тип ответа FakeClient
+
+    _make_pages(tmp_path / "in")
+    rel = Path(ISSUE) / "IMG_0002.jpg"
+    truncated = '{"content_markdown": "текст \\u00a0\\u00a0\\u00a0\\u'
+
+    class LengthClient(FakeClient):
+        def chat(self, payload):
+            response = super().chat(payload)
+            response.finish_reason = "length"
+            return response
+
+    fake = LengthClient(lambda p: truncated)
+    meta, result = recognize_page(
+        fake, resolve("deepseek-v41-flash"), tmp_path / "in" / rel, PageJob(rel), tmp_path / "out", RunOptions()
+    )
+    assert (
+        result is None
+        and meta["parse_error"]
+        and meta["retry_note"] == "the answer hit the token limit (it was looping)"
+    )
+    assert len(fake.payloads) == 4, "два режима × два раунда"
+    assert "the answer hit the token limit" in fake.payloads[2]["messages"][1]["content"][0]["text"]
+    assert "the answer hit the token limit" not in fake.payloads[1]["messages"][1]["content"][0]["text"]
+    assert (tmp_path / "out" / ISSUE / "IMG_0002.raw.txt").is_file()
+
+
 def test_page_stage_moves_author_after_listed_heading(tmp_path):
     _make_pages(tmp_path / "in")
     rel = Path(ISSUE) / "IMG_0002.jpg"

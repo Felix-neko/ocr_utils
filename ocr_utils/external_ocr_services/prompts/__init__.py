@@ -99,6 +99,7 @@ def user_prompt(
     max_lines: int = 60,
     rubrics: list | None = None,
     articles: list[dict] | None = None,
+    retry_note: str | None = None,
 ) -> str:
     """Текст рядом с картинками: фраза про повреждения, задача этапа, список выпуска, раскладка тайлов.
 
@@ -117,6 +118,9 @@ def user_prompt(
         max_lines: Сколько строк ``edge_words`` первого прохода показывать второму.
         rubrics: Рубрики «Содержания» выпуска для этапа ``PAGE`` (``[{"id", "title"}]`` или строки); пусто — списка нет.
         articles: Статьи «Содержания» (``[{"title", "authors": [str], "rubric"}]``) для этапа ``PAGE``.
+        retry_note: Причина повтора после сбоя разбора (по-английски: ответ упёрся в потолок /
+            невалидный JSON); с ней в конец сообщения добавляется абзац «прошлая попытка не удалась —
+            перепиши заново, не повторяя строк». ``None`` — обычный запрос, рендер прежний байт в байт.
 
     Returns:
         Текст пользовательского сообщения (без картинок).
@@ -133,4 +137,5 @@ def user_prompt(
         max_lines=max_lines,
         rubrics=list(rubrics or []),
         articles=list(articles or []),
+        retry_note=retry_note,
     )

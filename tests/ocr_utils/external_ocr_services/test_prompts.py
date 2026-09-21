@@ -92,6 +92,13 @@ def test_page_stage_prompt_with_and_without_lists():
     assert "add an entry to `headings`" in with_lists and "add an entry to `rubrics`" in with_lists
     assert "running_header_article_id" in with_lists and "running_footer_…" in with_lists
     assert "title_in_list" not in with_lists and '"headings": array of objects' in system_prompt("toc")
+    # Пометка повтора после сбоя разбора — только с retry_note, в самом конце; без неё рендер прежний.
+    noted = user_prompt(
+        2, 1, 2, rubrics=["Консультация"], articles=articles, retry_note="the answer hit the token limit"
+    )
+    assert noted.startswith(user) and noted.rstrip().endswith("without padding rows or repeated cells.")
+    assert "A previous attempt at this page failed: the answer hit the token limit." in noted
+    assert "A previous attempt" not in user
 
 
 def test_system_prompts_share_prefix_and_never_depend_on_issue():

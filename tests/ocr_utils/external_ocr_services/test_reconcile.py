@@ -230,3 +230,32 @@ def test_heading_restored_from_bold_topic_and_rubric_from_marker(tmp_path):
     assert text.count("# Тема: Технические") == 1, "повтор на другой странице не тронут"
     assert [(a["id"], a["status"], a["page_number"]) for a in assembly.reconcile.articles] == [("A1", "restored", 75)]
     assert [(r["id"], r["status"]) for r in assembly.reconcile.rubrics] == [("R1", "restored")]
+
+
+def test_toc_list_heading_is_not_a_candidate_for_a_lecture_title_and_body_restore_skips_headings(tmp_path):
+    """`# СОДЕРЖАНИЕ` не становится статьёй «… Содержание …»; лекция «Тема 11.» восстанавливается; чужой `#` не трогается."""
+    _toc(
+        tmp_path,
+        [
+            (None, [("Первая", "1"), ("Планирование — центральное звено. Содержание планов", "5")]),
+            (None, [("О разработке и внедрении систе", "7"), ("мы обеспечения объектов", "7")]),
+        ],
+    )
+    _page(
+        tmp_path,
+        "IMG_0001",
+        "# СОДЕРЖАНИЕ\n\n<toc>\n\n- Первая — 1\n\n</toc>",
+        stage=Stage.TOC,
+        toc_kind=TocKind.CONTENTS,
+        toc=TocPage(TocKind.CONTENTS, False, []),
+    )
+    _page(tmp_path, "IMG_0002", "# Первая\n\nТекст.", "1")
+    _page(tmp_path, "IMG_0003", "## Тема 11. Планирование — центральное звено. Содержание планов\n\nЛекция.", "5")
+    _page(tmp_path, "IMG_0004", "# О разработке и внедрении системы обеспечения объектов\n\nТекст.", "7")
+    assembly = _assemble(tmp_path)
+    text = assembly.text
+    assert text.count("# СОДЕРЖАНИЕ") == 1 and "<!-- article A2 -->\n\n# СОДЕРЖАНИЕ" not in text
+    assert "<!-- article A2 -->\n\n# Тема 11. Планирование — центральное звено. Содержание планов\n\nЛекция." in text
+    assert text.count("# О разработке") == 1 and "# # О разработке" not in text
+    statuses = {a["id"]: a["status"] for a in assembly.reconcile.articles}
+    assert statuses == {"A1": "found", "A2": "restored", "A3": "found", "A4": "missing"}

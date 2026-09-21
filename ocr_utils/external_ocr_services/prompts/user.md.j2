@@ -5,7 +5,8 @@
     stage; toc_kind — вид полосы для этапа toc; rubrics, articles — оглавление выпуска для этапа
     page (рубрики [{id, title}], статьи [{id, title, authors: [str], rubric, rubric_id}]; id «A3»/«R2»
     модель возвращает в полях ответа — v20); ntiles, ncols, nrows — раскладка; second_pass —
-    сводка первого прохода или None; max_lines — сколько строк edge_words показывать.
+    сводка первого прохода или None; max_lines — сколько строк edge_words показывать; retry_note —
+    причина повтора после сбоя разбора (абзац в самом конце; None — обычный запрос).
     v16: абзац «Apply rule 5 strictly» убран (третий повтор правила; на втором проходе его
     удаление ничего не меняло); во втором проходе список edge_words — только «как видно» и вид,
     без догадок full: с ними модель перечитывала названные строки и портила чистые слова
@@ -46,4 +47,8 @@ Its transcription was:
 Use it only to see WHERE the doubtful places are; read every word from the image again, do not copy the transcription.
 {% endif %}
 Now re-read the page with this in mind. First decide for the affected area whether the letters are HIDDEN (cut off, lost in the binding gutter, covered) or VISIBLE BUT UNRELIABLE (blurred, squashed, smeared, washed out by overexposure) — the first reading may have named the wrong kind. Hidden letters → reconstruct them from the context and the visible remains of the word and wrap them in <supplied>; unreliable letters → <unclear> on EVERY word where at least one letter was read by shape or context rather than by clear print; <gap>N</gap> (N — the approximate number of missing characters, nothing else inside the tag) only where no confident reconstruction is possible. Give one `edge_words` entry for EVERY affected line. If on inspection the page is actually clean, say so (`is_damaged` = false, `damage_description` = "") and return the plain transcription without tags.
+{%- endif %}
+{%- if retry_note %}
+
+A previous attempt at this page failed: {{ retry_note }}. Transcribe the page again from scratch. Do not repeat any line, phrase or character run; write every `<gap>` as a number only (`<gap>4</gap>`); inside JSON strings escape a backslash as `\\` and never write markdown escapes such as `\(` or `\_`; keep tables and lists exactly as printed, without padding rows or repeated cells.
 {%- endif %}

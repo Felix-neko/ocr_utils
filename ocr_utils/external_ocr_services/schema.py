@@ -282,6 +282,9 @@ class PageResult:
     # Что замаскировано в теле при разборе (masking.MaskReport.as_dict): чужие теги, невидимые символы,
     # экранированные `*`/`_`; пусто — тело было чистым. Уходит в meta и summary.csv.
     masked: dict = field(default_factory=dict)
+    # Сколько битых `\`-escape починено при разборе (`\(` → `\\(`, `\н` → `\\н`, `\u` без hex): модель
+    # экранирует markdown внутри JSON-строки, и строгий разбор падал бы на всём ответе.
+    repaired_escapes: int = 0
     headings: list[dict] = field(default_factory=list)
     rubrics: list[dict] = field(default_factory=list)
     running_header_article_id: str | None = None
@@ -830,30 +833,61 @@ def parse_json_text(text: str, stage: Stage = Stage.PAGE) -> PageResult:
         raise ParseError("пустой ответ")
     last_error: Exception | None = None
     decoder = json.JSONDecoder()
-    for candidate in _json_candidates(text):
+    for candidate, repaired in _json_candidates(text):
         try:
             payload, _ = decoder.raw_decode(candidate.lstrip())
-            return _coerce(payload, stage)
+            result = _coerce(payload, stage)
         except (json.JSONDecodeError, ParseError) as error:
             last_error = error
+            continue
+        result.repaired_escapes = repaired
+        return result
     raise ParseError(f"невалидный JSON: {last_error}")
 
 
-def _json_candidates(text: str) -> list[str]:
+# Битый escape в JSON-строке: `\` перед символом не из `"\/bfnrtu` (`\(`, `\_`, `\н`) или `\u` без
+# четырёх hex-знаков. Чётное число `\` перед ним — уже экранированные, их не трогать.
+_BAD_ESCAPE = re.compile(r'(?<!\\)((?:\\\\)*)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
+
+
+def _repair_escapes(text: str) -> tuple[str, int]:
+    """Починить битые `\`-escape в тексте ответа: одиночный `\` перед не-escape → `\\`.
+
+    DeepSeek изредка переносит экранирование markdown внутрь JSON-строки («\(разборных\)»,
+    «\_») или пишет `\н` вместо `\n`; строгий JSON на этом падает целиком (3 полосы из 10 649 в
+    прогоне пака 21.09.2026). Починенная строка читается как литеральный `\` — то, что модель и
+    имела в виду.
+
+    Args:
+        text: Кандидат на JSON (весь ответ или его срез).
+
+    Returns:
+        ``(текст, сколько замен)``; без битых escape — исходный текст и 0.
+    """
+    return _BAD_ESCAPE.subn(r"\1\\\\", text)
+
+
+def _json_candidates(text: str) -> list[tuple[str, int]]:
     """Кандидаты на JSON в тексте ответа, от самого строгого к самому терпимому.
 
     Args:
         text: Сырой текст ответа модели.
 
     Returns:
-        Список строк: текст как есть, без ограждений ```json, первый ``{...}`` целиком и всё от
-        первого ``{`` до конца (модели дописывают после JSON второй объект или эхо).
+        ``[(строка, починено escape)]``: текст как есть, без ограждений ```json, первый ``{...}``
+        целиком и всё от первого ``{`` до конца (модели дописывают после JSON второй объект или
+        эхо); затем те же с починенными `\`-escape (:func:`_repair_escapes`), если было что чинить.
     """
-    candidates = [text, _strip_fence(text)]
+    plain = [text, _strip_fence(text)]
     start, end = text.find("{"), text.rfind("}")
     if start >= 0 and end > start:
-        candidates.append(text[start : end + 1])
-        candidates.append(text[start:])
+        plain.append(text[start : end + 1])
+        plain.append(text[start:])
+    candidates = [(candidate, 0) for candidate in plain]
+    for candidate in plain:
+        repaired, count = _repair_escapes(candidate)
+        if count:
+            candidates.append((repaired, count))
     return candidates
 
 
@@ -873,7 +907,7 @@ def pretty_json(text: str) -> str | None:
     if not text or not text.strip():
         return None
     decoder = json.JSONDecoder()
-    for candidate in _json_candidates(text):
+    for candidate, _ in _json_candidates(text):
         try:
             payload, _ = decoder.raw_decode(candidate.lstrip())
         except json.JSONDecodeError:

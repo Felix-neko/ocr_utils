@@ -307,7 +307,9 @@ def reconcile_headings(
     rubric_ids = [r["id"] for r in rubric_entries]
 
     # 1. Кандидаты: каждый уцелевший `#` → статья по id или названию. Заголовок годового указателя на
-    #    полосе оглавления тоже кандидат: «Указатель статей…» в «Содержании» — статья.
+    #    полосе оглавления тоже кандидат («Указатель статей…» в «Содержании» — статья), но только если
+    #    название начинается с него: иначе `# СОДЕРЖАНИЕ` уходил лекции «Планирование… Содержание…»
+    #    по вхождению слова (1973/06).
     by_article: dict[str, list[_Candidate]] = {}
     for index, text in enumerate(blocks):
         match = _H1.match(text)
@@ -316,8 +318,13 @@ def reconcile_headings(
         page_index = page_of[index]
         page = pages[page_index]
         article_id = _ref_id(match.group(1), page.headings, "article_id", titles, article_ids)
-        if article_id is not None:
-            by_article.setdefault(article_id, []).append(_Candidate(index, page_index, match.group(1)))
+        if article_id is None:
+            continue
+        if page.stage == Stage.TOC.value:
+            title = toc.article_by_id(article_id).title
+            if not normalize_title(title).startswith(normalize_title(match.group(1))):
+                continue
+        by_article.setdefault(article_id, []).append(_Candidate(index, page_index, match.group(1)))
 
     # 2. По статье: настоящий `#` по странице оглавления, фантомы — удалить или понизить, нет — восстановить.
     primary_of: dict[str, int] = {}  # id статьи → индекс блока настоящего `#` (у восстановленного — куда вставлен)
@@ -511,7 +518,7 @@ def _restore_heading(
 # курсивом (`*…*`, `_…_`), подчёркнутым (`<u>…</u>`) — часто с пометкой «Тема:» (лекции раздела
 # «Экономическое образование кадров» в МТС: `**Тема: Ленинские принципы…**`).
 _BODY_TITLE_MARKUP = re.compile(r"^(?:#{2,6}\s+|\*{1,2}|_{1,2}|<u>)|(?:\*{1,2}|_{1,2}|</u>)$", re.IGNORECASE)
-_TOPIC_PREFIX = re.compile(r"^Тема\s*[:.]\s*", re.IGNORECASE)
+_TOPIC_PREFIX = re.compile(r"^Тема\s*\d*\s*[:.]\s*", re.IGNORECASE)  # «Тема:», «Тема.», «Тема 11.»
 BODY_TITLE_MAX_CHARS = 300
 
 
@@ -585,7 +592,9 @@ def _restore_from_body(
         if page.number != toc_page or page_index not in page_start:
             continue
         for index in range(page_start[page_index], page_end[page_index]):
-            if floating[index] or index in edits.delete or index in edits.replace:
+            # Готовый `#` — кандидат другой статьи (оглавление разрезало название по переносу на две
+            # статьи, 1976/08), его не трогаем.
+            if floating[index] or index in edits.delete or index in edits.replace or _H1.match(blocks[index]):
                 continue
             text = _body_title(blocks[index])
             if text is not None and title_matches(_title_key(text), [title]):
