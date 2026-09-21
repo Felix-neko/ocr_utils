@@ -1,4 +1,4 @@
-# Проверка детекторов ориентации: /mnt/SYSTEM/raw/mts/pack1_background_blurred_v2/sharpened
+# Проверка детекторов ориентации: /mnt/system/raw/mts/pack1_background_blurred_v2/sharpened
 
 Эталон: 150 полос. Каждая подана во всех четырёх поворотах — 600 попыток.
 

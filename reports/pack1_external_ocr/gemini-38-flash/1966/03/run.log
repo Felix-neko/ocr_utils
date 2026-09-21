@@ -1,0 +1,145 @@
+2026-09-14 00:03:20,604 INFO research.external_ocr_models: пропущено готовых: 0
+2026-09-14 00:03:20,604 INFO research.external_ocr_models: gemini-38-flash (google/gemini-3.8-flash): 97 полос, 4 потоков, strips=1, max_side=2200
+2026-09-14 00:03:24,144 INFO research.external_ocr_models: 1/97 IMG_0104_2R.jpg: ok, 1956 tok → 99 tok, $0.00183825, 3 с
+2026-09-14 00:03:24,908 INFO research.external_ocr_models: 2/97 IMG_0105_2R.jpg: ok, 1990 tok → 617 tok, $0.00380625, 4 с
+2026-09-14 00:03:25,988 INFO research.external_ocr_models: 3/97 IMG_0106_1L.jpg: ok, 1990 tok → 837 tok, $0.00463125, 5 с
+2026-09-14 00:03:26,180 INFO research.external_ocr_models: 4/97 IMG_0106_2R.jpg: ok, 1990 tok → 889 tok, $0.00482625, 5 с
+2026-09-14 00:03:29,374 INFO research.external_ocr_models: 5/97 IMG_0107_2R.jpg: ok, 1990 tok → 891 tok, $0.00483375, 4 с
+2026-09-14 00:03:29,793 INFO research.external_ocr_models: 6/97 IMG_0107_1L.jpg: ok, 1990 tok → 905 tok, $0.00488625, 5 с
+2026-09-14 00:03:31,269 INFO research.external_ocr_models: 7/97 IMG_0108_1L.jpg: ok, 1990 tok → 856 tok, $0.0047025, 5 с
+2026-09-14 00:03:31,545 INFO research.external_ocr_models: 8/97 IMG_0108_2R.jpg: ok, 1990 tok → 687 tok, $0.00406875, 5 с
+2026-09-14 00:03:34,090 INFO research.external_ocr_models: 9/97 IMG_0109_1L.jpg: ok, 1990 tok → 709 tok, $0.00415125, 4 с
+2026-09-14 00:03:34,679 INFO research.external_ocr_models: 10/97 IMG_0109_2R.jpg: ok, 1990 tok → 803 tok, $0.00450375, 5 с
+2026-09-14 00:03:36,417 INFO research.external_ocr_models: 11/97 IMG_0110_1L.jpg: ok, 1990 tok → 848 tok, $0.0046725, 5 с
+2026-09-14 00:03:36,719 INFO research.external_ocr_models: 12/97 IMG_0110_2R.jpg: ok, 1990 tok → 907 tok, $0.00489375, 5 с
+2026-09-14 00:03:39,167 INFO research.external_ocr_models: 13/97 IMG_0111_1L.jpg: ok, 1990 tok → 851 tok, $0.00468375, 5 с
+2026-09-14 00:03:39,753 INFO research.external_ocr_models: 14/97 IMG_0111_2R.jpg: ok, 1990 tok → 812 tok, $0.0045375, 5 с
+2026-09-14 00:03:42,462 INFO research.external_ocr_models: 15/97 IMG_0112_2R.jpg: ok, 1990 tok → 1201 tok, $0.00599625, 5 с
+2026-09-14 00:03:42,767 INFO research.external_ocr_models: 16/97 IMG_0112_1L.jpg: ok, 1990 tok → 907 tok, $0.00489375, 6 с
+2026-09-14 00:03:44,510 INFO research.external_ocr_models: 17/97 IMG_0113_1L.jpg: ok, 1990 tok → 902 tok, $0.004875, 5 с
+2026-09-14 00:03:45,356 INFO research.external_ocr_models: 18/97 IMG_0113_2R.jpg: ok, 1990 tok → 970 tok, $0.00513, 5 с
+2026-09-14 00:03:46,096 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:03:46,975 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:03:47,654 INFO research.external_ocr_models: 19/97 IMG_0114_1L.jpg: ok, 1990 tok → 1036 tok, $0.0053775, 5 с
+2026-09-14 00:03:48,502 INFO research.external_ocr_models: 20/97 IMG_0114_2R.jpg: ok, 1990 tok → 1461 tok, $0.00697125, 5 с
+2026-09-14 00:03:49,189 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:03:49,993 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:03:52,247 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:03:52,844 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:03:55,236 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:03:56,188 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:04:05,614 INFO research.external_ocr_models: 21/97 IMG_0115_1L.jpg: ok, 1990 tok → 656 tok, $0.0039525, 21 с
+2026-09-14 00:04:06,377 INFO research.external_ocr_models: 22/97 IMG_0115_2R.jpg: ok, 1990 tok → 1054 tok, $0.005445, 21 с
+2026-09-14 00:04:10,011 INFO research.external_ocr_models: 23/97 IMG_0116_1L.jpg: ok, 1990 tok → 1401 tok, $0.00674625, 22 с
+2026-09-14 00:04:10,128 INFO research.external_ocr_models: 24/97 IMG_0116_2R.jpg: ok, 1990 tok → 1196 tok, $0.0059775, 21 с
+2026-09-14 00:04:11,565 INFO research.external_ocr_models: 25/97 IMG_0117_2R.jpg: ok, 1990 tok → 844 tok, $0.0046575, 5 с
+2026-09-14 00:04:11,571 INFO research.external_ocr_models: 26/97 IMG_0117_1L.jpg: ok, 1990 tok → 1216 tok, $0.0060525, 6 с
+2026-09-14 00:04:14,983 INFO research.external_ocr_models: 27/97 IMG_0118_1L.jpg: ok, 1990 tok → 735 tok, $0.00424875, 5 с
+2026-09-14 00:04:15,522 INFO research.external_ocr_models: 28/97 IMG_0118_2R.jpg: ok, 1990 tok → 968 tok, $0.0051225, 5 с
+2026-09-14 00:04:16,633 INFO research.external_ocr_models: 29/97 IMG_0119_1L.jpg: ok, 1990 tok → 832 tok, $0.0046125, 5 с
+2026-09-14 00:04:16,851 INFO research.external_ocr_models: 30/97 IMG_0119_2R.jpg: ok, 1990 tok → 826 tok, $0.00459, 5 с
+2026-09-14 00:04:19,536 INFO research.external_ocr_models: 31/97 IMG_0120_1L.jpg: ok, 1990 tok → 468 tok, $0.0032475, 4 с
+2026-09-14 00:04:20,445 INFO research.external_ocr_models: 32/97 IMG_0120_2R.jpg: ok, 1990 tok → 799 tok, $0.00448875, 5 с
+2026-09-14 00:04:21,523 INFO research.external_ocr_models: 33/97 IMG_0121_2R.jpg: ok, 1990 tok → 952 tok, $0.0050625, 4 с
+2026-09-14 00:04:21,557 INFO research.external_ocr_models: 34/97 IMG_0121_1L.jpg: ok, 1990 tok → 594 tok, $0.00372, 5 с
+2026-09-14 00:04:23,678 INFO research.external_ocr_models: 35/97 IMG_0122_1L.jpg: ok, 1990 tok → 740 tok, $0.0042675, 4 с
+2026-09-14 00:04:25,631 INFO research.external_ocr_models: 36/97 IMG_0123_2R.jpg: ok, 1990 tok → 592 tok, $0.0037125, 4 с
+2026-09-14 00:04:26,010 INFO research.external_ocr_models: 37/97 IMG_0123_1L.jpg: ok, 1990 tok → 478 tok, $0.003285, 4 с
+2026-09-14 00:04:27,596 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:04:27,643 INFO research.external_ocr_models: 38/97 IMG_0122_2R.jpg: ok, 1990 tok → 2027 tok, $0.00909375, 7 с
+2026-09-14 00:04:28,940 INFO research.external_ocr_models: 39/97 IMG_0124_1L.jpg: ok, 1990 tok → 1042 tok, $0.0054, 5 с
+2026-09-14 00:04:29,170 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:04:30,355 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:04:30,755 INFO research.external_ocr_models: 40/97 IMG_0124_2R.jpg: ok, 1990 tok → 923 tok, $0.00495375, 5 с
+2026-09-14 00:04:32,281 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:04:33,696 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:04:34,815 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:04:36,042 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:04:38,087 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:04:43,722 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 16 с
+2026-09-14 00:04:44,826 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:04:45,485 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:04:48,082 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:05:05,071 INFO research.external_ocr_models: 41/97 IMG_0125_1L.jpg: ok, 1990 tok → 807 tok, $0.00451875, 39 с
+2026-09-14 00:05:06,592 INFO research.external_ocr_models: 42/97 IMG_0125_2R.jpg: ok, 1990 tok → 841 tok, $0.00464625, 39 с
+2026-09-14 00:05:07,045 INFO research.external_ocr_models: 43/97 IMG_0126_1L.jpg: ok, 1990 tok → 736 tok, $0.0042525, 38 с
+2026-09-14 00:05:09,723 INFO research.external_ocr_models: 44/97 IMG_0126_2R.jpg: ok, 1990 tok → 940 tok, $0.0050175, 39 с
+2026-09-14 00:05:10,530 INFO research.external_ocr_models: 45/97 IMG_0127_1L.jpg: ok, 1990 tok → 905 tok, $0.00488625, 5 с
+2026-09-14 00:05:12,504 INFO research.external_ocr_models: 46/97 IMG_0128_1L.jpg: ok, 1990 tok → 1013 tok, $0.00529125, 5 с
+2026-09-14 00:05:12,922 INFO research.external_ocr_models: 47/97 IMG_0127_2R.jpg: ok, 1990 tok → 1009 tok, $0.00527625, 6 с
+2026-09-14 00:05:15,598 INFO research.external_ocr_models: 48/97 IMG_0128_2R.jpg: ok, 1990 tok → 891 tok, $0.00483375, 6 с
+2026-09-14 00:05:15,707 INFO research.external_ocr_models: 49/97 IMG_0129_1L.jpg: ok, 1990 tok → 863 tok, $0.00472875, 5 с
+2026-09-14 00:05:17,369 INFO research.external_ocr_models: 50/97 IMG_0129_2R.jpg: ok, 1990 tok → 812 tok, $0.0045375, 5 с
+2026-09-14 00:05:19,635 INFO research.external_ocr_models: 51/97 IMG_0130_1L.jpg: ok, 1990 tok → 886 tok, $0.004815, 6 с
+2026-09-14 00:05:20,995 INFO research.external_ocr_models: 52/97 IMG_0131_1L.jpg: ok, 1990 tok → 953 tok, $0.00506625, 5 с
+2026-09-14 00:05:21,261 INFO research.external_ocr_models: 53/97 IMG_0130_2R.jpg: ok, 1990 tok → 934 tok, $0.004995, 5 с
+2026-09-14 00:05:22,318 INFO research.external_ocr_models: 54/97 IMG_0131_2R.jpg: ok, 1990 tok → 840 tok, $0.0046425, 5 с
+2026-09-14 00:05:24,445 INFO research.external_ocr_models: 55/97 IMG_0132_1L.jpg: ok, 1990 tok → 808 tok, $0.0045225, 5 с
+2026-09-14 00:05:26,706 INFO research.external_ocr_models: 56/97 IMG_0132_2R.jpg: ok, 1990 tok → 1009 tok, $0.00527625, 5 с
+2026-09-14 00:05:26,838 INFO research.external_ocr_models: 57/97 IMG_0133_1L.jpg: ok, 1990 tok → 979 tok, $0.00516375, 5 с
+2026-09-14 00:05:28,012 INFO research.external_ocr_models: 58/97 IMG_0133_2R.jpg: ok, 1990 tok → 1027 tok, $0.00534375, 5 с
+2026-09-14 00:05:28,365 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:05:29,513 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:05:29,760 INFO research.external_ocr_models: 59/97 IMG_0134_1L.jpg: ok, 1990 tok → 1299 tok, $0.00636375, 5 с
+2026-09-14 00:05:31,265 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:05:31,735 INFO research.external_ocr_models: 60/97 IMG_0134_2R.jpg: ok, 1990 tok → 960 tok, $0.0050925, 5 с
+2026-09-14 00:05:33,224 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:05:33,837 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:05:34,886 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:05:37,152 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:05:39,406 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:05:43,194 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:05:45,035 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:05:46,664 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 16 с
+2026-09-14 00:05:49,389 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:06:05,507 INFO research.external_ocr_models: 61/97 IMG_0135_1L.jpg: ok, 1990 tok → 1010 tok, $0.00528, 38 с
+2026-09-14 00:06:07,359 INFO research.external_ocr_models: 62/97 IMG_0135_2R.jpg: ok, 1990 tok → 936 tok, $0.0050025, 39 с
+2026-09-14 00:06:09,265 INFO research.external_ocr_models: 63/97 IMG_0136_1L.jpg: ok, 1990 tok → 1032 tok, $0.0053625, 39 с
+2026-09-14 00:06:10,777 INFO research.external_ocr_models: 64/97 IMG_0137_1L.jpg: ok, 1990 tok → 899 tok, $0.00486375, 5 с
+2026-09-14 00:06:10,813 INFO research.external_ocr_models: 65/97 IMG_0136_2R.jpg: ok, 1990 tok → 698 tok, $0.00411, 39 с
+2026-09-14 00:06:12,417 INFO research.external_ocr_models: 66/97 IMG_0137_2R.jpg: ok, 1990 tok → 859 tok, $0.00471375, 5 с
+2026-09-14 00:06:14,590 INFO research.external_ocr_models: 67/97 IMG_0138_1L.jpg: ok, 1990 tok → 948 tok, $0.0050475, 5 с
+2026-09-14 00:06:16,849 INFO research.external_ocr_models: 68/97 IMG_0138_2R.jpg: ok, 1990 tok → 1096 tok, $0.0056025, 6 с
+2026-09-14 00:06:17,439 INFO research.external_ocr_models: 69/97 IMG_0139_1L.jpg: ok, 1990 tok → 1412 tok, $0.0067875, 6 с
+2026-09-14 00:06:18,699 INFO research.external_ocr_models: 70/97 IMG_0139_2R.jpg: ok, 1990 tok → 1435 tok, $0.00687375, 6 с
+2026-09-14 00:06:21,017 INFO research.external_ocr_models: 71/97 IMG_0140_1L.jpg: ok, 1990 tok → 1416 tok, $0.0068025, 6 с
+2026-09-14 00:06:22,845 INFO research.external_ocr_models: 72/97 IMG_0140_2R.jpg: ok, 1990 tok → 1169 tok, $0.00587625, 6 с
+2026-09-14 00:06:24,301 INFO research.external_ocr_models: 73/97 IMG_0141_1L.jpg: ok, 1990 tok → 1560 tok, $0.0073425, 7 с
+2026-09-14 00:06:24,665 INFO research.external_ocr_models: 74/97 IMG_0141_2R.jpg: ok, 1990 tok → 1181 tok, $0.00592125, 6 с
+2026-09-14 00:06:27,711 INFO research.external_ocr_models: 75/97 IMG_0142_1L.jpg: ok, 1990 tok → 1505 tok, $0.00713625, 6 с
+2026-09-14 00:06:28,666 INFO research.external_ocr_models: 76/97 IMG_0142_2R.jpg: ok, 1990 tok → 1243 tok, $0.00615375, 6 с
+2026-09-14 00:06:30,477 INFO research.external_ocr_models: 77/97 IMG_0143_2R.jpg: ok, 1990 tok → 1258 tok, $0.00621, 6 с
+2026-09-14 00:06:31,349 INFO research.external_ocr_models: 78/97 IMG_0143_1L.jpg: ok, 1990 tok → 841 tok, $0.00464625, 7 с
+2026-09-14 00:06:32,058 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:06:32,848 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:06:33,228 INFO research.external_ocr_models: 79/97 IMG_0144_1L.jpg: ok, 1990 tok → 1033 tok, $0.00536625, 5 с
+2026-09-14 00:06:34,177 INFO research.external_ocr_models: 80/97 IMG_0144_2R.jpg: ok, 1990 tok → 1192 tok, $0.0059625, 5 с
+2026-09-14 00:06:34,725 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 5 с
+2026-09-14 00:06:35,683 WARNING research.external_ocr_models.client: попытка 1/5 не удалась (HTTP 429), пауза 4 с
+2026-09-14 00:06:37,421 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:06:38,074 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:06:40,688 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 9 с
+2026-09-14 00:06:40,916 WARNING research.external_ocr_models.client: попытка 2/5 не удалась (HTTP 429), пауза 8 с
+2026-09-14 00:06:46,817 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 16 с
+2026-09-14 00:06:47,352 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:06:50,549 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:06:50,636 WARNING research.external_ocr_models.client: попытка 3/5 не удалась (HTTP 429), пауза 17 с
+2026-09-14 00:07:08,218 INFO research.external_ocr_models: 81/97 IMG_0145_1L.jpg: ok, 1990 tok → 944 tok, $0.0050325, 37 с
+2026-09-14 00:07:09,429 INFO research.external_ocr_models: 82/97 IMG_0145_2R.jpg: ok, 1990 tok → 851 tok, $0.00468375, 38 с
+2026-09-14 00:07:12,251 INFO research.external_ocr_models: 83/97 IMG_0146_1L.jpg: ok, 1990 tok → 1057 tok, $0.00545625, 39 с
+2026-09-14 00:07:13,223 INFO research.external_ocr_models: 84/97 IMG_0146_2R.jpg: ok, 1990 tok → 1082 tok, $0.00555, 39 с
+2026-09-14 00:07:13,923 INFO research.external_ocr_models: 85/97 IMG_0147_1L.jpg: ok, 1990 tok → 944 tok, $0.0050325, 5 с
+2026-09-14 00:07:15,517 INFO research.external_ocr_models: 86/97 IMG_0147_2R.jpg: ok, 1990 tok → 1186 tok, $0.00594, 6 с
+2026-09-14 00:07:18,286 INFO research.external_ocr_models: 87/97 IMG_0148_1L.jpg: ok, 1990 tok → 1171 tok, $0.00588375, 6 с
+2026-09-14 00:07:19,085 INFO research.external_ocr_models: 88/97 IMG_0148_2R.jpg: ok, 1990 tok → 1167 tok, $0.00586875, 6 с
+2026-09-14 00:07:21,563 INFO research.external_ocr_models: 89/97 IMG_0149_2R.jpg: ok, 1990 tok → 1219 tok, $0.00606375, 6 с
+2026-09-14 00:07:21,908 INFO research.external_ocr_models: 90/97 IMG_0149_1L.jpg: ok, 1990 tok → 1241 tok, $0.00614625, 8 с
+2026-09-14 00:07:24,105 INFO research.external_ocr_models: 91/97 IMG_0150_1L.jpg: ok, 1990 tok → 1087 tok, $0.00556875, 6 с
+2026-09-14 00:07:24,946 INFO research.external_ocr_models: 92/97 IMG_0150_2R.jpg: ok, 1990 tok → 977 tok, $0.00515625, 6 с
+2026-09-14 00:07:27,115 INFO research.external_ocr_models: 93/97 IMG_0151_2R.jpg: ok, 1990 tok → 1118 tok, $0.005685, 5 с
+2026-09-14 00:07:28,363 INFO research.external_ocr_models: 94/97 IMG_0151_1L.jpg: ok, 1990 tok → 1117 tok, $0.00568125, 6 с
+2026-09-14 00:07:28,569 INFO research.external_ocr_models: 95/97 IMG_0152_1L.jpg: ok, 1990 tok → 517 tok, $0.00343125, 4 с
+2026-09-14 00:07:31,856 INFO research.external_ocr_models: 96/97 IMG_0152_2R.jpg: ok, 1990 tok → 1291 tok, $0.00633375, 7 с
+2026-09-14 00:07:32,706 INFO research.external_ocr_models: 97/97 IMG_0153_1L.jpg: ok, 1990 tok → 1062 tok, $0.005475, 5 с
+2026-09-14 00:07:32,707 INFO research.external_ocr_models: прогон занял 252 с
+2026-09-14 00:07:32,718 INFO research.external_ocr_models: готово: 97 полос, сбоев 0, стоимость $0.5002 (0.516 ¢/полоса), сводка /mnt/SYSTEM/raw/mts/pack1_external_ocr/gemini-38-flash/1966/03/summary.csv

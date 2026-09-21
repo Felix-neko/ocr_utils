@@ -1,0 +1,38 @@
+{
+ "page": "IMG_0148_2R.jpg",
+ "model": "gemini-31-flash-lite",
+ "openrouter_id": "google/gemini-3.1-flash-lite",
+ "started_at": "2026-09-13T20:54:48+00:00",
+ "prompt_version": 3,
+ "output_mode": "json",
+ "strips": 1,
+ "max_side": 2200,
+ "reasoning": "low",
+ "error": null,
+ "parse_error": null,
+ "image_px": [
+  [
+   1246,
+   2200
+  ]
+ ],
+ "image_bytes": 780341,
+ "json_mode_used": "json_schema",
+ "reasoning_sent": true,
+ "seconds": 5.57,
+ "provider": "Google",
+ "served_model": "google/gemini-3.1-flash-lite",
+ "request_id": "gen-1789332889-8W6YE2soTyvSUNMHWIdx",
+ "finish_reason": "stop",
+ "prompt_tokens": 2293,
+ "completion_tokens": 1151,
+ "reasoning_tokens": 0,
+ "cost_usd": 0.00229975,
+ "latency_s": 5.29,
+ "attempts": 1,
+ "response_chars": 5181,
+ "page_number": "87",
+ "is_toc": false,
+ "content_chars": 5030,
+ "has_header": false
+}

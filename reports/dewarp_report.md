@@ -52,7 +52,7 @@ FineReader с включённой коррекцией геометрии вы�
 ## Что получилось на восьми эталонных полосах
 
 Прогон `run_scripts/scan_markup/pack1/run_dewarp_validate.sh`, выход
-`/mnt/SYSTEM/raw/mts/pack1_dewarp/validate/` (папка на движок, `compare/<движок>/` — пары,
+`/mnt/system/raw/mts/pack1_dewarp/validate/` (папка на движок, `compare/<движок>/` — пары,
 `quality.md` — полная таблица до/после по каждой полосе).
 
 ### Сводка по метрикам
@@ -116,7 +116,7 @@ spans и отказался. Для флэтбед-скана модель не�
 
 `run_scripts/scan_markup/pack1/run_dewarp_found.sh`: все 580 полос из `curved_lines_pack1_links/combo`
 (симлинки на оригинальные TIFF), шесть движков, выход в 300 dpi —
-`/mnt/SYSTEM/raw/mts/pack1_dewarp/found/<движок>/`, пары «было | стало» в `compare/<движок>/`,
+`/mnt/system/raw/mts/pack1_dewarp/found/<движок>/`, пары «было | стало» в `compare/<движок>/`,
 7.6 ГБ. `doctr_plus` без весов пропущен. Имена файлов — как у симлинков детектора
 (`год_выпуск_имя_pNNN_sX.XX`), то есть сортировка по имени внутри выпуска идёт по номеру
 страницы, а score виден в имени.

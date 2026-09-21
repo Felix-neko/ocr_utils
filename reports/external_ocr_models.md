@@ -4,8 +4,8 @@
 должностями, таблицы с боковыми шапками, схемы, номер страницы и колонтитулы), чтобы
 потом слить её с буквами FineReader. Пакет — `research/external_ocr_models`
 (README там же), прогоны — `run_scripts/external_ocr_models/`, выходы —
-`/mnt/SYSTEM/raw/mts/pack1_external_ocr_probe/` (пробник, 13 полос × все модели) и
-`/mnt/SYSTEM/raw/mts/pack1_external_ocr/` (весь выпуск 1966/03, 4 модели).
+`/mnt/system/raw/mts/pack1_external_ocr_probe/` (пробник, 13 полос × все модели) и
+`/mnt/system/raw/mts/pack1_external_ocr/` (весь выпуск 1966/03, 4 модели).
 
 ## Коротко
 
@@ -235,14 +235,14 @@ FineReader — 0,02-0,03 на текстовых полосах; разница 
 (25 и 16), Qwen почти нет (5) — он чаще делает их `#`. Это вопрос вкуса промпта, не
 качества чтения.
 
-Полные выходы: `/mnt/SYSTEM/raw/mts/pack1_external_ocr/<модель>/1966/03/*.{json,md,meta.json}`,
+Полные выходы: `/mnt/system/raw/mts/pack1_external_ocr/<модель>/1966/03/*.{json,md,meta.json}`,
 построчная сводка — `reports/external_ocr_models_issue_1966_03.md`.
 
 ### Повтор выпуска на DeepSeek V4.1 Flash с промптом v12
 
 После обобщения промпта на прессу вообще (v8) и перевода таблиц в HTML (v9-v12) выпуск
 прогнан заново на основной модели — `run_issue_deepseek.sh`, выход
-`/mnt/SYSTEM/raw/mts/pack1_external_ocr/deepseek-v41-flash-s2-v12/1966/03/`:
+`/mnt/system/raw/mts/pack1_external_ocr/deepseek-v41-flash-s2-v12/1966/03/`:
 
 | | v3 (первый полный прогон) | v12 |
 |---|---|---|

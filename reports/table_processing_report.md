@@ -23,7 +23,7 @@ FineReader ломает таблицы двумя разными способа�
 
 ## Куда смотреть глазами
 
-Всё лежит в `/mnt/SYSTEM/raw/mts/pack1_table_research` (1.6 ГБ).
+Всё лежит в `/mnt/system/raw/mts/pack1_table_research` (1.6 ГБ).
 
 | путь | что там | сколько |
 |---|---|---|

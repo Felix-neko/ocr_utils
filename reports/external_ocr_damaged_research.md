@@ -13,10 +13,10 @@
 
 Код `690dc50` + подпакет `experimental`. Модель DeepSeek V4.1 Flash через OpenRouter, промпт v16,
 запросы через `scripts/replay_page.py` (боевой `ocr.recognize_page`, без второго прохода и списка
-статей), выходы `/mnt/SYSTEM/raw/mts/replay/`. Наборы: мини-набор повреждённых полос (11), МТС
+статей), выходы `/mnt/system/raw/mts/replay/`. Наборы: мини-набор повреждённых полос (11), МТС
 1991/02 кадрированный (33 полосы, три из них — с. 46, 47, 93 — в опытах отдельно), 20 первых
 полос 1966/03 из `SHARPENED_DIR` с текстовым слоем FineReader как эталоном CER
-(`/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg/full_1966_03.pdf`). Детектор
+(`/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg/full_1966_03.pdf`). Детектор
 корешка гонялся на исходных разворотах: 9 кадров мини-набора (`damaged/сырые сканы`) и все 59
 кадров 1991/02 с `/mnt/dump3` (только чтение). Дата — 19.09.2026, льготные часы DeepSeek.
 
@@ -63,7 +63,7 @@
 **Метод.** `python -m ocr_utils.gutter_loss_detection` на исходных разворотах (на нарезанных
 страницах детектор молча отвечает «ок»: аспект < 1.15). Эталон — тип повреждения по названию
 раздела мини-набора и тайлы 1991/02 глазами (`reports/external_ocr_prompt_v16.md`).
-Выходы: `/mnt/SYSTEM/raw/mts/replay/gutter/{mini,issue1991}.{csv,md}` и листы врезок.
+Выходы: `/mnt/system/raw/mts/replay/gutter/{mini,issue1991}.{csv,md}` и листы врезок.
 
 **Результат.** Мини-набор:
 

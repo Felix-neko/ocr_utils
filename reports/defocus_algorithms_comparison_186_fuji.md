@@ -1,7 +1,7 @@
 # Сравнение алгоритмов детекции расфокуса
 
 Выпуск: `/home/felix/Projects/ocr_utils/defocus_compare_186_fuji` (прогон по 215 файлам).
-Разметка: `/mnt/SYSTEM/raw/SI/focus_groups_186_FUJI_СИ_1985_07-09_чётная`.
+Разметка: `/mnt/system/raw/SI/focus_groups_186_FUJI_СИ_1985_07-09_чётная`.
 
 Размечено файлов: **defocus** — 10, **defocus_light** — 9, **defocus_ultralight** — 4, **good_focus** — 14, **cover** — 1
 

@@ -1,0 +1,38 @@
+{
+ "page": "IMG_0114_2R.jpg",
+ "model": "gemini-38-flash",
+ "openrouter_id": "google/gemini-3.8-flash",
+ "started_at": "2026-09-13T21:03:42+00:00",
+ "prompt_version": 3,
+ "output_mode": "json",
+ "strips": 1,
+ "max_side": 2200,
+ "reasoning": "low",
+ "error": null,
+ "parse_error": null,
+ "image_px": [
+  [
+   1246,
+   2200
+  ]
+ ],
+ "image_bytes": 601510,
+ "json_mode_used": "json_schema",
+ "reasoning_sent": true,
+ "seconds": 5.73,
+ "provider": "Google AI Studio",
+ "served_model": "google/gemini-3.8-flash",
+ "request_id": "gen-1789333423-ssZRN9NpQnQo7rxq0z71",
+ "finish_reason": "stop",
+ "prompt_tokens": 1990,
+ "completion_tokens": 1461,
+ "reasoning_tokens": 0,
+ "cost_usd": 0.00697125,
+ "latency_s": 5.46,
+ "attempts": 1,
+ "response_chars": 4485,
+ "page_number": "19",
+ "is_toc": false,
+ "content_chars": 4230,
+ "has_header": false
+}

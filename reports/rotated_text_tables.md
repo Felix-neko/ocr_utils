@@ -3,7 +3,7 @@
 Прогон подсистемы `ocr_utils/rotated_text/tables` по 903 таблицам, найденным детектором
 (`pack1_reviewed.sqlite`, `rect_regions.kind='table'`), на заострённых копиях 600 dpi.
 Запуск — `run_scripts/rotated_text/run_tables_pack1.sh`, 16 воркеров, только tesseract
-(surya — в бэклоге, см. ниже), 4,5 минуты. Всё смотреть в `/mnt/SYSTEM/raw/mts/pack1_rotated_tables/`: `sheets/` — 54
+(surya — в бэклоге, см. ниже), 4,5 минуты. Всё смотреть в `/mnt/system/raw/mts/pack1_rotated_tables/`: `sheets/` — 54
 листа «было-стало» (слева исходник с сеткой, набираемые ячейки красным с углом поворота,
 повёрнутые без замены оранжевым; справа результат), `pairs/` — те же пары по одной,
 `after/` — результат в конечном dpi, `info/*.json` — все решения по каждой ячейке,

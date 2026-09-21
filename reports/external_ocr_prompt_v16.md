@@ -24,7 +24,7 @@
 льготные часы DeepSeek), одним и тем же кодом `scripts/replay_page.py` (боевой
 `ocr.recognize_page`, без второго прохода и без списка статей выпуска, тайлы 4500/2200, `jobs 4`).
 Шаблоны v15 подставлены через `--prompts-dir` (v14 из git + правки v15, фраза по умолчанию v15).
-Код — `6b9189e` + незакоммиченные правки этого дня. Выходы — `/mnt/SYSTEM/raw/mts/replay/`
+Код — `6b9189e` + незакоммиченные правки этого дня. Выходы — `/mnt/system/raw/mts/replay/`
 (`damaged_v15`, `damaged_v16`, `issue1991_v15`, `issue1991_v16`, `clean1966_v15`, `clean1966_v16`;
 в каждом `run1/`, `run2/`, `debug/`, `summary.md`).
 

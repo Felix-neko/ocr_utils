@@ -1,7 +1,7 @@
 # Страницы, где коррекция геометрии FineReader сделала хуже
 
 Код — `research/geometry_regression` (README там), прогон — `run_scripts/geometry_regression/`.
-Выход прогона по паку-1: `/mnt/SYSTEM/raw/mts/pack1_geometry_regression/pack1_v7/` (v6 — `pack1/`) (`metrics.csv` —
+Выход прогона по паку-1: `/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/` (v6 — `pack1/`) (`metrics.csv` —
 12 135 строк, `report.md`, `cache/` JSON на страницу, `pairs/<вердикт>/<год>/` — картинки
 «было | стало», `vlm/` — ответы DeepSeek).
 
@@ -19,7 +19,7 @@
 
 ## 2. Стенд и данные
 
-* A = `/mnt/SYSTEM/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening` (с коррекцией),
+* A = `/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening` (с коррекцией),
   B = `…_no_geometry_correction` (без); 123 выпуска 1966–1976, 12 135 страниц, страницы
   сопоставляются по индексу (число страниц в парах совпало у всех 123).
 * Рендер `fitz` 300 dpi, рабочая копия 150 dpi; все размеры в коде — в мм бумаги, переводятся по
@@ -147,7 +147,7 @@ lineart 28, stretch 26, wobble 24, bend 22. Промежуточные прог�
 **v11 → v12: 63 → 64 из 70, 0 регрессий** (`regression_v11_v12.md`).
 
 **Регрессия v6 → v7 на эталоне из 58 страниц** (`labels.csv`, вердикты пользователя по
-картинкам; `/mnt/SYSTEM/raw/mts/pack1_geometry_regression/regression_v6_v7.md`): **41 → 54
+картинкам; `/mnt/system/raw/mts/pack1_geometry_regression/regression_v6_v7.md`): **41 → 54
 верно, 13 исправлено, 0 регрессий.** Что дал v7: относительный гистерезис (1970_04 с.26/28 —
 линейка врезки 2–3.6 против убранной трапеции 7–8 → mixed), непрощаемость только для среднего
 наклона черт при ≥ 3 чертах (подчёркивание рубрики 1967_01 с.71, линейка под подписью 1970_11

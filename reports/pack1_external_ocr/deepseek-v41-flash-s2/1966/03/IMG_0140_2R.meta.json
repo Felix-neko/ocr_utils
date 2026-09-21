@@ -1,0 +1,42 @@
+{
+ "page": "IMG_0140_2R.jpg",
+ "model": "deepseek-v41-flash",
+ "openrouter_id": "deepseek/deepseek-v4.1-flash",
+ "started_at": "2026-09-13T21:02:21+00:00",
+ "prompt_version": 3,
+ "output_mode": "json",
+ "strips": 2,
+ "max_side": 2200,
+ "reasoning": "off",
+ "error": null,
+ "parse_error": null,
+ "image_px": [
+  [
+   2200,
+   2097
+  ],
+  [
+   2200,
+   2097
+  ]
+ ],
+ "image_bytes": 1744712,
+ "json_mode_used": "json_object",
+ "reasoning_sent": true,
+ "seconds": 7.91,
+ "provider": "DeepSeek",
+ "served_model": "deepseek/deepseek-v4.1-flash",
+ "request_id": "gen-1789333343-yQRne1dbbX1dTBcz8cxv",
+ "finish_reason": "stop",
+ "prompt_tokens": 2961,
+ "completion_tokens": 1295,
+ "reasoning_tokens": 0,
+ "cost_usd": 0.001108254,
+ "latency_s": 7.56,
+ "attempts": 1,
+ "response_chars": 4502,
+ "page_number": null,
+ "is_toc": false,
+ "content_chars": 4345,
+ "has_header": false
+}

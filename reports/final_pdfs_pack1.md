@@ -1,8 +1,8 @@
 # Финальные PDF пака-1: сборка из двух прогонов FineReader
 
-Прогон `ocr_utils.final_pdfs` по паку-1 (2026-09-19). Выход — `/mnt/SYSTEM/raw/mts/pack1_pdf/final_pdfs/`
+Прогон `ocr_utils.final_pdfs` по паку-1 (2026-09-19). Выход — `/mnt/system/raw/mts/pack1_pdf/final_pdfs/`
 (123 файла `{год}/{год}_{выпуск}.pdf`, по папке на год, 1,80 ГиБ), рабочий каталог —
-`/mnt/SYSTEM/raw/mts/pack1_final_pdfs_work/` (JSON анализа на страницу в `pages/`, `analysis.csv`,
+`/mnt/system/raw/mts/pack1_final_pdfs_work/` (JSON анализа на страницу в `pages/`, `analysis.csv`,
 `pages.csv` — 12 135 строк, `summary.csv` — 123 строки, `preview/` — 232 PNG страниц с иллюстрациями).
 
 ## 1. Задача

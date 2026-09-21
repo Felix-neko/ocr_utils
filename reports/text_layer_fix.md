@@ -2,7 +2,7 @@
 
 Исследование `ocr_utils/text_layer_fix` (стенд: команды `survey`, `run`, `eval-lineart`, `llm-compare`…; пак-1, PDF FineReader из
 `full_pdfs_binary_no_bg_brightening`). Оверлеи — в `reports/text_layer_fix/` (вне git), полный выход
-прогона — `/mnt/SYSTEM/raw/mts/pack1_text_layer_fix/pack1_v1/` (кэш JSON на страницу, CSV,
+прогона — `/mnt/system/raw/mts/pack1_text_layer_fix/pack1_v1/` (кэш JSON на страницу, CSV,
 исправленные копии PDF в `pdf/`).
 
 ## 1. Задача
@@ -27,7 +27,7 @@ line art; годятся ли методики ориентации и чтен�
   `rotate_cw = 90`, 200 случайных контрольных (seed 7).
 * Эталон line art — 221 область `line_art_schema` из `pack1_reviewed.sqlite` (сверка на PDF без
   коррекции геометрии, где растр = скан + поля 12 × 6 мм). Согласие по ячейкам — с прогоном
-  `/mnt/SYSTEM/raw/mts/pack1_rotated_tables`.
+  `/mnt/system/raw/mts/pack1_rotated_tables`.
 * Железо: 16 ядер, 12 воркеров (`--reserve-cpu-cores 4`), surya на RTX 5060 Ti в родителе.
   Время: `survey` 4,5 мин на пак; `run` по выборке ~5 мин (медиана 1,8 с на страницу, p90 5,6 с;
   время уходит в tesseract по ячейкам); `fix` ~1 мин на 123 выпуска; `eval-lineart` 30 с.

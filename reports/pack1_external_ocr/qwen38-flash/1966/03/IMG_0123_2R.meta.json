@@ -1,0 +1,38 @@
+{
+ "page": "IMG_0123_2R.jpg",
+ "model": "qwen38-flash",
+ "openrouter_id": "qwen/qwen3.8-flash",
+ "started_at": "2026-09-13T20:56:55+00:00",
+ "prompt_version": 3,
+ "output_mode": "json",
+ "strips": 1,
+ "max_side": 2200,
+ "reasoning": "off",
+ "error": null,
+ "parse_error": null,
+ "image_px": [
+  [
+   1246,
+   2200
+  ]
+ ],
+ "image_bytes": 513152,
+ "json_mode_used": "json_schema",
+ "reasoning_sent": true,
+ "seconds": 9.09,
+ "provider": "Alibaba",
+ "served_model": "qwen/qwen3.8-flash",
+ "request_id": "gen-1789333016-PejvGz3mLyLa7SYnIn9G",
+ "finish_reason": "stop",
+ "prompt_tokens": 3720,
+ "completion_tokens": 543,
+ "reasoning_tokens": 0,
+ "cost_usd": 0.000675994,
+ "latency_s": 8.83,
+ "attempts": 1,
+ "response_chars": 2362,
+ "page_number": "37",
+ "is_toc": false,
+ "content_chars": 2223,
+ "has_header": false
+}
