@@ -19,4 +19,4 @@ tesseract — уже по часовой), и приводить их к общ�
 
 # Версия набора детекторов. Поднимать при любом изменении алгоритма: по ней видно, можно ли
 # сравнивать два отчёта между собой.
-ORIENTATION_VERSION = 1
+from ocr_utils.page_layout import ORIENTATION_VERSION  # noqa: E402,F401 — единый номер живёт в page_layout

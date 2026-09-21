@@ -555,7 +555,10 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
         if any(_overlaps_any(box, [c.box], 0.8) for c in candidates):
             continue  # эту область уже нашли пиксели, второй раз не считаем
         mask = ink[box[1] : box[3], box[0] : box[2]]
-        candidate, reason = classify(mask, box, int(np.count_nonzero(mask)), params, False, f"surya:{label}")
+        # Метка без пространства имён — блок surya (стенд line_art_detection подаёт их так);
+        # единый детектор подаёт затравки уже с именем источника («tables:схема»).
+        source = label if ":" in label else f"surya:{label}"
+        candidate, reason = classify(mask, box, int(np.count_nonzero(mask)), params, False, source)
         if candidate is None:
             dropped[reason] = dropped.get(reason, 0) + 1
         else:

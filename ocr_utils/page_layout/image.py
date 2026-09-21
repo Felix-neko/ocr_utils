@@ -278,6 +278,31 @@ class PageImage:
             renderer=render,
         )
 
+    @classmethod
+    def from_pdf_file(
+        cls, path: Path, index: int, variant: Variant, cache_name: str | None = None, native_dpi: int | None = None
+    ) -> "PageImage":
+        """Страница PDF по пути: документ открывается на каждый рендер (объект живёт дольше документа — пул, prefill)."""
+        import fitz
+
+        path = Path(path)
+        with fitz.open(str(path)) as document:
+            page = document[index]
+            if native_dpi is None:
+                native_dpi = main_image_dpi(page) or 600
+            rect = page.rect
+        width = int(round(rect.width / 72.0 * native_dpi))
+        height = int(round(rect.height / 72.0 * native_dpi))
+        return cls(
+            variant=variant,
+            dpi=int(native_dpi),
+            cache_name=cache_name if cache_name is not None else f"{path.stem}/p{index:04d}",
+            width=width,
+            height=height,
+            source=SourceStat.of(path, index),
+            renderer=lambda dpi: _render_pdf_gray(path, index, dpi),
+        )
+
     # --- Кадры -------------------------------------------------------------------
 
     @property
@@ -382,6 +407,10 @@ class PageImage:
         digest.update(f"{frame.shape[1]}x{frame.shape[0]}".encode())
         digest.update(np.ascontiguousarray(frame).tobytes())
         return digest.hexdigest()
+
+    def drop_full_frames(self) -> None:
+        """Отпустить полный кадр, оставив копии рабочего разрешения и кадр surya (перед pickle в родителя)."""
+        self._bgr = self._gray = None
 
     def drop_pixels(self) -> None:
         """Забыть все кадры (перед отправкой объекта из воркера в родителя, когда нужен только кадр surya)."""

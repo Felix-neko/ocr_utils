@@ -36,3 +36,23 @@ def mm_to_px(mm: float, dpi: float) -> int:
 def px_to_mm(px: float, dpi: float) -> float:
     """Пиксели при данном dpi → миллиметры бумаги."""
     return px * MM_PER_INCH / dpi
+
+
+# --- Версии семейств детекторов -------------------------------------------------------------
+# Каждое семейство помнит себя порознь: правка порога у таблиц не должна заставлять перечитывать
+# пак ради растра (полтерабайта с медленного диска). Номер пишется потребителями рядом с
+# результатом (колонки ``Page.*_version`` базы разметки, JSON кэшей geometry_regression и
+# text_layer_fix) и решает при повторном прогоне, пересчитывать ли страницу.
+#
+# Поднимать при ЛЮБОМ изменении, меняющем результат семейства: пороги, морфология, правило вида,
+# состав затравок. Не поднимать за оверлеи, сообщения, переименования.
+RASTER_VERSION = 10  # растровый детектор: тот же алгоритм, что DETECTOR_VERSION 10 у scan_markup
+TABLES_VERSION = 1  # детектор таблиц v4.2 (бывший TABLE_DETECTOR_VERSION)
+LINE_ART_VERSION = 1  # единый line art: схемы детектора таблиц + surya + пятна и линейки, вне растра и таблиц
+ROTATED_TEXT_VERSION = 1  # зоны повёрнутого текста вне таблиц (Docstrum)
+ORIENTATION_VERSION = 1  # ориентация полосы (бывший scan_markup.orientation.ORIENTATION_VERSION)
+
+
+def version_tag() -> str:
+    """Все версии одной строкой — для кэшей потребителей, которым нужен один ключ."""
+    return f"r{RASTER_VERSION}-t{TABLES_VERSION}-l{LINE_ART_VERSION}-x{ROTATED_TEXT_VERSION}-o{ORIENTATION_VERSION}"
