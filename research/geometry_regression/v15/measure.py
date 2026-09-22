@@ -57,12 +57,34 @@ DESKEW_TOL_DEG = 0.35
 DESKEW_MIN_ITEMS = 5
 # Рамка line art с не меньше чем столькими строками текста внутри — врезка, не чертёж.
 TEXT_LINES_IN_DRAWING = 4
+# Или рамка, которую строки текста занимают по высоте не меньше этой доли: логотип рубрики
+# (росчерк, линейка и три строки заголовка, 1974/04 с.59) — тоже не чертёж, у его «осей» нет
+# пропорций, а вместе с заголовком FineReader законно двигает и линейку.
+TEXT_HEIGHT_FRAC_IN_DRAWING = 0.5
 # Горизонтальный штрих от стольких мм под строкой — подчёркивание: форма такой строки не меряется.
 UNDERLINE_MIN_MM = 10.0
 
 
 def _wrap(angle: float) -> float:
     return (angle + 90.0) % 180.0 - 90.0
+
+
+def _text_inset(box: tuple[int, int, int, int], lines: list) -> bool:
+    """Рамка line art — врезка или логотип рубрики, а не чертёж: много строк внутри или высокий текст.
+
+    Args:
+        box: Рамка line art ``(x0, y0, x1, y1)`` в пикселях рабочей копии.
+        lines: Строки текста внутри рамок line art и таблиц (те же пиксели).
+
+    Returns:
+        ``True``, если внутри рамки не меньше ``TEXT_LINES_IN_DRAWING`` строк или строки занимают
+        по высоте не меньше ``TEXT_HEIGHT_FRAC_IN_DRAWING`` высоты рамки.
+    """
+    inside = [line for line in lines if _inside_any(line, [box])]
+    if len(inside) >= TEXT_LINES_IN_DRAWING:
+        return True
+    height = max(1.0, float(box[3] - box[1]))
+    return sum(line.y1 - line.y0 for line in inside) / height >= TEXT_HEIGHT_FRAC_IN_DRAWING
 
 
 def _deskew(lines: list[LineTilt], strokes: list[StrokeTilt], rot_deg: float) -> tuple[float, float, str]:
@@ -244,9 +266,7 @@ def measure_pair(
     # Порча рисунков: угол между осями, поворот и разброс линий, изгиб — по линиям внутри рамок line art.
     # Рамка line art со строками текста внутри (врезка в рамке, 1968/05 с.55) — не чертёж: её линии
     # выправляются вместе с текстом, пропорций у неё нет.
-    drawings_only = [
-        box for box in lineart if sum(1 for line in inner_b if _inside_any(line, [box])) < TEXT_LINES_IN_DRAWING
-    ]
+    drawings_only = [box for box in lineart if not _text_inset(box, inner_b)]
     metrics, culprits = lineart_metrics(
         gray300_b, gray300_a, strokes_b, strokes_a, drawings_only, warp, rot_deg, RENDER_DPI, dpi
     )
