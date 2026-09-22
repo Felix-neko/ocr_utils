@@ -69,7 +69,8 @@ DEFAULT_THRESHOLDS: dict[str, tuple[float, str]] = {
     "line_step_ratio": (0.06, "step"),
     "line_wedge_ratio": (0.05, "wedge"),
     "line_stretch_ratio": (0.05, "stretch"),
-    # мм; перекос выключенного блока: уход кромки по краске рядов сверх наклона строк, при
+    # мм; перекос выключенного блока: ИЗМЕНЕНИЕ шира (наклон кромки + наклон строк) в мм ухода
+    # конца кромки, при
     # подтверждении сдвигом по полю (``field_shear_p90_deg`` ≥ SHEAR_MIN_DEG). На 28 страницах
     # «равнение» уход 0.65–5 мм; по поясам пака глазами (2026-09-22): ≥ 1.2 мм виден сразу,
     # 0.8–1.2 — при внимательном взгляде, 0.6–0.8 — на грани (при 0.6 мм — 629 bad по паку,
@@ -108,14 +109,16 @@ LONE_PAIRS = {"hstroke_dev_max_delta_mm": "hstroke_pairs", "vstroke_dev_max_delt
 UNIFORM = {"hstroke_dev_max_delta_mm": "hstroke_uniform", "vstroke_dev_max_delta_mm": "vstroke_uniform"}
 MIN_UNIFORM = 0.7
 SOFT = ("vstroke_tilt_wmean_delta",)
-# Уход кромки считается перекосом только при сдвиге по полю не меньше SHEAR_MIN_DEG (градусы), а
-# при сильном уходе кромки (от SHEAR_STRONG_MM) — от SHEAR_MIN_WEAK_DEG: на 28 страницах
-# «равнение» p90 сдвига по тайлам 0.5–1.8, и у трёх страниц с уходом кромки 1.8–2.4 мм он лишь
-# 0.52–0.54 (1968/12 с.27, 1969/02 с.51, 1969/10 с.49). Без сдвига по полю уход кромки — шум
-# сегментации строк; без измеренных кромок (нет выключенных блоков) перекос не ставится.
-SHEAR_MIN_DEG = 0.75
-SHEAR_MIN_WEAK_DEG = 0.5
-SHEAR_STRONG_MM = 1.5
+# Уход кромки считается перекосом только при сдвиге по полю не меньше SHEAR_MIN_DEG (градусы):
+# без подтверждения полем уход кромки может быть шумом сегментации; без измеренных кромок (нет
+# выключенных блоков) перекос не ставится. Порог опущен с 0.75 до 0.5 после правки меры перекоса
+# (blocks.BlockEdge.shear_delta_mm — изменение шира, а не прирост модуля): у восьми страниц
+# «равнение перекосило», которые пользователь отобрал глазами в просмотре v16, поле 0.56–1.64°,
+# и порог 0.75 терял пять из них (1966/01 с.11 — 0.73, 1969/05 с.56 — 0.66, 1970/02 с.70 — 0.62,
+# 1971/07 с.58 — 0.57, 1970/01 с.56 — 0.56). Двухуровневая схема (0.5 при уходе ≥ 1.5 мм) убрана
+# как подпорка под старую меру. Пояс поля 0.3–0.5 (ещё ~400 страниц с уходом ≥ 1.2 мм, среди них
+# видимая глазом порча 1967/09 с.47) оставлен за порогом до следующего просмотра.
+SHEAR_MIN_DEG = 0.5
 
 GAIN_THRESHOLDS: dict[str, tuple[float, str]] = {
     "text_sag_gain_mm": (0.4, "sag"),
@@ -184,9 +187,7 @@ class Thresholds15:
             key, minimum = MIN_PAIRS[name]
             return float(metrics.get(key, 0.0) or 0.0) >= minimum
         if name == "edge_shear_delta_mm":
-            field = float(metrics.get("field_shear_p90_deg", 0.0) or 0.0)
-            strong = float(metrics.get(name, 0.0) or 0.0) >= SHEAR_STRONG_MM
-            return field >= SHEAR_MIN_DEG or (strong and field >= SHEAR_MIN_WEAK_DEG)
+            return float(metrics.get("field_shear_p90_deg", 0.0) or 0.0) >= SHEAR_MIN_DEG
         return True
 
     def _score(self, name: str, value: float, threshold: float) -> float:
