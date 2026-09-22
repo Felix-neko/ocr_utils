@@ -22,7 +22,13 @@ from ocr_utils.geometry_regression.metrics import (
 )
 from ocr_utils.geometry_regression.regions import TextLine, lineart_boxes, text_boxes, text_lines
 from ocr_utils.geometry_regression.render import RENDER_DPI, to_work
-from ocr_utils.geometry_regression.strokes import LOGO_TOP_FRAC, find_strokes, match_strokes, stroke_metrics
+from ocr_utils.geometry_regression.strokes import (
+    AXIS_TOL_DEG,
+    LOGO_TOP_FRAC,
+    find_strokes,
+    match_strokes,
+    stroke_metrics,
+)
 from research.geometry_regression.v15 import ENGINE_VERSION
 from research.geometry_regression.v15.blocks import block_edges, edge_metrics, text_rows
 from research.geometry_regression.v15.field_shear import shear_metrics
@@ -51,6 +57,8 @@ DESKEW_TOL_DEG = 0.35
 DESKEW_MIN_ITEMS = 5
 # Рамка line art с не меньше чем столькими строками текста внутри — врезка, не чертёж.
 TEXT_LINES_IN_DRAWING = 4
+# Горизонтальный штрих от стольких мм под строкой — подчёркивание: форма такой строки не меряется.
+UNDERLINE_MIN_MM = 10.0
 
 
 def _wrap(angle: float) -> float:
@@ -187,8 +195,14 @@ def measure_pair(
 
     # Строки корпуса по глифам: волна, растяжение, наклоны по проекции (сводятся после деcкью).
     body_pairs = match_lines(body_b, lines_a, warp, dpi)
+    # Подчёркивания и линейки под строками: горизонтальные штрихи B от UNDERLINE_MIN_MM (пиксели копии).
+    underlines = [
+        tuple(int(v / k_render) for v in s.box)
+        for s in strokes_b
+        if abs(s.angle_deg) <= AXIS_TOL_DEG and s.length >= UNDERLINE_MIN_MM * RENDER_DPI / 25.4
+    ]
     metrics, culprits, verified, tilts = glyph_line_metrics(
-        gray300_b, gray300_a, body_pairs, body_b, warp, dpi, params.line_min_mm
+        gray300_b, gray300_a, body_pairs, body_b, warp, dpi, params.line_min_mm, underlines
     )
     out.metrics.update(metrics)
     out.culprits.update(culprits)

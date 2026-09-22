@@ -32,6 +32,7 @@ from ocr_utils.geometry_regression.field import Field
 from ocr_utils.geometry_regression.regions import TextLine
 from ocr_utils.geometry_regression.render import RENDER_DPI
 from ocr_utils.geometry_regression.stretch import (
+    BAND_HEIGHTS,
     CHUNK_MM,
     GAIN_MIN_LENGTH_MM,
     MIN_CHUNK_COVERAGE,
@@ -43,6 +44,8 @@ from ocr_utils.geometry_regression.stretch import (
     _chunks_inside,
     line_chunks,
 )
+
+Box = tuple[int, int, int, int]
 
 # Перебор угла проекции: грубый шаг по всему диапазону, точный — вокруг лучшего.
 TILT_RANGE_DEG = 3.0
@@ -71,14 +74,17 @@ WEDGE_HARD = 0.10
 # промахов: 1966/06 с.62, 1968/05 с.95); худший пик не ограничивается — кусок на самой ступеньке
 # совпадает плохо по природе.
 SHAPE_MIN_PEAK_MEDIAN = 0.9
+# Строка, слипшаяся с соседней глубже этой доли высоты, в форму не идёт.
+OVERLAP_MAX_HEIGHTS = 0.2
 # Кусков в строке для формы (после медианного сглаживания по трём); строки ниже SHAPE_MIN_HEIGHT_MM не
 # меряются; прирост кривизны и ступеньки засчитывается только от SHAPE_MIN_DELTA_MM — у корпусной
 # строки в 2 мм промах куска на четверть миллиметра даёт «ступеньку» 0.1 высоты (1968/03 с.8).
 SHAPE_MIN_CHUNKS = 5
 SHAPE_MIN_HEIGHT_MM = 1.8
 SHAPE_MIN_DELTA_MM = 0.3
-# Наклон строки, когда проекция не сошлась с кусками (разрядка, короткий заголовок): по прямым через
-# центроиды кусков в B и в A; клин прощается и при выпрямлении наклона на STRAIGHTENED_TILT_DEG.
+# Клин прощается и при выпрямлении наклона на STRAIGHTENED_TILT_DEG. Наклон по центроидам кусков,
+# когда проекция не сошлась с кусками, отвергнут: на трёхстрочной рубрике 1966/06 с.62 центроиды
+# давали +1° из ничего; разрядка 1967/03 с.11 (проекция слепа к разреженным капителям) — известный промах.
 STRAIGHTENED_TILT_DEG = 0.3
 
 
@@ -201,6 +207,7 @@ def glyph_line_metrics(
     field: Field | None,
     dpi: float,
     min_len_mm: float,
+    underlines: list[Box] | None = None,
 ) -> tuple[dict[str, float], dict, list[tuple[TextLine, TextLine]], list[LineTilt]]:
     """Метрики строк по глифам (кроме наклона), виновники, подтверждённые пары и наклоны строк.
 
@@ -214,6 +221,9 @@ def glyph_line_metrics(
         field: Поле смещений B → A.
         dpi: Разрешение боксов строк.
         min_len_mm: Строка короче в попарные метрики не идёт.
+        underlines: Рамки горизонтальных штрихов B (пиксели ``dpi``): у строки с линейкой в полосе
+            кусков форма не меряется — куски цепляются за подчёркивание, и его наклон (порча
+            штриха, ловится отдельно) выглядит дугой заголовка (1967/01 с.71).
 
     Returns:
         Метрики, виновники (пиксели ``dpi``), подтверждённые пары и наклоны по проекции
@@ -271,6 +281,8 @@ def glyph_line_metrics(
         shape_ok = (
             measurable
             and heading
+            and not _underlined(line_b, underlines or [])
+            and not _overlapped(line_b, lines_b)
             and line_b.height >= mm_to_px(SHAPE_MIN_HEIGHT_MM, dpi)
             and len(chunks) >= SHAPE_MIN_CHUNKS
             and float(np.median(peaks)) >= SHAPE_MIN_PEAK_MEDIAN
@@ -281,11 +293,6 @@ def glyph_line_metrics(
         y0, y1 = int(line_b.y0 * k) - CENTROID_PAD_PX, int(line_b.y1 * k) + CENTROID_PAD_PX
         base_b = np.array([_centroid_y(ink_b, int(x - half), int(x + half), y0, y1) for x in xs])
         base_a = base_b + dys
-        if not tilt_ok and measurable and len(chunks) >= SHAPE_MIN_CHUNKS:
-            # Проекция не сошлась с кусками (разрядка 1967/03 с.11): наклон — по прямым через центроиды.
-            tilt_b = float(np.degrees(np.arctan(np.polyfit(xs, base_b, 1)[0])))
-            tilt_a = float(np.degrees(np.arctan(np.polyfit(xs, base_a, 1)[0])))
-            tilt_ok = True
         if not tilt_ok:
             metrics["line_tilt_skipped"] += 1.0
         else:
@@ -329,6 +336,31 @@ def glyph_line_metrics(
             metrics[name] = item[0]
             culprits[name] = {"b": item[1].box, "a": item[2].box}
     return metrics, culprits, verified, tilts
+
+
+def _overlapped(line: TextLine, lines: list[TextLine]) -> bool:
+    """Слиплась ли строка с соседней по вертикали (перекрытие боксов больше ``OVERLAP_MAX_HEIGHTS`` её высоты).
+
+    Заголовок, в бокс которого въехала соседняя строка (1967/01 с.71: 1164–1189 и 1183–1209), по
+    кускам меряет чужие буквы — «дуга» 0.012 длины из ничего.
+    """
+    for other in lines:
+        if other is line or other.column != line.column or other.x1 <= line.x0 or other.x0 >= line.x1:
+            continue
+        overlap = min(line.y1, other.y1) - max(line.y0, other.y0)
+        if overlap > OVERLAP_MAX_HEIGHTS * line.height:
+            return True
+    return False
+
+
+def _underlined(line: TextLine, underlines: list[Box]) -> bool:
+    """Есть ли горизонтальный штрих в полосе кусков строки (±``BAND_HEIGHTS`` высоты) на половину её длины."""
+    margin = BAND_HEIGHTS * line.height
+    for x0, y0, x1, y1 in underlines:
+        cy = (y0 + y1) / 2.0
+        if line.y0 - margin <= cy <= line.y1 + margin and min(x1, line.x1) - max(x0, line.x0) >= 0.5 * line.length:
+            return True
+    return False
 
 
 def _median3(values: np.ndarray) -> np.ndarray:
