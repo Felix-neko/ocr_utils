@@ -105,9 +105,35 @@ class BlockEdge:
     points_a: np.ndarray
 
     @property
+    def shear_move_mm(self) -> float:
+        """На сколько мм ушёл конец кромки ОТНОСИТЕЛЬНО СТРОК: |sin(шир A) − sin(шир B)| × длина."""
+        sa, sb = np.sin(np.radians(self.shear_a_deg)), np.sin(np.radians(self.shear_b_deg))
+        return float(self.length_mm * abs(sa - sb))
+
+    @property
     def shear_delta_mm(self) -> float:
-        """Уход конца кромки от вертикали в мм: стало − было (относительно строк)."""
-        return self.length_mm * (abs(np.sin(np.radians(self.shear_a_deg))) - abs(np.sin(np.radians(self.shear_b_deg))))
+        """Порча: блок перестал быть тем прямоугольником, каким был, в мм ухода конца кромки.
+
+        Мерится ИЗМЕНЕНИЕ перекоса, а не прирост его модуля: блок, который в B клонился на 0.7°
+        в одну сторону, а в A клонится на 0.7° в другую, деформирован на 1.4°, хотя модуль
+        перекоса тот же — разность модулей давала на таких страницах 0.05 мм и теряла порчу,
+        которую видно глазом (1968/11 с.94, 1966/01 с.11, 1971/07 с.58, 1970/02 с.70).
+        Результат ограничен остаточным перекосом A: если в B блок был перекошен сильно, а в A
+        перекошен слабее (пусть и в другую сторону), порча — только то, что осталось видно в A.
+
+        Кромка, ставшая прямее В ТУ ЖЕ СТОРОНУ (FineReader убрал часть перекоса), — не порча,
+        а выигрыш: см. :attr:`shear_gain_mm`.
+        """
+        sa, sb = np.sin(np.radians(self.shear_a_deg)), np.sin(np.radians(self.shear_b_deg))
+        if abs(sa) < abs(sb) and sa * sb >= 0:
+            return 0.0
+        return float(self.length_mm * min(abs(sa - sb), abs(sa)))
+
+    @property
+    def shear_gain_mm(self) -> float:
+        """Выигрыш: насколько перекос кромки относительно строк уменьшился по модулю (мм)."""
+        sa, sb = np.sin(np.radians(self.shear_a_deg)), np.sin(np.radians(self.shear_b_deg))
+        return float(max(0.0, self.length_mm * (abs(sb) - abs(sa))))
 
     @property
     def rough_delta_mm(self) -> float:
@@ -368,7 +394,7 @@ def edge_metrics(edges: list[BlockEdge], dpi: float) -> tuple[dict[str, float], 
     """Худшие разности по кромкам: перекос (мм), рваность (мм), дрожание; выигрыш по перекосу.
 
     Returns:
-        Метрики ``edges_matched``, ``edge_shear_delta_mm``, ``edge_shear_gain_mm``,
+        Метрики ``edges_matched``, ``edge_shear_delta_mm``, ``edge_shear_gain_mm``, ``edge_shear_move_mm``,
         ``edge_rough_delta_mm``, ``edge_jitter_delta_mm``, ``edge_shear_max_a_deg`` и виновники
         (рамка кромки и ряд точек краёв — на оверлее кружки и прямая по ним).
     """
@@ -376,6 +402,7 @@ def edge_metrics(edges: list[BlockEdge], dpi: float) -> tuple[dict[str, float], 
         "edges_matched": float(len(edges)),
         "edge_shear_delta_mm": 0.0,
         "edge_shear_gain_mm": 0.0,
+        "edge_shear_move_mm": 0.0,
         "edge_rough_delta_mm": 0.0,
         "edge_jitter_delta_mm": 0.0,
         "edge_shear_max_a_deg": 0.0,
@@ -387,7 +414,8 @@ def edge_metrics(edges: list[BlockEdge], dpi: float) -> tuple[dict[str, float], 
     shears = [edge.shear_delta_mm for edge in edges]
     worst = int(np.argmax(shears))
     metrics["edge_shear_delta_mm"] = float(shears[worst])
-    metrics["edge_shear_gain_mm"] = float(max(0.0, -min(shears)))
+    metrics["edge_shear_gain_mm"] = float(max(edge.shear_gain_mm for edge in edges))
+    metrics["edge_shear_move_mm"] = float(max(edge.shear_move_mm for edge in edges))
     metrics["edge_shear_max_a_deg"] = float(max(abs(edge.shear_a_deg) for edge in edges))
     roughs = [edge.rough_delta_mm for edge in edges]
     rough_worst = int(np.argmax(roughs))
