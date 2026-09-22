@@ -39,6 +39,7 @@ from ocr_utils.geometry_regression.stretch import (
     MIN_CHUNKS,
     MIN_CHUNKS_METRIC,
     MIN_LENGTH_MATCH,
+    SEARCH_DY_HEIGHTS,
     STRETCH_MIN_HEIGHT_MM,
     STRETCH_MIN_LENGTH_MM,
     _chunks_inside,
@@ -60,6 +61,10 @@ CROSS_TOL_DEG = 0.35
 # Отдельная строка (заголовок): выше медианы корпуса во столько раз ИЛИ пустота сверху и снизу.
 HEADING_HEIGHT_RATIO = 1.5
 HEADING_GAP_HEIGHTS = 1.5
+# Кусок, чей сдвиг упёрся в край окна поиска (``SEARCH_DY_HEIGHTS`` высот + 4 px, с таким запасом до
+# края), найден не там: заголовок, повёрнутый сильнее окна (1972/01 с.92, −2.25° → 0°), на дальнем
+# конце давал одинаковые «сдвиги» у последних кусков, и прямая по ним ломалась — ложная дуга.
+CLIP_MARGIN_PX = 0.5
 # Форма базовой линии по кускам: припуск окна центроида (px рендера) и перцентили размаха остатка.
 CENTROID_PAD_PX = 10
 SHAPE_PERCENTILES = (2.0, 98.0)
@@ -190,11 +195,13 @@ def is_heading(line: TextLine, lines: list[TextLine]) -> bool:
     if line.height >= HEADING_HEIGHT_RATIO * body:
         return True
     gap = HEADING_GAP_HEIGHTS * line.height
+    # Сосед — любая строка той же колонки, чья полоса заходит в зазор над или под строкой, в том
+    # числе перекрывающая её по y (строка через межколонник рядом с корпусом, 1966/06 с.78: сосед
+    # заходил на 2 px, и корпусная строка сходила за заголовок).
     near = [
         other
         for other in others
-        if min(line.x1, other.x1) > max(line.x0, other.x0)
-        and (line.y0 - gap <= other.y1 <= line.y0 or line.y1 <= other.y0 <= line.y1 + gap)
+        if min(line.x1, other.x1) > max(line.x0, other.x0) and other.y1 >= line.y0 - gap and other.y0 <= line.y1 + gap
     ]
     return not near
 
@@ -257,6 +264,9 @@ def glyph_line_metrics(
             continue
         want_scale = line_b.height >= stretch_h and line_b.length >= stretch_len
         chunks = line_chunks(ink_b, ink_a, line_b, field, dpi, want_scale)
+        # Куски у края окна поиска по y выбрасываются: их сдвиг — предел окна, а не место в A.
+        dy_limit = int(SEARCH_DY_HEIGHTS * line_b.height * k) + 4 - CLIP_MARGIN_PX
+        chunks = [c for c in chunks if abs(c.dy) < dy_limit]
         if len(chunks) < MIN_CHUNKS or not _chunks_inside(chunks, line_b, line_a, field, dpi):
             continue
         possible = max(1, int(line_b.length * k) // mm_to_px(CHUNK_MM, RENDER_DPI))
