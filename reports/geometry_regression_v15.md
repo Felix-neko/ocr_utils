@@ -445,6 +445,10 @@ ok (клин прощён), 1972/11 с.27 — как в v15, 1975/06 с.39 и 19
 | v15 | 949 | 80 | 11 106 |
 | **v16** | **2050** | **116** | **9969** |
 
+Смен вердикта v15 → v16 — **1132**: ok→bad 1014, ok→mixed 63, mixed→bad 24, bad→ok 24, mixed→ok 5,
+bad→mixed 2. Отдельное сравнение с ядром v14 («через версию») — **1944** смены: ok→bad 1673, ok→mixed 100,
+bad→ok 95, mixed→bad 49, mixed→ok 23, bad→mixed 4 (`changed_v14_v16/`, `changed_v14_v16.csv`).
+
 Причины bad: shear 1488, wedge 86, fraction 44, line 44, photo_tilt 44, vmean 43, fraction_max 42,
 htilt 42, la_axis 39, vtilt 36, hmean 33, parallel 27, bend_ratio 25, photo_bend 18, stretch 16, la_rot 7,
 step 5, bend 4, lineart 3, la_spread 3, jog 1.
