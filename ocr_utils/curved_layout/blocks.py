@@ -41,6 +41,8 @@ EDGE_QUANTILE = 0.25
 GRID_STEP_MM = 1.0
 # Блок короче стольких рядов огибающей не получает (однострочный заголовок — отдельный случай).
 MIN_BLOCK_ROWS = 3
+# Насколько край ряда может выйти за границу колонки (мм): дальше — чужая колонка.
+OVERHANG_MM = 1.5
 # Заход края ряда внутрь блока дальше этого (мм) — абзацный отступ или короткий конец строки:
 # в тренд кромки такой ряд не идёт (но в мерах выключки считается отдельно).
 TRIM_MM = 2.5
@@ -55,8 +57,13 @@ MERGE_GAP_PITCHES = 6.0
 MERGE_OVERLAP = 0.6
 MERGE_EDGE_MM = 3.0
 MERGE_WIDTH_RATIO = 1.5
+# Блок шире типичного во столько раз и короче стольких рядов — колонтитул, а не блок.
+WIDE_BLOCK_RATIO = 1.6
+WIDE_BLOCK_ROWS = 5
 # Столько раз повторяется «тренд → отбор рядов тела → тренд».
 TREND_PASSES = 2
+# Насколько кромке позволено выйти за диапазон краёв рядов (мм): дальше — экстраполяция.
+TREND_CLIP_MM = 3.0
 
 
 @dataclass(frozen=True)
@@ -202,7 +209,13 @@ def rows_of(
         right = ink_edge(ink, int(x_lo * k), int(x_hi * k), y0, y1, "right")
         if left is None or right is None:
             continue
-        rows.append(Row(y=y, height=height, x0=left / k, x1=right / k, axes=tuple(group)))
+        left, right = left / k, right / k
+        # Край, вылезший за колонку дальше OVERHANG_MM, — не край этого ряда: так выглядит
+        # строка, сшитая через межколонник (1973/07 с.88), и колонтитул во всю ширину.
+        overhang = mm_to_px(OVERHANG_MM, dpi)
+        if left < left_bound - overhang or right > right_bound + overhang:
+            continue
+        rows.append(Row(y=y, height=height, x0=left, x1=right, axes=tuple(group)))
     return rows
 
 
@@ -382,7 +395,10 @@ def _side_trend(
         if keep.sum() < MIN_TREND_ROWS:
             keep = np.ones(ys.shape, dtype=bool)
         trend = _local_line(ys[keep], xs[keep], grid, window)
-    return trend
+    # Кромка не должна уходить за пределы самих краёв рядов: на краях сетки локальная прямая
+    # экстраполирует, и у коротких блоков огибающая улетала на десятки миллиметров.
+    margin = mm_to_px(TREND_CLIP_MM, dpi)
+    return np.clip(trend, xs[keep].min() - margin, xs[keep].max() + margin)
 
 
 def _cap(row: Row, x_left: float, x_right: float, direction: float) -> np.ndarray:
@@ -438,9 +454,16 @@ def blocks_of(
             rows = rows_of(own, ink, span, dpi, gutters=gutters, width=width, pad=pad)
             if rows:
                 pieces.append((span, rows))
+    merged = _merge_pieces(pieces, dpi)
+    widths = [span[1] - span[0] for span, _ in merged]
+    typical = float(np.median(widths)) if widths else 0.0
     blocks: list[TextBlock] = []
-    for column, (span, rows) in enumerate(_merge_pieces(pieces, dpi)):
+    for column, (span, rows) in enumerate(merged):
         if len(rows) < MIN_BLOCK_ROWS:
+            continue
+        # Обрывок во всю ширину страницы из пары строк — колонтитул или строки, слипшиеся над
+        # межколонником: у него ширина заметно больше типичной, а строк мало.
+        if typical and span[1] - span[0] > WIDE_BLOCK_RATIO * typical and len(rows) < WIDE_BLOCK_ROWS:
             continue
         for number, group in enumerate(split_blocks(rows, pitch_of(rows))):
             if len(group) < MIN_BLOCK_ROWS:

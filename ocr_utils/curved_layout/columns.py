@@ -32,6 +32,8 @@ MIN_COLUMN_MM = 20.0
 # Межколонник должен быть виден не меньше чем в стольких лентах подряд: одна лента — случайное
 # совпадение пустот в паре строк.
 MIN_GUTTER_BANDS = 2
+# Доля краски в полосе межколонника, выше которой он считается перегороженным.
+BLOCK_INK_SHARE = 0.3
 # Пустота шире этого — поле страницы, а не межколонник.
 MAX_GUTTER_MM = 25.0
 # Доля строк с краской по каждую сторону межколонника в его диапазоне высот и минимальная
@@ -272,10 +274,16 @@ def _extend(gutter: Gutter, mask: np.ndarray) -> Gutter:
 
 
 def _row_blocked(mask: np.ndarray, gutter: Gutter, y: int) -> bool:
-    """Есть ли краска в полосе межколонника на высоте ``y``."""
+    """Перегорожена ли полоса межколонника на высоте ``y``.
+
+    Не «есть ли хоть пиксель», а «есть ли краска шире ``BLOCK_INK_SHARE`` полосы»: одиночная
+    точка, дефект бумаги или свисающая запятая соседней колонки не должны обрывать межколонник
+    (иначе верхние строки колонок попадают в зону над ним и собираются в блок во всю ширину —
+    1973/07 с.88).
+    """
     x0 = int(max(0, min(mask.shape[1] - 1, gutter.x0_at(y))))
     x1 = int(max(x0 + 1, min(mask.shape[1], gutter.x1_at(y))))
-    return bool(mask[y, x0:x1].any())
+    return bool(mask[y, x0:x1].mean() > BLOCK_INK_SHARE)
 
 
 def _confirm(gutters: list[Gutter], mask: np.ndarray, dpi: float) -> list[Gutter]:
@@ -320,13 +328,17 @@ def _confirm(gutters: list[Gutter], mask: np.ndarray, dpi: float) -> list[Gutter
 def bounds_at(gutters: list[Gutter], x0: float, x1: float, y: float, width: int) -> tuple[float, float]:
     """Границы колонки для строки ``[x0, x1]`` НА ЕЁ ВЫСОТЕ: ближайшие живые межколонники."""
     left, right = 0.0, float(width)
+    centre = (x0 + x1) / 2.0
     for gutter in gutters:
         if not gutter.alive_at(y):
             continue
         gx0, gx1 = gutter.x0_at(y), gutter.x1_at(y)
-        if gx1 <= x0 + 1:
+        # Сравнение по СЕРЕДИНЕ строки, а не по её концам: последняя буква или дефис нередко
+        # заходят в межколонник, и по концам он переставал считаться границей — окно поиска края
+        # уходило в соседнюю колонку и брало её край (1973/07 с.88).
+        if gx1 <= centre:
             left = max(left, gx1)
-        elif gx0 >= x1 - 1:
+        elif gx0 >= centre:
             right = min(right, gx0)
     return left, right
 
