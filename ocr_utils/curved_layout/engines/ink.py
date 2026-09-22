@@ -38,6 +38,7 @@ class InkEngine:
         work = cv2.resize(gray300, size, interpolation=cv2.INTER_AREA)
         gutters = gutters_of(work, dpi)
         separators = separators_for_segmentation(gutters)
+        segments, rules = segments_of(gray300, separators, dpi)
         lines = [
             EngineLine(
                 points=np.column_stack([segment.xs, segment.ys]),
@@ -45,9 +46,11 @@ class InkEngine:
                 height=float(segment.height),
                 baseline=False,
             )
-            for segment in segments_of(gray300, separators, dpi)
+            for segment in segments
         ]
-        return EngineResult(lines=lines, gutters=gutters, engine=self.name, seconds=time.monotonic() - started)
+        return EngineResult(
+            lines=lines, gutters=gutters, rules=rules, engine=self.name, seconds=time.monotonic() - started
+        )
 
 
 __all__ = ["InkEngine"]

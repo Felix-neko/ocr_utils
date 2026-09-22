@@ -85,7 +85,7 @@ def analyse_gray(
     axes = [with_column(axis, axis.column, cross=flag) for axis, flag in zip(axes, cut)]
     ink = text_ink(gray300, dpi)
     zones = zones_of(result.gutters, height, width, dpi)
-    blocks = blocks_of(axes, zones, result.gutters, width, ink, dpi, smooth_block, coarse_factor)
+    blocks = blocks_of(axes, zones, result.gutters, width, ink, result.rules, dpi, smooth_block, coarse_factor)
     alignments = [alignment_of(block) for block in blocks]
     return PageAnalysis(
         name=name,

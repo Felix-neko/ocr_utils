@@ -39,10 +39,13 @@ COARSE_FACTOR = 3.0
 EDGE_QUANTILE = 0.25
 # Шаг сетки огибающей по y.
 GRID_STEP_MM = 1.0
-# Блок короче стольких рядов огибающей не получает (однострочный заголовок — отдельный случай).
-MIN_BLOCK_ROWS = 3
+# Блок короче стольких рядов не строится. Один ряд — это тоже блок (заголовок в одну строку,
+# колонтитул, подпись автора): его огибающая идёт по оси строки с полем в полвысоты.
+MIN_BLOCK_ROWS = 1
 # Насколько край ряда может выйти за границу колонки (мм): дальше — чужая колонка.
 OVERHANG_MM = 1.5
+# Доля длины строки, которая должна лежать в колонке, чтобы строка считалась её строкой.
+INSIDE_SHARE = 0.9
 # Заход края ряда внутрь блока дальше этого (мм) — абзацный отступ или короткий конец строки:
 # в тренд кромки такой ряд не идёт (но в мерах выключки считается отдельно).
 TRIM_MM = 2.5
@@ -50,6 +53,13 @@ TRIM_MM = 2.5
 MIN_TREND_ROWS = 5
 # Вертикальный разрыв больше стольких межстрочных интервалов делит колонку на два блока.
 BLOCK_GAP_PITCHES = 3.0
+# Медианные высоты по HEIGHT_WINDOW рядам с обеих сторон границы различаются во столько раз —
+# другой кегль, другой блок (заголовок над корпусом, подпись автора под ним).
+HEIGHT_BREAK_RATIO = 1.45
+HEIGHT_WINDOW = 3
+# Сплошная черта делит блок, если она перекрывает колонку не меньше чем на эту долю ширины:
+# разделитель сноски в журнале — короткая черта примерно в четверть колонки.
+RULE_OVERLAP_SHARE = 0.15
 # Обрывок короче MIN_BLOCK_ROWS приклеивается к соседней группе, если разрыв не больше этого.
 MERGE_GAP_PITCHES = 6.0
 # Куски колонки из соседних зон считаются одной колонкой при таком перекрытии по ширине и
@@ -234,7 +244,45 @@ def row_gap(previous: Row, row: Row) -> float:
     return row.axis.y_at(x) - previous.axis.y_at(x)
 
 
-def split_blocks(rows: list[Row], pitch: float) -> list[list[Row]]:
+def _height_break(rows: list[Row], index: int) -> bool:
+    """Устойчивая смена кегля на границе после ряда ``index``.
+
+    Сравниваются МЕДИАНЫ высот по нескольким рядам с каждой стороны, а не сами соседи: высота
+    отдельного ряда корпуса скачет на выносных элементах и прописных (13 против 17 px), и по
+    соседям колонка дробилась на куски. Заголовок же выше корпуса устойчиво.
+    """
+    # На коротких группах кегль не меряют: у крупного набора высота «строки» скачет (слипшиеся
+    # строки заголовка дают 65 px против 44), и блок заголовка дробился на куски по одной строке
+    # (1973/06 с.65). Там границу и так ставят разрыв и линейка.
+    if len(rows) < 2 * HEIGHT_WINDOW:
+        return False
+    before = [row.height for row in rows[max(0, index - HEIGHT_WINDOW + 1) : index + 1]]
+    after = [row.height for row in rows[index + 1 : index + 1 + HEIGHT_WINDOW]]
+    if not before or not after:
+        return False
+    lo, hi = sorted((float(np.median(before)), float(np.median(after))))
+    return hi > HEIGHT_BREAK_RATIO * max(lo, 1e-6)
+
+
+def _rule_between(previous: Row, row: Row, rules: list, span: tuple[int, int]) -> bool:
+    """Проходит ли между рядами сплошная черта, перекрывающая колонку.
+
+    Разделитель сноски — именно такая черта: текст под ней относится к сноске, а не к блоку
+    (1973/06 с.65, правая колонка).
+    """
+    width = max(1, span[1] - span[0])
+    for rule in rules:
+        if not (previous.y < rule.cy < row.y):
+            continue
+        overlap = min(rule.x1, span[1]) - max(rule.x0, span[0])
+        if overlap >= RULE_OVERLAP_SHARE * width:
+            return True
+    return False
+
+
+def split_blocks(
+    rows: list[Row], pitch: float, rules: list | None = None, span: tuple[int, int] | None = None
+) -> list[list[Row]]:
     """Разделить ряды колонки на блоки по вертикальным разрывам больше ``BLOCK_GAP_PITCHES`` шагов.
 
     Обрывок из одной-двух строк (пропала строка при сегментации — жирный или разрядка) к блоку
@@ -246,8 +294,14 @@ def split_blocks(rows: list[Row], pitch: float) -> list[list[Row]]:
         return [rows]
     groups: list[list[Row]] = [[rows[0]]]
     limit = BLOCK_GAP_PITCHES * pitch
-    for previous, row in zip(rows[:-1], rows[1:]):
-        if row_gap(previous, row) > limit:
+    rules = rules or []
+    for index, (previous, row) in enumerate(zip(rows[:-1], rows[1:])):
+        divided = (
+            row_gap(previous, row) > limit
+            or _height_break(rows, index)
+            or (span is not None and _rule_between(previous, row, rules, span))
+        )
+        if divided:
             groups.append([row])
         else:
             groups[-1].append(row)
@@ -255,7 +309,15 @@ def split_blocks(rows: list[Row], pitch: float) -> list[list[Row]]:
     for group in groups:
         gap = row_gap(merged[-1][-1], group[0]) if merged else None
         small = len(group) < MIN_BLOCK_ROWS or (merged and len(merged[-1]) < MIN_BLOCK_ROWS)
-        if merged and small and gap is not None and gap <= MERGE_GAP_PITCHES * pitch:
+        joinable = (
+            merged
+            and small
+            and gap is not None
+            and gap <= MERGE_GAP_PITCHES * pitch
+            and not _height_break([*merged[-1], *group], len(merged[-1]) - 1)
+            and not (span is not None and _rule_between(merged[-1][-1], group[0], rules, span))
+        )
+        if joinable:
             merged[-1].extend(group)
         else:
             merged.append(group)
@@ -331,6 +393,24 @@ def _smooth(values: np.ndarray, window_nodes: int) -> np.ndarray:
     return savgol_filter(values, window_length=window, polyorder=2, mode="nearest")
 
 
+def _single_row_envelope(row: Row, smooth_pitches: float) -> BlockEnvelope:
+    """Огибающая блока из одного ряда: по его оси, с полем в половину высоты.
+
+    Тренд по одному ряду не построить, поэтому кромки — вертикальные отрезки по краям краски, а
+    верх и низ — сама ось, поднятая и опущенная на полвысоты.
+    """
+    axis = row.axis
+    half = row.height / 2.0
+    top = _cap(row, row.x0, row.x1, -1.0)
+    bottom = _cap(row, row.x0, row.x1, 1.0)
+    left = np.array([[row.x0, axis.y_at(row.x0) - half], [row.x0, axis.y_at(row.x0) + half]])
+    right = np.array([[row.x1, axis.y_at(row.x1) - half], [row.x1, axis.y_at(row.x1) + half]])
+    polygon = np.vstack([left, bottom, right[::-1], top[::-1]])
+    return BlockEnvelope(
+        left=left, right=right, top=top, bottom=bottom, polygon=polygon, smooth_pitches=float(smooth_pitches)
+    )
+
+
 def envelope_of(rows: list[Row], pitch: float, dpi: float, smooth_pitches: float) -> BlockEnvelope:
     """Гладкая огибающая блока с окном ``smooth_pitches`` межстрочных интервалов.
 
@@ -339,6 +419,8 @@ def envelope_of(rows: list[Row], pitch: float, dpi: float, smooth_pitches: float
     кромок. Контур собирается обходом: левая сверху вниз, низ слева направо, правая снизу
     вверх, верх справа налево.
     """
+    if len(rows) == 1:
+        return _single_row_envelope(rows[0], smooth_pitches)
     ys = np.array([row.y for row in rows], dtype=np.float64)
     xs_left = np.array([row.x0 for row in rows], dtype=np.float64)
     xs_right = np.array([row.x1 for row in rows], dtype=np.float64)
@@ -416,6 +498,7 @@ def blocks_of(
     gutters: list,
     width: int,
     ink: np.ndarray,
+    rules: list | None = None,
     dpi: float = WORK_DPI,
     smooth_pitches: float = SMOOTH_PITCHES,
     coarse_factor: float = COARSE_FACTOR,
@@ -433,6 +516,7 @@ def blocks_of(
         gutters: Локальные межколонники-ломаные (``columns.Gutter``).
         width: Ширина рабочей копии.
         ink: Краска текста рендера ``RENDER_DPI``.
+        rules: Сплошные черты страницы (``segment.Rule``): делят блок (сноска под линейкой).
         dpi: Разрешение рабочей копии.
         smooth_pitches: Окно основной огибающей в межстрочных интервалах.
         coarse_factor: Во сколько раз шире окно крупной огибающей.
@@ -442,18 +526,27 @@ def blocks_of(
     """
     pad = mm_to_px(COLUMN_PAD_MM, dpi)
     pieces: list[tuple[tuple[int, int], list[Row]]] = []
+    placed: set[tuple[int, int, int]] = set()
     for zone in zones:
+        own_zone = [axis for axis in axes if zone.y0 <= axis.cy < zone.y1]
         for column, span in enumerate(zone.columns):
             own = [
-                with_column(axis, column)
-                for axis in axes
-                if not axis.cross and zone.y0 <= axis.cy < zone.y1 and _inside(axis, span, gutters, width)
+                with_column(axis, column) for axis in own_zone if not axis.cross and _inside(axis, span, gutters, width)
             ]
             if not own:
                 continue
+            placed.update(_axis_key(axis) for axis in own)
             rows = rows_of(own, ink, span, dpi, gutters=gutters, width=width, pad=pad)
             if rows:
                 pieces.append((span, rows))
+    # Строки, которым колонки не нашлось (набраны через межколонник, шире любой колонки —
+    # колонтитул, заголовок во всю ширину), собираются в блоки ПО ВСЕЙ СТРАНИЦЕ, а не по зонам:
+    # заголовок и его подзаголовок часто попадают в соседние зоны и иначе разъезжаются.
+    rest = [axis for axis in axes if _axis_key(axis) not in placed]
+    if rest:
+        rows = rows_of(rest, ink, (0, width), dpi, pad=pad)
+        if rows:
+            pieces.append(((0, width), rows))
     merged = _merge_pieces(pieces, dpi)
     widths = [span[1] - span[0] for span, _ in merged]
     typical = float(np.median(widths)) if widths else 0.0
@@ -465,7 +558,7 @@ def blocks_of(
         # межколонником: у него ширина заметно больше типичной, а строк мало.
         if typical and span[1] - span[0] > WIDE_BLOCK_RATIO * typical and len(rows) < WIDE_BLOCK_ROWS:
             continue
-        for number, group in enumerate(split_blocks(rows, pitch_of(rows))):
+        for number, group in enumerate(split_blocks(rows, pitch_of(rows), rules, span)):
             if len(group) < MIN_BLOCK_ROWS:
                 continue
             pitch = pitch_of(group)
@@ -514,6 +607,21 @@ def _merge_pieces(
     return sorted(out, key=lambda item: (item[0][0], item[1][0].y))
 
 
+def _fits_any(axis: LineAxis, zones: list, gutters: list, width: int) -> bool:
+    """Есть ли зона и колонка в ней, в которую ось помещается целиком."""
+    for zone in zones:
+        if not (zone.y0 <= axis.cy < zone.y1):
+            continue
+        if any(_inside(axis, span, gutters, width) for span in zone.columns):
+            return True
+    return False
+
+
+def _axis_key(axis: LineAxis) -> tuple[int, int, int]:
+    """Ключ оси для сравнения между копиями: округлённые середина и концы."""
+    return (round(axis.cy), round(axis.x0), round(axis.x1))
+
+
 def _inside(axis: LineAxis, span: tuple[int, int], gutters: list, width: int) -> bool:
     """Ось лежит в колонке зоны — по границам колонки НА ВЫСОТЕ ЭТОЙ ОСИ.
 
@@ -525,8 +633,12 @@ def _inside(axis: LineAxis, span: tuple[int, int], gutters: list, width: int) ->
     # Колонка зоны и локальные границы должны быть той же колонкой: сравниваем по перекрытию.
     if min(right, span[1]) - max(left, span[0]) < 0.5 * (span[1] - span[0]):
         return False
+    # Строка принадлежит колонке, если лежит в ней ОСНОВНОЙ своей частью: требовать «целиком
+    # внутри» нельзя — у последней строки абзаца выносной элемент вылезает за кромку, и строка
+    # уходила из колонки в блок-остаток (1970/02 с.90, «справочниках»).
     pad = 0.05 * (right - left)
-    return axis.x0 >= left - pad and axis.x1 <= right + pad
+    inside = min(axis.x1, right + pad) - max(axis.x0, left - pad)
+    return inside >= INSIDE_SHARE * max(1.0, axis.x1 - axis.x0)
 
 
 __all__ = [

@@ -36,6 +36,7 @@ class EngineResult:
     lines: list[EngineLine]
     regions: list[np.ndarray] = field(default_factory=list)
     gutters: list = field(default_factory=list)  # локальные межколонники (``columns.Gutter``)
+    rules: list = field(default_factory=list)  # сплошные черты (``segment.Rule``): границы блоков
     engine: str = ""
     seconds: float = 0.0
     note: str = ""
