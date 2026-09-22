@@ -156,8 +156,8 @@ def test_heading_step_and_bend_ratios():
     cv2.putText(page, "ZAGOLOVOK STATI GAZETY", (200, 250), cv2.FONT_HERSHEY_SIMPLEX, 2.6, 0, 7, cv2.LINE_AA)
     after = page.copy()
     shift = int(1.0 * RENDER_DPI / 25.4)
-    after[150 - shift : 280 - shift, 1100:1500] = page[150:280, 1100:1500]
-    after[280 - shift : 280, 1100:1500] = 255
+    after[150 - shift : 280 - shift, 900:1400] = page[150:280, 900:1400]
+    after[280 - shift : 280, 900:1400] = 255
     warp = estimate_field(to_work(page), to_work(after), DPI, [])
     lines_b, _ = text_lines(page, DPI)
     lines_a, _ = text_lines(after, DPI)

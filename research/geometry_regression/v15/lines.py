@@ -67,7 +67,13 @@ HEADING_GAP_HEIGHTS = 1.5
 CLIP_MARGIN_PX = 0.5
 # Форма базовой линии по кускам: припуск окна центроида (px рендера) и перцентили размаха остатка.
 CENTROID_PAD_PX = 10
-SHAPE_PERCENTILES = (2.0, 98.0)
+# Выпрямление («строка была кривой и стала прямее») мерится полным размахом остатка базовой: здесь
+# вопрос в самой кривизне, а не в приросте, и обе версии считаются по одним и тем же глифам.
+GAIN_PERCENTILES = (2.0, 98.0)
+# Размах остатка берётся усечённым (p10–p90): один кусок, найденный не там, не должен сойти за дугу.
+SHAPE_PERCENTILES = (10.0, 90.0)
+# Ступенькой считается сдвиг уровня, подтверждённый не менее чем этим числом кусков с каждой стороны.
+STEP_MIN_SIDE = 2
 # Строка «стала прямее», если кривизна относительно длины упала не меньше чем на столько; тогда клин
 # и неравномерность масштаба режутся до WEDGE_FORGIVEN_MAX (побочный эффект выпрямления).
 STRAIGHTENED_BEND_RATIO = 1.5e-3
@@ -188,7 +194,12 @@ def projection_tilt(ink: np.ndarray, x0: int, y0: int, x1: int, y1: int, height:
 
 def is_heading(line: TextLine, lines: list[TextLine]) -> bool:
     """Отдельная строка: крупнее корпуса или с пустотой сверху и снизу в своей колонке."""
-    others = [other for other in lines if other is not line and other.column == line.column]
+    # Строка через межколонник (column −1) сверяется со ВСЕМИ строками: это либо заголовок на всю
+    # ширину, либо две корпусные строки, слипшиеся через межколонник (``line_fit`` сшивает их по
+    # общей y-полосе). У слипшейся высота корпусная, а над и под ней в колонках стоят соседи —
+    # сравнение только с такими же «через межколонник» делало её заголовком, и дыра над межколонником
+    # давала ложную дугу (1967/08 с.88, 1966/02 с.65).
+    others = [other for other in lines if other is not line and (line.column < 0 or other.column == line.column)]
     if not others:
         return True
     body = float(np.median([other.height for other in others]))
@@ -297,30 +308,29 @@ def glyph_line_metrics(
             and len(chunks) >= SHAPE_MIN_CHUNKS
             and float(np.median(peaks)) >= SHAPE_MIN_PEAK_MEDIAN
         )
-        # Базовая линия B — центроид краски каждого куска; A — то же плюс сдвиг куска: одни и те же
-        # глифы, шум их формы одинаков и в разности сокращается (центр-линия ``line_fit`` на
-        # акцидентном шрифте скачет на ±10 px и прятала дугу и ступеньку заголовка).
-        y0, y1 = int(line_b.y0 * k) - CENTROID_PAD_PX, int(line_b.y1 * k) + CENTROID_PAD_PX
-        base_b = np.array([_centroid_y(ink_b, int(x - half), int(x + half), y0, y1) for x in xs])
-        base_a = base_b + dys
         if not tilt_ok:
             metrics["line_tilt_skipped"] += 1.0
         else:
             tilts.append(LineTilt(line_b, line_a, tilt_b, tilt_a, length_mm, heading, measurable))
         if not shape_ok:
             continue
-        # Медиана по трём соседям: одиночный промах куска не ступенька, ступенька «Севера» из двух
-        # кусков (1968/09 с.52) остаётся.
-        base_b, base_a = _median3(base_b), _median3(base_a)
-        bend_b, step_b = _shape(xs, base_b)
-        bend_a, step_a = _shape(xs, base_a)
+        # Форма мерится по САМИМ СДВИГАМ кусков (A − B по одним и тем же глифам): из них вычитается
+        # прямая, то есть общий сдвиг и доворот строки. Что осталось — то, что FineReader сделал со
+        # строкой сверх переноса и поворота: дуга и ступенька. Абсолютные базовые линии (центроид
+        # краски куска) для этого не годились: шум формы букв в B ±5 px входил в размах и в скачок
+        # по-разному в A и B, а выправленный наклон (1972/01 с.92, −2.25° → 0°) сам по себе давал
+        # «ступеньку» 3.7 px на кусок.
+        resid = dys - np.polyval(np.polyfit(xs, dys, 1), xs)
+        lo, hi = np.percentile(resid, SHAPE_PERCENTILES)
+        bend_px = float(hi - lo)
+        step_px = _level_step(resid)
         height_px = line_b.height * k
         floor = mm_to_px(SHAPE_MIN_DELTA_MM, RENDER_DPI)
         values: dict[str, float] = {
-            # Кривизна относительно длины строки и ступенька относительно высоты букв, A − B; прирост
-            # меньше SHAPE_MIN_DELTA_MM — шум кусков, не считается.
-            "line_bend_ratio": float((bend_a - bend_b) / length_px) if bend_a - bend_b >= floor else 0.0,
-            "line_step_ratio": float((step_a - step_b) / height_px) if step_a - step_b >= floor else 0.0,
+            # Кривизна относительно длины строки и ступенька относительно высоты букв; меньше
+            # SHAPE_MIN_DELTA_MM — шум кусков, не считается.
+            "line_bend_ratio": float(bend_px / length_px) if bend_px >= floor else 0.0,
+            "line_step_ratio": float(step_px / height_px) if step_px >= floor else 0.0,
         }
         scales = np.array([c.scale for c in chunks if c.scale is not None])
         if len(scales) >= MIN_CHUNKS:
@@ -332,7 +342,7 @@ def glyph_line_metrics(
             values["line_stretch_ratio"] = float(np.percentile(scales, 90) - np.percentile(scales, 10))
             # Клин при настоящем выпрямлении (строка стала заметно прямее или ровнее — 1968/02 с.92,
             # 1968/03 с.89) глаз прощает; прямее не стала — клин порча целиком (1968/09 с.52, 1976/07 с.31).
-            straightened = (bend_a - bend_b) / length_px <= -STRAIGHTENED_BEND_RATIO or (
+            straightened = _bend_gain(ink_b, ink_a, line_b, line_a, xs, dys, k, half) >= STRAIGHTENED_BEND_RATIO or (
                 tilt_ok and abs(tilt_b) - abs(tilt_a) >= STRAIGHTENED_TILT_DEG
             )
             if straightened and values["line_wedge_ratio"] < WEDGE_HARD:
@@ -373,12 +383,57 @@ def _underlined(line: TextLine, underlines: list[Box]) -> bool:
     return False
 
 
+def _bend_gain(
+    ink_b: np.ndarray,
+    ink_a: np.ndarray,
+    line_b: TextLine,
+    line_a: TextLine,
+    xs: np.ndarray,
+    dys: np.ndarray,
+    k: float,
+    half: int,
+) -> float:
+    """Насколько строка стала ПРЯМЕЕ: (размах остатка базовой B − то же в A) в долях длины.
+
+    Здесь абсолютные базовые линии нужны: вопрос не «что изменилось», а «была ли строка кривой и
+    выпрямилась». Базовая B — центроид краски куска, A — то же плюс сдвиг куска: шум формы букв
+    одинаков в обеих версиях и в разности размахов сокращается.
+    """
+    y0, y1 = int(line_b.y0 * k) - CENTROID_PAD_PX, int(line_b.y1 * k) + CENTROID_PAD_PX
+    base_b = _median3(np.array([_centroid_y(ink_b, int(x - half), int(x + half), y0, y1) for x in xs]))
+    base_a = _median3(base_b + dys)
+    length_px = float(xs[-1] - xs[0] + 2 * half)
+    return (_bend(xs, base_b) - _bend(xs, base_a)) / length_px
+
+
+def _bend(xs: np.ndarray, ys: np.ndarray) -> float:
+    """Размах (``GAIN_PERCENTILES``) остатка ряда от прямой — «насколько ряд кривой» в пикселях."""
+    resid = ys - np.polyval(np.polyfit(xs, ys, 1), xs)
+    lo, hi = np.percentile(resid, GAIN_PERCENTILES)
+    return float(hi - lo)
+
+
 def _median3(values: np.ndarray) -> np.ndarray:
     """Скользящая медиана по трём точкам с повтором краёв."""
     if len(values) < 3:
         return values
     padded = np.pad(values, 1, mode="edge")
     return np.median(np.lib.stride_tricks.sliding_window_view(padded, 3), axis=1)
+
+
+def _level_step(resid: np.ndarray) -> float:
+    """Наибольший СДВИГ УРОВНЯ ряда: |медиана слева − медиана справа| по всем разбиениям.
+
+    Ступенька — это когда часть строки уехала и там осталась (``STEP_MIN_SIDE`` кусков с каждой
+    стороны), а не когда один кусок нашёлся не там: одиночный промах даёт два скачка подряд (туда
+    и обратно) и медианы половин почти не двигает (1968/02 с.92 — первый кусок мимо на 3.8 px).
+    """
+    if len(resid) < 2 * STEP_MIN_SIDE:
+        return 0.0
+    return max(
+        abs(float(np.median(resid[:i])) - float(np.median(resid[i:])))
+        for i in range(STEP_MIN_SIDE, len(resid) - STEP_MIN_SIDE + 1)
+    )
 
 
 def _centroid_y(ink: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> float:
@@ -390,13 +445,6 @@ def _centroid_y(ink: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> float:
     if weights.sum() <= 0:
         return (y0 + y1) / 2.0
     return float((weights * np.arange(y0, y1)).sum() / weights.sum())
-
-
-def _shape(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float]:
-    """Форма базовой линии: размах остатка от прямой (p2–p98) и наибольший скачок между соседними кусками."""
-    resid = ys - np.polyval(np.polyfit(xs, ys, 1), xs)
-    lo, hi = np.percentile(resid, SHAPE_PERCENTILES)
-    return float(hi - lo), float(np.abs(np.diff(ys)).max()) if len(ys) > 1 else 0.0
 
 
 __all__ = ["LineTilt", "tilt_summary", "projection_tilt", "is_heading", "glyph_line_metrics"]
