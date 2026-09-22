@@ -408,7 +408,8 @@ def report(
         culprit = None
         if row.flags:
             best = max(row.flags, key=row.flags.get)
-            culprit = culprits.get(best)
+            if best in culprits:
+                culprit = {**culprits[best], "metric": best}
         field_raw = cache.get("raw", {}).get("field") if arrows else None
         # Раскладка pairs/<вердикт>/<год>/: сначала по вердикту, чтобы смотреть все bad подряд.
         out_path = pairs_dir / row.verdict / row.year / pair_name(row)
@@ -519,7 +520,9 @@ def diff(old_dir, new_dir, old_engine, new_engine, thr, csv_out, pairs_dir, labe
         culprit = None
         if worse.flags:
             cache = json.loads(cache_path(worse_dir, worse.pdf, worse.page).read_text(encoding="utf-8"))
-            culprit = cache.get("culprits", {}).get(max(worse.flags, key=worse.flags.get))
+            best = max(worse.flags, key=worse.flags.get)
+            if best in cache.get("culprits", {}):
+                culprit = {**cache["culprits"][best], "metric": best}
         name = f"{a.pdf}_p{a.page:03d}_{b.verdict}_d{b.score:.2f}_{b.reason or 'none'}__{a.verdict}_d{a.score:.2f}_g{a.gain:.2f}_{a.reason or 'none'}.jpg"
         out_path = pairs_dir / f"{b.verdict}_to_{a.verdict}" / name
         geo = str(Path(run_info["geo_dir"]) / f"{a.pdf}.pdf")
