@@ -63,8 +63,10 @@ BEND_MIN_SAMPLES = 6
 MATCH_PERP_MM = 5.0
 MATCH_ANGLE_DEG = 8.0
 MATCH_LENGTH_FRAC = 0.4
-# Разброс поворотов считается по семейству не меньше чем из стольких линий от ROT_MIN_MM.
+# Разброс углов считается по семейству не меньше чем из стольких линий от SPREAD_MIN_MM: у коротких
+# рёбер блок-схемы (20–25 мм, 1972/11 с.27) угол по следу гуляет на ±0.5°.
 SPREAD_MIN_LINES = 3
+SPREAD_MIN_MM = 25.0
 # Потерянной считается линия, чей след в B покрыт не хуже этого.
 LOST_MIN_COVERAGE = 0.9
 # Тайлов с парой внутри рамки для локального аффина.
@@ -272,7 +274,7 @@ def lineart_metrics(
             # 1973/03 с.59). Именно A − B, а не разброс поворотов: перекошенную сканом блок-схему
             # (1972/11 с.27, рёбра от −2° до +2°) FineReader выровнял к осям — разброс упал, это не порча.
             for family in (horizontals, verticals):
-                members = [s for s in family if s.stroke.length >= mm_to_px(ROT_MIN_MM, dpi)]
+                members = [s for s in family if s.stroke.length >= mm_to_px(SPREAD_MIN_MM, dpi)]
                 if len(members) < SPREAD_MIN_LINES:
                     continue
                 ref = members[0].angle_b

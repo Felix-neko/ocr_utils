@@ -52,9 +52,10 @@ ROUGH_PERCENTILE = 80.0
 EDGE_BOX_MM = 1.7
 # Сегменты с центрами ближе этой доли высоты — один ряд.
 ROW_TOL_HEIGHTS = 0.5
-# Припуск к границам колонки при поиске края (мм): межколонник определён по лентам с точностью до
-# пары мм, край ряда лежит у самой границы.
-COLUMN_PAD_MM = 3.0
+# Окно поиска края: от границы колонки или от края сегментов ряда (что дальше наружу) с припуском
+# (мм): у трапеции 1975/05 с.61 левый край колонки уходит за межколонник на 8 мм, а бокс ряда без
+# первой буквы начинается на 4 мм правее видимого края.
+COLUMN_PAD_MM = 5.0
 # Край ряда: столбец с не меньше стольких пикселей краски в полосе ряда (300 dpi) …
 EDGE_MIN_INK_PX = 2
 # … и с краской в следующих (внутрь строки) стольких столбцах из этих — иначе пылинка.
@@ -186,7 +187,7 @@ def _row_edge_b(ink_b: np.ndarray, row: Row, column: tuple[int, int], side: str,
     """Край ряда в B (пиксели рабочей копии) по краске рендера ``ink_b``."""
     k = RENDER_DPI / dpi
     pad = mm_to_px(COLUMN_PAD_MM, dpi)
-    x_lo, x_hi = int((column[0] - pad) * k), int((column[1] + pad) * k)
+    x_lo, x_hi = int((min(column[0], row.x0) - pad) * k), int((max(column[1], row.x1) + pad) * k)
     x = _ink_edge(ink_b, x_lo, x_hi, int(row.y0 * k), int(row.y1 * k) + 1, side)
     return None if x is None else x / k
 
@@ -197,7 +198,8 @@ def _row_edge_a(
     """Край и центр ряда в A: полоса ряда переносится полем, край ищется в той же колонке."""
     k = RENDER_DPI / dpi
     pad = mm_to_px(COLUMN_PAD_MM, dpi)
-    corners = np.array([[column[0], row.y0], [column[1], row.y1], [column[0], row.y1], [column[1], row.y0]], float)
+    c0, c1 = min(column[0], row.x0), max(column[1], row.x1)
+    corners = np.array([[c0, row.y0], [c1, row.y1], [c0, row.y1], [c1, row.y0]], float)
     moved = field.transform(corners) if field is not None else corners
     margin = ROW_PAD_HEIGHTS * row.height
     y0, y1 = moved[:, 1].min() - margin, moved[:, 1].max() + margin

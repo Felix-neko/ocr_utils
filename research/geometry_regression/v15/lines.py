@@ -64,8 +64,15 @@ SHAPE_PERCENTILES = (2.0, 98.0)
 # и неравномерность масштаба режутся до WEDGE_FORGIVEN_MAX (побочный эффект выпрямления).
 STRAIGHTENED_BEND_RATIO = 2.0e-3
 WEDGE_FORGIVEN_MAX = 0.04
-# Кусков в строке для формы (после медианного сглаживания по трём).
+# Кусков в строке для формы (после медианного сглаживания по трём); строки ниже SHAPE_MIN_HEIGHT_MM не
+# меряются; прирост кривизны и ступеньки засчитывается только от SHAPE_MIN_DELTA_MM — у корпусной
+# строки в 2 мм промах куска на четверть миллиметра даёт «ступеньку» 0.1 высоты (1968/03 с.8).
 SHAPE_MIN_CHUNKS = 5
+SHAPE_MIN_HEIGHT_MM = 1.8
+SHAPE_MIN_DELTA_MM = 0.3
+# Наклон строки, когда проекция не сошлась с кусками (разрядка, короткий заголовок): по прямым через
+# центроиды кусков в B и в A; клин прощается и при выпрямлении наклона на STRAIGHTENED_TILT_DEG.
+STRAIGHTENED_TILT_DEG = 0.3
 
 
 @dataclass(frozen=True)
@@ -248,38 +255,46 @@ def glyph_line_metrics(
         tilt_ok = tilt_b is not None and tilt_a is not None and abs((tilt_a - tilt_b) - turn_deg) <= CROSS_TOL_DEG
         length_px = float(xs[-1] - xs[0] + 2 * half)
         length_mm = px_to_mm(length_px, RENDER_DPI)
-        if not tilt_ok:
-            metrics["line_tilt_skipped"] += 1.0
-        else:
-            measurable = line_b.length >= min_len and covered
-            tilts.append(LineTilt(line_b, line_a, tilt_b, tilt_a, length_mm, is_heading(line_b, lines_b), measurable))
-        # Форма строки — только у отдельных строк высотой от STRETCH_MIN_HEIGHT_MM (заголовки): у
-        # корпуса промах одного куска даёт ложную ступеньку (1968/03 с.8), строка с формулой —
-        # прыжки центроида по числителю и знаменателю (1966/05 с.70), а волну корпуса FineReader
-        # убирает — её выигрыш считают сводки ``line_metrics``.
-        if (
-            line_b.length < min_len
-            or not covered
-            or not is_heading(line_b, lines_b)
-            or line_b.height < stretch_h
-            or len(chunks) < SHAPE_MIN_CHUNKS
-        ):
-            continue
+        heading = is_heading(line_b, lines_b)
+        measurable = line_b.length >= min_len and covered
+        # Форма строки — только у отдельных строк (заголовков) от SHAPE_MIN_HEIGHT_MM: у корпуса промах
+        # одного куска даёт ложную ступеньку (1968/03 с.8, отсекается порогом SHAPE_MIN_DELTA_MM), а
+        # волну корпуса FineReader убирает — её выигрыш считают сводки ``line_metrics``.
+        shape_ok = (
+            measurable
+            and heading
+            and line_b.height >= mm_to_px(SHAPE_MIN_HEIGHT_MM, dpi)
+            and len(chunks) >= SHAPE_MIN_CHUNKS
+        )
         # Базовая линия B — центроид краски каждого куска; A — то же плюс сдвиг куска: одни и те же
         # глифы, шум их формы одинаков и в разности сокращается (центр-линия ``line_fit`` на
         # акцидентном шрифте скачет на ±10 px и прятала дугу и ступеньку заголовка).
         y0, y1 = int(line_b.y0 * k) - CENTROID_PAD_PX, int(line_b.y1 * k) + CENTROID_PAD_PX
         base_b = np.array([_centroid_y(ink_b, int(x - half), int(x + half), y0, y1) for x in xs])
+        base_a = base_b + dys
+        if not tilt_ok and measurable and len(chunks) >= SHAPE_MIN_CHUNKS:
+            # Проекция не сошлась с кусками (разрядка 1967/03 с.11): наклон — по прямым через центроиды.
+            tilt_b = float(np.degrees(np.arctan(np.polyfit(xs, base_b, 1)[0])))
+            tilt_a = float(np.degrees(np.arctan(np.polyfit(xs, base_a, 1)[0])))
+            tilt_ok = True
+        if not tilt_ok:
+            metrics["line_tilt_skipped"] += 1.0
+        else:
+            tilts.append(LineTilt(line_b, line_a, tilt_b, tilt_a, length_mm, heading, measurable))
+        if not shape_ok:
+            continue
         # Медиана по трём соседям: одиночный промах куска не ступенька, ступенька «Севера» из двух
         # кусков (1968/09 с.52) остаётся.
-        base_b, base_a = _median3(base_b), _median3(base_b + dys)
+        base_b, base_a = _median3(base_b), _median3(base_a)
         bend_b, step_b = _shape(xs, base_b)
         bend_a, step_a = _shape(xs, base_a)
         height_px = line_b.height * k
+        floor = mm_to_px(SHAPE_MIN_DELTA_MM, RENDER_DPI)
         values: dict[str, float] = {
-            # Кривизна относительно длины строки и ступенька относительно высоты букв, A − B.
-            "line_bend_ratio": float((bend_a - bend_b) / length_px),
-            "line_step_ratio": float((step_a - step_b) / height_px),
+            # Кривизна относительно длины строки и ступенька относительно высоты букв, A − B; прирост
+            # меньше SHAPE_MIN_DELTA_MM — шум кусков, не считается.
+            "line_bend_ratio": float((bend_a - bend_b) / length_px) if bend_a - bend_b >= floor else 0.0,
+            "line_step_ratio": float((step_a - step_b) / height_px) if step_a - step_b >= floor else 0.0,
         }
         scales = np.array([c.scale for c in chunks if c.scale is not None])
         if len(scales) >= MIN_CHUNKS:
@@ -289,9 +304,12 @@ def glyph_line_metrics(
             # оба безразмерные (растяжение относительно высоты букв).
             values["line_wedge_ratio"] = float(abs(np.polyfit(xs_s, scales, 1)[0] * (xs_s[-1] - xs_s[0])))
             values["line_stretch_ratio"] = float(np.percentile(scales, 90) - np.percentile(scales, 10))
-            # Клин при настоящем выпрямлении (строка стала заметно прямее) глаз прощает — 1968/02
-            # с.92; прямее не стала — клин порча целиком (1968/09 с.52, 1976/07 с.31).
-            if values["line_bend_ratio"] <= -STRAIGHTENED_BEND_RATIO:
+            # Клин при настоящем выпрямлении (строка стала заметно прямее или ровнее — 1968/02 с.92,
+            # 1968/03 с.89) глаз прощает; прямее не стала — клин порча целиком (1968/09 с.52, 1976/07 с.31).
+            straightened = (bend_a - bend_b) / length_px <= -STRAIGHTENED_BEND_RATIO or (
+                tilt_ok and abs(tilt_b) - abs(tilt_a) >= STRAIGHTENED_TILT_DEG
+            )
+            if straightened:
                 values["line_wedge_ratio"] = min(values["line_wedge_ratio"], WEDGE_FORGIVEN_MAX)
                 values["line_stretch_ratio"] = min(values["line_stretch_ratio"], WEDGE_FORGIVEN_MAX)
         for name, value in values.items():

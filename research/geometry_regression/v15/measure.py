@@ -49,6 +49,8 @@ DESKEW_MIN_GAIN_DEG = 0.3
 DESKEW_TOL_DEG = 0.35
 # Элементов для оценки доворота меньше — не подтверждается.
 DESKEW_MIN_ITEMS = 5
+# Рамка line art с не меньше чем столькими строками текста внутри — врезка, не чертёж.
+TEXT_LINES_IN_DRAWING = 4
 
 
 def _wrap(angle: float) -> float:
@@ -226,8 +228,13 @@ def measure_pair(
     out.metrics.update(metrics)
     out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
     # Порча рисунков: угол между осями, поворот и разброс линий, изгиб — по линиям внутри рамок line art.
+    # Рамка line art со строками текста внутри (врезка в рамке, 1968/05 с.55) — не чертёж: её линии
+    # выправляются вместе с текстом, пропорций у неё нет.
+    drawings_only = [
+        box for box in lineart if sum(1 for line in inner_b if _inside_any(line, [box])) < TEXT_LINES_IN_DRAWING
+    ]
     metrics, culprits = lineart_metrics(
-        gray300_b, gray300_a, strokes_b, strokes_a, lineart, warp, rot_deg, RENDER_DPI, dpi
+        gray300_b, gray300_a, strokes_b, strokes_a, drawings_only, warp, rot_deg, RENDER_DPI, dpi
     )
     out.metrics.update(metrics)
     out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))

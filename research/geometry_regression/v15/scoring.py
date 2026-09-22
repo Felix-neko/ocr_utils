@@ -53,7 +53,7 @@ DEFAULT_THRESHOLDS: dict[str, tuple[float, str]] = {
     # A − B, изгиб линии от 25 мм.
     "lineart_axis_delta_deg": (0.7, "la_axis"),
     "lineart_rot_max_deg": (3.0, "la_rot"),
-    "lineart_spread_delta_deg": (1.0, "la_spread"),
+    "lineart_spread_delta_deg": (1.5, "la_spread"),
     "lineart_bend_mm": (0.8, "la_bend"),
     "raster_edge_bend_mm": (0.8, "photo_bend"),
     "raster_photo_tilt_mm": (1.5, "photo_tilt"),
@@ -63,7 +63,7 @@ DEFAULT_THRESHOLDS: dict[str, tuple[float, str]] = {
     # ступенька к высоте: порча 0.03–0.08, не порча < 0; клин и неравномерность к высоте: порча
     # 0.05–0.12 (при выпрямлении режутся до 0.04 — 1968/02 с.92). Только заголовки; калибровать по паку.
     "line_bend_ratio": (3.0e-3, "bend_ratio"),
-    "line_step_ratio": (0.04, "step"),
+    "line_step_ratio": (0.06, "step"),
     "line_wedge_ratio": (0.05, "wedge"),
     "line_stretch_ratio": (0.05, "stretch"),
     # мм; перекос выключенного блока: уход кромки по краске рядов сверх наклона строк, при
