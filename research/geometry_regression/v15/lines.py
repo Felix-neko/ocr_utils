@@ -11,10 +11,13 @@
   выше корпуса в ``HEADING_HEIGHT_RATIO`` раз или с пустотой в ``HEADING_GAP_HEIGHTS`` высот
   сверху и снизу): по одной корпусной строке из 60 с шумной центр-линией набирался «выигрыш»
   0.7° (1968/03 с.8); выигрыш корпуса — сводки ``line_metrics`` по колонкам;
-* **растяжение** — и в мм (как в ядре), и относительно высоты строки
-  (``line_stretch_rel_max``), волна — и в долях высоты, и относительно длины
-  (``line_glyph_wobble_len_max``): решение пользователя 2026-09-22 — сравнить, что разделяет
-  1967/03 с.36 и 1968/05 с.44 (порча) от 1968/02 с.92 и 1975/05 с.47 (не порча).
+* **форма строки — относительными мерами** (решение пользователя 2026-09-22): базовая линия по
+  центроидам краски кусков (B) и та же плюс сдвиги (A); ``line_bend_ratio`` — рост размаха остатка от
+  прямой относительно длины строки (дуга заголовка 1973/10 с.32: +4.4·10⁻³, выпрямленный 1968/02 с.92:
+  −3.9·10⁻³), ``line_step_ratio`` — рост наибольшего скачка между соседними кусками относительно
+  высоты букв (ступенька «Севера» 1968/09 с.52: +0.05), ``line_wedge_ratio`` — линейный тренд
+  масштаба кусков (клин), ``line_stretch_ratio`` — размах масштабов p10–p90 (неравномерное
+  растяжение); клин при настоящем выпрямлении строки режется до ``WEDGE_FORGIVEN_MAX``.
 """
 
 from __future__ import annotations
@@ -38,7 +41,6 @@ from ocr_utils.geometry_regression.stretch import (
     STRETCH_MIN_HEIGHT_MM,
     STRETCH_MIN_LENGTH_MM,
     _chunks_inside,
-    _resid,
     line_chunks,
 )
 
@@ -55,6 +57,15 @@ CROSS_TOL_DEG = 0.35
 # Отдельная строка (заголовок): выше медианы корпуса во столько раз ИЛИ пустота сверху и снизу.
 HEADING_HEIGHT_RATIO = 1.5
 HEADING_GAP_HEIGHTS = 1.5
+# Форма базовой линии по кускам: припуск окна центроида (px рендера) и перцентили размаха остатка.
+CENTROID_PAD_PX = 10
+SHAPE_PERCENTILES = (2.0, 98.0)
+# Строка «стала прямее», если кривизна относительно длины упала не меньше чем на столько; тогда клин
+# и неравномерность масштаба режутся до WEDGE_FORGIVEN_MAX (побочный эффект выпрямления).
+STRAIGHTENED_BEND_RATIO = 2.0e-3
+WEDGE_FORGIVEN_MAX = 0.04
+# Кусков в строке для формы (после медианного сглаживания по трём).
+SHAPE_MIN_CHUNKS = 5
 
 
 @dataclass(frozen=True)
@@ -201,10 +212,10 @@ def glyph_line_metrics(
     metrics = {
         "lines_verified": 0.0,
         "stretch_lines": 0.0,
-        "line_glyph_wobble_max": 0.0,
-        "line_glyph_wobble_len_max": 0.0,
-        "line_stretch_mm_max": 0.0,
-        "line_stretch_rel_max": 0.0,
+        "line_bend_ratio": 0.0,
+        "line_step_ratio": 0.0,
+        "line_wedge_ratio": 0.0,
+        "line_stretch_ratio": 0.0,
         "line_tilt_skipped": 0.0,
     }
     gain_min_len = mm_to_px(GAIN_MIN_LENGTH_MM, dpi)
@@ -214,6 +225,7 @@ def glyph_line_metrics(
     }
     verified: list[tuple[TextLine, TextLine]] = []
     tilts: list[LineTilt] = []
+    half = mm_to_px(CHUNK_MM, RENDER_DPI) // 2
     for line_b, line_a in pairs:
         if line_b.length < gain_min_len:
             continue
@@ -234,31 +246,54 @@ def glyph_line_metrics(
         tilt_b = projection_tilt(ink_b, *(int(v * k) for v in line_b.box), line_b.height * k)
         tilt_a = projection_tilt(ink_a, *(int(v * k) for v in line_a.box), line_a.height * k)
         tilt_ok = tilt_b is not None and tilt_a is not None and abs((tilt_a - tilt_b) - turn_deg) <= CROSS_TOL_DEG
-        length_mm = px_to_mm(xs[-1] - xs[0] + mm_to_px(CHUNK_MM, RENDER_DPI), RENDER_DPI)
+        length_px = float(xs[-1] - xs[0] + 2 * half)
+        length_mm = px_to_mm(length_px, RENDER_DPI)
         if not tilt_ok:
             metrics["line_tilt_skipped"] += 1.0
         else:
             measurable = line_b.length >= min_len and covered
             tilts.append(LineTilt(line_b, line_a, tilt_b, tilt_a, length_mm, is_heading(line_b, lines_b), measurable))
-        if line_b.length < min_len or not covered:
+        # Форма строки — только у отдельных строк высотой от STRETCH_MIN_HEIGHT_MM (заголовки): у
+        # корпуса промах одного куска даёт ложную ступеньку (1968/03 с.8), строка с формулой —
+        # прыжки центроида по числителю и знаменателю (1966/05 с.70), а волну корпуса FineReader
+        # убирает — её выигрыш считают сводки ``line_metrics``.
+        if (
+            line_b.length < min_len
+            or not covered
+            or not is_heading(line_b, lines_b)
+            or line_b.height < stretch_h
+            or len(chunks) < SHAPE_MIN_CHUNKS
+        ):
             continue
-        values: dict[str, float] = {}
-        cy_b = np.interp(xs, line_b.xs, line_b.ys)
-        wobble_px = _resid(xs, cy_b + dys) - _resid(xs, cy_b)
-        values["line_glyph_wobble_max"] = float(wobble_px / (line_b.height * k))
-        values["line_glyph_wobble_len_max"] = float(wobble_px / (line_b.length * k))
+        # Базовая линия B — центроид краски каждого куска; A — то же плюс сдвиг куска: одни и те же
+        # глифы, шум их формы одинаков и в разности сокращается (центр-линия ``line_fit`` на
+        # акцидентном шрифте скачет на ±10 px и прятала дугу и ступеньку заголовка).
+        y0, y1 = int(line_b.y0 * k) - CENTROID_PAD_PX, int(line_b.y1 * k) + CENTROID_PAD_PX
+        base_b = np.array([_centroid_y(ink_b, int(x - half), int(x + half), y0, y1) for x in xs])
+        # Медиана по трём соседям: одиночный промах куска не ступенька, ступенька «Севера» из двух
+        # кусков (1968/09 с.52) остаётся.
+        base_b, base_a = _median3(base_b), _median3(base_b + dys)
+        bend_b, step_b = _shape(xs, base_b)
+        bend_a, step_a = _shape(xs, base_a)
+        height_px = line_b.height * k
+        values: dict[str, float] = {
+            # Кривизна относительно длины строки и ступенька относительно высоты букв, A − B.
+            "line_bend_ratio": float((bend_a - bend_b) / length_px),
+            "line_step_ratio": float((step_a - step_b) / height_px),
+        }
         scales = np.array([c.scale for c in chunks if c.scale is not None])
         if len(scales) >= MIN_CHUNKS:
             metrics["stretch_lines"] += 1.0
             xs_s = np.array([c.x for c in chunks if c.scale is not None])
-            trend = abs(np.polyfit(xs_s, scales, 1)[0] * (xs_s[-1] - xs_s[0]))
-            # Клин сверх доворота и выпрямления (как в ядре): по кускам, а не по центр-линии.
-            turn_mm = length_mm * abs(np.sin(np.radians(turn_deg)))
-            straightened_mm = max(0.0, px_to_mm(-wobble_px, RENDER_DPI))
-            height_mm = px_to_mm(line_b.height * k, RENDER_DPI)
-            stretch_mm = max(0.0, float(trend * height_mm) - turn_mm - straightened_mm)
-            values["line_stretch_mm_max"] = stretch_mm
-            values["line_stretch_rel_max"] = stretch_mm / max(height_mm, 1e-6)
+            # Клин — линейный тренд масштаба от начала к концу; неравномерность — размах p10–p90:
+            # оба безразмерные (растяжение относительно высоты букв).
+            values["line_wedge_ratio"] = float(abs(np.polyfit(xs_s, scales, 1)[0] * (xs_s[-1] - xs_s[0])))
+            values["line_stretch_ratio"] = float(np.percentile(scales, 90) - np.percentile(scales, 10))
+            # Клин при настоящем выпрямлении (строка стала заметно прямее) глаз прощает — 1968/02
+            # с.92; прямее не стала — клин порча целиком (1968/09 с.52, 1976/07 с.31).
+            if values["line_bend_ratio"] <= -STRAIGHTENED_BEND_RATIO:
+                values["line_wedge_ratio"] = min(values["line_wedge_ratio"], WEDGE_FORGIVEN_MAX)
+                values["line_stretch_ratio"] = min(values["line_stretch_ratio"], WEDGE_FORGIVEN_MAX)
         for name, value in values.items():
             if best[name] is None or value > best[name][0]:
                 best[name] = (float(value), line_b, line_a)
@@ -267,6 +302,32 @@ def glyph_line_metrics(
             metrics[name] = item[0]
             culprits[name] = {"b": item[1].box, "a": item[2].box}
     return metrics, culprits, verified, tilts
+
+
+def _median3(values: np.ndarray) -> np.ndarray:
+    """Скользящая медиана по трём точкам с повтором краёв."""
+    if len(values) < 3:
+        return values
+    padded = np.pad(values, 1, mode="edge")
+    return np.median(np.lib.stride_tricks.sliding_window_view(padded, 3), axis=1)
+
+
+def _centroid_y(ink: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> float:
+    """Вертикальный центроид краски в окне (пиксели рендера); середина окна, если краски нет."""
+    h, w = ink.shape
+    x0, x1, y0, y1 = max(0, x0), min(w, x1), max(0, y0), min(h, y1)
+    band = ink[y0:y1, x0:x1].astype(np.float64)
+    weights = band.sum(axis=1)
+    if weights.sum() <= 0:
+        return (y0 + y1) / 2.0
+    return float((weights * np.arange(y0, y1)).sum() / weights.sum())
+
+
+def _shape(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float]:
+    """Форма базовой линии: размах остатка от прямой (p2–p98) и наибольший скачок между соседними кусками."""
+    resid = ys - np.polyval(np.polyfit(xs, ys, 1), xs)
+    lo, hi = np.percentile(resid, SHAPE_PERCENTILES)
+    return float(hi - lo), float(np.abs(np.diff(ys)).max()) if len(ys) > 1 else 0.0
 
 
 __all__ = ["LineTilt", "tilt_summary", "projection_tilt", "is_heading", "glyph_line_metrics"]

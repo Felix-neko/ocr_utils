@@ -27,8 +27,8 @@ from ocr_utils.geometry_regression.field import Field
 from ocr_utils.geometry_regression.strokes import (
     AXIS_TOL_DEG,
     RULER_AXIS_TOL_DEG,
-    WMEAN_MIN_TOTAL_MM,
     Stroke,
+    _is_fraction_bar,
     _weighted_tilt,
 )
 
@@ -58,6 +58,21 @@ JOG_MAX_CONTINUATION = 0.3
 # черты по 5 мм давали 0.6° «из ничего» по LSD); след краски точнее, и три дробные черты по 4 мм
 # (1966/05 с.70, наклон +1.6° каждая) должны считаться.
 WMEAN_MIN_TOTAL_MM = 8.0
+# Дробные черты формул — отдельное семейство: горизонтальные штрихи до FRACTION_MAX_MM вне таблиц и
+# рисунков с краской над и под чертой (``strokes._is_fraction_bar``). Средний по длине наклон всех
+# горизонталей их не видит: линейки колонтитула и таблицы по 120–130 мм съедают черты 9–18 мм
+# (1973/08 с.32, с.35, 1974/10 с.52, 1975/06 с.50 — черты в A под 1–4°). Считаются от FRACTION_MIN_BARS
+# черт, средний наклон — по числу черт, без веса по длине.
+FRACTION_MAX_MM = 25.0
+FRACTION_MIN_BARS = 2
+# Числитель и знаменатель: краска в полосах от FRACTION_NEAR_MM до FRACTION_FAR_MM над и под чертой
+# (в ядре — до 1.2 мм, для тире; у крупных формул с индексами зазор до 3 мм: 1973/08 с.35) покрывает
+# не меньше FRACTION_COVER длины черты с обеих сторон. Подчёркивание рубрики — краска только над
+# чертой; линейки между строками длиннее FRACTION_MAX_MM; строки рядом с дробью в формуле (0,5·S/E·K)
+# краску в стороны дают, поэтому по сторонам не проверяется.
+FRACTION_NEAR_MM = 0.2
+FRACTION_FAR_MM = 3.0
+FRACTION_COVER = 0.25
 
 
 @dataclass(frozen=True)
@@ -361,6 +376,74 @@ def _uniformity(deltas: np.ndarray, lengths: np.ndarray) -> float:
     return float(np.clip(1.0 - values.std() / mean, 0.0, 1.0))
 
 
+def _cover(ink: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> float:
+    """Доля столбцов [x0, x1) с краской в полосе строк [y0, y1); вне кадра — 0."""
+    h, w = ink.shape
+    x0, x1, y0, y1 = max(0, x0), min(w, x1), max(0, y0), min(h, y1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return float(ink[y0:y1, x0:x1].any(axis=0).mean())
+
+
+def _is_fraction_bar_wide(ink: np.ndarray, stroke: Stroke, dpi: float) -> bool:
+    """Дробная черта: краска и над, и под чертой в пределах её длины."""
+    mm = dpi / 25.4
+    x0, x1 = int(min(stroke.x0, stroke.x1)), int(max(stroke.x0, stroke.x1)) + 1
+    y = (stroke.y0 + stroke.y1) / 2.0
+    near, far = FRACTION_NEAR_MM * mm, FRACTION_FAR_MM * mm
+    return all(
+        _cover(ink, x0, x1, y_lo, y_hi) >= FRACTION_COVER
+        for y_lo, y_hi in ((int(y - far), int(y - near) + 1), (int(y + near), int(y + far) + 1))
+    )
+
+
+def fraction_metrics(
+    tilts: list[StrokeTilt], ink_b: np.ndarray, dpi: float, exclude: list, k: float
+) -> tuple[dict[str, float], dict]:
+    """Наклон дробных черт формул: средний и худший прирост |наклона| A − B (градусы).
+
+    Args:
+        tilts: Штрихи с направлениями (:func:`trace_strokes` + :func:`lsd_fallback`).
+        ink_b: Краска рендера B (``серый < 128``) для проверки числителя и знаменателя.
+        dpi: Разрешение рендера.
+        exclude: Рамки таблиц и рисунков в пикселях ``dpi / k`` — черты внутри них не считаются.
+        k: Множитель из пикселей рендера в пиксели рамок.
+
+    Returns:
+        ``fraction_bars``, ``fraction_tilt_mean_delta_deg``, ``fraction_tilt_max_delta_deg`` и виновник
+        (все черты, сегменты B и A).
+    """
+    metrics = {"fraction_bars": 0.0, "fraction_tilt_mean_delta_deg": 0.0, "fraction_tilt_max_delta_deg": 0.0}
+    culprits: dict = {}
+    max_len = FRACTION_MAX_MM * dpi / 25.4
+    bars: list[StrokeTilt] = []
+    for t in tilts:
+        s = t.stroke
+        if s.length > max_len or abs(t.angle_b) > AXIS_TOL_DEG or s.in_lineart:
+            continue
+        mx, my = s.mid
+        if any(x0 <= mx * k < x1 and y0 <= my * k < y1 for x0, y0, x1, y1 in exclude):
+            continue
+        if not _is_fraction_bar_wide(ink_b, s, dpi):
+            continue
+        bars.append(t)
+    metrics["fraction_bars"] = float(len(bars))
+    if len(bars) < FRACTION_MIN_BARS:
+        return metrics, culprits
+    deltas = [_axis_tilt(t.angle_a, "h") - _axis_tilt(t.angle_b, "h") for t in bars]
+    metrics["fraction_tilt_mean_delta_deg"] = float(np.mean(deltas))
+    metrics["fraction_tilt_max_delta_deg"] = float(max(deltas))
+    worst = int(np.argmax(deltas))
+    culprits["fraction_tilt_mean_delta_deg"] = {
+        "b": bars[worst].stroke.box,
+        "a": _seg_box(bars[worst].segment_a),
+        "segments_b": [t.segment_b for t in bars],
+        "segments_a": [t.segment_a for t in bars],
+    }
+    culprits["fraction_tilt_max_delta_deg"] = culprits["fraction_tilt_mean_delta_deg"]
+    return metrics, culprits
+
+
 def _trace_box(trace: Trace) -> tuple[int, int, int, int]:
     pts = trace.points
     return (int(pts[:, 0].min()), int(pts[:, 1].min()), int(pts[:, 0].max()) + 1, int(pts[:, 1].max()) + 1)
@@ -400,4 +483,13 @@ def bend_metrics(
     return metrics, culprits
 
 
-__all__ = ["Trace", "StrokeTilt", "trace_line", "trace_strokes", "lsd_fallback", "ridge_stroke_metrics", "bend_metrics"]
+__all__ = [
+    "Trace",
+    "StrokeTilt",
+    "trace_line",
+    "trace_strokes",
+    "lsd_fallback",
+    "ridge_stroke_metrics",
+    "fraction_metrics",
+    "bend_metrics",
+]

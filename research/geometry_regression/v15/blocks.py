@@ -1,17 +1,23 @@
-"""Блоки текста и их кромки по одним и тем же строкам «было | стало»: перекос и рваность.
+"""Блоки текста и их кромки по краске рядов «было | стало»: перекос и рваность.
 
 Ядро (``edges.py``) подбирало строки кромки в A и B независимо и сопоставляло кромки по
 перекрытию — на перекошенном блоке (1969/12 с.34: левый край ушёл на 5 мм при горизонтальных
-строках) оно видело 0.2–1.2 мм. Здесь кромка строится по ПАРАМ строк (``lines.match_lines``):
-в B выбираются строки, доходящие до огибающей блока, и те же строки берутся в A. Огибающая —
-«липкая лента» пользователя в одномерном виде: последовательность начал (концов) строк сверху
-вниз сглаживается морфологическим открытием (закрытием) окном ``ENVELOPE_LINES`` строк —
-абзацный отступ и короткая последняя строка абзаца (1–2 строки) заливаются, вырез под
-иллюстрацию в 3+ строки остаётся ямой (там кромки нет). Блок считается выключенным, если в B
-на кромке не меньше ``MIN_EDGE_LINES`` строк и p80 их остатка от прямой не больше
-``MAX_ROUGH_B_MM`` (строки на кромке отбираются с допуском полвысоты, ~1.5 мм, и p80 их остатка у
-выключенного блока 1.0–1.4 мм; у оглавления 1967/07 с.97 — 5.3 мм);
-оглавления, стихи и списки так отсекаются.
+строках) оно видело 0.2–1.2 мм. Первая версия стенда строила кромку по боксам строк и их парам
+(``lines.match_lines``), и её портили разрезанные строки: у выключенного текста строка часто
+распадается на два сегмента по широкому пробелу, а одиночная первая буква «в»/«и» отваливается от
+строки — бокс начинается со второго слова; обрезки вставали в последовательность как отдельные
+«строки», окно огибающей видело вместо соседей обрезки, и строка с отступом попадала в кромку
+(1966/03 с.13, 1967/11 с.75 — кружки в отступах и внутри блока).
+
+Здесь кромка меряется ПО КРАСКЕ: сегменты одной колонки с близкими центрами по y сливаются в
+РЯД (полоса ``[y0, y1]``), и край ряда — первый (последний) столбец рендера 300 dpi в пределах
+колонки, где в полосе ряда есть краска, с проверкой, что краска есть и в соседних столбцах
+(пыль не край). В A полоса ряда переносится полем смещений и край меряется там же — партнёр из
+``match_lines`` не нужен. Огибающая — «липкая лента» пользователя в одномерном виде:
+последовательность краёв рядов сверху вниз сглаживается морфологическим открытием (закрытием)
+окном ``ENVELOPE_LINES`` рядов — абзацный отступ и короткая последняя строка абзаца заливаются,
+вырез под иллюстрацию в 3+ ряда остаётся ямой. Блок выключенный, если в B на кромке не меньше
+``MIN_EDGE_LINES`` рядов и p80 их остатка от прямой не больше ``MAX_ROUGH_B_MM``.
 
 Перекос кромки — её наклон от вертикали МИНУС наклон строк блока (шир, не поворот): доворот
 всей страницы, при котором кромка и строки поворачиваются вместе, порчей не считается.
@@ -26,27 +32,58 @@ from scipy.ndimage import grey_closing, grey_opening
 
 from ocr_utils.geometry_regression import mm_to_px, px_to_mm
 from ocr_utils.geometry_regression.edges import BLOCK_GAP_HEIGHTS, _theil_sen
-from ocr_utils.geometry_regression.regions import TextLine
+from ocr_utils.geometry_regression.field import Field
+from ocr_utils.geometry_regression.regions import TextLine, column_spans
+from ocr_utils.geometry_regression.render import RENDER_DPI
 
 Box = tuple[int, int, int, int]
 
-# Строк на кромке меньше — блок не мерится.
+# Рядов на кромке меньше — блок не мерится.
 MIN_EDGE_LINES = 8
-# Окно огибающей (строк): открытие/закрытие заливает ямы короче окна − 1.
+# Окно огибающей (рядов): открытие/закрытие заливает ямы короче окна − 1.
 ENVELOPE_LINES = 3
-# Строка «на кромке», если её край не дальше этой доли высоты строки от огибающей.
+# Ряд «на кромке», если его край не дальше этой доли высоты строки от огибающей.
 EDGE_TOL_HEIGHTS = 0.5
 # Кромка в B рваная сильнее — блок не выключенный (оглавление, стихи, список), не мерится.
 MAX_ROUGH_B_MM = 1.5
-# Перцентиль остатка для рваности: одна выпавшая строка (переносный дефис) её не задирает.
+# Перцентиль остатка для рваности: один выпавший ряд (переносный дефис) её не задирает.
 ROUGH_PERCENTILE = 80.0
 # Полуширина рамки кромки на оверлее.
 EDGE_BOX_MM = 1.7
+# Сегменты с центрами ближе этой доли высоты — один ряд.
+ROW_TOL_HEIGHTS = 0.5
+# Припуск к границам колонки при поиске края (мм): межколонник определён по лентам с точностью до
+# пары мм, край ряда лежит у самой границы.
+COLUMN_PAD_MM = 3.0
+# Край ряда: столбец с не меньше стольких пикселей краски в полосе ряда (300 dpi) …
+EDGE_MIN_INK_PX = 2
+# … и с краской в следующих (внутрь строки) стольких столбцах из этих — иначе пылинка.
+EDGE_CONFIRM_COLS = 3
+EDGE_CONFIRM_MIN = 2
+# Полоса ряда в A — та же высота с припуском в долях высоты (поле ошибается на доли миллиметра).
+ROW_PAD_HEIGHTS = 0.15
+
+
+@dataclass(frozen=True)
+class Row:
+    """Ряд текста колонки: слитые сегменты одной y-полосы (пиксели рабочей копии)."""
+
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+    height: float
+    slope_deg: float  # медианный наклон сегментов ряда
+    column: int
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2.0
 
 
 @dataclass(frozen=True)
 class BlockEdge:
-    """Одна кромка блока по тем же строкам в обеих версиях.
+    """Одна кромка блока по тем же рядам в обеих версиях.
 
     Наклоны — в градусах от вертикали (положительный — низ кромки правее верха), шир —
     наклон кромки плюс наклон строк блока (у повёрнутого блока они гасят друг друга).
@@ -63,7 +100,7 @@ class BlockEdge:
     rough_a_mm: float
     jitter_b_mm: float
     jitter_a_mm: float
-    points_b: np.ndarray  # N × 2, (x, y) краёв строк в B
+    points_b: np.ndarray  # N × 2, (x, y) краёв рядов в B, пиксели рабочей копии
     points_a: np.ndarray
 
     @property
@@ -76,20 +113,99 @@ class BlockEdge:
         return self.rough_a_mm - self.rough_b_mm
 
 
-def text_blocks(lines: list[TextLine]) -> list[list[TextLine]]:
-    """Строки одной колонки → блоки по разрыву больше ``BLOCK_GAP_HEIGHTS`` высот; строки через межколонник (column −1) не участвуют."""
-    blocks: list[list[TextLine]] = []
+def text_rows(lines: list[TextLine]) -> list[Row]:
+    """Сегменты строк → ряды: в одной колонке сегменты с центрами ближе ``ROW_TOL_HEIGHTS`` высот сливаются.
+
+    Строки через межколонник (column −1) не участвуют. Ряд получает объединённую полосу по y,
+    крайние x сегментов и медианный наклон.
+    """
+    rows: list[Row] = []
     for column in sorted({line.column for line in lines if line.column >= 0}):
         own = sorted((line for line in lines if line.column == column), key=lambda line: line.cy)
-        current: list[TextLine] = []
+        groups: list[list[TextLine]] = []
         for line in own:
-            if current and line.y0 - current[-1].y1 > BLOCK_GAP_HEIGHTS * line.height:
+            if groups and abs(line.cy - np.median([g.cy for g in groups[-1]])) <= ROW_TOL_HEIGHTS * line.height:
+                groups[-1].append(line)
+            else:
+                groups.append([line])
+        for group in groups:
+            rows.append(
+                Row(
+                    min(g.x0 for g in group),
+                    min(g.y0 for g in group),
+                    max(g.x1 for g in group),
+                    max(g.y1 for g in group),
+                    float(np.median([g.height for g in group])),
+                    float(np.median([g.slope_deg for g in group])),
+                    column,
+                )
+            )
+    return sorted(rows, key=lambda row: (row.column, row.cy))
+
+
+def text_blocks(rows: list[Row]) -> list[list[Row]]:
+    """Ряды одной колонки → блоки по разрыву больше ``BLOCK_GAP_HEIGHTS`` высот."""
+    blocks: list[list[Row]] = []
+    for column in sorted({row.column for row in rows}):
+        current: list[Row] = []
+        for row in (r for r in rows if r.column == column):
+            if current and row.y0 - current[-1].y1 > BLOCK_GAP_HEIGHTS * row.height:
                 blocks.append(current)
                 current = []
-            current.append(line)
+            current.append(row)
         if current:
             blocks.append(current)
     return [block for block in blocks if len(block) >= MIN_EDGE_LINES]
+
+
+def _ink_edge(ink: np.ndarray, x_lo: int, x_hi: int, y0: int, y1: int, side: str) -> float | None:
+    """Край краски в полосе ``[y0, y1)`` между столбцами ``x_lo`` и ``x_hi`` (пиксели ``ink``).
+
+    Для левой кромки — первый столбец слева с краской, подтверждённой соседями справа; для
+    правой — последний столбец с подтверждением слева. ``None`` — краски в полосе нет.
+    """
+    h, w = ink.shape
+    x_lo, x_hi, y0, y1 = max(0, x_lo), min(w, x_hi), max(0, y0), min(h, y1)
+    if x_hi - x_lo < EDGE_CONFIRM_COLS + 1 or y1 <= y0:
+        return None
+    counts = (ink[y0:y1, x_lo:x_hi] > 0).sum(axis=0)
+    filled = counts >= EDGE_MIN_INK_PX
+    order = range(len(filled)) if side == "left" else range(len(filled) - 1, -1, -1)
+    for i in order:
+        if not filled[i]:
+            continue
+        window = (
+            filled[i + 1 : i + 1 + EDGE_CONFIRM_COLS] if side == "left" else filled[max(0, i - EDGE_CONFIRM_COLS) : i]
+        )
+        if window.sum() >= EDGE_CONFIRM_MIN:
+            return float(x_lo + i)
+    return None
+
+
+def _row_edge_b(ink_b: np.ndarray, row: Row, column: tuple[int, int], side: str, dpi: float) -> float | None:
+    """Край ряда в B (пиксели рабочей копии) по краске рендера ``ink_b``."""
+    k = RENDER_DPI / dpi
+    pad = mm_to_px(COLUMN_PAD_MM, dpi)
+    x_lo, x_hi = int((column[0] - pad) * k), int((column[1] + pad) * k)
+    x = _ink_edge(ink_b, x_lo, x_hi, int(row.y0 * k), int(row.y1 * k) + 1, side)
+    return None if x is None else x / k
+
+
+def _row_edge_a(
+    ink_a: np.ndarray, row: Row, column: tuple[int, int], side: str, field: Field | None, dpi: float
+) -> tuple[float, float] | None:
+    """Край и центр ряда в A: полоса ряда переносится полем, край ищется в той же колонке."""
+    k = RENDER_DPI / dpi
+    pad = mm_to_px(COLUMN_PAD_MM, dpi)
+    corners = np.array([[column[0], row.y0], [column[1], row.y1], [column[0], row.y1], [column[1], row.y0]], float)
+    moved = field.transform(corners) if field is not None else corners
+    margin = ROW_PAD_HEIGHTS * row.height
+    y0, y1 = moved[:, 1].min() - margin, moved[:, 1].max() + margin
+    x_lo, x_hi = moved[:, 0].min() - pad, moved[:, 0].max() + pad
+    x = _ink_edge(ink_a, int(x_lo * k), int(x_hi * k), int(y0 * k), int(y1 * k) + 1, side)
+    if x is None:
+        return None
+    return x / k, float((y0 + y1) / 2.0)
 
 
 def _fit(xs: np.ndarray, ys: np.ndarray) -> tuple[float, np.ndarray]:
@@ -99,39 +215,67 @@ def _fit(xs: np.ndarray, ys: np.ndarray) -> tuple[float, np.ndarray]:
     return slope, xs - (slope * ys + intercept)
 
 
-def block_edge(block: list[TextLine], partner: dict[int, TextLine], side: str, dpi: float) -> BlockEdge | None:
-    """Кромка блока по строкам, доходящим до огибающей в B, и их парам в A.
+def block_edge(
+    block: list[Row],
+    column: tuple[int, int],
+    side: str,
+    ink_b: np.ndarray,
+    ink_a: np.ndarray,
+    field: Field | None,
+    dpi: float,
+    slopes_a: dict[int, float] | None = None,
+) -> BlockEdge | None:
+    """Кромка блока по краске рядов, доходящих до огибающей в B, и тех же рядов в A.
 
     Args:
-        block: Строки блока в B (одна колонка, сверху вниз).
-        partner: ``id(строка B) → строка A`` из ``lines.match_lines``.
-        side: ``left`` (начала строк) или ``right`` (концы).
-        dpi: Разрешение копии, в которой заданы строки.
+        block: Ряды блока в B (одна колонка, сверху вниз).
+        column: Границы колонки ``(x0, x1)`` в пикселях рабочей копии.
+        side: ``left`` или ``right``.
+        ink_b, ink_a: Краска рендеров ``RENDER_DPI`` обеих версий (``255 − серый``).
+        field: Поле смещений B → A (пиксели ``dpi``) или ``None``.
+        dpi: Разрешение рабочей копии, в которой заданы ряды и колонка.
+        slopes_a: Наклон строк в A по рядам (``id(row) → градусы``); без него наклон строк
+            A берётся равным наклону B плюс поворот поля.
 
     Returns:
-        :class:`BlockEdge` или ``None``, если строк на кромке мало или кромка в B рваная.
+        :class:`BlockEdge` или ``None``, если рядов на кромке мало или кромка в B рваная.
     """
-    height = float(np.median([line.height for line in block]))
-    xs = np.array([line.x0 if side == "left" else line.x1 for line in block], dtype=np.float64)
+    height = float(np.median([row.height for row in block]))
+    edges_b = [_row_edge_b(ink_b, row, column, side, dpi) for row in block]
+    found = [i for i, x in enumerate(edges_b) if x is not None]
+    if len(found) < MIN_EDGE_LINES:
+        return None
+    xs = np.array([edges_b[i] for i in found], dtype=np.float64)
     envelope = grey_opening(xs, size=ENVELOPE_LINES) if side == "left" else grey_closing(xs, size=ENVELOPE_LINES)
     on_edge = np.abs(xs - envelope) <= EDGE_TOL_HEIGHTS * height
-    chosen = [line for line, ok in zip(block, on_edge) if ok and id(line) in partner]
+    chosen: list[tuple[Row, float, tuple[float, float]]] = []
+    for i, ok in zip(found, on_edge):
+        if not ok:
+            continue
+        edge_a = _row_edge_a(ink_a, block[i], column, side, field, dpi)
+        if edge_a is not None:
+            chosen.append((block[i], edges_b[i], edge_a))
     if len(chosen) < MIN_EDGE_LINES:
         return None
-    xb = np.array([line.x0 if side == "left" else line.x1 for line in chosen], dtype=np.float64)
-    yb = np.array([line.cy for line in chosen], dtype=np.float64)
-    xa = np.array([partner[id(line)].x0 if side == "left" else partner[id(line)].x1 for line in chosen])
-    ya = np.array([partner[id(line)].cy for line in chosen], dtype=np.float64)
+    xb = np.array([x for _, x, _ in chosen])
+    yb = np.array([row.cy for row, _, _ in chosen])
+    xa = np.array([a[0] for _, _, a in chosen])
+    ya = np.array([a[1] for _, _, a in chosen])
     slope_b, resid_b = _fit(xb, yb)
-    slope_a, resid_a = _fit(xa.astype(np.float64), ya)
+    slope_a, resid_a = _fit(xa, ya)
     rough_b = px_to_mm(float(np.percentile(np.abs(resid_b), ROUGH_PERCENTILE)), dpi)
     if rough_b > MAX_ROUGH_B_MM:
         return None
     rough_a = px_to_mm(float(np.percentile(np.abs(resid_a), ROUGH_PERCENTILE)), dpi)
     # Шир: наклон кромки от вертикали (dx/dy) плюс медианный наклон строк (dy/dx) — у чистого
     # поворота они противоположны по знаку и сумма ≈ 0.
-    line_tilt_b = float(np.median([line.slope_deg for line in chosen]))
-    line_tilt_a = float(np.median([partner[id(line)].slope_deg for line in chosen]))
+    line_tilt_b = float(np.median([row.slope_deg for row, _, _ in chosen]))
+    rot = field.rot_deg if field is not None else 0.0
+    line_tilt_a = (
+        float(np.median([slopes_a.get(id(row), row.slope_deg + rot) for row, _, _ in chosen]))
+        if slopes_a
+        else line_tilt_b + rot
+    )
     tilt_b = float(np.degrees(np.arctan(slope_b)))
     tilt_a = float(np.degrees(np.arctan(slope_a)))
     return BlockEdge(
@@ -151,13 +295,34 @@ def block_edge(block: list[TextLine], partner: dict[int, TextLine], side: str, d
     )
 
 
-def block_edges(lines_b: list[TextLine], pairs: list[tuple[TextLine, TextLine]], dpi: float) -> list[BlockEdge]:
-    """Все кромки выключенных блоков страницы по парам строк."""
-    partner = {id(b): a for b, a in pairs}
+def block_edges(
+    lines_b: list[TextLine],
+    separators: list[tuple[int, int]],
+    width: int,
+    gray300_b: np.ndarray,
+    gray300_a: np.ndarray,
+    field: Field | None,
+    dpi: float,
+    slopes_a: dict[int, float] | None = None,
+) -> list[BlockEdge]:
+    """Все кромки выключенных блоков страницы по краске рядов.
+
+    Args:
+        lines_b: Строки B (сегменты ``text_lines``) вне рисунков, таблиц и растра.
+        separators: Межколонники B в пикселях ``dpi`` (из ``text_lines``).
+        width: Ширина рабочей копии B.
+        gray300_b, gray300_a: Серые рендеры ``RENDER_DPI``.
+        field: Поле смещений B → A.
+        dpi: Разрешение рабочей копии.
+        slopes_a: Наклон строк A по рядам (см. :func:`block_edge`).
+    """
+    ink_b, ink_a = 255 - gray300_b, 255 - gray300_a
+    columns = column_spans(separators, width, dpi)
     edges: list[BlockEdge] = []
-    for block in text_blocks(lines_b):
+    for block in text_blocks(text_rows(lines_b)):
+        column = columns[block[0].column] if block[0].column < len(columns) else (0, width)
         for side in ("left", "right"):
-            edge = block_edge(block, partner, side, dpi)
+            edge = block_edge(block, column, side, ink_b, ink_a, field, dpi, slopes_a)
             if edge is not None:
                 edges.append(edge)
     return edges
@@ -178,7 +343,7 @@ def edge_metrics(edges: list[BlockEdge], dpi: float) -> tuple[dict[str, float], 
     Returns:
         Метрики ``edges_matched``, ``edge_shear_delta_mm``, ``edge_shear_gain_mm``,
         ``edge_rough_delta_mm``, ``edge_jitter_delta_mm``, ``edge_shear_max_a_deg`` и виновники
-        (рамка кромки и ломаная краёв строк в A — на оверлей).
+        (рамка кромки и ряд точек краёв — на оверлее кружки и прямая по ним).
     """
     metrics = {
         "edges_matched": float(len(edges)),
@@ -212,4 +377,4 @@ def edge_metrics(edges: list[BlockEdge], dpi: float) -> tuple[dict[str, float], 
     return metrics, culprits
 
 
-__all__ = ["BlockEdge", "text_blocks", "block_edge", "block_edges", "edge_metrics"]
+__all__ = ["Row", "BlockEdge", "text_rows", "text_blocks", "block_edge", "block_edges", "edge_metrics"]

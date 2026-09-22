@@ -24,8 +24,9 @@ from ocr_utils.geometry_regression.regions import TextLine, lineart_boxes, text_
 from ocr_utils.geometry_regression.render import RENDER_DPI, to_work
 from ocr_utils.geometry_regression.strokes import LOGO_TOP_FRAC, find_strokes, match_strokes, stroke_metrics
 from research.geometry_regression.v15 import ENGINE_VERSION
-from research.geometry_regression.v15.blocks import block_edges, edge_metrics
+from research.geometry_regression.v15.blocks import block_edges, edge_metrics, text_rows
 from research.geometry_regression.v15.field_shear import shear_metrics
+from research.geometry_regression.v15.lineart import lineart_metrics
 from research.geometry_regression.v15.lines import LineTilt, glyph_line_metrics, tilt_summary
 from research.geometry_regression.v15.parallel import parallel_metrics
 from research.geometry_regression.v15.raster import raster_edge_metrics
@@ -33,6 +34,7 @@ from research.geometry_regression.v15.ridge import (
     StrokeTilt,
     bend_metrics,
     lsd_fallback,
+    fraction_metrics,
     ridge_stroke_metrics,
     trace_strokes,
 )
@@ -99,6 +101,17 @@ def _deskew(lines: list[LineTilt], strokes: list[StrokeTilt], rot_deg: float) ->
     if gains and max(gains) >= DESKEW_MIN_GAIN_DEG:
         return abs(rot_deg), rot_deg, sources[0]
     return 0.0, 0.0, ""
+
+
+def _row_slopes_a(rows, tilts: list[LineTilt]) -> dict[int, float]:
+    """``id(ряда) → медианный наклон A (градусы)`` по проекциям строк, лежащих в ряду."""
+    out: dict[int, list[float]] = {}
+    for row in rows:
+        for t in tilts:
+            line = t.line_b
+            if line.column == row.column and row.y0 <= line.cy <= row.y1:
+                out.setdefault(id(row), []).append(t.tilt_a)
+    return {key: float(np.median(values)) for key, values in out.items()}
 
 
 def _merge_max(target: dict[str, float], source: dict[str, float], names: tuple[str, ...]) -> None:
@@ -208,6 +221,16 @@ def measure_pair(
     metrics, culprits = bend_metrics(gray300_b, gray300_a, strokes_b, warp, RENDER_DPI, dpi)
     out.metrics.update(metrics)
     out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
+    # Дробные черты формул — своё семейство, без веса по длине.
+    metrics, culprits = fraction_metrics(tilts_strokes, gray300_b < 128, RENDER_DPI, tables + lineart, dpi / RENDER_DPI)
+    out.metrics.update(metrics)
+    out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
+    # Порча рисунков: угол между осями, поворот и разброс линий, изгиб — по линиям внутри рамок line art.
+    metrics, culprits = lineart_metrics(
+        gray300_b, gray300_a, strokes_b, strokes_a, lineart, warp, rot_deg, RENDER_DPI, dpi
+    )
+    out.metrics.update(metrics)
+    out.culprits.update(_scale_culprits(culprits, dpi / RENDER_DPI))
 
     # Кромки фотографий — по каждому снимку в рамке, наклон по снимку целиком.
     metrics, culprits = raster_edge_metrics(b, a, raster, warp, dpi)
@@ -218,7 +241,12 @@ def measure_pair(
     metrics, culprits = shear_metrics(warp, text_boxes(body_b), lineart + tables + raster, dpi)
     out.metrics.update(metrics)
     out.culprits.update(culprits)
-    metrics, culprits = edge_metrics(block_edges(body_b, body_pairs, dpi), dpi)
+    # Наклон строк A по рядам — из проекций подтверждённых пар (для шира кромки = наклон кромки +
+    # наклон строк); ряды без проекции берут наклон B плюс поворот поля.
+    slopes_a = _row_slopes_a(text_rows(body_b), tilts)
+    metrics, culprits = edge_metrics(
+        block_edges(body_b, separators_b, b.shape[1], gray300_b, gray300_a, warp, dpi, slopes_a), dpi
+    )
     out.metrics.update(metrics)
     out.culprits.update(culprits)
 

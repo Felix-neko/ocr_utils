@@ -33,10 +33,8 @@ def shear(page: np.ndarray, shear_deg: float) -> np.ndarray:
 def _edges(before: np.ndarray, after: np.ndarray):
     b, a = to_work(before), to_work(after)
     warp = estimate_field(b, a, DPI, [])
-    lines_b, _ = text_lines(before, DPI)
-    lines_a, _ = text_lines(after, DPI)
-    pairs = match_lines(lines_b, lines_a, warp, DPI)
-    return warp, lines_b, block_edges(lines_b, pairs, DPI)
+    lines_b, separators = text_lines(before, DPI)
+    return warp, lines_b, block_edges(lines_b, separators, b.shape[1], before, after, warp, DPI)
 
 
 def test_sheared_block_is_caught_and_rotation_is_not():
