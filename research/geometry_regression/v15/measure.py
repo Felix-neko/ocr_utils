@@ -252,7 +252,10 @@ def measure_pair(
     # наклон строк); ряды без проекции берут наклон B плюс поворот поля.
     slopes_a = _row_slopes_a(text_rows(body_b), tilts)
     metrics, culprits = edge_metrics(
-        block_edges(body_b, separators_b, b.shape[1], gray300_b, gray300_a, warp, dpi, slopes_a), dpi
+        block_edges(
+            body_b, separators_b, b.shape[1], gray300_b, gray300_a, warp, dpi, slopes_a, lineart + tables + raster
+        ),
+        dpi,
     )
     out.metrics.update(metrics)
     out.culprits.update(culprits)

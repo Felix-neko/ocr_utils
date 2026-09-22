@@ -62,8 +62,15 @@ CENTROID_PAD_PX = 10
 SHAPE_PERCENTILES = (2.0, 98.0)
 # Строка «стала прямее», если кривизна относительно длины упала не меньше чем на столько; тогда клин
 # и неравномерность масштаба режутся до WEDGE_FORGIVEN_MAX (побочный эффект выпрямления).
-STRAIGHTENED_BEND_RATIO = 2.0e-3
+STRAIGHTENED_BEND_RATIO = 1.5e-3
 WEDGE_FORGIVEN_MAX = 0.04
+# Клин от WEDGE_HARD не прощается и при выпрямлении (1976/08 с.73 — 0.117 при стало-прямее на 0.15 мм).
+WEDGE_HARD = 0.10
+# Форма считается только по надёжно найденным кускам: медиана пиков корреляции не ниже этой (на
+# страницах со снятой трапецией короткие строки в 2–4 мм совпадают на 0.6–0.85 и рисуют дугу из
+# промахов: 1966/06 с.62, 1968/05 с.95); худший пик не ограничивается — кусок на самой ступеньке
+# совпадает плохо по природе.
+SHAPE_MIN_PEAK_MEDIAN = 0.9
 # Кусков в строке для формы (после медианного сглаживания по трём); строки ниже SHAPE_MIN_HEIGHT_MM не
 # меряются; прирост кривизны и ступеньки засчитывается только от SHAPE_MIN_DELTA_MM — у корпусной
 # строки в 2 мм промах куска на четверть миллиметра даёт «ступеньку» 0.1 высоты (1968/03 с.8).
@@ -260,11 +267,13 @@ def glyph_line_metrics(
         # Форма строки — только у отдельных строк (заголовков) от SHAPE_MIN_HEIGHT_MM: у корпуса промах
         # одного куска даёт ложную ступеньку (1968/03 с.8, отсекается порогом SHAPE_MIN_DELTA_MM), а
         # волну корпуса FineReader убирает — её выигрыш считают сводки ``line_metrics``.
+        peaks = [c.peak for c in chunks]
         shape_ok = (
             measurable
             and heading
             and line_b.height >= mm_to_px(SHAPE_MIN_HEIGHT_MM, dpi)
             and len(chunks) >= SHAPE_MIN_CHUNKS
+            and float(np.median(peaks)) >= SHAPE_MIN_PEAK_MEDIAN
         )
         # Базовая линия B — центроид краски каждого куска; A — то же плюс сдвиг куска: одни и те же
         # глифы, шум их формы одинаков и в разности сокращается (центр-линия ``line_fit`` на
@@ -309,7 +318,7 @@ def glyph_line_metrics(
             straightened = (bend_a - bend_b) / length_px <= -STRAIGHTENED_BEND_RATIO or (
                 tilt_ok and abs(tilt_b) - abs(tilt_a) >= STRAIGHTENED_TILT_DEG
             )
-            if straightened:
+            if straightened and values["line_wedge_ratio"] < WEDGE_HARD:
                 values["line_wedge_ratio"] = min(values["line_wedge_ratio"], WEDGE_FORGIVEN_MAX)
                 values["line_stretch_ratio"] = min(values["line_stretch_ratio"], WEDGE_FORGIVEN_MAX)
         for name, value in values.items():

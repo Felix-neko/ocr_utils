@@ -297,6 +297,17 @@ def block_edge(
     )
 
 
+def _blank_boxes(ink: np.ndarray, boxes: list[Box], k: float) -> np.ndarray:
+    """Копия краски с погашенными рамками (пиксели ``dpi`` × ``k``): линейка у поля — не край текста."""
+    if not boxes:
+        return ink
+    out = ink.copy()
+    h, w = out.shape
+    for x0, y0, x1, y1 in boxes:
+        out[max(0, int(y0 * k)) : min(h, int(y1 * k) + 1), max(0, int(x0 * k)) : min(w, int(x1 * k) + 1)] = 0
+    return out
+
+
 def block_edges(
     lines_b: list[TextLine],
     separators: list[tuple[int, int]],
@@ -306,6 +317,7 @@ def block_edges(
     field: Field | None,
     dpi: float,
     slopes_a: dict[int, float] | None = None,
+    exclude: list[Box] | None = None,
 ) -> list[BlockEdge]:
     """Все кромки выключенных блоков страницы по краске рядов.
 
@@ -317,8 +329,21 @@ def block_edges(
         field: Поле смещений B → A.
         dpi: Разрешение рабочей копии.
         slopes_a: Наклон строк A по рядам (см. :func:`block_edge`).
+        exclude: Рамки рисунков, таблиц и растра на B (пиксели ``dpi``): их краска в край не идёт —
+            вертикальная линейка у поля (1975/05 с.61) иначе становится «краем» первых рядов.
     """
-    ink_b, ink_a = 255 - gray300_b, 255 - gray300_a
+    k = RENDER_DPI / dpi
+    exclude = list(exclude or [])
+    ink_b = _blank_boxes(255 - gray300_b, exclude, k)
+    exclude_a = exclude
+    if field is not None and exclude:
+        exclude_a = []
+        for x0, y0, x1, y1 in exclude:
+            corners = field.transform(np.array([[x0, y0], [x1, y0], [x0, y1], [x1, y1]], float))
+            exclude_a.append(
+                (int(corners[:, 0].min()), int(corners[:, 1].min()), int(corners[:, 0].max()), int(corners[:, 1].max()))
+            )
+    ink_a = _blank_boxes(255 - gray300_a, exclude_a, k)
     columns = column_spans(separators, width, dpi)
     edges: list[BlockEdge] = []
     for block in text_blocks(text_rows(lines_b)):
