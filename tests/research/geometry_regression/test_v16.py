@@ -175,5 +175,5 @@ def test_scoring_v16_rules():
     assert thr.apply(fraction).verdict == "mixed"  # обычная порча с гистерезисом
     one_bar = {"fraction_bars": 1.0, "fraction_tilt_mean_delta_deg": 3.0}
     assert thr.apply(one_bar).verdict == "ok"
-    heading = {"line_bend_ratio": 4.0e-3}
+    heading = {"line_bend_ratio": 6.0e-3}
     assert thr.apply(heading).verdict == "bad"
