@@ -326,11 +326,19 @@ def glyph_line_metrics(
         step_px = _level_step(resid)
         height_px = line_b.height * k
         floor = mm_to_px(SHAPE_MIN_DELTA_MM, RENDER_DPI)
+        # Остаток сдвигов ЗНАКА не имеет: у выпрямленной дуги размах такой же, как у наведённой
+        # (1968/01 с.96 — заголовок рубрики стоял под 2.2° дугой и стал прямым, остаток 4.8 px).
+        # Поэтому форма считается порчей только у строки, которая НЕ стала прямее или ровнее:
+        # выпрямление (дуга базовой упала, 1968/02 с.92, 1966/01 с.60) и доворот к оси (1968/01 с.96)
+        # — работа FineReader, а не порча.
+        straightened = _bend_gain(ink_b, ink_a, line_b, line_a, xs, dys, k, half) >= STRAIGHTENED_BEND_RATIO or (
+            tilt_ok and abs(tilt_b) - abs(tilt_a) >= STRAIGHTENED_TILT_DEG
+        )
         values: dict[str, float] = {
             # Кривизна относительно длины строки и ступенька относительно высоты букв; меньше
             # SHAPE_MIN_DELTA_MM — шум кусков, не считается.
-            "line_bend_ratio": float(bend_px / length_px) if bend_px >= floor else 0.0,
-            "line_step_ratio": float(step_px / height_px) if step_px >= floor else 0.0,
+            "line_bend_ratio": float(bend_px / length_px) if bend_px >= floor and not straightened else 0.0,
+            "line_step_ratio": float(step_px / height_px) if step_px >= floor and not straightened else 0.0,
         }
         scales = np.array([c.scale for c in chunks if c.scale is not None])
         if len(scales) >= MIN_CHUNKS:
@@ -342,9 +350,6 @@ def glyph_line_metrics(
             values["line_stretch_ratio"] = float(np.percentile(scales, 90) - np.percentile(scales, 10))
             # Клин при настоящем выпрямлении (строка стала заметно прямее или ровнее — 1968/02 с.92,
             # 1968/03 с.89) глаз прощает; прямее не стала — клин порча целиком (1968/09 с.52, 1976/07 с.31).
-            straightened = _bend_gain(ink_b, ink_a, line_b, line_a, xs, dys, k, half) >= STRAIGHTENED_BEND_RATIO or (
-                tilt_ok and abs(tilt_b) - abs(tilt_a) >= STRAIGHTENED_TILT_DEG
-            )
             if straightened and values["line_wedge_ratio"] < WEDGE_HARD:
                 values["line_wedge_ratio"] = min(values["line_wedge_ratio"], WEDGE_FORGIVEN_MAX)
                 values["line_stretch_ratio"] = min(values["line_stretch_ratio"], WEDGE_FORGIVEN_MAX)
