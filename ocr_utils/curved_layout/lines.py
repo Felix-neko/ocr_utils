@@ -17,6 +17,7 @@ from scipy.signal import savgol_filter
 from ocr_utils.curved_layout import WORK_DPI
 from ocr_utils.curved_layout.engines.base import EngineLine
 from ocr_utils.page_layout import mm_to_px, px_to_mm
+from ocr_utils.curved_layout.leaders import inside_spans
 from ocr_utils.scan_markup.curved_lines.fitting import fit_line, smooth_median
 
 # Шаг, с которым ось пересобирается: 1 мм — мельче кегля, но крупнее формы буквы.
@@ -24,11 +25,12 @@ AXIS_STEP_MM = 1.0
 # Окно сглаживания оси в долях высоты строки (умолчание; настраивается снаружи). 0.6 высоты
 # гасит прыжки центра масс на выносных элементах и знаках препинания, но оставляет форму строки.
 SMOOTH_HEIGHTS = 0.6
-# Короче этого строка осью не описывается. 8 мм — короткая концевая строка абзаца («зяйства.»)
-# ещё нужна блоку как ряд, а обрывок в два символа уже нет.
-MIN_LENGTH_MM = 8.0
+# Короче этого строка осью не описывается. 4 мм — столько занимают три буквы корпуса, а строка
+# от трёх букв уже строка (решение пользователя): при 8 мм без оси оставались концевые строки
+# сносок («ч. II, с. 421» — 1973/08 с.85) и числовые графы таблиц.
+MIN_LENGTH_MM = 4.0
 # Точек оси меньше — строку не берём (нужны хотя бы три отсчёта для сглаживания).
-MIN_POINTS = 5
+MIN_POINTS = 4
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,9 @@ class LineAxis:
     slope_deg: float  # наклон прямой по концам оси
     bend_mm: float  # размах остатка оси от прямой: «насколько строка непрямая»
     resid_parabola_mm: float  # размах остатка оси от ПАРАБОЛЫ: где параболы не хватает
+    # Отрезки по x, занятые точками и запятыми: там ось провисает к базовой линии, и в меры
+    # формы строки эти участки не входят (см. ``_shape_stats``).
+    mark_spans: tuple[tuple[float, float], ...] = ()
 
     @property
     def x0(self) -> float:
@@ -85,6 +90,10 @@ def resample(points: np.ndarray, step_px: float) -> np.ndarray:
     if xs.size == 0:
         return points
     grid = np.arange(xs.min(), xs.max() + step_px, step_px)
+    if xs.size < grid.size:
+        # Редкая ломаная (базовая линия нейросетевого движка — три-четыре точки на строку):
+        # сетка заполняется интерполяцией, иначе после пересборки точек меньше минимума.
+        return np.column_stack([grid, np.interp(grid, xs, ys)])
     index = np.clip(np.searchsorted(grid, xs, side="right") - 1, 0, len(grid) - 1)
     out_x: list[float] = []
     out_y: list[float] = []
@@ -108,8 +117,20 @@ def smooth_axis(points: np.ndarray, window_px: float) -> np.ndarray:
     return np.column_stack([points[:, 0], ys])
 
 
-def _shape_stats(points: np.ndarray, dpi: float) -> tuple[float, float, float, float]:
-    """Сводки формы оси: сагитта, наклон, размах остатка от прямой и от параболы (мм, градусы)."""
+def _shape_stats(
+    points: np.ndarray, dpi: float, mark_spans: tuple[tuple[float, float], ...] = ()
+) -> tuple[float, float, float, float]:
+    """Сводки формы оси: сагитта, наклон, размах остатка от прямой и от параболы (мм, градусы).
+
+    Столбцы точек и запятых из счёта исключаются: эти знаки стоят на БАЗОВОЙ линии, ось там
+    провисает на полвысоты строчной, и без отсева строка выглядит круче и кривее, чем она есть
+    («Энгельс Ф.» в конце сноски 1973/08 с.85 задирал размах остатка вдвое). Если после отсева
+    точек осталось меньше четырёх, меры считаются по всем — лучше огрублённая мера, чем никакой.
+    """
+    if mark_spans:
+        keep = ~inside_spans(points[:, 0], list(mark_spans))
+        if int(keep.sum()) >= MIN_POINTS:
+            points = points[keep]
     xs, ys = points[:, 0], points[:, 1]
     length = float(xs[-1] - xs[0])
     if length <= 0:
@@ -159,7 +180,7 @@ def axis_of(line: EngineLine, dpi: float = WORK_DPI, smooth_heights: float = SMO
     if points.shape[0] < MIN_POINTS:
         return None
     points = smooth_axis(points, max(smooth_heights * line.height, mm_to_px(AXIS_STEP_MM, dpi) * 3))
-    sagitta, slope, bend, resid = _shape_stats(points, dpi)
+    sagitta, slope, bend, resid = _shape_stats(points, dpi, tuple(line.mark_spans))
     return LineAxis(
         points=points,
         height=float(line.height),
@@ -170,6 +191,7 @@ def axis_of(line: EngineLine, dpi: float = WORK_DPI, smooth_heights: float = SMO
         slope_deg=slope,
         bend_mm=bend,
         resid_parabola_mm=resid,
+        mark_spans=tuple(line.mark_spans),
     )
 
 
@@ -191,6 +213,7 @@ def with_column(axis: LineAxis, column: int, cross: bool | None = None) -> LineA
         slope_deg=axis.slope_deg,
         bend_mm=axis.bend_mm,
         resid_parabola_mm=axis.resid_parabola_mm,
+        mark_spans=axis.mark_spans,
     )
 
 

@@ -20,6 +20,9 @@ class EngineLine:
         baseline: ``True``, если ``points`` — базовая линия, а не центр строки: ось тогда
             поднимается на половину высоты.
         confidence: Уверенность движка, если он её сообщает.
+        mark_spans: Отрезки по x, занятые НИЗКИМИ МЕТКАМИ — точками и запятыми. Они стоят на
+            базовой линии, ось в их столбцах провисает на полвысоты строчной, и эти участки
+            исключаются из мер наклона и формы строки.
     """
 
     points: np.ndarray
@@ -27,6 +30,7 @@ class EngineLine:
     height: float
     baseline: bool = False
     confidence: float = float("nan")
+    mark_spans: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,7 @@ class EngineResult:
     regions: list[np.ndarray] = field(default_factory=list)
     gutters: list = field(default_factory=list)  # локальные межколонники (``columns.Gutter``)
     rules: list = field(default_factory=list)  # сплошные черты (``segment.Rule``): границы блоков
+    leaders: list = field(default_factory=list)  # отточия (``leaders.Leader``): часть строк таблицы
     engine: str = ""
     seconds: float = 0.0
     note: str = ""

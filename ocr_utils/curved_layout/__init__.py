@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 # Версия разбора: меняется, когда меняются модель данных или алгоритмы — по ней инвалидируется кэш.
-CURVED_LAYOUT_VERSION = 1
+CURVED_LAYOUT_VERSION = 2
 
 # Рендер и рабочая копия. Строки ищутся на копии 150 dpi (как во всём проекте), центр-линии и края
 # краски — на копии 300 dpi: бинарный рендер FineReader на 150 dpi теряет тонкие засечки.
 RENDER_DPI = 300
 WORK_DPI = 150
+
+# Способ сцепки кусков в строки. ``zones`` — по зонам поиска (каждый кусок ведёт свою ось),
+# ``greedy`` — прежняя жадная цепочка с полем хода строк (``legacy_linking``), оставлена для
+# сравнения и как запасной ход.
+LINKING_ZONES = "zones"
+LINKING_GREEDY = "greedy"
+LINKING_CHOICES = (LINKING_ZONES, LINKING_GREEDY)
+LINKING_DEFAULT = LINKING_ZONES

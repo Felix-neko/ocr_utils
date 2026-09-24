@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from ocr_utils.curved_layout.page import PageAnalysis
+from ocr_utils.page_layout import px_to_mm
 
 CSV_FIELDS = [
     "name",
@@ -30,9 +31,12 @@ CSV_FIELDS = [
     "right_indent_rows",
     "right_dev_mm",
     "right_bend_mm",
+    "glyph_w_mm",
+    "glyph_h_mm",
     "axis_bend_p90_mm",
     "axis_resid_parabola_p90_mm",
     "seconds",
+    "ink_share",
 ]
 
 
@@ -52,8 +56,19 @@ def page_json(analysis: PageAnalysis) -> dict:
                 "span": list(block.span),
                 "lines": block.lines,
                 "pitch_mm": round(block.pitch_mm, 2),
+                "glyph_mm": [
+                    round(px_to_mm(block.glyph_size[0], block.dpi), 2),
+                    round(px_to_mm(block.glyph_size[1], block.dpi), 2),
+                ],
                 "envelope": {
                     "smooth_pitches": block.envelope.smooth_pitches,
+                    "polygon_dilated": (
+                        _curve(block.envelope.polygon_dilated) if block.envelope.polygon_dilated is not None else None
+                    ),
+                    "dilate_mm": [
+                        round(px_to_mm(block.envelope.dilate_px[0], block.dpi), 2),
+                        round(px_to_mm(block.envelope.dilate_px[1], block.dpi), 2),
+                    ],
                     "left": _curve(block.envelope.left),
                     "right": _curve(block.envelope.right),
                     "top": _curve(block.envelope.top),
@@ -94,6 +109,7 @@ def page_json(analysis: PageAnalysis) -> dict:
         ],
         "zones": [{"y0": z.y0, "y1": z.y1, "columns": [list(c) for c in z.columns]} for z in analysis.zones],
         "seconds": round(analysis.seconds, 2),
+        "ink_share": round(analysis.ink_share, 4),
         "note": analysis.note,
         "axes": [
             {
@@ -104,6 +120,7 @@ def page_json(analysis: PageAnalysis) -> dict:
                 "bend_mm": round(axis.bend_mm, 2),
                 "resid_parabola_mm": round(axis.resid_parabola_mm, 2),
                 "points": _curve(axis.points),
+                "mark_spans": [[round(float(a), 1), round(float(b), 1)] for a, b in axis.mark_spans],
             }
             for axis in analysis.axes
         ],
@@ -147,9 +164,12 @@ def rows_for_csv(analysis: PageAnalysis) -> list[dict]:
                 "right_indent_rows": alignment.right.indent_rows,
                 "right_dev_mm": round(alignment.right.envelope_dev_mm, 3),
                 "right_bend_mm": round(alignment.right.bend_mm, 3),
+                "glyph_w_mm": round(px_to_mm(block.glyph_size[0], block.dpi), 2),
+                "glyph_h_mm": round(px_to_mm(block.glyph_size[1], block.dpi), 2),
                 "axis_bend_p90_mm": round(float(np.percentile(bends, 90)), 3),
                 "axis_resid_parabola_p90_mm": round(float(np.percentile(resid, 90)), 3),
                 "seconds": round(analysis.seconds, 2),
+                "ink_share": round(analysis.ink_share, 4),
             }
         )
     return out
@@ -164,6 +184,81 @@ def write_csv(analyses: list[PageAnalysis], path: Path) -> Path:
         for analysis in analyses:
             writer.writerows(rows_for_csv(analysis))
     return path
+
+
+def _axis_deviation(axes: list, reference: list) -> list[float]:
+    """Расхождение осей движка с осями по краске: для каждой оси-эталона — медиана |dy| в мм.
+
+    Ось движка подбирается ближайшая по центру; сравнение идёт на общем отрезке по x, поэтому
+    короткая ось не наказывается за то, что не дошла до края.
+
+    Args:
+        axes: Оси движка.
+        reference: Оси эталона (движок ``ink``).
+
+    Returns:
+        Список расхождений в миллиметрах, по одному на ось эталона, у которой нашлась пара.
+    """
+    out: list[float] = []
+    for target in reference:
+        best, best_distance = None, None
+        for axis in axes:
+            distance = abs(axis.cy - target.cy) + abs((axis.x0 + axis.x1) / 2.0 - (target.x0 + target.x1) / 2.0)
+            if best_distance is None or distance < best_distance:
+                best, best_distance = axis, distance
+        if best is None:
+            continue
+        left, right = max(best.x0, target.x0), min(best.x1, target.x1)
+        if right - left < 10:
+            continue  # оси почти не пересекаются по x: это разные строки
+        grid = np.linspace(left, right, num=25)
+        own = np.interp(grid, best.points[:, 0], best.points[:, 1])
+        mine = np.interp(grid, target.points[:, 0], target.points[:, 1])
+        out.append(px_to_mm(float(np.median(np.abs(own - mine))), target.dpi))
+    return out
+
+
+def engines_summary(analyses: list[PageAnalysis]) -> list[str]:
+    """Сравнение движков на одних и тех же страницах: полнота, расхождение с краской, время.
+
+    Args:
+        analyses: Разборы всех страниц всеми движками.
+
+    Returns:
+        Строки markdown с таблицей; пустой список, если движок был один.
+    """
+    engines = sorted({analysis.engine for analysis in analyses})
+    if len(engines) < 2:
+        return []
+    # Эталон — только разбор движком ``ink``: в общий словарь иначе попадает последний по
+    # порядку движок, и расхождение считать не с чем.
+    reference = {
+        (analysis.name, analysis.page, analysis.variant): analysis for analysis in analyses if analysis.engine == "ink"
+    }
+    lines = [
+        "",
+        "## Сравнение движков",
+        "",
+        "| движок | страниц | строк | блоков | краска под строками | строк через межколонник | "
+        "медиана \\|dy\\| от ink, мм | с/страницу |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for engine in engines:
+        own = [analysis for analysis in analyses if analysis.engine == engine]
+        deviations: list[float] = []
+        for analysis in own:
+            base = reference.get((analysis.name, analysis.page, analysis.variant))
+            if base is not None and engine != "ink":
+                deviations.extend(_axis_deviation(list(analysis.axes), list(base.axes)))
+        crossed = sum(1 for analysis in own for axis in analysis.axes if axis.cross)
+        share = float(np.mean([analysis.ink_share for analysis in own])) if own else 0.0
+        median = f"{float(np.median(deviations)):.2f}" if deviations else "—"
+        lines.append(
+            f"| {engine} | {len(own)} | {sum(len(analysis.axes) for analysis in own)} | "
+            f"{sum(len(analysis.blocks) for analysis in own)} | {share:.0%} | {crossed} | {median} | "
+            f"{float(np.mean([analysis.seconds for analysis in own])):.1f} |"
+        )
+    return lines
 
 
 def markdown(analyses: list[PageAnalysis]) -> str:
@@ -188,7 +283,8 @@ def markdown(analyses: list[PageAnalysis]) -> str:
             f"{len(analysis.blocks)} | {len(analysis.axes)} | {kinds} | {dev or '—'} | {bend or '—'} | "
             f"{analysis.seconds:.1f} |"
         )
+    lines.extend(engines_summary(analyses))
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["CSV_FIELDS", "markdown", "page_json", "rows_for_csv", "write_csv", "write_json"]
+__all__ = ["CSV_FIELDS", "engines_summary", "markdown", "page_json", "rows_for_csv", "write_csv", "write_json"]

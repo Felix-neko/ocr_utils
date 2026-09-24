@@ -66,9 +66,18 @@ class Alignment:
     right: SideStats
 
 
+def _core_curve(envelope: BlockEnvelope, side: Side) -> np.ndarray:
+    """Кривая по телу блока с нужной стороны: ``core_*``, а если её нет — внешний контур."""
+    if side is Side.LEFT:
+        return envelope.core_left if envelope.core_left is not None else envelope.left
+    return envelope.core_right if envelope.core_right is not None else envelope.right
+
+
 def _residuals(rows: list[Row], envelope: BlockEnvelope, side: Side) -> np.ndarray:
     """Отклонения краёв рядов от огибающей, со знаком «внутрь блока — плюс» (пиксели)."""
-    curve = envelope.left if side is Side.LEFT else envelope.right
+    # Меры выключки считаются от тренда по телу блока (``core_*``), а не от внешнего контура:
+    # контур отодвинут наружу до самых дальних строк и за одиночным выносом прыгает весь.
+    curve = _core_curve(envelope, side)
     xs = np.array([row.x0 if side is Side.LEFT else row.x1 for row in rows], dtype=np.float64)
     ys = np.array([row.y for row in rows], dtype=np.float64)
     fitted = np.interp(ys, curve[:, 1], curve[:, 0])
@@ -97,8 +106,10 @@ def side_stats(block: TextBlock, side: Side) -> SideStats:
     considered = ~indent
     share = float(core[considered].mean()) if considered.any() else 0.0
     indent_share = float(indent.mean()) if indent.size else 0.0
-    fine = block.envelope.left if side is Side.LEFT else block.envelope.right
-    coarse = block.envelope_coarse.left if side is Side.LEFT else block.envelope_coarse.right
+    # Девиация масштабов тоже считается по тренду тела: внешний контур обоих масштабов прижат
+    # к одним и тем же выносам и различался бы меньше, чем сами блоки.
+    fine = _core_curve(block.envelope, side)
+    coarse = _core_curve(block.envelope_coarse, side)
     dev = float(np.abs(fine[:, 0] - np.interp(fine[:, 1], coarse[:, 1], coarse[:, 0])).max())
     aligned = share >= CORE_SHARE and indent_share <= INDENT_MAX_SHARE
     return SideStats(

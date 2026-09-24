@@ -18,6 +18,7 @@ import numpy as np
 
 from ocr_utils.curved_layout import WORK_DPI
 from ocr_utils.page_layout import mm_to_px, px_to_mm
+from ocr_utils.page_layout.tables.ruling import find_lines
 from ocr_utils.page_layout.orientation.detectors.ink_axis import _smear, glyph_mask
 
 # Лента: высота и шаг (мм бумаги). 40 мм — 8–12 строк корпуса, 20 мм — половинное перекрытие.
@@ -50,6 +51,18 @@ GUTTER_MATCH_MM = 4.0
 # строки соседних колонок стоят на одной высоте и начинаются сразу за межколонником — помечались
 # все подряд.
 GUTTER_OVERLAP_SHARE = 0.3
+# Доля столбцов межколонника с краской НА ВЫСОТЕ строки, выше которой через него идёт краска самой
+# строки (отточия таблицы, заголовок через межколонник), и запреты межколонника на неё не
+# распространяются. Замер по паку: обычные страницы p99 = 0.23, страница с отточиями — 0.69.
+DOT_FILL_SHARE = 0.4
+# Столько отточий, идущих сквозь полосу-кандидат, превращают её из межколонника в поле точек.
+DOT_GUTTER_LEADERS = 3
+# По скольким высотам меряется ширина межколонника внутри зоны.
+ZONE_BOUND_SAMPLES = 24
+# Минимальная ширина полосы запрета по вертикальной линейке (px рабочей копии).
+RULE_SEPARATOR_MIN_PX = 3
+# Минимальная полуширина окна пробы по вертикали (px рабочей копии): у тонких строк высота мала.
+MIN_PROBE_HEIGHT_PX = 4.0
 
 
 @dataclass(frozen=True)
@@ -134,12 +147,42 @@ def text_mask(gray: np.ndarray) -> np.ndarray:
     return _smear(glyph_mask(gray), horizontal=True) > 0
 
 
-def gutters_of(gray: np.ndarray, dpi: float = WORK_DPI) -> list[Gutter]:
+def gutter_filled(ink: np.ndarray, gx0: float, gx1: float, cy: float, height: float, k: float) -> float:
+    """Доля столбцов межколонника, в которых есть краска НА ВЫСОТЕ строки.
+
+    Признак «через межколонник идёт краска самой строки»: так выглядят отточия таблицы
+    (1971/10 с.93 — точки заполняют больше половины столбцов) и заголовок, набранный через
+    межколонник. У обычного двухколоночного набора на высоте строки межколонник пуст: замер по
+    паку дал p99 = 0.23 против 0.69 на странице с отточиями.
+
+    Args:
+        ink: Краска рендера ``RENDER_DPI`` (ненулевое — краска).
+        gx0, gx1: Границы межколонника на этой высоте, пиксели рабочей копии.
+        cy: Ордината середины строки, пиксели рабочей копии.
+        height: Высота строки, пиксели рабочей копии.
+        k: Во сколько раз рендер крупнее рабочей копии.
+
+    Returns:
+        Доля от 0 до 1; 0, если полоса пуста или вырождена.
+    """
+    half = max(height, MIN_PROBE_HEIGHT_PX)
+    y0, y1 = int((cy - half) * k), int((cy + half) * k) + 1
+    x0, x1 = int(gx0 * k), int(gx1 * k) + 1
+    y0, x0 = max(0, y0), max(0, x0)
+    y1, x1 = min(ink.shape[0], y1), min(ink.shape[1], x1)
+    if y1 <= y0 or x1 <= x0:
+        return 0.0
+    band = ink[y0:y1, x0:x1] > 0
+    return float(band.any(axis=0).mean())
+
+
+def gutters_of(gray: np.ndarray, dpi: float = WORK_DPI, leaders: list | None = None) -> list[Gutter]:
     """Локальные межколонники страницы.
 
     Args:
         gray: Серая рабочая копия страницы.
         dpi: Её разрешение.
+        leaders: Отточия страницы: полоса, сквозь которую они идут, межколонником не считается.
 
     Returns:
         Межколонники с диапазоном высот, слева направо. Поля страницы сюда не входят: пустоты
@@ -163,7 +206,10 @@ def gutters_of(gray: np.ndarray, dpi: float = WORK_DPI) -> list[Gutter]:
             found.append((gx0, gx1, y0, y1))
     # Сначала подтверждение текстом по обе стороны (по «рабочему» диапазону лент), и только потом
     # продление по пустой краске: иначе пустой хвост над колонкой рушит долю строк с текстом.
-    return [_extend(gutter, mask) for gutter in _confirm(_merge_gutters(found, dpi), mask, dpi)]
+    extended = [_extend(gutter, mask) for gutter in _confirm(_merge_gutters(found, dpi), mask, dpi)]
+    # Отбраковка поля отточий — ПОСЛЕ продления: до него диапазон высот кандидата ещё короткий, и
+    # отточия в него не попадают (на 1971/10 с.93 ложный межколонник видел 0 отточий вместо 15).
+    return [gutter for gutter in extended if not leaders or _dotted(gutter, leaders) < DOT_GUTTER_LEADERS]
 
 
 def _merge_gutters(found: list[tuple[int, int, int, int]], dpi: float) -> list[Gutter]:
@@ -207,6 +253,39 @@ class Zone:
     columns: tuple[tuple[int, int], ...]
 
 
+def _zone_bounds(gutter: Gutter, y0: float, y1: float, middle: float) -> tuple[float, float]:
+    """Границы колонок по межколоннику на всю высоту зоны: самые широкие колонки без потери текста.
+
+    Брать ширину межколонника в СЕРЕДИНЕ зоны нельзя: она меняется по высоте. На 1971/10 с.93
+    межколонник широк против таблицы (x 606–726) и узок ниже неё, где справа стоит текст в две
+    графы шириной (x 609–636). Зона одна на всю высоту, и по середине правая колонка начиналась с
+    x 725 — одиннадцать строк, начинающихся с x 641, не помещались ни в одну колонку и терялись
+    вместе со своим блоком.
+
+    Поэтому левая колонка тянется до САМОЙ ПРАВОЙ левой границы межколонника по высоте зоны, а
+    правая начинается с САМОЙ ЛЕВОЙ правой границы: так ни одна строка зоны не обрезается. Если
+    межколонник так сильно уходит вбок, что границы переворачиваются (трапеция), берутся значения
+    в середине зоны — как раньше.
+
+    Args:
+        gutter: Межколонник.
+        y0, y1: Границы зоны по высоте.
+        middle: Середина зоны (запасной вариант).
+
+    Returns:
+        Пара ``(конец левой колонки, начало правой)``.
+    """
+    top, bottom = max(y0, gutter.y0), min(y1, gutter.y1)
+    if bottom <= top:
+        return gutter.x0_at(middle), gutter.x1_at(middle)
+    ys = np.linspace(top, bottom, ZONE_BOUND_SAMPLES)
+    left = max(gutter.x0_at(y) for y in ys)
+    right = min(gutter.x1_at(y) for y in ys)
+    if right <= left:
+        return gutter.x0_at(middle), gutter.x1_at(middle)
+    return left, right
+
+
 def zones_of(gutters: list[Gutter], height: int, width: int, dpi: float = WORK_DPI) -> list[Zone]:
     """Зоны вёрстки страницы: границы там, где межколонник появляется или кончается.
 
@@ -239,7 +318,7 @@ def zones_of(gutters: list[Gutter], height: int, width: int, dpi: float = WORK_D
     for y0, y1 in zip(merged[:-1], merged[1:]):
         middle = (y0 + y1) / 2.0
         alive = sorted((g for g in gutters if g.alive_at(middle)), key=lambda g: g.x0_at(middle))
-        bounds = [0.0] + [x for g in alive for x in (g.x0_at(middle), g.x1_at(middle))] + [float(width)]
+        bounds = [0.0] + [x for g in alive for x in _zone_bounds(g, y0, y1, middle)] + [float(width)]
         columns = tuple(
             (int(bounds[i]), int(bounds[i + 1]))
             for i in range(0, len(bounds) - 1, 2)
@@ -287,13 +366,46 @@ def _row_blocked(mask: np.ndarray, gutter: Gutter, y: int) -> bool:
     return bool(mask[y, x0:x1].mean() > BLOCK_INK_SHARE)
 
 
+def _dotted(gutter: Gutter, leaders: list) -> int:
+    """Сколько отточий задевает полосу межколонника на его высоте.
+
+    Поле точек «. . . . .» пустое по краске, и его середина выглядит как межколонник: на 1971/10
+    с.93 таких ложных межколонников четыре (ширина 11–21 мм), и таблица рассыпалась по колонкам на
+    девятнадцать блоков. Отточия же там идут насквозь. Замер по паку: ложные задевают 9–13
+    отточий, настоящие межколонники — ни одного.
+
+    Args:
+        gutter: Кандидат в межколонники.
+        leaders: Отточия страницы (``leaders.Leader``).
+
+    Returns:
+        Число отточий, пересекающих полосу кандидата на его высоте.
+    """
+    count = 0
+    for leader in leaders:
+        if not gutter.alive_at(leader.y):
+            continue
+        if leader.x1 > gutter.x0_at(leader.y) and leader.x0 < gutter.x1_at(leader.y):
+            count += 1
+    return count
+
+
 def _confirm(gutters: list[Gutter], mask: np.ndarray, dpi: float) -> list[Gutter]:
     """Оставить те межколонники, у которых по обе стороны есть текст на их же высоте.
 
     Пустое поле справа от текста (там лишь номер страницы) и пустота внутри врезки иначе
     становятся «межколонниками» и режут блок пополам (1967/10 с.63). Проверка: в диапазоне
     высот межколонника доля строк с краской слева и справа — не меньше ``SIDE_ROWS_SHARE``.
-    Слишком широкая пустота (шире ``MAX_GUTTER_MM``) — это поле, а не межколонник.
+    Слишком широкая пустота (шире ``MAX_GUTTER_MM``) — это поле, а не межколонник. Полоса, сквозь
+    которую идут отточия, отбраковывается отдельно, уже после продления (см. :func:`_dotted`).
+
+    Args:
+        gutters: Кандидаты в межколонники.
+        mask: Маска текста рабочей копии.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Подтверждённые межколонники.
     """
     out: list[Gutter] = []
     max_gutter = mm_to_px(MAX_GUTTER_MM, dpi)
@@ -344,13 +456,17 @@ def bounds_at(gutters: list[Gutter], x0: float, x1: float, y: float, width: int)
     return left, right
 
 
-def mark_cut_lines(axes: list, gutters: list[Gutter], dpi: float = WORK_DPI) -> list[bool]:
+def mark_cut_lines(
+    axes: list, gutters: list[Gutter], dpi: float = WORK_DPI, ink: np.ndarray | None = None, k: float = 2.0
+) -> list[bool]:
     """Какие оси — куски широкой строки, набранной ЧЕРЕЗ межколонник (заголовок во всю ширину).
 
     Args:
         axes: Оси строк страницы (``lines.LineAxis``).
         gutters: Локальные межколонники.
         dpi: Разрешение рабочей копии.
+        ink: Краска рендера ``RENDER_DPI``; нужна, чтобы отличить отточия от настоящего разреза.
+        k: Во сколько раз рендер крупнее рабочей копии.
 
     Returns:
         Список признаков по осям в том же порядке.
@@ -362,23 +478,61 @@ def mark_cut_lines(axes: list, gutters: list[Gutter], dpi: float = WORK_DPI) -> 
                 continue
             gx0, gx1 = gutter.x0_at(axis.cy), gutter.x1_at(axis.cy)
             overlap = min(axis.x1, gx1) - max(axis.x0, gx0)
-            if overlap >= GUTTER_OVERLAP_SHARE * max(1.0, gx1 - gx0):
+            # Строка набрана ЧЕРЕЗ межколонник, только если она выходит за него с ОБЕИХ сторон.
+            # Иначе последняя буква строки, заехавшая в межколонник на пару пикселей, объявляла
+            # обычную строку колонки «широкой», и та уходила в отдельный блок во всю ширину
+            # страницы поверх обеих колонок (1973/08 с.85).
+            through = axis.x0 < gx0 and axis.x1 > gx1
+            # Через межколонник может идти краска самой строки — отточия таблицы. Такая строка
+            # не «разрезанная»: она целиком принадлежит своей колонке (1971/10 с.93).
+            dotted = ink is not None and gutter_filled(ink, gx0, gx1, axis.cy, axis.height, k) >= DOT_FILL_SHARE
+            if through and not dotted and overlap >= GUTTER_OVERLAP_SHARE * max(1.0, gx1 - gx0):
                 out[i] = True
     return out
 
 
-def separators_for_segmentation(gutters: list[Gutter]) -> list[tuple[int, int]]:
-    """Межколонники полосами ``(x0, x1)`` для сегментации строк: ``link_spans`` про высоту не знает.
+def separators_for_segmentation(gutters: list[Gutter]) -> list[tuple[int, int, int, int]]:
+    """Межколонники полосами ``(x0, x1, y0, y1)`` для сегментации строк.
 
-    Берётся ОБЩАЯ часть ломаной (максимум левых границ и минимум правых): полоса заведомо внутри
-    межколонника на всех его высотах, и сборка кусков строки через него не перескочит.
+    По x берётся ОБЩАЯ часть ломаной (максимум левых границ и минимум правых): полоса заведомо
+    внутри межколонника на всех его высотах, и сборка кусков строки через него не перескочит.
+    По y отдаётся ВЫСОТА, на которой межколонник живёт: заголовок над колонками идёт выше него,
+    и резать заголовок по чужой пустоте нельзя (1973/06 с.65: «ОСНОВЫ ЭКОНОМИКИ…» рвалось
+    пополам там, где ниже начинался межколонник основного текста).
     """
-    out: list[tuple[int, int]] = []
+    out: list[tuple[int, int, int, int]] = []
     for gutter in gutters:
         x0 = max(point[1] for point in gutter.points)
         x1 = min(point[2] for point in gutter.points)
         if x1 > x0:
-            out.append((int(x0), int(x1)))
+            out.append((int(x0), int(x1), int(gutter.y0), int(gutter.y1)))
+    return out
+
+
+def rule_separators(gray: np.ndarray, dpi: float = WORK_DPI) -> list[tuple[int, int, int, int]]:
+    """Вертикальные линейки полосами ``(x0, x1, y0, y1)`` — такие же запреты сцепки, как межколонник.
+
+    Графы таблицы разделены не пустотой, а ЛИНЕЙКОЙ, и пустого межколонника между ними может не
+    быть вовсе: числа графы стоят вплотную к черте. Поэтому детектор межколонников такую границу
+    не видит, а сборка строки спокойно перешагивает через неё и склеивает текст левой графы с
+    числами правой (1971/10 с.93). Линейку же видно прямо — тем же морфологическим детектором,
+    которым таблицы находит ``page_layout``.
+
+    Args:
+        gray: Серая рабочая копия страницы.
+        dpi: Её разрешение.
+
+    Returns:
+        Полосы запрета по каждой вертикальной линейке, в пикселях рабочей копии.
+    """
+    lines = find_lines(gray, int(round(dpi)))
+    out: list[tuple[int, int, int, int]] = []
+    for item in lines.vertical:
+        box = item.box
+        # Линейка тонкая, поэтому полоса расширяется до минимальной ширины: иначе разрыв между
+        # кусками, стоящими вплотную к черте, может её «перепрыгнуть».
+        pad = max(0, (RULE_SEPARATOR_MIN_PX - (box.x1 - box.x0)) // 2)
+        out.append((int(box.x0 - pad), int(box.x1 + pad), int(box.y0), int(box.y1)))
     return out
 
 
@@ -394,7 +548,9 @@ __all__ = [
     "bounds_at",
     "column_width_mm",
     "gutters_of",
+    "rule_separators",
     "mark_cut_lines",
+    "gutter_filled",
     "separators_for_segmentation",
     "text_mask",
 ]

@@ -96,6 +96,16 @@ def bowed(image: np.ndarray, amplitude_px: float = 30.0) -> np.ndarray:
     return warp(image, lambda xs, ys: amplitude_px * (1.0 - ((xs - width / 2.0) / (width / 2.0)) ** 2))
 
 
+def sheared(image: np.ndarray, rise_px: float = 26.0) -> np.ndarray:
+    """Перекос: правый край строк ниже левого на ``rise_px`` (наклон постоянный по всей странице).
+
+    Такой перекос ломает жадную сборку: сгустки соседних строк начинают чередоваться по x, и
+    цепочка уходит на соседнюю строку.
+    """
+    width = image.shape[1]
+    return warp(image, lambda xs, ys: rise_px * xs / width)
+
+
 def inset_page(shape: tuple[int, int] = PAGE_SHAPE, seed: int = 0) -> np.ndarray:
     """Одна колонка на всю ширину внизу и врезка справа вверху: межколонник живёт на части высоты."""
     image = paper(shape)
@@ -111,3 +121,40 @@ def inset_page(shape: tuple[int, int] = PAGE_SHAPE, seed: int = 0) -> np.ndarray
 
 
 __all__ = ["GUTTER_PX", "bowed", "column_page", "inset_page", "warp"]
+
+
+def leader_page(
+    rows: int = 14, shape: tuple[int, int] = PAGE_SHAPE, dot_step: int = 36, dot_px: int = 6, seed: int = 3
+) -> np.ndarray:
+    """Страница-таблица: слева слова, дальше отточие «. . . . .», справа число.
+
+    Геометрия взята с 1971/10 с.93: шаг между точками 36 px при 300 dpi (3 мм), точка 6 × 6 px.
+    Между отточием и числом остаётся широкая пустота — она не должна стать межколонником.
+
+    Args:
+        rows: Сколько строк таблицы нарисовать.
+        shape: Размер страницы (пиксели 300 dpi).
+        dot_step: Шаг между точками отточия.
+        dot_px: Размер точки.
+        seed: Зерно генератора слов.
+
+    Returns:
+        Серую страницу.
+    """
+    page = paper(shape)
+    generator = random.Random(seed)
+    x_dots, x_number = MARGIN + 700, shape[1] - MARGIN - 200
+    for index in range(rows):
+        y = MARGIN + index * LINE_STEP * 2
+        _draw_line(page, generator, MARGIN, MARGIN + 520, y, False)
+        for x in range(x_dots, x_number - 3 * dot_step, dot_step):
+            page[y + GLYPH_H - dot_px : y + GLYPH_H, x : x + dot_px] = INK
+        _draw_line(page, generator, x_number, x_number + 150, y, False)
+    return page
+
+
+def single_line_page(shape: tuple[int, int] = PAGE_SHAPE, seed: int = 5) -> np.ndarray:
+    """Страница с одной-единственной строкой: для проверки контура однострочного блока."""
+    page = paper(shape)
+    _draw_line(page, random.Random(seed), MARGIN, shape[1] - MARGIN, MARGIN + 200, False)
+    return page
