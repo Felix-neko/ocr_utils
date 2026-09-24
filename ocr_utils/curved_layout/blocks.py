@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 
 from dataclasses import dataclass
+from enum import Enum
 
 import cv2
 import numpy as np
@@ -140,6 +141,16 @@ STYLE_PRODUCT_RATIO = 1.9
 GLYPH_SAME_RATIO = 1.15
 # Меньше стольких рядов с каждой стороны границы — признаки не меряем.
 MIN_BREAK_WINDOW = 2
+# Квантиль отступа кромки-полосы от оси ряда: по скольким столбцам профиля краски она проходит
+# снаружи. Единица дала бы ту же кромку по краске со всеми выносными элементами.
+# Замер по 22 544 столбцам четырёх текстовых полос, отступ в высотах глифа ряда:
+#   квантиль   0.50   0.65   0.70   0.75   0.80   0.90   1.00
+#   вверх     +0.55  +0.73  +0.81  +0.89  +1.06  +1.41  +2.83
+#   вниз      +0.66  +0.81  +0.85  +0.88  +0.91  +1.10  +2.47
+# Корпус строки (икс-высота) кончается около 0.55 вверх и 0.66 вниз — это медиана; выше 0.75
+# высоты глифа уходят 34 % столбцов вверх и 41 % вниз, то есть выносные элементы. Порог 0.70
+# оставляет полосе корпус с небольшим запасом и отсекает выносные.
+BODY_QUANTILE = 0.70
 # Сплошная черта делит блок, если она перекрывает колонку не меньше чем на эту долю ширины:
 # разделитель сноски в журнале — короткая черта примерно в четверть колонки.
 RULE_OVERLAP_SHARE = 0.15
@@ -207,9 +218,10 @@ class BlockEnvelope:
     попадали все его строки целиком. Меры выключки считаются не от них, а от ``core_left`` и
     ``core_right`` — гладкого тренда по телу блока, который не прыгает за одиночным выносом.
 
-    ``polygon`` — НЕ просто обход четырёх кромок: он ещё и проглатывает краску рядов там, где
-    рамка её режет (:func:`_swallow_rows`), поэтому в него гарантированно попадают все буквы всех
-    рядов блока. Четыре кромки остаются гладкой рамкой и от этой правки не меняются.
+    У огибающей ПО КРАСКЕ (``CapKind.INK``) ``polygon`` — не просто обход четырёх кромок: он ещё и
+    проглатывает краску рядов там, где рамка её режет (:func:`_swallow_rows`), поэтому в него
+    гарантированно попадают все буквы всех рядов блока. У огибающей-ПОЛОСЫ (``CapKind.BODY``)
+    такого обещания нет и быть не может: она нарочно идёт мимо выносных элементов.
     """
 
     left: np.ndarray
@@ -241,8 +253,9 @@ class TextBlock:
     rows: tuple[Row, ...]
     pitch_px: float
     dpi: float
-    envelope: BlockEnvelope
+    envelope: BlockEnvelope  # главная: полоса вокруг оси
     envelope_coarse: BlockEnvelope
+    envelope_ink: BlockEnvelope | None = None  # справочная: кромки по краске крайних рядов
 
     @property
     def glyph_size(self) -> tuple[float, float]:
@@ -262,6 +275,13 @@ class TextBlock:
     @property
     def lines(self) -> int:
         return len(self.rows)
+
+
+class CapKind(str, Enum):
+    """Чем идут верхняя и нижняя кромки блока."""
+
+    BODY = "body"  # полоса вокруг оси ряда: устойчивый отступ, выносные элементы её не дёргают
+    INK = "ink"  # профиль краски крайнего ряда: повторяет каждый выносной элемент
 
 
 def ink_edge(ink: np.ndarray, x_lo: int, x_hi: int, y0: int, y1: int, side: str) -> float | None:
@@ -1128,21 +1148,29 @@ def _swallow_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> np.ndarra
 
 
 def _single_row_envelope(
-    row: Row, smooth_pitches: float, dpi: float, glyph: tuple[float, float] | None, dilate: float
+    row: Row,
+    smooth_pitches: float,
+    dpi: float,
+    glyph: tuple[float, float] | None,
+    dilate: float,
+    cap: CapKind = CapKind.BODY,
 ) -> BlockEnvelope:
     """Огибающая блока из одного ряда: по его оси, с полем в половину высоты.
 
     Тренд по одному ряду не построить, поэтому кромки — вертикальные отрезки по краям краски, а
     верх и низ — сама ось, поднятая и опущенная на полвысоты.
     """
-    top = _cap(row, row.x0, row.x1, -1.0)
-    bottom = _cap(row, row.x0, row.x1, 1.0)
+    make_cap = _cap_body if cap is CapKind.BODY else _cap
+    top = make_cap(row, row.x0, row.x1, -1.0)
+    bottom = make_cap(row, row.x0, row.x1, 1.0)
     # Боковые кромки соединяют верх и низ ПО КРАСКЕ, а не отмеряют полвысоты ряда от оси: у
     # логотипа рубрики высота ряда 121 px при 76 px фактической краски, и из контура торчали
     # вертикальные «усы» на полсантиметра (1973/06 с.65).
     left = np.array([[row.x0, top[0, 1]], [row.x0, bottom[0, 1]]])
     right = np.array([[row.x1, top[-1, 1]], [row.x1, bottom[-1, 1]]])
-    polygon = _swallow_rows(np.vstack([left, bottom, right[::-1], top[::-1]]), [row], dpi)
+    polygon = np.vstack([left, bottom, right[::-1], top[::-1]])
+    if cap is CapKind.INK:
+        polygon = _swallow_rows(polygon, [row], dpi)
     return BlockEnvelope(
         left=left,
         right=right,
@@ -1162,6 +1190,7 @@ def envelope_of(
     smooth_pitches: float,
     glyph: tuple[float, float] | None = None,
     dilate: float = DILATE_GLYPHS,
+    cap: CapKind = CapKind.BODY,
 ) -> BlockEnvelope:
     """Гладкая огибающая блока с окном ``smooth_pitches`` межстрочных интервалов.
 
@@ -1171,7 +1200,7 @@ def envelope_of(
     вверх, верх справа налево.
     """
     if len(rows) == 1:
-        return _single_row_envelope(rows[0], smooth_pitches, dpi, glyph, dilate)
+        return _single_row_envelope(rows[0], smooth_pitches, dpi, glyph, dilate, cap)
     ys = np.array([row.y for row in rows], dtype=np.float64)
     xs_left = np.array([row.x0 for row in rows], dtype=np.float64)
     xs_right = np.array([row.x1 for row in rows], dtype=np.float64)
@@ -1188,13 +1217,18 @@ def envelope_of(
     # Кромка для контура — тот же тренд, отодвинутый наружу до самых дальних краёв рядов.
     left = _outward(core_left, ys, xs_left, grid, pitch, nodes, dpi, inward=+1.0)
     right = _outward(core_right, ys, xs_right, grid, pitch, nodes, dpi, inward=-1.0)
-    top_curve = _cap(top_row, left[0], right[0], -1.0)
-    bottom_curve = _cap(bottom_row, left[-1], right[-1], 1.0)
+    make_cap = _cap_body if cap is CapKind.BODY else _cap
+    top_curve = make_cap(top_row, left[0], right[0], -1.0)
+    bottom_curve = make_cap(bottom_row, left[-1], right[-1], 1.0)
     # Кромки обрезаются верхней и нижней кривыми: иначе угол блока уходит вниз (или вверх) за
     # строку, которая на своём конце загнулась (1973/07 с.77, правый нижний угол).
     left_curve = _trim_to_caps(np.column_stack([left, grid]), top_curve, bottom_curve)
     right_curve = _trim_to_caps(np.column_stack([right, grid]), top_curve, bottom_curve)
-    polygon = _swallow_rows(np.vstack([left_curve, bottom_curve, right_curve[::-1], top_curve[::-1]]), rows, dpi)
+    polygon = np.vstack([left_curve, bottom_curve, right_curve[::-1], top_curve[::-1]])
+    # Охват краски рядов обещает только кромка ПО КРАСКЕ: полоса вокруг оси выносные элементы не
+    # охватывает по определению, и подмешивать их в неё значило бы вернуть то самое вихляние.
+    if cap is CapKind.INK:
+        polygon = _swallow_rows(polygon, rows, dpi)
     return BlockEnvelope(
         left=left_curve,
         right=right_curve,
@@ -1346,6 +1380,42 @@ def _cap(row: Row, x_left: float, x_right: float, direction: float) -> np.ndarra
     ys = np.interp(xs, profile[:, 0], profile[:, 1])
     ys = _extend_ends(xs, ys, profile, dpi)
     return np.column_stack([xs, ys + margin])
+
+
+def _cap_body(row: Row, x_left: float, x_right: float, direction: float) -> np.ndarray:
+    """Кромка-ПОЛОСА: ось ряда, отодвинутая на устойчивый отступ (пиксели рабочей копии).
+
+    Кромка по краске (:func:`_cap`) повторяет каждый выносной элемент: «б», прописные и цифры
+    задирают верх, «р», «у», «щ» и запятая роняют низ, и граница блока на плотном наборе вихляет
+    амплитудой в полвысоты строчной. Полоса вокруг оси этого не делает: она отстоит от оси на
+    ОДНУ величину по всей длине ряда и потому гладка ровно настолько, насколько гладка ось.
+
+    Отступ — квантиль ``BODY_QUANTILE`` отклонения профиля краски от оси: кромка проходит снаружи
+    четырёх столбцов краски из пяти, а выносные элементы (четверть-треть столбцов) остаются
+    снаружи — в этом и смысл. Максимум брать нельзя: это и была бы кромка по краске.
+
+    Args:
+        row: Крайний ряд блока.
+        x_left, x_right: Куда протянуть кромку по x.
+        direction: ``-1`` — верх, ``+1`` — низ.
+
+    Returns:
+        Кривая ``(N, 2)`` слева направо.
+    """
+    profile = row.top_edge if direction < 0 else row.bottom_edge
+    points = np.vstack([np.asarray(axis.points, dtype=np.float64) for axis in row.axes])
+    points = points[np.argsort(points[:, 0])]
+    dpi = row.axis.dpi
+    xs = np.linspace(x_left, x_right, num=max(2, int(abs(x_right - x_left) / 4) + 2))
+    axis_ys = _extend_ends(xs, np.interp(xs, points[:, 0], points[:, 1]), points, dpi)
+    if profile is None or len(profile) < 2:
+        offset = row.height / 2.0  # профиля нет (ряд пришёл не из ``rows_of``) — полвысоты ряда
+    else:
+        own = np.interp(profile[:, 0], points[:, 0], points[:, 1])
+        away = direction * (profile[:, 1] - own)
+        offset = float(np.quantile(np.maximum(away, 0.0), BODY_QUANTILE))
+    margin = direction * mm_to_px(OUTWARD_MARGIN_MM, dpi)
+    return np.column_stack([xs, axis_ys + direction * offset + margin])
 
 
 def _extend_ends(xs: np.ndarray, ys: np.ndarray, profile: np.ndarray, dpi: float) -> np.ndarray:
@@ -1501,8 +1571,9 @@ def blocks_of(
                     rows=tuple(group),
                     pitch_px=pitch,
                     dpi=float(dpi),
-                    envelope=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate),
+                    envelope=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate, CapKind.BODY),
                     envelope_coarse=envelope_of(group, pitch, dpi, smooth_pitches * coarse_factor),
+                    envelope_ink=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate, CapKind.INK),
                 )
             )
     return blocks

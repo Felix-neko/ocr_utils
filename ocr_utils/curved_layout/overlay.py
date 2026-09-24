@@ -15,9 +15,23 @@ from ocr_utils.curved_layout.page import PageAnalysis
 # Цвета BGR: огибающая — синяя, крупная огибающая — фиолетовая, оси строк — зелёные,
 # найденные края рядов — оранжевые кружки, границы колонок — серые пунктиры.
 COLOUR_ENVELOPE = (220, 90, 20)
+# Справочная кромка по краске: тот же синий, но приглушённый — главная здесь полоса вокруг оси.
+COLOUR_ENVELOPE_INK = (150, 170, 120)
+# Границы блоков рисуются полупрозрачно: под ними должны читаться буквы.
+ENVELOPE_ALPHA = 0.55
+# Подсказки внешних детекторов: рамка-запрет (таблица, схема), область бокового текста и поле,
+# где текста быть не должно (растр). Все три — заливкой, значит полупрозрачно.
+COLOUR_BARRIER = (60, 90, 210)
+COLOUR_SIDEWAYS = (170, 90, 40)
+COLOUR_FORBIDDEN = (120, 120, 120)
+# Ячейка таблицы как область разбора: их на полосе бывает под полторы сотни, поэтому только
+# тонкий КОНТУР, а не заливка — иначе подсказка съест страницу.
+COLOUR_CELL = (90, 160, 90)
+COLOUR_CELL_SIDEWAYS = (170, 90, 40)
+HINT_ALPHA = 0.30
 COLOUR_COARSE = (200, 60, 200)
 COLOUR_AXIS = (40, 170, 40)
-COLOUR_POINT = (30, 140, 240)
+COLOUR_POINT = (140, 140, 0)  # бирюзовый: рядом с оранжевой меткой оси оранжевый же неразличим
 COLOUR_COLUMN = (170, 170, 170)
 # Участок оси над точкой или запятой: там ось провисает к базовой линии, в меры формы строки он
 # не входит и на оверлее рисуется отдельным цветом, чтобы провисание не принимали за дефект.
@@ -39,7 +53,7 @@ def _polyline(
 
 
 def draw(
-    analysis: PageAnalysis, gray: np.ndarray, scale: float = 1.0, dilate_extra: tuple[float, ...] = ()
+    analysis: PageAnalysis, gray: np.ndarray, scale: float = 1.0, dilate_extra: tuple[float, ...] = (), hints=None
 ) -> np.ndarray:
     """Нарисовать разбор поверх серого изображения страницы.
 
@@ -54,6 +68,15 @@ def draw(
         Цветной холст BGR.
     """
     canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if hints is not None:
+        _hints(canvas, hints, scale)
+    # Границы блоков — в отдельный слой: его подмешают полупрозрачно, чтобы буквы читались.
+    layer = canvas.copy()
+    for block in analysis.blocks:
+        if block.envelope_ink is not None:
+            _polyline(layer, block.envelope_ink.polygon, COLOUR_ENVELOPE_INK, 2, scale, closed=True)
+        _polyline(layer, block.envelope.polygon, COLOUR_ENVELOPE, 2, scale, closed=True)
+    cv2.addWeighted(layer, ENVELOPE_ALPHA, canvas, 1.0 - ENVELOPE_ALPHA, 0, canvas)
     for gutter in analysis.gutters:
         # Межколонник — ломаная: на трапеции он уезжает вбок вместе с колонками.
         for side in (1, 2):
@@ -62,7 +85,6 @@ def draw(
     for axis in analysis.axes:
         _axis_line(canvas, axis, scale)
     for block, alignment in zip(analysis.blocks, analysis.alignments):
-        _polyline(canvas, block.envelope.polygon, COLOUR_ENVELOPE, 2, scale, closed=True)
         _polyline(canvas, block.envelope_coarse.left, COLOUR_COARSE, 1, scale)
         _polyline(canvas, block.envelope_coarse.right, COLOUR_COARSE, 1, scale)
         glyph = block.glyph_size
@@ -74,6 +96,58 @@ def draw(
                 cv2.circle(canvas, (int(x * scale), int(row.y * scale)), 3, COLOUR_POINT, 1, cv2.LINE_AA)
         _caption(canvas, block, alignment, scale)
     return canvas
+
+
+def _hints(canvas: np.ndarray, hints, scale: float) -> None:
+    """Подсказки подложкой: запретное поле, рамки таблиц и схем, области бокового текста, ячейки.
+
+    Области и заливки — полупрозрачно: под подсказкой должны читаться и буквы, и сам разбор.
+    Ячейки таблиц рисуются тонким КОНТУРОМ: их на полосе бывает под полторы сотни, и залитые
+    прямоугольники съели бы страницу.
+    """
+    layer = canvas.copy()
+    cells = [zone for zone in hints.zones if _is_cell(zone, hints)]
+    cell_boxes = {zone.box for zone in cells}
+    if hints.text_allowed is not None and not hints.text_allowed.all():
+        forbidden = cv2.resize(
+            (~hints.text_allowed).astype(np.uint8), (canvas.shape[1], canvas.shape[0]), interpolation=cv2.INTER_NEAREST
+        )
+        layer[forbidden > 0] = COLOUR_FORBIDDEN
+    for box in hints.barriers:
+        # Рамку ячейки заливкой не даём: её рисует контур ниже, а полторы сотни заливок сольются.
+        if _matches(box, cell_boxes):
+            continue
+        cv2.rectangle(layer, _at(box[0], box[1], scale), _at(box[2], box[3], scale), COLOUR_BARRIER, -1)
+    page = (0, 0, canvas.shape[1] / max(scale, 1e-6), canvas.shape[0] / max(scale, 1e-6))
+    for zone in hints.zones:
+        if zone in cells:
+            colour = COLOUR_CELL_SIDEWAYS if zone.sideways else COLOUR_CELL
+            cv2.rectangle(layer, _at(zone.box[0], zone.box[1], scale), _at(zone.box[2], zone.box[3], scale), colour, 1)
+        elif zone.sideways and not _inside(page, zone.box):
+            cv2.rectangle(
+                layer, _at(zone.box[0], zone.box[1], scale), _at(zone.box[2], zone.box[3], scale), COLOUR_SIDEWAYS, -1
+            )
+    cv2.addWeighted(layer, HINT_ALPHA, canvas, 1.0 - HINT_ALPHA, 0, canvas)
+
+
+def _is_cell(zone, hints) -> bool:
+    """Ячейка таблицы среди областей: её внутренность лежит внутри одной из рамок-запретов."""
+    return any(_inside(zone.box, box) for box in hints.barriers)
+
+
+def _inside(box, outer) -> bool:
+    """Лежит ли бокс внутри другого (допуск в пиксель на округление координат)."""
+    return box[0] >= outer[0] - 1 and box[1] >= outer[1] - 1 and box[2] <= outer[2] + 1 and box[3] <= outer[3] + 1
+
+
+def _matches(box, boxes) -> bool:
+    """Совпадает ли рамка-запрет с боксом какой-нибудь ячейки (с точностью до линеек)."""
+    return any(abs(box[0] - own[0]) <= 4 and abs(box[2] - own[2]) <= 4 and abs(box[1] - own[1]) <= 4 for own in boxes)
+
+
+def _at(x: float, y: float, scale: float) -> tuple[int, int]:
+    """Точка рабочей копии в координатах холста."""
+    return int(round(x * scale)), int(round(y * scale))
 
 
 def _axis_line(canvas: np.ndarray, axis, scale: float) -> None:
@@ -122,29 +196,67 @@ def _caption(canvas: np.ndarray, block, alignment: Alignment, scale: float) -> N
         cv2.putText(canvas, text, (x, y + i * 12), cv2.FONT_HERSHEY_COMPLEX, 0.33, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
-def _legend(canvas: np.ndarray, dilate_extra: tuple[float, ...]) -> None:
-    """Легенда в правом верхнем углу: что означает каждая кривая."""
-    lines = [("кромка по краске", COLOUR_ENVELOPE), ("ось строки", COLOUR_AXIS)]
-    lines += [(f"+{share:g} символа", COLOUR_DILATE.get(share, COLOUR_DILATE_OTHER)) for share in dilate_extra]
-    x = canvas.shape[1] - 150
-    for index, (text, colour) in enumerate(lines):
+def _on_paper(colour: tuple[int, int, int], alpha: float) -> tuple[int, int, int]:
+    """Цвет, каким он ЛЯЖЕТ НА БУМАГУ при подмешивании с прозрачностью ``alpha``.
+
+    Полупрозрачная линия на белой бумаге выглядит светлее своего цвета, и образец в легенде,
+    нарисованный непрозрачно, сбивал бы с толку: в легенде насыщенный синий, на странице —
+    блёклый. Поэтому образец смешивается с бумагой ровно так же, как сама линия.
+    """
+    return tuple(int(round(alpha * own + (1.0 - alpha) * 255)) for own in colour)
+
+
+def _legend(canvas: np.ndarray, dilate_extra: tuple[float, ...], hints=None) -> None:
+    """Легенда в правом верхнем углу: что означает каждый цвет.
+
+    Печатается ВСЕГДА: на оверлее семь сущностей, и без легенды их не различить. Образцы
+    полупрозрачных линий показываются такими же полупрозрачными (см. :func:`_on_paper`).
+    """
+    lines = [
+        ("граница блока: полоса вокруг оси", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
+        ("граница блока по краске, справочно", COLOUR_ENVELOPE_INK, ENVELOPE_ALPHA),
+        ("крупная огибающая", COLOUR_COARSE, 1.0),
+        ("ось строки", COLOUR_AXIS, 1.0),
+        ("ось над точкой, запятой", COLOUR_MARK, 1.0),
+        ("края рядов", COLOUR_POINT, 1.0),
+        ("межколонник", COLOUR_COLUMN, 1.0),
+    ]
+    lines += [
+        (f"граница +{share:g} символа", COLOUR_DILATE.get(share, COLOUR_DILATE_OTHER), 1.0) for share in dilate_extra
+    ]
+    if hints is not None and not hints.empty:
+        lines.append(("подсказка: рамка таблицы, схемы", COLOUR_BARRIER, HINT_ALPHA))
+        if any(zone.sideways for zone in hints.zones):
+            lines.append(("подсказка: боковой текст", COLOUR_SIDEWAYS, HINT_ALPHA))
+        if hints.text_allowed is not None:
+            lines.append(("подсказка: текста быть не должно", COLOUR_FORBIDDEN, HINT_ALPHA))
+        if any(_is_cell(zone, hints) for zone in hints.zones):
+            lines.append(("подсказка: ячейка таблицы", COLOUR_CELL, HINT_ALPHA))
+            lines.append(("подсказка: ячейка, текст боком", COLOUR_CELL_SIDEWAYS, HINT_ALPHA))
+    width = 250
+    x = canvas.shape[1] - width
+    cv2.rectangle(canvas, (x - 6, 4), (canvas.shape[1] - 2, 10 + 14 * len(lines)), (255, 255, 255), -1)
+    for index, (text, colour, alpha) in enumerate(lines):
         y = 16 + 14 * index
-        cv2.rectangle(canvas, (x - 4, y - 10), (canvas.shape[1] - 4, y + 3), (255, 255, 255), -1)
-        cv2.line(canvas, (x, y - 3), (x + 18, y - 3), colour, 2, cv2.LINE_AA)
+        cv2.line(canvas, (x, y - 3), (x + 18, y - 3), _on_paper(colour, alpha), 2, cv2.LINE_AA)
         cv2.putText(canvas, text, (x + 22, y), cv2.FONT_HERSHEY_COMPLEX, 0.33, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
 def write(
-    analysis: PageAnalysis, gray300: np.ndarray, path: Path, width: int = 1400, dilate_extra: tuple[float, ...] = ()
+    analysis: PageAnalysis,
+    gray300: np.ndarray,
+    path: Path,
+    width: int = 1400,
+    dilate_extra: tuple[float, ...] = (),
+    hints=None,
 ) -> Path:
     """Записать оверлей в файл, ужав страницу до ширины ``width``."""
     scale_page = width / gray300.shape[1]
     page = cv2.resize(gray300, (width, int(gray300.shape[0] * scale_page)), interpolation=cv2.INTER_AREA)
-    canvas = draw(analysis, page, scale=width / analysis.width, dilate_extra=dilate_extra)
+    canvas = draw(analysis, page, scale=width / analysis.width, dilate_extra=dilate_extra, hints=hints)
     header = f"{analysis.name} с.{analysis.page} [{analysis.variant}] движок {analysis.engine}"
     cv2.putText(canvas, header, (10, 18), cv2.FONT_HERSHEY_COMPLEX, 0.5, COLOUR_TEXT, 1, cv2.LINE_AA)
-    if dilate_extra:
-        _legend(canvas, dilate_extra)
+    _legend(canvas, dilate_extra, hints)
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     return path

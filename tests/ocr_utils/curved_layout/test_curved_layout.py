@@ -12,13 +12,17 @@ from ocr_utils.curved_layout import WORK_DPI
 from ocr_utils.curved_layout.alignment import AlignKind
 from ocr_utils.curved_layout.blocks import (
     EXTEND_SLOPE_LIMIT_DEG,
+    BODY_QUANTILE,
+    CapKind,
     Row,
     _axis_slope,
     _same_row,
     _style_break,
     envelope_of,
 )
+from ocr_utils.curved_layout import blocks
 from ocr_utils.curved_layout import segment as seg
+from ocr_utils.curved_layout.segment import _edge_marks
 from ocr_utils.curved_layout.columns import gutters_of, zones_of
 from ocr_utils.curved_layout.lines import LineAxis
 from ocr_utils.curved_layout.leaders import leaders_of
@@ -285,31 +289,99 @@ def _row(x0: float, x1: float, ys: list[float], height: float) -> Row:
     )
 
 
-def test_flatten_ends_clamps_the_corner_of_an_italic_letter():
-    """Столбцы-углы на конце строки не утаскивают ось вверх.
+def _line_with_glyphs(first_width: float, last_width: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Прямая центр-линия и боксы букв строки: крайние буквы заданной ширины, между ними мелкие.
 
-    У курсива нет вертикальных штрихов: справа дальше всего выступает ВЕРХНИЙ-правый угол
-    последней буквы, и центр масс в этих столбцах уходит вверх (1971/10 с.87, «комиссии ВАК»:
-    ось поднималась на 2.4 px рабочей копии при высоте строчной 10).
+    Абсциссы центр-линии — пиксели рендера от начала сегмента (k = 2, начало строки x0 = 100
+    рабочей копии), боксы букв — пиксели рабочей копии, как их отдаёт ``_glyph_boxes``.
     """
-    xs = np.arange(120, dtype=float)
-    ys = np.full(120, 20.0)
-    weights = np.full(120, 12.0)
-    ys[-4:] = (14.0, 10.0, 8.0, 7.0)  # угол буквы: центр масс уехал вверх
-    weights[-4:] = 4.0  # и краски в этих столбцах втрое меньше обычного
-    out = seg._flatten_ends(xs, ys, weights, height_px=30.0)
-    assert out[:-4] == pytest.approx(ys[:-4])
-    assert out[-4:] == pytest.approx(20.0 - seg.END_FLAT_TOLERANCE_HEIGHTS * 30.0)
+    xs = np.arange(240, dtype=float)
+    ys = np.full(240, 20.0)
+    boxes = [(100.0, 100.0 + first_width, first_width, 15.0)]
+    boxes += [(x, x + 8.0, 8.0, 15.0) for x in np.arange(100.0 + first_width + 4, 220.0 - last_width - 4, 12.0)]
+    boxes.append((220.0 - last_width, 220.0, last_width, 15.0))
+    return xs, ys, np.array(boxes, dtype=float)
 
 
-def test_flatten_ends_keeps_a_full_column():
-    """Полный столбец на конце строки не трогается: его центр масс верен."""
-    xs = np.arange(120, dtype=float)
-    ys = np.full(120, 20.0)
-    weights = np.full(120, 12.0)
-    ys[-4:] = (14.0, 10.0, 8.0, 7.0)  # ординаты те же, но краски в столбцах обычное количество
-    out = seg._flatten_ends(xs, ys, weights, height_px=30.0)
+def test_flatten_ends_clamps_a_wide_first_letter():
+    """Крупная первая буква не утаскивает ось, хотя краски в её крайних столбцах много.
+
+    1975/05 с.97, «Нам пишут…»: первый глиф 37 px при высоте строки 32, и ось уезжала на 18.7 px
+    рабочей копии. Ворота по количеству краски такой случай пропускают — столбцы крупной буквы
+    полны; ворота по отклонению ловят.
+    """
+    xs, ys, boxes = _line_with_glyphs(first_width=20.0, last_width=8.0)
+    zone = xs <= (100.0 + 20.0 + seg.END_GLYPH_MARGIN * 20.0 - 100.0) * 2.0
+    ys[zone] = 8.0  # угол буквы: центр масс уехал на полвысоты строки
+    out = seg._flatten_ends(xs, ys, boxes, height_px=30.0, k=2.0, x0=100.0)
+    assert out[zone] == pytest.approx(20.0 - seg.END_FLAT_TOLERANCE_HEIGHTS * 30.0)
+    assert out[~zone] == pytest.approx(ys[~zone])
+
+
+def test_flatten_ends_keeps_a_column_that_follows_the_line():
+    """Столбец в зоне конца, идущий по строке, не трогается."""
+    xs, ys, boxes = _line_with_glyphs(first_width=20.0, last_width=8.0)
+    out = seg._flatten_ends(xs, ys, boxes, height_px=30.0, k=2.0, x0=100.0)
     assert out == pytest.approx(ys)
+
+
+def test_flatten_ends_skips_a_three_glyph_logo():
+    """У строки из трёх крупных знаков опорой стала бы вторая буква — концы не прижимаем.
+
+    Числа с логотипа рубрики «Нам пишут» (1975/05 с.97): строка x 112..209 рабочей копии при
+    высоте 32, три глифа шириной 37, 23 и 34 px. После вычета обеих зон середины остаётся 14 px
+    рабочей копии при опорном окне в 48 — опереться не на что.
+    """
+    xs = np.arange(194, dtype=float)
+    ys = np.full(194, 20.0)
+    ys[:20] = 8.0
+    boxes = np.array([(112.0, 149.0, 37.0, 35.0), (151.0, 174.0, 23.0, 20.0), (174.0, 208.0, 34.0, 20.0)])
+    out = seg._flatten_ends(xs, ys, boxes, height_px=64.0, k=2.0, x0=112.0)
+    assert out == pytest.approx(ys)
+
+
+def _marked_line(span: tuple[float, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Наклонная центр-линия, у которой столбцы внутри ``span`` держат ординату низкой метки."""
+    xs = np.arange(120, dtype=float)
+    ys = 20.0 + 0.1 * xs
+    ys[(xs >= span[0]) & (xs <= span[1])] = 35.0  # центр масс точки — на базовой линии
+    return xs, ys, np.full(120, 12.0)
+
+
+def test_edge_mark_shortens_the_axis_to_the_middle_of_the_mark():
+    """Запятая в конце строки: ось доводится до её середины и идёт по ходу строки.
+
+    1973/08 с.85, сноска «…Энгельс Ф. Соч., т. 25,»: ``np.interp`` за концом опоры отдаёт
+    концевое значение, и ось шла от запятой горизонтальной полкой до её дальнего края.
+    """
+    # Метка доходит до последнего столбца строки — за запятой краски уже нет.
+    xs, ys, weights = _marked_line((112.0, 119.0))
+    out_xs, out_ys, out_weights, inner = _edge_marks(xs, ys, weights, [(112.0, 119.0)], height_px=30.0)
+    assert inner == []  # метка краевая, в интерполяцию по соседям она не уходит
+    assert out_xs[-1] == pytest.approx(115.0)  # ось доведена до СЕРЕДИНЫ метки (115.5)
+    assert out_weights.size == out_xs.size
+    inside = out_xs >= 112.0
+    assert out_ys[inside] == pytest.approx(20.0 + 0.1 * out_xs[inside], abs=0.5)  # ход строки
+
+
+def test_mark_in_the_middle_of_a_line_is_not_an_edge_mark():
+    """Точка между буквами ось не укорачивает — её обходит интерполяция по соседям."""
+    xs, ys, weights = _marked_line((60.0, 64.0))
+    out_xs, _, _, inner = _edge_marks(xs, ys, weights, [(60.0, 64.0)], height_px=30.0)
+    assert inner == [(60.0, 64.0)]
+    assert out_xs.size == xs.size
+
+
+def test_mark_before_a_leader_run_is_not_an_edge_mark():
+    """За меткой идёт отточие — строка на ней не кончается, ось не обрезаем.
+
+    1971/10 с.93: первая точка отточия обрезала ось по своей середине, и продление по отточию
+    уходило с уровня строки.
+    """
+    xs, ys, weights = _marked_line((112.0, 119.0))
+    out_xs, _, _, inner = _edge_marks(xs, ys, weights, [(112.0, 119.0)], height_px=30.0, leaders=[(120.0, 300.0)])
+    assert inner == [(112.0, 119.0)]
+    assert out_xs.size == xs.size
 
 
 def _style_row(height: float, stroke: float, glyph: tuple[float, float]) -> Row:
@@ -354,11 +426,37 @@ def test_block_contour_swallows_a_strongly_curved_row():
     """
     long_row = _row(557, 905, [1382, 1374, 1368, 1370, 1384, 1403], height=17.0)
     short_row = _row(520, 610, [1401, 1396], height=13.0)
-    envelope = envelope_of([long_row, short_row], pitch=20.5, dpi=WORK_DPI, smooth_pitches=2.5)
+    envelope = envelope_of([long_row, short_row], pitch=20.5, dpi=WORK_DPI, smooth_pitches=2.5, cap=CapKind.INK)
     hull = envelope.polygon.astype(np.float32).reshape(-1, 1, 2)
     for row in (long_row, short_row):
         for x, y in np.vstack([row.top_edge, row.bottom_edge]):
             assert cv2.pointPolygonTest(hull, (float(x), float(y)), True) >= -0.5
+
+
+def test_body_cap_does_not_follow_ascenders():
+    """Кромка-полоса идёт мимо выносных элементов, а кромка по краске — по ним.
+
+    У ряда пять столбцов из двадцати задраны на высоту прописной; полоса вокруг оси обязана
+    остаться у корпуса, а кромка по краске — подняться к ним.
+    """
+    xs = np.linspace(100.0, 400.0, 20)
+    axis_y = np.full(xs.size, 200.0)
+    tops = np.full(xs.size, 195.0)
+    tops[::4] = 185.0  # выносные элементы вверх: четверть столбцов
+    row = _row(100.0, 400.0, [200.0, 200.0], height=14.0)
+    row = Row(
+        **{
+            **row.__dict__,
+            "top_edge": np.column_stack([xs, tops]),
+            "bottom_edge": np.column_stack([xs, np.full(xs.size, 205.0)]),
+        }
+    )
+    body = blocks._cap_body(row, 100.0, 400.0, -1.0)
+    ink = blocks._cap(row, 100.0, 400.0, -1.0)
+    assert body[:, 1].max() - body[:, 1].min() < 0.5  # полоса ровная
+    assert ink[:, 1].max() - ink[:, 1].min() > 5.0  # краска вихляет на выносных
+    # Полоса стоит у корпуса (195), а не у выносных (185): квантиль 0.8 оставляет их снаружи.
+    assert float(np.median(body[:, 1])) > float(np.median(axis_y)) - 8.0
 
 
 def test_row_keeps_neighbouring_lines_apart():

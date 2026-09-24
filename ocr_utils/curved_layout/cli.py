@@ -6,7 +6,7 @@ from pathlib import Path
 
 import click
 
-from ocr_utils.curved_layout import LINKING_CHOICES, LINKING_DEFAULT, WORK_DPI
+from ocr_utils.curved_layout import LINKING_CHOICES, LINKING_DEFAULT, RENDER_DPI, WORK_DPI
 from ocr_utils.curved_layout.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES
 from ocr_utils.curved_layout.lines import SMOOTH_HEIGHTS
 from ocr_utils.curved_layout.page import Variant, analyse_gray, render_page
@@ -33,7 +33,7 @@ def make_engine(name: str, options: dict):
     if name == "ink":
         from ocr_utils.curved_layout.engines.ink import InkEngine
 
-        return InkEngine(linking=options.get("linking", LINKING_DEFAULT))
+        return InkEngine(linking=options.get("linking", LINKING_DEFAULT), hints=options.get("hints"))
     if name == "kraken":
         from ocr_utils.curved_layout.engines.kraken import KrakenEngine
 
@@ -91,6 +91,18 @@ def main() -> None:
     default="",
     help="доли размера символа через запятую: их границы рисуются в оверлее для сравнения",
 )
+@click.option(
+    "--layout-cache",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="кэш surya page_layout: включает подсказки — растр, таблицы, схемы, боковой текст",
+)
+@click.option(
+    "--text-layer-cache",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="кэш text_layer_fix (<прогон>/cache): ячейки таблиц и поворот текста в них",
+)
 @click.option("--kraken-python", type=click.Path(path_type=Path), default=None, help="python окружения kraken")
 @click.option("--pero-python", type=click.Path(path_type=Path), default=None)
 @click.option("--pero-config", type=click.Path(path_type=Path), default=None, help="config.ini модели pero")
@@ -111,6 +123,8 @@ def analyze(
     overlay_width: int,
     dilate_glyphs: float,
     dilate_compare: str,
+    layout_cache: Path | None,
+    text_layer_cache: Path | None,
     **options,
 ) -> None:
     """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку."""
@@ -120,8 +134,12 @@ def analyze(
     variants = [Variant.GEO.value, Variant.NOGEO.value] if variant == "both" else [variant]
     dirs = {Variant.GEO.value: geo_dir, Variant.NOGEO.value: nogeo_dir}
     analyses = []
+    surya = None
+    if layout_cache is not None:
+        from ocr_utils.page_layout.surya import SuryaSourceConfig
+
+        surya = SuryaSourceConfig(layout_cache).open()
     for engine_name in engines:
-        engine = make_engine(engine_name, options)
         for name, page in parse_pages(pages):
             for current in variants:
                 pdf = dirs[current] / f"{name}.pdf"
@@ -129,6 +147,8 @@ def analyze(
                     click.echo(f"нет файла: {pdf}")
                     continue
                 gray300 = render_page(pdf, page)
+                hints = _page_hints(pdf, page, gray300, dpi, surya, text_layer_cache)
+                engine = make_engine(engine_name, {**options, "hints": hints})
                 analysis = analyse_gray(
                     gray300,
                     engine,
@@ -140,9 +160,12 @@ def analyze(
                     name=name,
                     page=page,
                     variant=current,
+                    hints=hints,
                 )
                 write_json(analysis, out_dir / "pages")
-                overlay.write(analysis, gray300, out_dir / "overlays" / f"{analysis.key}.jpg", overlay_width, extra)
+                overlay.write(
+                    analysis, gray300, out_dir / "overlays" / f"{analysis.key}.jpg", overlay_width, extra, hints
+                )
                 analyses.append(analysis)
                 click.echo(
                     f"{analysis.key}: блоков {len(analysis.blocks)}, строк {len(analysis.axes)}, "
@@ -152,6 +175,35 @@ def analyze(
         write_csv(analyses, out_dir / "blocks.csv")
         (out_dir / "report.md").write_text(markdown(analyses), encoding="utf-8")
         click.echo(f"готово: {out_dir}")
+
+
+def _page_hints(pdf: Path, page: int, gray300, dpi: float, surya, text_layer_cache: Path | None = None):
+    """Подсказки страницы: находки ``page_layout`` плюс ячейки таблиц из кэша ``text_layer_fix``.
+
+    Координаты нужны в рабочей копии разбора, поэтому её размер передаётся явно: кадр
+    ``page_layout`` считается в своём разрешении и округляется иначе.
+
+    Returns:
+        :class:`hints.LayoutHints` или ``None``, если не задан ни один кэш.
+    """
+    if surya is None and text_layer_cache is None:
+        return None
+    import cv2
+    import fitz
+
+    from ocr_utils.curved_layout.from_layout import hints_of as layout_hints
+    from ocr_utils.curved_layout.from_text_layer import hints_of as cell_hints
+
+    width = int(round(gray300.shape[1] * dpi / RENDER_DPI))
+    height = int(round(gray300.shape[0] * dpi / RENDER_DPI))
+    hints = None
+    if surya is not None:
+        with fitz.open(pdf) as document:
+            hints = layout_hints(document, page - 1, dpi=dpi, surya=surya, width=width, height=height)
+    if text_layer_cache is not None:
+        work = cv2.resize(gray300, (width, height), interpolation=cv2.INTER_AREA)
+        hints = cell_hints(pdf.name, page - 1, text_layer_cache, work, dpi=dpi, base=hints)
+    return hints
 
 
 @main.command()

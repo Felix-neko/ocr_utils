@@ -13,7 +13,11 @@
 - `docs/win10_vm.md` — Windows-VM с FineReader: Hot Folder, доступ через vmrun, ограничения.
 - README подпакетов: `ocr_utils/<пакет>/README.md` (есть у 11 из 18).
 
-Навыки: `/run-pack1-step`, `/new-detector`, `/write-report`, `/cvat-roundtrip`, `/recall` (поиск по переписке прошлых сессий).
+Навыки: `/run-pack1-step`, `/new-detector`, `/write-report`, `/cvat-roundtrip`, `/draw-overlay` (палитра,
+легенда и полупрозрачность отладочных оверлеев), `/recall` (поиск по переписке прошлых сессий),
+`/web-search` (веб-поиск через Chrome пользователя).
+Любой поиск в интернете — по умолчанию через навык `web-search` (браузер), `WebSearch`/`WebFetch` — только
+если Chrome не подключён или сбоит.
 Правила по путям (`.claude/rules/`) подгружаются сами при работе с `scan_markup`, `run_scripts`, `tests`.
 
 ## Карта пакета

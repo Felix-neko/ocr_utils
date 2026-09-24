@@ -244,6 +244,40 @@ def metrics_of(page: dict) -> PageMetrics:
     )
 
 
+def blocks_over_cells(blocks: list[dict], cells: list[tuple[int, int, int, int]]) -> tuple[int, int]:
+    """Сколько блоков накрывают больше ОДНОЙ ячейки таблицы и сколько блоков вообще в таблицах.
+
+    Прямая мера требования «блок не попадает на несколько ячеек»: контур блока не должен
+    пересекать рёбра таблицы. Блоки вне таблиц в счёт не идут — им ячеек не назначено.
+
+    Args:
+        blocks: Блоки страницы из JSON разбора.
+        cells: Боксы ячеек ``(x0, y0, x1, y1)`` в пикселях рабочей копии.
+
+    Returns:
+        Пара ``(блоков на нескольких ячейках, блоков в таблицах)``.
+    """
+    if not cells:
+        return 0, 0
+    bad = total = 0
+    for block in blocks:
+        polygon = np.asarray((block.get("envelope") or {}).get("polygon") or [], dtype=np.float64).reshape(-1, 2)
+        if polygon.shape[0] < 3:
+            continue
+        box = (polygon[:, 0].min(), polygon[:, 1].min(), polygon[:, 0].max(), polygon[:, 1].max())
+        # Ячейка считается задетой, если блок накрывает больше половины её площади: касание
+        # краем — это округление координат, а не захват соседней графы.
+        touched = 0
+        for x0, y0, x1, y1 in cells:
+            overlap = max(0.0, min(box[2], x1) - max(box[0], x0)) * max(0.0, min(box[3], y1) - max(box[1], y0))
+            if overlap > 0.5 * max((x1 - x0) * (y1 - y0), 1.0):
+                touched += 1
+        if touched:
+            total += 1
+            bad += touched > 1
+    return bad, total
+
+
 def read_pages(directory: Path) -> list[PageMetrics]:
     """Метрики по всем ``pages/*.json`` выкладки прогона."""
     folder = directory / "pages" if (directory / "pages").is_dir() else directory
@@ -287,4 +321,14 @@ def table(pages: list[PageMetrics], against: list[PageMetrics] | None = None, br
     return "\n".join([header, left.row().replace("ИТОГО", "было"), right.row().replace("ИТОГО", "стало")])
 
 
-__all__ = ["PageMetrics", "converging_of", "crossings_of", "pitch_of", "metrics_of", "read_pages", "table", "totals"]
+__all__ = [
+    "PageMetrics",
+    "blocks_over_cells",
+    "converging_of",
+    "crossings_of",
+    "pitch_of",
+    "metrics_of",
+    "read_pages",
+    "table",
+    "totals",
+]

@@ -65,12 +65,14 @@ X_OVERLAP_SHARE = 0.5
 # Полуширина полосы второго прохода центр-линии, в высотах строки: хвост соседней строки, попавший
 # в тот же сгусток, за неё не выходит.
 CENTRE_WINDOW_HEIGHTS = 0.55
-# Зона на КОНЦЕ строки, где центр масс столбца ненадёжен, — в высотах строки. У курсива нет
-# вертикальных штрихов: крайний столбец строки держит не всю букву, а только её угол — слева
-# нижний, справа верхний, — и центр масс уезжает вниз и вверх соответственно (1971/10 с.87,
-# подпись «В. ГУЛЕНКО / учёный секретарь экспертной / комиссии ВАК»: на «В.» ось ныряла на 3.5 px
-# рабочей копии, на «ВАК» поднималась на 2.4 при высоте строчной 10).
-END_FLAT_HEIGHTS = 0.6
+# Зона на КОНЦЕ строки, где центр масс столбца ненадёжен, — это КРАЙНЯЯ БУКВА плюс поле в такую
+# долю её ширины. Портит ось не полоса у края, а конкретная крайняя буква: её крайние столбцы
+# пересекают не всю высоту буквы, а только угол — ножку «А», росчерк «Н», у курсива нижний-левый
+# и верхний-правый углы (1971/10 с.87, подпись «В. ГУЛЕНКО … комиссии ВАК»: ось ныряла на 3.5 px
+# рабочей копии и поднималась на 2.4 при высоте строчной 10). Мерить зону в высотах СТРОКИ
+# нельзя: у «Нам пишут…» (1975/05 с.97) первый глиф 37 px шириной при высоте строки 32, и полоса
+# в 0.6 высоты накрывала меньше половины буквы, а ось уезжала на 18.7 px.
+END_GLYPH_MARGIN = 0.15
 # Насколько ордината в этой зоне может отойти от продолжения строки. Больше — это уже угол буквы,
 # и ордината прижимается к продолжению. Меньше высоты полустрочной: настоящий изгиб строки на
 # отрезке в полвысоты столько не набирает.
@@ -81,10 +83,12 @@ END_FIT_HEIGHTS = 1.5
 MIN_END_COLUMNS = 3
 # Окно медианы, которым сглаживается опора перед подгонкой прямой (в высотах строки).
 END_FIT_SMOOTH_HEIGHTS = 0.5
-# Столбец НЕПОЛНЫЙ, если краски в нём меньше этой доли медианной по строке: он пересёк не всю
-# букву, а только её угол. Замер на подписи 1971/10 с.87: у столбцов-углов 0.27–0.50 медианного
-# веса, у полных столбцов той же зоны — 0.75–1.5.
-END_THIN_SHARE = 0.55
+# Наклон опорной прямой ограничен: это не измерение наклона строки, а защита от разворота прямой,
+# подогнанной по короткой шумной опоре — такая прямая тащит за собой весь конец строки (замер без
+# ограничения: скрещиваний осей 10, сближений 25 против 0 и 2). Недобор наклона на честно
+# наклонённой строке съедает допуск: у строки в 5° и зоны в 40 px это 2.1 px при допуске 2.6.
+# Замер по набору: 1° — отклонений от хорды 38, половинок 5; 2° — 39 и 4; 3° — 42 и 4; 8° — 49 и 4.
+END_SLOPE_LIMIT_DEG = 2.0
 # Корпусному масштабу оставляем строки не выше этой доли от медианы страницы; медиана берётся,
 # только если корпусных строк набралось хотя бы столько.
 BODY_HEIGHT_RATIO = 1.6
@@ -446,15 +450,14 @@ def _segments_at_scale(
     return build(merge_by_field(guarded, stats, field, separators, scale, ink300, k, leaders, rules))
 
 
-def _mark_spans(
+def _glyph_boxes(
     mask: np.ndarray, labels: np.ndarray, span: list[int], x0: int, y0: int, x1: int, y1: int
-) -> tuple[tuple[float, float], ...]:
-    """Отрезки по x, занятые низкими метками сегмента — точками и запятыми.
+) -> np.ndarray:
+    """Боксы букв сегмента ``(n, 4)`` — ``x0, x1, ширина, высота`` в пикселях рабочей копии.
 
-    Точка и запятая стоят на БАЗОВОЙ линии, а не на оси строки: центр масс краски в их столбцах
-    на полвысоты строчной ниже оси, и ось в конце строки провисает («Энгельс Ф.» в сноске
-    1973/08 с.85). Такие участки помечаются, чтобы исключать их из мер наклона и формы строки и
-    рисовать на оверлее отдельно.
+    Буквы — связные компоненты маски глифов, принадлежащие сгусткам сегмента. Считаются ОДИН раз
+    на сегмент: по ним и метки ищутся (:func:`_mark_spans`), и зона конца строки меряется
+    (:func:`_flatten_ends`).
 
     Args:
         mask: Маска глифов рабочей копии.
@@ -463,22 +466,38 @@ def _mark_spans(
         x0, y0, x1, y1: Бокс сегмента на рабочей копии.
 
     Returns:
-        Отрезки ``(x0, x1)`` в пикселях рабочей копии, слева направо.
+        Боксы слева направо; пустой массив, если букв не нашлось.
     """
     own = np.isin(labels[y0:y1, x0:x1], span)
     glyphs = ((mask[y0:y1, x0:x1] > 0) & own).astype(np.uint8)
     count, _, stats, _ = cv2.connectedComponentsWithStats(glyphs, 8)
     if count <= 1:
-        return ()
-    heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.float64)
+        return np.zeros((0, 4), dtype=np.float64)
+    lefts = stats[1:, cv2.CC_STAT_LEFT].astype(np.float64) + x0
     widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.float64)
-    x_h = float(np.median(heights))
-    out = [
-        (float(x0 + stats[index + 1, cv2.CC_STAT_LEFT]), float(x0 + stats[index + 1, cv2.CC_STAT_LEFT] + widths[index]))
-        for index in range(count - 1)
-        if is_low_mark(widths[index], heights[index], x_h)
-    ]
-    return tuple(sorted(out))
+    heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.float64)
+    boxes = np.column_stack([lefts, lefts + widths, widths, heights])
+    return boxes[np.argsort(boxes[:, 0])]
+
+
+def _mark_spans(boxes: np.ndarray) -> tuple[tuple[float, float], ...]:
+    """Отрезки по x, занятые низкими метками сегмента — точками и запятыми.
+
+    Точка и запятая стоят на БАЗОВОЙ линии, а не на оси строки: центр масс краски в их столбцах
+    на полвысоты строчной ниже оси, и ось в конце строки провисает («Энгельс Ф.» в сноске
+    1973/08 с.85). Такие участки помечаются, чтобы исключать их из мер наклона и формы строки и
+    рисовать на оверлее отдельно.
+
+    Args:
+        boxes: Боксы букв сегмента из :func:`_glyph_boxes`.
+
+    Returns:
+        Отрезки ``(x0, x1)`` в пикселях рабочей копии, слева направо.
+    """
+    if boxes.shape[0] == 0:
+        return ()
+    x_h = float(np.median(boxes[:, 3]))
+    return tuple((float(box[0]), float(box[1])) for box in boxes if is_low_mark(float(box[2]), float(box[3]), x_h))
 
 
 def _segment_of(
@@ -526,6 +545,7 @@ def _segment_of(
         return None  # сплошная черта: она ищется отдельно (``rules_of``)
     if width >= SEGMENT_RULE_MIN_ASPECT * h_line and _thin_rule(ink, k, own_spans):
         return None  # волнистая черта (подчёркивание колонтитула): краски в столбце на волос
+    boxes = _glyph_boxes(mask, labels, span, x0, y0, x1, y1)
     xs, ys, weights = refined_centreline(ink, min(h_line, typical_height or h_line) * k)
     if xs.size == 0:
         return None
@@ -533,10 +553,18 @@ def _segment_of(
     # столбцах берутся интерполяцией по соседним буквам (см. ``leaders.flatten_axis``). Точка и
     # запятая стоят на базовой линии, то есть на полвысоты строчной ниже оси, и без этого ось
     # провисала над каждым знаком препинания, а в конце строки — уходила вниз совсем.
-    marks = _mark_spans(mask, labels, span, x0, y0, x1, y1)
-    flat = own_spans + [((mark_x0 - x0) * k, (mark_x1 - x0) * k) for mark_x0, mark_x1 in marks]
-    xs, ys, weights = flatten_axis(xs, ys, weights, flat)
-    ys = _flatten_ends(xs, ys, weights, h_line * k)
+    marks = _mark_spans(boxes)
+    # Точки отточия — те же низкие метки, но ось по ним ведёт ``extend_with_leaders``: из краевых
+    # они исключаются, иначе хвост отточия обрезал бы ось по середине последней точки
+    # (1971/10 с.93: два скрещивания осей).
+    marks_local = [
+        ((mark_x0 - x0) * k, (mark_x1 - x0) * k)
+        for mark_x0, mark_x1 in marks
+        if not _overlaps(((mark_x0 - x0) * k, (mark_x1 - x0) * k), own_spans)
+    ]
+    xs, ys, weights, inner_marks = _edge_marks(xs, ys, weights, marks_local, h_line * k, own_spans)
+    xs, ys, weights = flatten_axis(xs, ys, weights, own_spans + inner_marks)
+    ys = _flatten_ends(xs, ys, boxes, h_line * k, k, x0)
     ys = smooth_median(ys, int(SMOOTH_HEIGHTS * h_line * k))
     return Segment(
         x0=x0,
@@ -687,64 +715,187 @@ def refined_centreline(ink: np.ndarray, height_px: float) -> tuple[np.ndarray, n
     return xs, out_y, out_w
 
 
-def _flatten_ends(xs: np.ndarray, ys: np.ndarray, weights: np.ndarray, height_px: float) -> np.ndarray:
+def _overlaps(span: tuple[float, float], spans: list[tuple[float, float]]) -> bool:
+    """Пересекается ли отрезок хотя бы с одним из ``spans``."""
+    return any(span[0] <= other_x1 and span[1] >= other_x0 for other_x0, other_x1 in spans)
+
+
+def _edge_line(xs: np.ndarray, ys: np.ndarray, base: np.ndarray, height_px: float) -> tuple[float, float] | None:
+    """Прямая по опорному окну ``base``: коэффициенты ``(наклон, сдвиг)`` или ``None``.
+
+    Ординаты опоры перед подгонкой сглаживаются медианой: на сырых прямую разворачивает форма
+    отдельной буквы — разброс центра масс по столбцам доходит до полвысоты строчной.
+    """
+    if int(base.sum()) < MIN_END_COLUMNS:
+        return None
+    steady = smooth_median(ys[base], max(3, int(END_FIT_SMOOTH_HEIGHTS * height_px) | 1))
+    slope, intercept = np.polyfit(xs[base], steady, 1)
+    return float(slope), float(intercept)
+
+
+def _edge_marks(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    weights: np.ndarray,
+    spans: list[tuple[float, float]],
+    height_px: float,
+    leaders: list[tuple[float, float]] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[float, float]]]:
+    """Точка или запятая НА КРАЮ строки: ось доводится до её середины по ходу строки.
+
+    Низкая метка внутри строки обходится интерполяцией по соседним буквам
+    (:func:`leaders.flatten_axis`) — «как будто там пусто, но без разрыва». На краю строки соседа
+    с одной стороны нет, и интерполяция вырождается в горизонтальную полку до дальнего края
+    метки: ось «Энгельс Ф. Соч., т. 25,» уходила в запятую и шла от неё горизонтально.
+
+    Краевая метка обрабатывается иначе:
+
+    * **по длине** ось доводится до СЕРЕДИНЫ метки — столбцы за серединой отбрасываются. Метка
+      принадлежит строке, поэтому обрывать ось перед ней нельзя, но и тянуть до её дальнего края
+      незачем: центр масс там уже чисто метки;
+    * **по ординате** внутри метки берётся продолжение прямой, построенной по опорному окну сразу
+      внутри строки, то есть ход строки, как если бы метки не было.
+
+    Отточия сюда не подаются: ось по ним ведёт :func:`extend_with_leaders` своим ходом. И метка,
+    за которой отточие ещё идёт, краевой не считается — строка на ней не кончается.
+
+    Args:
+        xs, ys: Точки центр-линии (пиксели рендера, начало — левый край сегмента).
+        weights: Веса столбцов.
+        spans: Отрезки низких меток в тех же координатах.
+        height_px: Высота строки в тех же пикселях.
+        leaders: Отрезки отточий строки: за ними строка продолжается.
+
+    Returns:
+        ``(xs, ys, weights, внутренние спаны)`` — первые три укорочены до середин краевых меток,
+        последний отдаётся дальше в ``flatten_axis``.
+    """
+    if not spans or xs.size < MIN_END_COLUMNS:
+        return xs, ys, weights, list(spans)
+    marked = inside_spans(xs, spans)
+    if marked.all():
+        return xs, ys, weights, list(spans)
+    free = np.nonzero(~marked)[0]
+    first_free, last_free = float(xs[free[0]]), float(xs[free[-1]])
+    inner: list[tuple[float, float]] = []
+    keep = np.ones(xs.size, dtype=bool)
+    values = ys.copy()
+    reach = END_FIT_HEIGHTS * height_px
+    for span_x0, span_x1 in spans:
+        centre = (span_x0 + span_x1) / 2.0
+        at_start = span_x1 <= first_free and not any(leader_x0 < span_x0 for leader_x0, _ in leaders or [])
+        at_end = span_x0 >= last_free and not any(leader_x1 > span_x1 for _, leader_x1 in leaders or [])
+        if not at_start and not at_end:
+            inner.append((span_x0, span_x1))
+            continue
+        # Опора — свободные от меток столбцы сразу внутри строки.
+        if at_start:
+            base = (~marked) & (xs <= first_free + reach)
+            keep &= xs >= centre
+        else:
+            base = (~marked) & (xs >= last_free - reach)
+            keep &= xs <= centre
+        fitted = _edge_line(xs, ys, base, height_px)
+        if fitted is None:
+            inner.append((span_x0, span_x1))
+            continue
+        own = (xs >= span_x0) & (xs <= span_x1)
+        values[own] = fitted[0] * xs[own] + fitted[1]
+    if int(keep.sum()) < MIN_END_COLUMNS:
+        return xs, values, weights, inner
+    return xs[keep], values[keep], weights[keep], inner
+
+
+def _end_zone(boxes: np.ndarray, x_h: float, at_start: bool) -> float:
+    """До какой абсциссы тянется зона конца строки: крайняя БУКВА плюс поле (пиксели рабочей копии).
+
+    Низкие метки крайней буквой не считаются: у точки своя обработка (:func:`_edge_marks`), а
+    зона шириной в три пикселя не накрыла бы ничего.
+
+    Args:
+        boxes: Боксы букв строки из :func:`_glyph_boxes`, слева направо.
+        x_h: Медианная высота буквы строки — по ней опознаётся низкая метка.
+        at_start: Считаем левую границу зоны (иначе правую).
+
+    Returns:
+        Граница зоны по x; ``nan``, если букв, кроме меток, не нашлось.
+    """
+    own = [box for box in boxes if not is_low_mark(float(box[2]), float(box[3]), x_h)]
+    if not own:
+        return float("nan")
+    box = own[0] if at_start else own[-1]
+    margin = END_GLYPH_MARGIN * float(box[2])
+    return float(box[1]) + margin if at_start else float(box[0]) - margin
+
+
+def _flatten_ends(
+    xs: np.ndarray, ys: np.ndarray, boxes: np.ndarray, height_px: float, k: float, x0: float
+) -> np.ndarray:
     """Не давать оси нырять на концах строки: там столбец держит только УГОЛ буквы.
 
     Ось — центр масс краски по столбцам, и это верная оценка уровня строки, пока столбец
-    пересекает букву во всю её высоту. На концах строки это не так, и особенно у курсива:
-    вертикальных штрихов в нём нет, каждый штрих наклонён, поэтому дальше всего слева выступает
-    НИЖНИЙ-левый угол первой буквы, а справа — ВЕРХНИЙ-правый угол последней. Центр масс в этих
-    столбцах уходит вниз и вверх соответственно, и ось на концах загибается.
+    пересекает букву во всю её высоту. В крайней букве строки это не так: дальше всего слева
+    выступает её нижний-левый угол (ножка «А») или верхний-левый (росчерк «Н»), справа —
+    зеркально. Центр масс там уезжает, и ось на конце загибается. У курсива это правило, потому
+    что вертикальных штрихов в нём нет вовсе; на крупном наборе — вдобавок с амплитудой в
+    полвысоты строки, ведь буква втрое выше корпусной.
 
-    Лечится прижатием: по опорному окну сразу за зоной конца строится прямая (по медианно
-    сглаженным ординатам, иначе её развернёт форма отдельной буквы), и ордината в зоне зажимается
-    вокруг её продолжения. Честный изгиб строки на полвысоты допуска не выбирает, а угол буквы
-    выбирает вдвое.
+    Лечится прижатием: по опорному окну сразу за зоной строится прямая (по медианно сглаженным
+    ординатам, иначе её развернёт форма отдельной буквы), и ордината в зоне зажимается вокруг её
+    продолжения.
+
+    Три вещи, каждая по замеру:
+
+    * **зона — крайняя БУКВА**, а не доля высоты строки: у «Нам пишут…» (1975/05 с.97) первый
+      глиф 37 px при высоте строки 32, и полоса в 0.6 высоты накрывала меньше половины буквы;
+    * **ворота — отклонение**, а не количество краски в столбце: на крупной букве даже частичный
+      столбец полон, и в начале «Актуальный вопрос» отношения к медианному весу идут 0.27, 0.40,
+      0.33, 0.47, 0.73, 0.80, 0.60, 0.87 — ворота по весу закрылись бы на восьмом столбце, а
+      смещение тянется через всю букву;
+    * **наклон опоры зажимается** ``END_SLOPE_LIMIT_DEG``, а прямая проводится через медиану
+      опоры: подогнанная по шумной опоре прямая разворачивается, и зажим тащит за ней весь конец
+      строки (замер без ограничения: скрещиваний осей 10, сближений 25 против 0 и 2).
 
     Делается это ДО общего сглаживания оси. После — поздно: окно медианы у самого конца строки
-    одностороннее, доля столбцов-углов в нём вырастает, и медиана тянется за ними. На той же
-    подписи 1971/10 с.87 четыре столбца угла «К» утащили за собой девять пикселей рабочей копии.
-
-    Прижимаются не все столбцы зоны, а только НЕПОЛНЫЕ — те, где краски в столбце заметно меньше
-    обычного: столбец, пересекающий букву во всю высоту, даёт верный центр масс и трогать его
-    незачем. Замер на подписи 1971/10 с.87: у столбцов-углов вес 0.27–0.50 медианного, у
-    остальных столбцов той же зоны — 0.75–1.5.
+    одностороннее, доля столбцов-углов в нём растёт, и медиана тянется за ними.
 
     Args:
         xs: Абсциссы центр-линии (пиксели рендера, начало — левый край сегмента).
         ys: Ординаты в тех же координатах, ещё не сглаженные.
-        weights: Вес столбца — сколько в нём краски.
-        height_px: Высота строки в тех же пикселях.
+        boxes: Боксы букв строки (пиксели рабочей копии) — по ним меряется зона конца.
+        height_px: Высота строки в пикселях рендера.
+        k: Во сколько раз рендер крупнее рабочей копии.
+        x0: Левый край сегмента на рабочей копии.
 
     Returns:
         Те же ординаты с прижатыми концами.
     """
-    if xs.size < MIN_END_COLUMNS or height_px <= 0:
+    if xs.size < MIN_END_COLUMNS or height_px <= 0 or boxes.shape[0] == 0:
         return ys
-    reach = END_FLAT_HEIGHTS * height_px
-    limit = END_FLAT_TOLERANCE_HEIGHTS * height_px
-    if float(xs[-1] - xs[0]) <= 2.0 * reach:
-        return ys  # строка короче двух зон: прижимать не от чего
+    x_h = float(np.median(boxes[:, 3]))
+    fit = END_FIT_HEIGHTS * height_px
+    # Границы зон переводятся в координаты центр-линии: рабочая копия → рендер от начала сегмента.
+    left = (_end_zone(boxes, x_h, at_start=True) - x0) * k
+    right = (_end_zone(boxes, x_h, at_start=False) - x0) * k
+    if not np.isfinite(left) or not np.isfinite(right) or right - left < fit:
+        return ys  # середины меньше опорного окна: опорой стала бы вторая буква (логотип в три знака)
     out = ys.copy()
-    thin = weights < END_THIN_SHARE * max(float(np.median(weights)), 1e-6)
-    if not thin.any():
-        return out
     for at_start in (True, False):
         if at_start:
-            edge = float(xs[0])
-            zone = xs <= edge + reach
-            base = (xs > edge + reach) & (xs <= edge + reach + END_FIT_HEIGHTS * height_px)
+            zone = xs <= left
+            base = (xs > left) & (xs <= left + fit)
         else:
-            edge = float(xs[-1])
-            zone = xs >= edge - reach
-            base = (xs < edge - reach) & (xs >= edge - reach - END_FIT_HEIGHTS * height_px)
-        zone &= thin
+            zone = xs >= right
+            base = (xs < right) & (xs >= right - fit)
         if int(base.sum()) < MIN_END_COLUMNS or not zone.any():
             continue
-        # Прямая строится по СГЛАЖЕННЫМ ординатам опоры: на сырых её разворачивает форма
-        # отдельной буквы (разброс центра масс по столбцам — полвысоты строчной).
         steady = smooth_median(out[base], max(3, int(END_FIT_SMOOTH_HEIGHTS * height_px) | 1))
-        slope, intercept = np.polyfit(xs[base], steady, 1)
+        slope = float(np.polyfit(xs[base], steady, 1)[0])
+        # Наклон зажимается, а прямая проводится через МЕДИАНУ опоры: подогнанный по шумной опоре
+        # свободный член уводит продолжение на десятки пикселей.
+        slope = float(np.clip(slope, -np.tan(np.radians(END_SLOPE_LIMIT_DEG)), np.tan(np.radians(END_SLOPE_LIMIT_DEG))))
+        intercept = float(np.median(steady - slope * xs[base]))
+        limit = END_FLAT_TOLERANCE_HEIGHTS * height_px
         predicted = slope * xs[zone] + intercept
         out[zone] = np.clip(out[zone], predicted - limit, predicted + limit)
     return out

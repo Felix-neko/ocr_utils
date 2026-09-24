@@ -75,6 +75,17 @@ def page_json(analysis: PageAnalysis) -> dict:
                     "bottom": _curve(block.envelope.bottom),
                     "polygon": _curve(block.envelope.polygon),
                 },
+                # Справочная граница по краске: она одна обещает охват всех букв рядов, тогда как
+                # главная — полоса вокруг оси — нарочно идёт мимо выносных элементов.
+                "envelope_ink": (
+                    {
+                        "top": _curve(block.envelope_ink.top),
+                        "bottom": _curve(block.envelope_ink.bottom),
+                        "polygon": _curve(block.envelope_ink.polygon),
+                    }
+                    if block.envelope_ink is not None
+                    else None
+                ),
                 "envelope_coarse": {
                     "smooth_pitches": block.envelope_coarse.smooth_pitches,
                     "left": _curve(block.envelope_coarse.left),

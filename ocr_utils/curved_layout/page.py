@@ -14,6 +14,7 @@ from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
 from ocr_utils.curved_layout.alignment import Alignment, alignment_of
 from ocr_utils.curved_layout.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
 from ocr_utils.curved_layout.engines.base import Engine
+from ocr_utils.curved_layout.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
 from ocr_utils.curved_layout.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column
 from ocr_utils.page_layout.orientation.detectors.ink_axis import glyph_mask
 from ocr_utils.curved_layout.columns import gutters_of, mark_cut_lines, zones_of
@@ -67,6 +68,7 @@ def analyse_gray(
     name: str = "page",
     page: int = 1,
     variant: str = Variant.NOGEO.value,
+    hints: LayoutHints | None = None,
 ) -> PageAnalysis:
     """Разбор страницы по серому рендеру ``RENDER_DPI``.
 
@@ -79,15 +81,40 @@ def analyse_gray(
         coarse_factor: Во сколько раз шире окно крупной огибающей.
         dilate: На какую долю размера символа раздувать границу блока.
         name, page, variant: Чем подписать результат.
+        hints: Вспомогательная информация внешних детекторов (:class:`hints.LayoutHints`): маска
+            разрешённого текста, области с ориентацией текста, рамки таблиц и блок-схем. ``None``
+            — разбор как прежде, одной прямой областью на всю полосу.
 
     Returns:
         :class:`PageAnalysis` со всеми кривыми в пикселях рабочей копии.
     """
     started = time.monotonic()
-    result = engine.segment(gray300, dpi)
-    axes = axes_of(result.lines, dpi, smooth_line)
+    hints = hints or LayoutHints()
     width = int(round(gray300.shape[1] * dpi / RENDER_DPI))
     height = int(round(gray300.shape[0] * dpi / RENDER_DPI))
+    areas = hints.zones_or_page(width, height)
+    if len(areas) > 1 or areas[0].rotate_cw != 0:
+        # Области разбираются ПОРОЗНЬ: строки сращиваются и блоки собираются только внутри одной
+        # ориентации, а через границу областей сшивать нечего.
+        return _analyse_areas(
+            gray300,
+            engine,
+            areas,
+            hints,
+            dpi,
+            smooth_line,
+            smooth_block,
+            coarse_factor,
+            dilate,
+            name,
+            page,
+            variant,
+            started,
+            width,
+            height,
+        )
+    result = engine.segment(gray300, dpi)
+    axes = axes_of(result.lines, dpi, smooth_line)
     # Куски заголовка во всю ширину, набранные через межколонник, помечаются до сборки блоков.
     work = _work_copy(gray300, dpi)
     # Отточия считаются один раз на разбор: они нужны и колонкам (поле точек — не межколонник), и
@@ -123,6 +150,143 @@ def analyse_gray(
         ink_share=share,
         note=result.note,
     )
+
+
+def _analyse_areas(
+    gray300: np.ndarray,
+    engine: Engine,
+    areas: tuple[OrientedZone, ...],
+    hints: LayoutHints,
+    dpi: float,
+    smooth_line: float,
+    smooth_block: float,
+    coarse_factor: float,
+    dilate: float,
+    name: str,
+    page: int,
+    variant: str,
+    started: float,
+    width: int,
+    height: int,
+) -> PageAnalysis:
+    """Разбор по ОБЛАСТЯМ с разной ориентацией текста, со сведением результатов в один разбор.
+
+    Каждая область разбирается отдельным проходом по своей вырезке: боковая — повёрнутой до
+    прямого текста (:mod:`orient`), прямая — как есть. Так строки сращиваются и блоки собираются
+    только внутри одной ориентации, а ни один порог конвейера не трогается.
+
+    Меры выключки считаются только у прямых областей: «левый край блока» у лежащего текста
+    зависит от стороны чтения, которую мы намеренно не определяем.
+    """
+    from ocr_utils.curved_layout.orient import back_axis, back_block, back_gutter, back_leader, upright
+
+    scale = RENDER_DPI / dpi
+    axes: list[LineAxis] = []
+    blocks: list[TextBlock] = []
+    alignments: list[Alignment] = []
+    gutters: list = []
+    leaders: list = []
+    zones: list = []
+    for index, area in enumerate(areas):
+        size = (area.width, area.height)
+        # Области перекрываются: полоса целиком идёт первой, а найденные детектором боковые
+        # врезки — за ней. Область гасит у себя всё, что забрали ПОСЛЕДУЮЩИЕ: так один и тот же
+        # текст не разбирается дважды, и порядок областей и есть их старшинство.
+        allowed = _area_allowed(hints.text_allowed, areas[index + 1 :], (height, width))
+        crop = upright(masked_ink(gray300, allowed), area, scale)
+        if crop.size == 0 or min(crop.shape[:2]) < scale * 4:
+            continue
+        inner = analyse_gray(
+            crop,
+            engine,
+            dpi=dpi,
+            smooth_line=smooth_line,
+            smooth_block=smooth_block,
+            coarse_factor=coarse_factor,
+            dilate=dilate,
+            name=name,
+            page=page,
+            variant=variant,
+            hints=LayoutHints(barriers=_shifted_barriers(hints.barriers, area), dpi=dpi),
+        )
+        axes.extend(back_axis(axis, size, area) for axis in inner.axes)
+        for block, alignment in zip(inner.blocks, inner.alignments):
+            blocks.append(back_block(block, size, area))
+            alignments.append(alignment)
+        gutters.extend(item for item in (back_gutter(g, size, area) for g in inner.gutters) if item is not None)
+        leaders.extend(item for item in (back_leader(item, size, area) for item in inner.leaders) if item is not None)
+        if not area.sideways and area.rotate_cw == 0:
+            zones.extend(inner.zones)
+    work = _work_copy(gray300, dpi)
+    ink = text_ink(gray300, dpi, work=work, leaders=leaders)
+    return PageAnalysis(
+        name=name,
+        page=page,
+        variant=variant,
+        engine=getattr(engine, "name", "?"),
+        width=width,
+        height=height,
+        dpi=float(dpi),
+        axes=tuple(axes),
+        blocks=tuple(blocks),
+        alignments=tuple(alignments),
+        gutters=tuple(gutters),
+        leaders=tuple(leaders),
+        zones=tuple(zones),
+        seconds=time.monotonic() - started,
+        ink_share=ink_share(axes, ink, dpi),
+        note=f"областей {len(areas)}",
+    )
+
+
+def _area_allowed(
+    allowed: np.ndarray | None, later: tuple[OrientedZone, ...], shape: tuple[int, int]
+) -> np.ndarray | None:
+    """Маска разрешённого текста области: общая маска минус рамки более старших областей."""
+    if not later:
+        return allowed
+    out = np.ones(shape, dtype=bool) if allowed is None else allowed.copy()
+    for area in later:
+        out &= ~zone_mask(shape, area)
+    return out
+
+
+def _shifted_barriers(
+    barriers: tuple[tuple[int, int, int, int], ...], area: OrientedZone
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Рамки-запреты, пересчитанные в координаты ВЫПРЯМЛЕННОЙ вырезки области.
+
+    Рамка вне области выбрасывается: её рёбра там ничего не разделяют.
+    """
+    out: list[tuple[int, int, int, int]] = []
+    ax0, ay0, ax1, ay1 = area.box
+    for x0, y0, x1, y1 in barriers:
+        if x1 <= ax0 or x0 >= ax1 or y1 <= ay0 or y0 >= ay1:
+            continue
+        box = (max(x0, ax0) - ax0, max(y0, ay0) - ay0, min(x1, ax1) - ax0, min(y1, ay1) - ay0)
+        if area.rotate_cw == 0:
+            out.append(box)
+            continue
+        # Рамка поворачивается вместе с вырезкой: углы переводятся и берётся их охват.
+        from ocr_utils.curved_layout.orient import back_points
+
+        corners = np.array([[box[0], box[1]], [box[2], box[1]], [box[0], box[3]], [box[2], box[3]]], dtype=np.float64)
+        turned = _forward_points(corners, (area.width, area.height), area.rotate_cw)
+        out.append((int(turned[:, 0].min()), int(turned[:, 1].min()), int(turned[:, 0].max()), int(turned[:, 1].max())))
+    return tuple(out)
+
+
+def _forward_points(points: np.ndarray, size: tuple[int, int], rotate_cw: int) -> np.ndarray:
+    """Точки исходной вырезки в координаты ВЫПРЯМЛЕННОГО кадра (обратное к ``orient.back_points``)."""
+    width, height = size
+    xs, ys = points[:, 0], points[:, 1]
+    if rotate_cw == 90:
+        return np.column_stack([(height - 1) - ys, xs])
+    if rotate_cw == 180:
+        return np.column_stack([(width - 1) - xs, (height - 1) - ys])
+    if rotate_cw == 270:
+        return np.column_stack([ys, (width - 1) - xs])
+    return points
 
 
 def _work_copy(gray300: np.ndarray, dpi: float) -> np.ndarray:
