@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 import pytest
 
-from ocr_utils.curved_layout import zones as zn
-from ocr_utils.curved_layout.capsules import contact_of
-from ocr_utils.curved_layout.pieces import (
+from ocr_utils.page_layout.text_blocks import zones as zn
+from ocr_utils.page_layout.text_blocks.capsules import contact_of
+from ocr_utils.page_layout.text_blocks.pieces import (
     Piece,
     anchors_of,
     axis_residual,
@@ -226,7 +226,7 @@ def test_comma_counts_as_a_low_mark():
 
 def test_shape_stats_ignore_the_dip_over_a_dot():
     """Провисание оси над точкой не попадает в меры формы строки."""
-    from ocr_utils.curved_layout.lines import _shape_stats
+    from ocr_utils.page_layout.text_blocks.lines import _shape_stats
 
     xs = np.arange(0.0, 60.0, 1.0)
     ys = np.full(xs.size, 100.0)

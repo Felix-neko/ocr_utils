@@ -8,9 +8,9 @@ import cv2
 import numpy as np
 import pytest
 
-from ocr_utils.curved_layout import WORK_DPI
-from ocr_utils.curved_layout.alignment import AlignKind
-from ocr_utils.curved_layout.blocks import (
+from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks.alignment import AlignKind
+from ocr_utils.page_layout.text_blocks.blocks import (
     EXTEND_SLOPE_LIMIT_DEG,
     BODY_QUANTILE,
     CapKind,
@@ -20,16 +20,16 @@ from ocr_utils.curved_layout.blocks import (
     _style_break,
     envelope_of,
 )
-from ocr_utils.curved_layout import blocks
-from ocr_utils.curved_layout import segment as seg
-from ocr_utils.curved_layout.segment import _edge_marks
-from ocr_utils.curved_layout.columns import gutters_of, zones_of
-from ocr_utils.curved_layout.lines import LineAxis
-from ocr_utils.curved_layout.leaders import leaders_of
-from ocr_utils.curved_layout.engines.ink import InkEngine
-from ocr_utils.curved_layout.page import analyse_gray
+from ocr_utils.page_layout.text_blocks import blocks
+from ocr_utils.page_layout.text_blocks import segment as seg
+from ocr_utils.page_layout.text_blocks.segment import _edge_marks
+from ocr_utils.page_layout.text_blocks.columns import Gutter, Zone, gutters_of, inside_gutter, zones_of
+from ocr_utils.page_layout.text_blocks.lines import LineAxis
+from ocr_utils.page_layout.text_blocks.leaders import Leader, leaders_of
+from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
+from ocr_utils.page_layout.text_blocks.page import analyse_gray
 from ocr_utils.page_layout import px_to_mm
-from tests.ocr_utils.curved_layout.synthetic import (
+from tests.ocr_utils.page_layout.text_blocks.synthetic import (
     bowed,
     column_page,
     inset_page,
@@ -464,3 +464,103 @@ def test_row_keeps_neighbouring_lines_apart():
     left = _fragment(520, 610, 1396, height=13.0)
     right = _fragment(827, 902, 1396 + 22, height=13.0)
     assert not _same_row([left], right)
+
+
+def test_body_contour_holds_all_its_axes():
+    """Контур-ПОЛОСА охватывает оси всех своих рядов, даже когда изгиб строки больше шага рядов.
+
+    Та же сноска 1973/08 с.85, что и у кромки по краске: рамка «ордината → края» обязана обрушить
+    правую кромку за несколько пикселей высоты и срезает конец первой строки («Соч., т. 25,» — на
+    10.4 px снаружи). Полоса вокруг оси букв не обещает, но СВОИ ОСИ обязана держать внутри.
+    """
+    long_row = _row(557, 905, [1382, 1374, 1368, 1370, 1384, 1403], height=17.0)
+    short_row = _row(520, 610, [1401, 1396], height=13.0)
+    envelope = envelope_of([long_row, short_row], pitch=20.5, dpi=WORK_DPI, smooth_pitches=2.5, cap=CapKind.BODY)
+    hull = envelope.polygon.astype(np.float32).reshape(-1, 1, 2)
+    for row in (long_row, short_row):
+        for axis in row.axes:
+            for x, y in np.asarray(axis.points, dtype=np.float64):
+                assert cv2.pointPolygonTest(hull, (float(x), float(y)), True) >= -1.0
+
+
+def test_body_contour_covers_an_axis_longer_than_the_ink():
+    """У блока из одного ряда контур-полоса охватывает ось и там, где краски уже нет.
+
+    Край ряда ищется по заполненности столбца и тонкие элементы отбрасывает: у заголовка-вензеля
+    1973/06 с.65 край ряда x = 220 при оси от x = 170, и ось торчала из контура на полсантиметра.
+    """
+    row = _row(220.0, 748.0, [213.0, 225.0, 240.0], height=121.0)
+    long_axis = _fragment(170.0, 746.0, 226.0, height=121.0)
+    row = Row(**{**row.__dict__, "axes": (long_axis,)})
+    envelope = envelope_of([row], pitch=40.0, dpi=WORK_DPI, smooth_pitches=2.5, cap=CapKind.BODY)
+    hull = envelope.polygon.astype(np.float32).reshape(-1, 1, 2)
+    for x, y in np.asarray(long_axis.points, dtype=np.float64):
+        assert cv2.pointPolygonTest(hull, (float(x), float(y)), True) >= -1.0
+
+
+def test_body_contour_still_leaves_ascenders_outside():
+    """Полоса и после подмешивания лент остаётся полосой: выносные элементы наружу.
+
+    Иначе вернулось бы вихляние границы амплитудой в полвысоты строчной, ради которого полосу и
+    заводили: контур-полоса обязан быть уже контура по краске.
+    """
+    xs = np.linspace(100.0, 400.0, 20)
+    tops = np.full(xs.size, 195.0)
+    tops[::4] = 175.0  # выносные элементы вверх: четверть столбцов
+    row = _row(100.0, 400.0, [200.0, 200.0, 200.0], height=14.0)
+    row = Row(
+        **{
+            **row.__dict__,
+            "top_edge": np.column_stack([xs, tops]),
+            "bottom_edge": np.column_stack([xs, np.full(xs.size, 205.0)]),
+        }
+    )
+    other = _row(100.0, 400.0, [240.0, 240.0, 240.0], height=14.0)
+    body = envelope_of([row, other], pitch=40.0, dpi=WORK_DPI, smooth_pitches=2.5, cap=CapKind.BODY)
+    ink = envelope_of([row, other], pitch=40.0, dpi=WORK_DPI, smooth_pitches=2.5, cap=CapKind.INK)
+    assert body.polygon[:, 1].min() > ink.polygon[:, 1].min() + 5.0
+
+
+# Межколонник, колонки зоны и строка правой графы, заехавшая в него, — числа с 1971/10 с.93.
+_GUTTER = Gutter(points=((500.0, 605.0, 726.0), (1500.0, 605.0, 726.0)))
+_ZONE = Zone(y0=500, y1=1500, columns=((0, 618), (723, 1009)))
+
+
+def _toc_axes() -> tuple[LineAxis, LineAxis, LineAxis]:
+    """Строка оглавления с отточием слева, её продолжение в правой графе и обрывок между ними."""
+    left = _fragment(128.0, 608.0, 1198.0, height=12.5)  # «Кабели дальней связи . . . . . .»
+    right = _fragment(719.0, 863.0, 1190.0, height=12.5)  # «825, 1000 м в зави-»
+    orphan = _fragment(641.0, 665.0, 1193.0, height=17.0)  # «425», целиком в межколоннике
+    return left, right, orphan
+
+
+def test_an_axis_inside_the_gutter_belongs_to_no_column():
+    """Ось, целиком лежащая в межколоннике, не в колонке: ``bounds_at`` её попросту не ограничивал."""
+    _, _, orphan = _toc_axes()
+    assert inside_gutter([_GUTTER], orphan.x0, orphan.x1, orphan.cy)
+    assert not blocks._inside(orphan, _ZONE.columns[0], [_GUTTER], 1009)
+    assert not blocks._inside(orphan, _ZONE.columns[1], [_GUTTER], 1009)
+
+
+def test_a_gutter_orphan_goes_to_the_nearest_text_not_to_the_nearest_leader():
+    """Обрывок в межколоннике уходит в графу справа: отточия соседа слева текстом не считаются.
+
+    По концам осей левая строка ближе (33 px против 54), но её хвост — отточие; до её ТЕКСТА
+    311 px. Без отточия правило переворачивается — это и проверяется вторым случаем.
+    """
+    left, right, orphan = _toc_axes()
+    leader = Leader(x0=330.0, x1=608.0, y=1198.0, thickness=2.0, dots=20)
+    homes = blocks._column_homes([left, right, orphan], _ZONE, [_GUTTER], 1009, [leader])
+    assert homes[blocks._axis_key(left)] == 0 and homes[blocks._axis_key(right)] == 1
+    assert homes[blocks._axis_key(orphan)] == 1
+    without = blocks._column_homes([left, right, orphan], _ZONE, [_GUTTER], 1009, [])
+    assert without[blocks._axis_key(orphan)] == 0
+
+
+def test_gutter_orphans_chain_to_each_other():
+    """Сироты цепляются цепочкой: «425» идёт за «500,», а тот — за «825, 1000 м» в правой графе."""
+    left, right, orphan = _toc_axes()
+    second = _fragment(681.0, 705.0, 1191.0, height=17.0)  # «500,», тоже целиком в межколоннике
+    leader = Leader(x0=330.0, x1=608.0, y=1198.0, thickness=2.0, dots=20)
+    homes = blocks._column_homes([left, right, orphan, second], _ZONE, [_GUTTER], 1009, [leader])
+    assert homes[blocks._axis_key(second)] == 1 and homes[blocks._axis_key(orphan)] == 1

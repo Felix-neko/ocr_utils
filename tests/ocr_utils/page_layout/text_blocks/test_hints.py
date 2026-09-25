@@ -6,16 +6,16 @@ import cv2
 import numpy as np
 import pytest
 
-from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.engines.ink import InkEngine
-from ocr_utils.curved_layout.from_layout import build
-from ocr_utils.curved_layout.hints import LayoutHints, OrientedZone, barrier_rules, barrier_separators
-from ocr_utils.curved_layout.orient import back_points
-from ocr_utils.curved_layout.from_text_layer import hints_of
-from ocr_utils.curved_layout.page import _forward_points, analyse_gray
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
+from ocr_utils.page_layout.text_blocks.from_layout import build
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, barrier_rules, barrier_separators
+from ocr_utils.page_layout.text_blocks.orient import back_points
+from ocr_utils.page_layout.text_blocks.from_text_layer import hints_of
+from ocr_utils.page_layout.text_blocks.page import _forward_points, analyse_gray
 from ocr_utils.text_layer_fix import VERSION
 from ocr_utils.text_layer_fix.cache import cache_path, save_page
-from tests.ocr_utils.curved_layout.synthetic import column_page
+from tests.ocr_utils.page_layout.text_blocks.synthetic import column_page
 
 ENGINE = InkEngine()
 SCALE = WORK_DPI / RENDER_DPI
@@ -191,3 +191,24 @@ def test_a_block_stays_inside_its_cell(tmp_path):
             box[0] >= cell[0] - 2 and box[1] >= cell[1] - 2 and box[2] <= cell[2] + 2 and box[3] <= cell[3] + 2
             for cell in (top, bottom)
         ), f"блок {box} вышел за свою ячейку"
+
+
+def test_a_cell_is_cut_out_of_the_forbidden_table(tmp_path):
+    """Зона таблицы под запретом, но ячейка-область из запрета вырезана — иначе краска погаснет.
+
+    `from_layout` кладёт таблицу и в рамки-запреты, и в запретную маску: внутри рисунка и таблицы
+    строк не ищем. Ячейка, ставшая областью разбора, — ровно то место, где их искать надо.
+    """
+    page = column_page(columns=1)
+    work = _work(page)
+    height, width = work.shape[:2]
+    table, cell, empty = (40, 20, 400, 400), (100, 100, 300, 200), (60, 25, 200, 50)
+    forbidden = np.ones((height, width), dtype=bool)
+    forbidden[table[1] : table[3], table[0] : table[2]] = False
+    base = LayoutHints(text_allowed=forbidden, barriers=(table,))
+    hints = hints_of(CACHE_PDF, 0, _cache_dir(tmp_path, [_cell(cell), _cell(empty)]), work, base=base)
+    assert hints.text_allowed is not None
+    assert hints.text_allowed[cell[1] + 5, cell[0] + 5]  # ячейка с текстом снова разрешена
+    assert not hints.text_allowed[empty[1] + 5, empty[0] + 5]  # пустая осталась под запретом
+    assert not hints.text_allowed[table[3] - 5, table[2] - 5]  # поле таблицы между ячейками — тоже
+    assert base.text_allowed[cell[1] + 5, cell[0] + 5] == False  # исходная маска не испорчена

@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from ocr_utils.curved_layout.capsules import Capsule, angle_at, band, contact_of, segment_distance
+from ocr_utils.page_layout.text_blocks.capsules import Capsule, angle_at, band, contact_of, segment_distance
 
 
 def test_parallel_segments_keep_their_distance():

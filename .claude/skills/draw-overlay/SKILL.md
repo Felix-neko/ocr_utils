@@ -9,8 +9,8 @@ description: Рисовать отладочные оверлеи детекто
 разметкой должны читаться буквы, у каждой линии должно быть понятно, что она значит, а спорное
 место должно быть вырезано с увеличением.
 
-Образцы в репозитории: `ocr_utils/curved_layout/overlay.py` (итоговый разбор),
-`ocr_utils/curved_layout/stages.py` (по этапам), `ocr_utils/page_layout/cli.py` (`--overlay`).
+Образцы в репозитории: `ocr_utils/page_layout/text_blocks/overlay.py` (итоговый разбор),
+`ocr_utils/page_layout/text_blocks/stages.py` (по этапам), `ocr_utils/page_layout/cli.py` (`--overlay`).
 
 ## Палитра
 
@@ -19,7 +19,7 @@ description: Рисовать отладочные оверлеи детекто
 
 | Сущность | BGR | Где объявлено |
 |---|---|---|
-| ось строки | `(40, 170, 40)` зелёный | `curved_layout/overlay.py` `COLOUR_AXIS` |
+| ось строки | `(40, 170, 40)` зелёный | `page_layout/text_blocks/overlay.py` `COLOUR_AXIS` |
 | ось над точкой, запятой | `(0, 165, 255)` оранжевый | `COLOUR_MARK` |
 | граница блока, главная | `(220, 90, 20)` синий | `COLOUR_ENVELOPE` |
 | граница блока, справочная | `(150, 170, 120)` приглушённый | `COLOUR_ENVELOPE_INK` |
