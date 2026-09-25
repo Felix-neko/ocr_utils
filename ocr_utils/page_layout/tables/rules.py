@@ -126,24 +126,56 @@ class Fragment:
         return (self.box.y0 + self.box.y1) / 2 if self.horizontal else (self.box.x0 + self.box.x1) / 2
 
 
-def fragments(binary: np.ndarray, dpi: int, min_mm: float = FRAGMENT_MM) -> tuple[list[Fragment], list[Fragment]]:
-    """Фрагменты линеек обеих осей: открытие коротким ядром, компоненты, порог толщины."""
+@dataclass(frozen=True)
+class FragmentLayer:
+    """Фрагменты одной оси вместе с картой меток компонент, из которой они вырезаны.
+
+    Карта нужна трассировке изогнутых линеек (``traces``): чтобы взять ИМЕННО пиксели линейки, а не
+    всё, что попало в её габарит, — у наклонной линейки габарит высотой в сантиметр и тянет чужую
+    краску. ``label_ids[i]`` — номер компоненты в ``labels`` у фрагмента ``fragments[i]``.
+    """
+
+    fragments: list[Fragment]
+    labels: np.ndarray
+    label_ids: list[int]
+
+
+def fragment_layers(binary: np.ndarray, dpi: int, min_mm: float = FRAGMENT_MM) -> tuple[FragmentLayer, FragmentLayer]:
+    """Фрагменты линеек обеих осей с картами меток: открытие коротким ядром, компоненты, порог толщины.
+
+    Args:
+        binary: Краска белым на чёрном (``ruling.binarize``).
+        dpi: Разрешение картинки — для перевода миллиметров в пиксели.
+        min_mm: Длина ядра открытия, то есть минимальная длина фрагмента.
+
+    Returns:
+        Слои горизонтальных и вертикальных фрагментов (в этом порядке).
+    """
     length = mm_to_px(min_mm, dpi)
     thickness = mm_to_px(MAX_RULE_THICKNESS_MM, dpi)
-    result: list[list[Fragment]] = []
+    result: list[FragmentLayer] = []
     for horizontal in (True, False):
         mask = _axis_mask(binary, length, horizontal)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         found: list[Fragment] = []
+        label_ids: list[int] = []
         for index in range(1, count):
             left, top, width, height, area = stats[index]
             extent = width if horizontal else height
+            # Толщина как площадь на длину: толще миллиметра — не линейка, а пятно или буква.
             if area / max(extent, 1) > thickness:
                 continue
             box = Box(int(left), int(top), int(left + width), int(top + height))
             found.append(Fragment(box, horizontal, _angle_of(labels, index, horizontal, box), int(area)))
-        result.append(found)
+            label_ids.append(index)
+        result.append(FragmentLayer(found, labels, label_ids))
     return result[0], result[1]
+
+
+def fragments(binary: np.ndarray, dpi: int, min_mm: float = FRAGMENT_MM) -> tuple[list[Fragment], list[Fragment]]:
+    """Фрагменты линеек обеих осей: открытие коротким ядром, компоненты, порог толщины."""
+    horizontal, vertical = fragment_layers(binary, dpi, min_mm)
+    return horizontal.fragments, vertical.fragments
 
 
 def _predicted_across(first: Fragment, at_along: float) -> float:
@@ -174,8 +206,16 @@ def continues(first: Fragment, second: Fragment, dpi: int, gap_mm: float = CHAIN
     return abs(predicted - actual) <= mm_to_px(CHAIN_OFFSET_MM, dpi)
 
 
-def _components(count: int, edges: list[tuple[int, int]]) -> list[list[int]]:
-    """Компоненты связности простого графа на ``count`` вершинах."""
+def components(count: int, edges: list[tuple[int, int]]) -> list[list[int]]:
+    """Компоненты связности простого графа на ``count`` вершинах (союз-поиск).
+
+    Args:
+        count: Число вершин, они нумеруются ``0 … count-1``.
+        edges: Рёбра графа парами номеров вершин.
+
+    Returns:
+        Списки номеров вершин по компонентам; одиночная вершина — компонента из одной вершины.
+    """
     parent = list(range(count))
 
     def find(item: int) -> int:
@@ -192,6 +232,10 @@ def _components(count: int, edges: list[tuple[int, int]]) -> list[list[int]]:
     for index in range(count):
         groups.setdefault(find(index), []).append(index)
     return list(groups.values())
+
+
+# Прежнее имя: его импортирует замороженный стенд research/legacy/table_processing.
+_components = components
 
 
 def _chain_edges(items: list[Fragment], dpi: int, gap_mm: float) -> list[tuple[int, int]]:
@@ -236,18 +280,46 @@ def _merge(items: list[Fragment], labels: np.ndarray | None = None) -> Segment:
     return Segment(box, horizontal, angle)
 
 
-def chain(items: list[Fragment], dpi: int, min_mm: float = MIN_RULE_MM, gap_mm: float = CHAIN_GAP_MM) -> list[Segment]:
-    """Сшить фрагменты в линейки и оставить те, что набрали ``min_mm``."""
+@dataclass(frozen=True)
+class ChainedRule:
+    """Линейка-цепочка вместе с номерами фрагментов, из которых она сшита (индексы во входном списке)."""
+
+    segment: Segment
+    members: tuple[int, ...]
+
+
+def chain_groups(
+    items: list[Fragment], dpi: int, min_mm: float = MIN_RULE_MM, gap_mm: float = CHAIN_GAP_MM
+) -> list[ChainedRule]:
+    """Сшить фрагменты в линейки, сохранив состав каждой; оставить те, что набрали ``min_mm``.
+
+    Состав нужен трассировке (``traces``): изгиб линейки живёт в её фрагментах, а ``Segment`` хранит
+    только габарит и средний наклон.
+
+    Args:
+        items: Фрагменты одной оси.
+        dpi: Разрешение картинки.
+        min_mm: Минимальная длина линейки-цепочки.
+        gap_mm: Наибольший зазор между сшиваемыми фрагментами вдоль оси.
+
+    Returns:
+        Линейки в порядке компонент графа сшивки; у каждой — отрезок и номера её фрагментов.
+    """
     if not items:
         return []
-    groups = _components(len(items), _chain_edges(items, dpi, gap_mm))
+    groups = components(len(items), _chain_edges(items, dpi, gap_mm))
     minimal = mm_to_px(min_mm, dpi)
-    rules: list[Segment] = []
+    rules: list[ChainedRule] = []
     for group in groups:
         merged = _merge([items[index] for index in group])
         if merged.length >= minimal:
-            rules.append(merged)
+            rules.append(ChainedRule(merged, tuple(group)))
     return rules
+
+
+def chain(items: list[Fragment], dpi: int, min_mm: float = MIN_RULE_MM, gap_mm: float = CHAIN_GAP_MM) -> list[Segment]:
+    """Сшить фрагменты в линейки и оставить те, что набрали ``min_mm``."""
+    return [rule.segment for rule in chain_groups(items, dpi, min_mm, gap_mm)]
 
 
 def isolation(ink_without_rules: np.ndarray, segment: Segment, dpi: int) -> float:
@@ -410,7 +482,7 @@ def cores(lines: Lines, dpi: int) -> list[list[Segment]]:
     for axis_items, base in ((lines.horizontal, 0), (lines.vertical, n_h)):
         as_fragments = [_as_fragment(s) for s in axis_items]
         edges += [(base + a, base + b) for a, b in _chain_edges(as_fragments, dpi, CHAIN_GAP_MM)]
-    groups = [g for g in _components(len(segments), edges) if len(g) >= 2]
+    groups = [g for g in components(len(segments), edges) if len(g) >= 2]
     in_core = {i for g in groups for i in g}
     orphans = [segments[i] for i in range(len(segments)) if i not in in_core]
 

@@ -277,3 +277,125 @@ def _dashed(draw: ImageDraw.ImageDraw, start: tuple[int, int], end: tuple[int, i
         draw.line(
             [(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0), (x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1)], fill=INK, width=2
         )
+
+
+@dataclass
+class CurvedSyntheticTable:
+    """Таблица, изогнутая известным полем: истинная осевая кривая каждой линейки — по построению.
+
+    Прямая таблица рисуется ``make_table`` и переносится обратным отображением ``u = x − G(y)``,
+    ``v = y − F(x)``. Тогда горизонтальная линейка, стоявшая на ``v = c``, проходит по ``y = c + F(x)``,
+    а вертикальная с ``u = c`` — по ``x = c + G(y)``: ответ известен точно, без подгонки.
+    """
+
+    image: np.ndarray
+    row_centres: list[float]  # середины штрихов горизонтальных линеек в прямой таблице
+    col_centres: list[float]  # середины штрихов вертикальных линеек
+    double_centre: "float | None"  # середина второй линейки двойной, если она есть
+    skew: float  # тангенс наклона
+    amplitude: float  # размах изгиба, px
+    period: float  # период изгиба, px
+    phase: float
+
+    def bend(self, along: np.ndarray) -> np.ndarray:
+        """Сдвиг поперёк как функция вдоль: наклон плюс синусоидальный изгиб."""
+        along = np.asarray(along, dtype=float)
+        return self.skew * along + self.amplitude * np.sin(2 * np.pi * along / self.period + self.phase)
+
+    def bend_slope(self, along: np.ndarray) -> np.ndarray:
+        """Производная ``bend``: истинный наклон линейки."""
+        along = np.asarray(along, dtype=float)
+        return self.skew + self.amplitude * 2 * np.pi / self.period * np.cos(
+            2 * np.pi * along / self.period + self.phase
+        )
+
+    def horizontal_truth(self, centre: float, x: np.ndarray) -> np.ndarray:
+        """Истинная ``y(x)`` горизонтальной линейки с серединой ``centre`` в прямой таблице."""
+        return centre + self.bend(x)
+
+    def vertical_truth(self, centre: float, y: np.ndarray) -> np.ndarray:
+        """Истинная ``x(y)`` вертикальной линейки; у вертикалей наклон обратного знака — поворот, а не сдвиг."""
+        return centre - self.bend(y)
+
+
+def make_curved_table(
+    col_widths: "list[int] | None" = None,
+    row_heights: "list[int] | None" = None,
+    missing_vertical: "set[tuple[int, int]] | None" = None,
+    outer_verticals: bool = True,
+    double_under_row: "int | None" = None,
+    skew_deg: float = 2.0,
+    amplitude_px: float = 5.0,
+    period_px: float = 700.0,
+    phase: float = 0.0,
+    rule_px: int = 4,
+    margin: int = 60,
+    font_px: int = 20,
+) -> CurvedSyntheticTable:
+    """Таблица с текстом в каждой клетке, наклонённая и изогнутая по S (наклон линеек плавает по длине).
+
+    Наибольший наклон линейки — ``atan(tan(skew) + 2π·amplitude/period)``; при умолчаниях около 4,6°.
+    Штрих ``rule_px`` px переживает открытие ядром 3 мм, пока ``rule_px > 35·tg θ`` (300 dpi): для 4 px
+    это 6,5°, поэтому синтетика держит наклон не выше 5°.
+
+    Args:
+        col_widths: Ширины граф, px.
+        row_heights: Высоты строк, px.
+        missing_vertical: Пары (строка, номер вертикали), где вертикаль не рисуется — объединение.
+        outer_verticals: Рисовать ли внешние вертикали (у таблиц пака их часто нет).
+        double_under_row: У какой строки провести над нижней границей вторую линейку в 1,2 мм (двойная — конец шапки).
+        skew_deg: Общий наклон.
+        amplitude_px: Размах S-изгиба.
+        period_px: Период изгиба.
+        phase: Фаза изгиба.
+        rule_px: Толщина линеек.
+        margin: Поля вокруг таблицы.
+        font_px: Кегль текста.
+
+    Returns:
+        Изогнутая таблица с истинными кривыми.
+    """
+    import cv2
+
+    col_widths = col_widths or [240, 150, 150]
+    row_heights = row_heights or [110, 90, 90, 90]
+    missing = set(missing_vertical or set())
+    if not outer_verticals:
+        missing |= {(row, 0) for row in range(len(row_heights))}
+        missing |= {(row, len(col_widths)) for row in range(len(row_heights))}
+    upright = {(r, c): f"ячейка {r}{c} текст" for r in range(len(row_heights)) for c in range(len(col_widths))}
+    straight = make_table(
+        col_widths,
+        row_heights,
+        upright=upright,
+        missing_vertical=missing,
+        font_px=font_px,
+        margin=margin,
+        rule_px=rule_px,
+    )
+    canvas = Image.fromarray(straight.image.copy())
+    double_centre = None
+    if double_under_row is not None:
+        # Вторая линейка на 1,2 мм (14 px) ВЫШЕ границы строки, внутри шапки: текст шапки стоит у её
+        # верха, а у строки ниже — сразу под линейкой, и линейка ниже границы легла бы на буквы.
+        y = straight.ys[double_under_row + 1] - 14
+        ImageDraw.Draw(canvas).rectangle([straight.xs[0], y, straight.xs[-1], y + rule_px - 1], fill=INK)
+        double_centre = y + (rule_px - 1) / 2.0
+    image = np.asarray(canvas)
+
+    height, width = image.shape[:2]
+    table = CurvedSyntheticTable(
+        image,
+        [y + (rule_px - 1) / 2.0 for y in straight.ys],
+        [x + (rule_px - 1) / 2.0 for x in straight.xs],
+        double_centre,
+        float(np.tan(np.radians(skew_deg))),
+        amplitude_px,
+        period_px,
+        phase,
+    )
+    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    source_x = (grid_x + table.bend(grid_y)).astype(np.float32)
+    source_y = (grid_y - table.bend(grid_x)).astype(np.float32)
+    table.image = cv2.remap(image, source_x, source_y, cv2.INTER_LINEAR, borderValue=PAPER)
+    return table

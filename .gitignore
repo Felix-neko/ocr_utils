@@ -121,3 +121,6 @@ research/deepseek_damage_lesson/выход/
 
 # Оверлеи исследования текстового слоя (картинки, вне git)
 reports/text_layer_fix/
+
+# Оверлеи стенда трасс линеек (research/table_traces): десятки JPEG, в репо не тащим.
+reports/curved_table_grid/оверлеи/
