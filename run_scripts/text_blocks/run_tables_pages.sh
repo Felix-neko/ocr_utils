@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Валидационный прогон curved_layout: табличный и нетекстовый контент.
+# Валидационный прогон детектора текстовых блоков (page_layout.text_blocks): табличный и нетекстовый контент.
 #
 # Часть валидационного множества «табличный и нетекстовый контент»: line art, таблицы и
 # повёрнутый текст. Детектор под них НЕ дорабатывался — прогон нужен, чтобы посмотреть глазами,
@@ -28,7 +28,7 @@ cd "$SCRIPT_DIR/../.."
 OUT="${OUT:-/mnt/system/raw/mts/curved_layout_validation/tables_and_nontext}"
 PAGES="${PAGES:-full_1975_05:99,full_1968_01:54,full_1971_09:80,full_1974_07:78,full_1973_10:51,full_1976_07:19,full_1973_01:84,full_1974_11:45,full_1969_11:69,full_1970_06:62,full_1966_03:34,full_1970_01:19,full_1973_08:19,full_1973_08:24,full_1967_07:73,full_1968_01:75,full_1971_11:59,full_1969_06:44,full_1969_02:43,full_1974_11:50,full_1972_09:13}"
 
-uv run python -m ocr_utils.curved_layout analyze \
+uv run python -m ocr_utils.page_layout.text_blocks analyze \
     --geo-dir "$GEO_PDF_DIR" \
     --nogeo-dir "$NOGEO_PDF_DIR" \
     --pages "$PAGES" \

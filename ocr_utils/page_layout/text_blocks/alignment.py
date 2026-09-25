@@ -14,7 +14,7 @@ from enum import Enum
 
 import numpy as np
 
-from ocr_utils.curved_layout.blocks import BlockEnvelope, Row, TextBlock
+from ocr_utils.page_layout.text_blocks.blocks import BlockEnvelope, Row, TextBlock
 from ocr_utils.page_layout import px_to_mm
 
 # Ряд считается лежащим на огибающей, если он отстоит от неё не больше чем на столько мм.

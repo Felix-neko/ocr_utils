@@ -6,12 +6,12 @@
 кусков, звенья цепочек, отсчёты наклона поля, столбцы центра масс, узлы пересборки.
 
 Модуль ничего не считает сам: он вызывает те же функции, что и рабочий разбор
-(:mod:`ocr_utils.curved_layout.segment`, :mod:`~.baselines`, :mod:`~.lines`), и показывает их
+(:mod:`ocr_utils.page_layout.text_blocks.segment`, :mod:`~.baselines`, :mod:`~.lines`), и показывает их
 промежуточные значения. Единственное исключение — отбор компонент маски глифов: рабочая
 ``segment.component_mask`` отдаёт только принятые, а для картинки нужны и отвергнутые, поэтому
 их разбор повторён здесь (те же пороги из ``Scale``).
 
-Запуск: ``python -m ocr_utils.curved_layout stages --pdf … --page … --out-dir …``.
+Запуск: ``python -m ocr_utils.page_layout.text_blocks stages --pdf … --page … --out-dir …``.
 """
 
 from __future__ import annotations
@@ -22,13 +22,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout import LINKING_DEFAULT, LINKING_ZONES, lines as axis_lines, segment as seg
-from ocr_utils.curved_layout.legacy_linking import baselines
-from ocr_utils.curved_layout.legacy_linking import linking as linking_module
-from ocr_utils.curved_layout.legacy_linking.linking import link_spans, merge_by_field
-from ocr_utils.curved_layout.columns import gutters_of, rule_separators, separators_for_segmentation
-from ocr_utils.curved_layout.leaders import flatten_axis, leaders_of, spans_at
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, LINKING_ZONES, lines as axis_lines, segment as seg
+from ocr_utils.page_layout.text_blocks.legacy_linking import baselines
+from ocr_utils.page_layout.text_blocks.legacy_linking import linking as linking_module
+from ocr_utils.page_layout.text_blocks.legacy_linking.linking import link_spans, merge_by_field
+from ocr_utils.page_layout.text_blocks.columns import gutters_of, rule_separators, separators_for_segmentation
+from ocr_utils.page_layout.text_blocks.leaders import flatten_axis, leaders_of, spans_at
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.scan_markup.curved_lines.fitting import centreline, smooth_median
 
@@ -324,8 +324,8 @@ def _greedy_stages(
     который больше не рабочий, незачем. Сами цепочки показываются — по ним видно, где жадный
     ход уходит на соседнюю строку.
     """
-    from ocr_utils.curved_layout.legacy_linking.baselines import field_of
-    from ocr_utils.curved_layout.legacy_linking.linking import link_spans, merge_by_field
+    from ocr_utils.page_layout.text_blocks.legacy_linking.baselines import field_of
+    from ocr_utils.page_layout.text_blocks.legacy_linking.linking import link_spans, merge_by_field
 
     spans = link_spans(stats, separators, scale, dpi, ink300, k)
     canvas = _canvas(work)
@@ -356,8 +356,8 @@ def _zone_stages(
     work, stats, labels, mask, candidates, separators, rules, leaders, scale, dpi, ink300, k, page_picture, crop_picture
 ) -> list[list[int]]:
     """Этапы 6–12 сцепки по зонам: куски, их оси, зоны, соединения, круги слияния."""
-    from ocr_utils.curved_layout import zones as zn
-    from ocr_utils.curved_layout.pieces import page_x_height, pieces_of, pitch_of
+    from ocr_utils.page_layout.text_blocks import zones as zn
+    from ocr_utils.page_layout.text_blocks.pieces import page_x_height, pieces_of, pitch_of
 
     pieces = pieces_of(stats, labels, mask, candidates, dpi, leaders)
     x_h = page_x_height(pieces, dpi)
@@ -522,8 +522,8 @@ def render(
     Returns:
         Список нарисованных картинок по порядку этапов.
     """
-    from ocr_utils.curved_layout.engines.ink import InkEngine
-    from ocr_utils.curved_layout.page import analyse_gray
+    from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
+    from ocr_utils.page_layout.text_blocks.page import analyse_gray
 
     out: list[StagePicture] = []
     k = RENDER_DPI / dpi

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ocr_utils.curved_layout.page import PageAnalysis
+from ocr_utils.page_layout.text_blocks.page import PageAnalysis
 from ocr_utils.page_layout import px_to_mm
 
 CSV_FIELDS = [
@@ -97,6 +97,10 @@ def page_json(analysis: PageAnalysis) -> dict:
                         "x0": round(row.x0, 1),
                         "x1": round(row.x1, 1),
                         "height": round(row.height, 1),
+                        # Хвост последней строки и линия отсечки (``blocks._tail_of``): виртуальные,
+                        # в ``axes`` страницы их нет.
+                        "tail": _curve(row.tail) if row.tail is not None else None,
+                        "cut": _curve(row.cut) if row.cut is not None else None,
                     }
                     for row in block.rows
                 ],
@@ -294,6 +298,9 @@ def markdown(analyses: list[PageAnalysis]) -> str:
             f"{len(analysis.blocks)} | {len(analysis.axes)} | {kinds} | {dev or '—'} | {bend or '—'} | "
             f"{analysis.seconds:.1f} |"
         )
+    tails = sum(row.tail is not None for analysis in analyses for block in analysis.blocks for row in block.rows)
+    lines.append("")
+    lines.append(f"Рядов с хвостом (последняя строка, достроенная до линии отсечки): {tails}.")
     lines.extend(engines_summary(analyses))
     return "\n".join(lines) + "\n"
 

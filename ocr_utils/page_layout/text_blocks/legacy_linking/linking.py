@@ -6,7 +6,7 @@
 уходит на соседнюю строку. Поле хода строк (:mod:`.baselines`) как ограничитель помогает лишь
 отчасти: оно правит общий ход полосы, а местный изгиб в углу не отслеживает.
 
-Ход оставлен рабочим: ``--linking greedy``. Замена — :mod:`ocr_utils.curved_layout.zones`.
+Ход оставлен рабочим: ``--linking greedy``. Замена — :mod:`ocr_utils.page_layout.text_blocks.zones`.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import math
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout.legacy_linking.baselines import LineField
-from ocr_utils.curved_layout.segment import Rule, Scale, X_OVERLAP_SHARE, _crosses, candidates_of
+from ocr_utils.page_layout.text_blocks.legacy_linking.baselines import LineField
+from ocr_utils.page_layout.text_blocks.segment import Rule, Scale, X_OVERLAP_SHARE, _crosses, candidates_of
 
 
 # Второй проход: насколько выпрямленная ордината куска может уйти от ординаты цепочки — в долях

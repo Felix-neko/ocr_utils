@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ocr_utils.curved_layout import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.scan_markup.rotation import ROTATIONS
 
 
@@ -113,7 +113,7 @@ def barrier_separators(barriers: tuple[tuple[int, int, int, int], ...]) -> list[
 
 def barrier_rules(barriers: tuple[tuple[int, int, int, int], ...]) -> list:
     """Горизонтальные рёбра рамок как черты ``segment.Rule``: по ним делится блок."""
-    from ocr_utils.curved_layout.segment import Rule
+    from ocr_utils.page_layout.text_blocks.segment import Rule
 
     out = []
     for x0, y0, x1, y1 in barriers:

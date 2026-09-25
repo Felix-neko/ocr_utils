@@ -28,9 +28,9 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ocr_utils.curved_layout import WORK_DPI
-from ocr_utils.curved_layout.capsules import Capsule, contact_of
-from ocr_utils.curved_layout.pieces import (
+from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks.capsules import Capsule, contact_of
+from ocr_utils.page_layout.text_blocks.pieces import (
     AXIS_MIN_LETTERS,
     Piece,
     axis_residual,
@@ -285,7 +285,7 @@ def links_of(
     Returns:
         Соединения без дубликатов: для каждой пары кусков — самое близкое.
     """
-    from ocr_utils.curved_layout.segment import _crosses
+    from ocr_utils.page_layout.text_blocks.segment import _crosses
 
     best: dict[tuple[int, int], Link] = {}
     for first, second in _pairs(zones):
@@ -469,7 +469,7 @@ def link_by_zones(
     Returns:
         Наборы индексов сгустков — по одному на строку.
     """
-    from ocr_utils.curved_layout.segment import candidates_of
+    from ocr_utils.page_layout.text_blocks.segment import candidates_of
 
     candidates = candidates_of(stats, scale, dpi)
     pieces = pieces_of(stats, labels, mask, candidates, dpi, leaders)

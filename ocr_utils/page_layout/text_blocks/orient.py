@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ocr_utils.curved_layout.hints import OrientedZone
+from ocr_utils.page_layout.text_blocks.hints import OrientedZone
 from ocr_utils.scan_markup.rotation import rotate_cw as rotate_image
 
 
@@ -79,7 +79,7 @@ def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
     """
     from dataclasses import replace
 
-    from ocr_utils.curved_layout.lines import _shape_stats
+    from ocr_utils.page_layout.text_blocks.lines import _shape_stats
 
     points = back_points(np.asarray(axis.points, dtype=np.float64), size, zone.rotate_cw)
     points = points[np.argsort(points[:, 0])]
@@ -141,7 +141,7 @@ def back_block(block, size: tuple[int, int], zone: OrientedZone):
 
 
 def _back_row(row, size: tuple[int, int], zone: OrientedZone):
-    """Ряд блока: оси и профили краски — обратным поворотом, края и уровень — из повёрнутых осей."""
+    """Ряд блока: оси, профили, хвост и отсечка — обратным поворотом; края и уровень — из повёрнутых осей."""
     from dataclasses import replace
 
     offset = np.array([zone.box[0], zone.box[1]], dtype=np.float64)
@@ -163,6 +163,9 @@ def _back_row(row, size: tuple[int, int], zone: OrientedZone):
         x1=float(points[:, 0].max()),
         top_edge=profile(row.top_edge),
         bottom_edge=profile(row.bottom_edge),
+        # Хвост последней строки и линия отсечки — такие же кривые вырезки, как профили.
+        tail=profile(row.tail),
+        cut=profile(row.cut),
     )
 
 

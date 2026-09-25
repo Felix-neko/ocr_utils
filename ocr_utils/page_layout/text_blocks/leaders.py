@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 
 # Размер точки отточия: замер на 1971/10 с.93 — 0.5 × 0.5 мм. Ниже — пыль, выше — буква (её и так

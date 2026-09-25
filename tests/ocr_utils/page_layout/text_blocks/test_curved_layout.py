@@ -564,3 +564,98 @@ def test_gutter_orphans_chain_to_each_other():
     leader = Leader(x0=330.0, x1=608.0, y=1198.0, thickness=2.0, dots=20)
     homes = blocks._column_homes([left, right, orphan, second], _ZONE, [_GUTTER], 1009, [leader])
     assert homes[blocks._axis_key(second)] == 1 and homes[blocks._axis_key(orphan)] == 1
+
+
+# Хвост последней строки: предпоследняя строка выгнута аркой (как на 1976/09 с.92), последняя —
+# на треть колонки ниже на шаг строк. Шаг 22.7 px и символ 8 px — замер той же полосы.
+_TAIL_PITCH = 22.7
+_TAIL_GLYPH = 8.0
+
+
+def _arch(x0: float, x1: float, y: float, rise: float, count: int = 60) -> list[float]:
+    """Ординаты арки: концы на ``y``, середина на ``rise`` выше."""
+    t = np.linspace(-1.0, 1.0, count)
+    return list(y - rise * (1.0 - t**2))
+
+
+def _tail_pair() -> tuple[Row, Row]:
+    """Предпоследний (полный, аркой) и последний (короткий, та же арка ниже на шаг) ряды."""
+    reference = _row(112.0, 476.0, _arch(112.0, 476.0, 1416.0, 4.0), height=14.0)
+    xs = np.linspace(112.0, 476.0, 60)
+    ys = np.asarray(_arch(112.0, 476.0, 1416.0 + _TAIL_PITCH, 4.0))
+    short = xs <= 254.0
+    last = _row(112.0, float(xs[short][-1]), list(ys[short]), height=14.0)
+    return reference, last
+
+
+def test_tail_follows_the_previous_line_to_the_cut():
+    """Хвост идёт по изгибу предпоследней строки на шаг ниже и кончается на линии отсечки."""
+    reference, last = _tail_pair()
+    tail, cut = blocks._tail_of(last, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI)
+    assert tail[0, 0] > last.x1 and tail[-1, 0] == pytest.approx(476.0, abs=2.0 + abs(cut[1, 0] - cut[0, 0]))
+    ref_xs, ref_ys = blocks._smoothed_axis(blocks._row_axis(reference), WORK_DPI)
+    # За зоной сращивания хвост — сглаженная опора, сдвинутая на шаг строк.
+    steady = tail[:, 0] >= last.x1 + blocks.TAIL_BLEND_GLYPHS * _TAIL_GLYPH
+    expected = np.interp(tail[steady, 0], ref_xs, ref_ys) + _TAIL_PITCH
+    assert np.abs(tail[steady, 1] - expected).max() < 0.5
+    # Ступеньки на стыке с настоящей осью нет.
+    assert abs(tail[0, 1] - last.axes[0].points[-1, 1]) < 1.0
+
+
+def test_tail_cut_is_perpendicular_to_a_sloping_line():
+    """На наклонной опоре отсечка на высоте хвоста сдвинута на −наклон·интервал."""
+    slope = 0.05
+    xs = np.linspace(112.0, 476.0, 60)
+    reference = _row(112.0, 476.0, list(1400.0 + slope * (xs - 112.0)), height=14.0)
+    short = xs <= 254.0
+    last = _row(112.0, 254.0, list(1400.0 + _TAIL_PITCH + slope * (xs[short] - 112.0)), height=14.0)
+    tail, cut = blocks._tail_of(last, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI)
+    assert tail[-1, 0] == pytest.approx(476.0 - slope * _TAIL_PITCH, abs=1.0)
+    direction = cut[1] - cut[0]
+    # Отсечка перпендикулярна опоре с точностью до градуса (наклон меряется по сглаженной оси).
+    angle = math.degrees(math.atan2(direction[0], direction[1])) + math.degrees(math.atan(slope))
+    assert abs(angle) < 1.0
+
+
+def test_no_tail_for_a_full_row_a_single_row_or_distant_rows():
+    """Полная последняя строка, блок из одного ряда и несоседние ряды хвоста не получают."""
+    reference, _ = _tail_pair()
+    xs = np.linspace(112.0, 476.0, 60)
+    full = _row(112.0, 474.0, list(1416.0 + _TAIL_PITCH + 0.0 * xs), height=14.0)
+    assert blocks._tail_of(full, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI) is None
+    assert blocks._with_tail([reference], _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI) == [reference]
+    far = _row(112.0, 254.0, [1416.0 + 4.0 * _TAIL_PITCH] * 25, height=14.0)
+    assert blocks._tail_of(far, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI) is None
+
+
+def test_envelope_encloses_the_tail():
+    """Главная граница блока обводит хвост, а справочная по краске его не касается."""
+    reference, last = _tail_pair()
+    rows = blocks._with_tail(
+        [_row(112.0, 476.0, _arch(112.0, 476.0, 1416.0 - k * _TAIL_PITCH, 4.0), 14.0) for k in (3, 2, 1)]
+        + [reference, last],
+        _TAIL_PITCH,
+        _TAIL_GLYPH,
+        WORK_DPI,
+    )
+    tail = rows[-1].tail
+    assert tail is not None
+    envelope = envelope_of(rows, _TAIL_PITCH, WORK_DPI, 2.5, (_TAIL_GLYPH, 9.5), cap=CapKind.BODY)
+    hull = envelope.polygon.astype(np.float32).reshape(-1, 1, 2)
+    assert all(cv2.pointPolygonTest(hull, (float(x), float(y)), False) >= 0 for x, y in tail)
+    # Низ блока правее конца строки идёт по хвосту (плюс отступ полосы), а не горизонталью.
+    bottom = envelope.bottom
+    at = np.interp(tail[:, 0], bottom[:, 0], bottom[:, 1]) - tail[:, 1]
+    assert np.ptp(at) < 1.0
+
+
+def test_no_tail_across_foreign_text():
+    """Справа от короткой строки краска чужого текста — хвост не строится; пустая бумага — строится."""
+    reference, last = _tail_pair()
+    k = 2  # рендер RENDER_DPI вдвое крупнее рабочей копии WORK_DPI
+    ink = np.zeros((1600 * k, 600 * k), dtype=bool)
+    assert blocks._tail_of(last, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI, ink) is not None
+    # Чужая строка на высоте последней, от середины колонки до правого края.
+    y = int((1416.0 + _TAIL_PITCH) * k)
+    ink[y - 8 : y + 8, 300 * k : 470 * k] = True
+    assert blocks._tail_of(last, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI, ink) is None

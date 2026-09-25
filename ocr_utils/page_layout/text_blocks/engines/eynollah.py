@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.engines.base import EngineLine, EngineResult
-from ocr_utils.curved_layout.engines.external import (
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.engines.base import EngineLine, EngineResult
+from ocr_utils.page_layout.text_blocks.engines.external import (
     ENGINES_ROOT,
     centre_from_polygon,
     polygon_height,
@@ -46,7 +46,7 @@ class EynollahEngine:
             points = polyline(item["baseline"], scale) if item.get("baseline") else None
             is_baseline = points is not None and len(points) >= 2
             if not is_baseline:
-                # Часть строк приходит только контуром: ось берём серединой его толщины.
+                # eynollah базовых линий в PAGE-XML не пишет (проверено 2026-09-25): ось — середина контура.
                 points = centre_from_polygon(boundary) if boundary is not None else None
             if points is None or len(points) < 2:
                 continue

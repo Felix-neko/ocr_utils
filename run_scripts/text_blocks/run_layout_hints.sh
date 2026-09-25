@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Валидационный прогон curved_layout со ВСПОМОГАТЕЛЬНОЙ ИНФОРМАЦИЕЙ page_layout.
+# Валидационный прогон детектора текстовых блоков (page_layout.text_blocks) со ВСПОМОГАТЕЛЬНОЙ ИНФОРМАЦИЕЙ page_layout.
 #
 # Страницы с боковым текстом, таблицами и блок-схемами: на них видно, что дают подсказки —
 # маска запретного поля (растр), рамки таблиц и схем как запрет сцепки, области бокового текста
@@ -28,9 +28,9 @@ common=(--geo-dir "$GEO_PDF_DIR" --nogeo-dir "$NOGEO_PDF_DIR" --pages "$PAGES"
         --variant nogeo --engine ink --smooth-block 2.5 --coarse-factor 3 --smooth-line 0.6)
 
 echo "== без подсказок =="
-uv run python -m ocr_utils.curved_layout analyze "${common[@]}" --out-dir "$OUT/plain" "$@"
+uv run python -m ocr_utils.page_layout.text_blocks analyze "${common[@]}" --out-dir "$OUT/plain" "$@"
 echo "== с подсказками =="
-uv run python -m ocr_utils.curved_layout analyze "${common[@]}" --out-dir "$OUT/hinted" --layout-cache "$LAYOUT_CACHE" "$@"
+uv run python -m ocr_utils.page_layout.text_blocks analyze "${common[@]}" --out-dir "$OUT/hinted" --layout-cache "$LAYOUT_CACHE" "$@"
 echo "== с подсказками и ячейками таблиц =="
-uv run python -m ocr_utils.curved_layout analyze "${common[@]}" --out-dir "$OUT/cells" \
+uv run python -m ocr_utils.page_layout.text_blocks analyze "${common[@]}" --out-dir "$OUT/cells" \
     --layout-cache "$LAYOUT_CACHE" --text-layer-cache "$TEXT_LAYER_CACHE" "$@"

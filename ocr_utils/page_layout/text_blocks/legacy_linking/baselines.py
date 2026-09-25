@@ -27,7 +27,7 @@ import numpy as np
 from scipy.interpolate import RBFInterpolator
 from scipy.ndimage import map_coordinates
 
-from ocr_utils.curved_layout import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.page_layout import mm_to_px
 
 # Якорная строка — длиннее этой доли от p90 длин (тот же приём, что у ``fitting.long_mask``).

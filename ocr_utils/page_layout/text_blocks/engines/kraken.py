@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.engines.base import EngineLine, EngineResult
-from ocr_utils.curved_layout.engines.external import ENGINES_ROOT, polygon_height, polyline, run_worker
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.engines.base import EngineLine, EngineResult
+from ocr_utils.page_layout.text_blocks.engines.external import ENGINES_ROOT, polygon_height, polyline, run_worker
 
 
 class KrakenEngine:

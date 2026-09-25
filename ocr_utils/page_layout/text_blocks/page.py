@@ -10,15 +10,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.alignment import Alignment, alignment_of
-from ocr_utils.curved_layout.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
-from ocr_utils.curved_layout.engines.base import Engine
-from ocr_utils.curved_layout.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
-from ocr_utils.curved_layout.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.alignment import Alignment, alignment_of
+from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
+from ocr_utils.page_layout.text_blocks.engines.base import Engine
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
+from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column
 from ocr_utils.page_layout.orientation.detectors.ink_axis import glyph_mask
-from ocr_utils.curved_layout.columns import gutters_of, mark_cut_lines, zones_of
-from ocr_utils.curved_layout.leaders import leaders_mask, leaders_of
+from ocr_utils.page_layout.text_blocks.columns import gutters_of, mark_cut_lines, zones_of
+from ocr_utils.page_layout.text_blocks.leaders import leaders_mask, leaders_of
 
 # Полоса строки для меры покрытия краски: ось ± столько её высот.
 BAND_HEIGHTS = 0.6
@@ -178,7 +178,7 @@ def _analyse_areas(
     Меры выключки считаются только у прямых областей: «левый край блока» у лежащего текста
     зависит от стороны чтения, которую мы намеренно не определяем.
     """
-    from ocr_utils.curved_layout.orient import back_axis, back_block, back_gutter, back_leader, upright
+    from ocr_utils.page_layout.text_blocks.orient import back_axis, back_block, back_gutter, back_leader, upright
 
     scale = RENDER_DPI / dpi
     axes: list[LineAxis] = []
@@ -268,7 +268,7 @@ def _shifted_barriers(
             out.append(box)
             continue
         # Рамка поворачивается вместе с вырезкой: углы переводятся и берётся их охват.
-        from ocr_utils.curved_layout.orient import back_points
+        from ocr_utils.page_layout.text_blocks.orient import back_points
 
         corners = np.array([[box[0], box[1]], [box[2], box[1]], [box[0], box[3]], [box[2], box[3]]], dtype=np.float64)
         turned = _forward_points(corners, (area.width, area.height), area.rotate_cw)

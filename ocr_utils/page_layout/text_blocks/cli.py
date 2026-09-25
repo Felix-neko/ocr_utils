@@ -6,14 +6,17 @@ from pathlib import Path
 
 import click
 
-from ocr_utils.curved_layout import LINKING_CHOICES, LINKING_DEFAULT, RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES
-from ocr_utils.curved_layout.lines import SMOOTH_HEIGHTS
-from ocr_utils.curved_layout.page import Variant, analyse_gray, render_page
-from ocr_utils.curved_layout.report import markdown, write_csv, write_json
+from ocr_utils.page_layout.text_blocks import LINKING_CHOICES, LINKING_DEFAULT, RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES
+from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS
+from ocr_utils.page_layout.text_blocks.page import Variant, analyse_gray, render_page
+from ocr_utils.page_layout.text_blocks.report import markdown, write_csv, write_json
 
-# Движок по умолчанию — свой, по краске; остальные подключаются адаптерами.
-ENGINE_CHOICES = ("ink", "surya", "kraken", "pero", "eynollah")
+from ocr_utils.page_layout.text_blocks.engines.catalog import WorkerEngineName
+
+# Движок по умолчанию — свой, по краске; остальные подключаются адаптерами: у kraken, pero и eynollah
+# свои, у движков каталога (surya, orli, paddle …) — общий адаптер с единым JSON воркера.
+ENGINE_CHOICES = ("ink", "kraken", "pero", "eynollah", *(item.value for item in WorkerEngineName))
 
 
 def parse_pages(text: str) -> list[tuple[str, int]]:
@@ -31,25 +34,28 @@ def parse_pages(text: str) -> list[tuple[str, int]]:
 def make_engine(name: str, options: dict):
     """Создать поставщика строк по имени движка."""
     if name == "ink":
-        from ocr_utils.curved_layout.engines.ink import InkEngine
+        from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
 
         return InkEngine(linking=options.get("linking", LINKING_DEFAULT), hints=options.get("hints"))
     if name == "kraken":
-        from ocr_utils.curved_layout.engines.kraken import KrakenEngine
+        from ocr_utils.page_layout.text_blocks.engines.kraken import KrakenEngine
 
         return KrakenEngine(python=options.get("kraken_python"))
     if name == "pero":
-        from ocr_utils.curved_layout.engines.pero import PeroEngine
+        from ocr_utils.page_layout.text_blocks.engines.pero import PeroEngine
 
         return PeroEngine(python=options.get("pero_python"), config=options.get("pero_config"))
     if name == "eynollah":
-        from ocr_utils.curved_layout.engines.eynollah import EynollahEngine
+        from ocr_utils.page_layout.text_blocks.engines.eynollah import EynollahEngine
 
         return EynollahEngine(python=options.get("eynollah_python"), models=options.get("eynollah_models"))
-    if name == "surya":
-        from ocr_utils.curved_layout.engines.surya_cache import SuryaEngine
+    if name in {item.value for item in WorkerEngineName}:
+        from ocr_utils.page_layout.text_blocks.engines.catalog import spec_of
+        from ocr_utils.page_layout.text_blocks.engines.generic import WorkerEngine
 
-        return SuryaEngine(cache_dir=options.get("surya_cache"))
+        # Свой интерпретатор движка каталога — из ``--engine-python имя=путь``.
+        pythons = dict(item.split("=", 1) for item in options.get("engine_python") or ())
+        return WorkerEngine(spec_of(WorkerEngineName(name), pythons.get(name)))
     raise click.BadParameter(f"неизвестный движок: {name}")
 
 
@@ -98,6 +104,12 @@ def main() -> None:
     help="кэш surya page_layout: включает подсказки — растр, таблицы, схемы, боковой текст",
 )
 @click.option(
+    "--forbid-figures",
+    is_flag=True,
+    default=False,
+    help="запретить текст ВНУТРИ таблиц и line art, а не только резать по их рёбрам",
+)
+@click.option(
     "--text-layer-cache",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -108,7 +120,11 @@ def main() -> None:
 @click.option("--pero-config", type=click.Path(path_type=Path), default=None, help="config.ini модели pero")
 @click.option("--eynollah-python", type=click.Path(path_type=Path), default=None)
 @click.option("--eynollah-models", type=click.Path(path_type=Path), default=None)
-@click.option("--surya-cache", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--engine-python",
+    multiple=True,
+    help="свой python движка каталога: ``имя=путь`` (по умолчанию — окружение в LINE_ENGINES_ROOT)",
+)
 def analyze(
     geo_dir: Path,
     nogeo_dir: Path,
@@ -125,10 +141,11 @@ def analyze(
     dilate_compare: str,
     layout_cache: Path | None,
     text_layer_cache: Path | None,
+    forbid_figures: bool,
     **options,
 ) -> None:
     """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку."""
-    from ocr_utils.curved_layout import overlay
+    from ocr_utils.page_layout.text_blocks import overlay
 
     extra = tuple(float(item) for item in dilate_compare.split(",") if item.strip())
     variants = [Variant.GEO.value, Variant.NOGEO.value] if variant == "both" else [variant]
@@ -147,7 +164,7 @@ def analyze(
                     click.echo(f"нет файла: {pdf}")
                     continue
                 gray300 = render_page(pdf, page)
-                hints = _page_hints(pdf, page, gray300, dpi, surya, text_layer_cache)
+                hints = _page_hints(pdf, page, gray300, dpi, surya, text_layer_cache, current, forbid_figures)
                 engine = make_engine(engine_name, {**options, "hints": hints})
                 analysis = analyse_gray(
                     gray300,
@@ -177,11 +194,31 @@ def analyze(
         click.echo(f"готово: {out_dir}")
 
 
-def _page_hints(pdf: Path, page: int, gray300, dpi: float, surya, text_layer_cache: Path | None = None):
+def _page_hints(
+    pdf: Path,
+    page: int,
+    gray300,
+    dpi: float,
+    surya,
+    text_layer_cache: Path | None = None,
+    variant=None,
+    forbid_figures: bool = False,
+):
     """Подсказки страницы: находки ``page_layout`` плюс ячейки таблиц из кэша ``text_layer_fix``.
 
     Координаты нужны в рабочей копии разбора, поэтому её размер передаётся явно: кадр
     ``page_layout`` считается в своём разрешении и округляется иначе.
+
+    Args:
+        pdf: Файл PDF разбираемого прогона FineReader.
+        page: Номер страницы С ЕДИНИЦЫ.
+        gray300: Серый рендер страницы.
+        dpi: Разрешение рабочей копии.
+        surya: ``SuryaSource`` или ``None``.
+        text_layer_cache: Корень кэша ``text_layer_fix`` или ``None``.
+        variant: Какой вариант разбирается, ``geo`` или ``nogeo``: от него зависит и ключ кэша
+            surya, и параметры рендера ``page_layout``.
+        forbid_figures: Запрещать ли текст внутри таблиц и line art.
 
     Returns:
         :class:`hints.LayoutHints` или ``None``, если не задан ни один кэш.
@@ -191,15 +228,26 @@ def _page_hints(pdf: Path, page: int, gray300, dpi: float, surya, text_layer_cac
     import cv2
     import fitz
 
-    from ocr_utils.curved_layout.from_layout import hints_of as layout_hints
-    from ocr_utils.curved_layout.from_text_layer import hints_of as cell_hints
+    from ocr_utils.page_layout.text_blocks.from_layout import hints_of as layout_hints
+    from ocr_utils.page_layout.text_blocks.from_text_layer import hints_of as cell_hints
+    from ocr_utils.page_layout.image import Variant as PageVariant
 
     width = int(round(gray300.shape[1] * dpi / RENDER_DPI))
     height = int(round(gray300.shape[0] * dpi / RENDER_DPI))
+    kind = PageVariant.FR_GEO if variant == Variant.GEO.value else PageVariant.FR_NOGEO
     hints = None
     if surya is not None:
         with fitz.open(pdf) as document:
-            hints = layout_hints(document, page - 1, dpi=dpi, surya=surya, width=width, height=height)
+            hints = layout_hints(
+                document,
+                page - 1,
+                dpi=dpi,
+                surya=surya,
+                width=width,
+                height=height,
+                variant=kind,
+                forbid_figures=forbid_figures,
+            )
     if text_layer_cache is not None:
         work = cv2.resize(gray300, (width, height), interpolation=cv2.INTER_AREA)
         hints = cell_hints(pdf.name, page - 1, text_layer_cache, work, dpi=dpi, base=hints)
@@ -220,7 +268,7 @@ def _page_hints(pdf: Path, page: int, gray300, dpi: float, surya, text_layer_cac
 @click.option("--linking", type=click.Choice(LINKING_CHOICES), default=LINKING_DEFAULT, show_default=True)
 def stages(pdf: Path, page: int, out_dir: Path, variant: str, dpi: float, crop: str | None, linking: str) -> None:
     """Отладочные оверлеи по ЭТАПАМ построения осевой линии для одной полосы."""
-    from ocr_utils.curved_layout import stages as stages_module
+    from ocr_utils.page_layout.text_blocks import stages as stages_module
 
     gray300 = render_page(pdf, page)
     box = tuple(int(value) for value in crop.split(",")) if crop else None
@@ -241,7 +289,7 @@ def stages(pdf: Path, page: int, out_dir: Path, variant: str, dpi: float, crop: 
 @click.option("--full", is_flag=True, help="печатать таблицу по страницам, а не только итог")
 def metrics(out_dir: Path, against: Path | None, full: bool) -> None:
     """Валидационные метрики по выкладке прогона: скрещивания осей, перескоки, блоки, краска."""
-    from ocr_utils.curved_layout.metrics import read_pages, table
+    from ocr_utils.page_layout.text_blocks.metrics import read_pages, table
 
     pages = read_pages(out_dir)
     if not pages:

@@ -27,8 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ocr_utils.curved_layout import WORK_DPI
-from ocr_utils.curved_layout.hints import LayoutHints, OrientedZone
+from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone
 
 # Ячейка считается пустой, если краски в ней меньше этой доли площади. Доля, а не число пикселей:
 # ячейки одной таблицы различаются по площади в десятки раз. Замер по 1967/07 с.73 и 1973/08 с.19:
@@ -80,7 +80,38 @@ def hints_of(
     # боковые зоны `page_layout`, и в самом конце ячейки — они перекрывают всё.
     height, width = work.shape[:2]
     zones = base.zones_or_page(width, height) + tuple(free) + tuple(cells)
-    return LayoutHints(text_allowed=base.text_allowed, zones=zones, barriers=base.barriers + tuple(barriers), dpi=dpi)
+    return LayoutHints(
+        text_allowed=_allow_cells(base.text_allowed, cells),
+        zones=zones,
+        barriers=base.barriers + tuple(barriers),
+        dpi=dpi,
+    )
+
+
+def _allow_cells(allowed: np.ndarray | None, cells: list[OrientedZone]) -> np.ndarray | None:
+    """Вернуть ячейкам право на текст: `page_layout` запрещает таблицу целиком.
+
+    Зона таблицы идёт у `from_layout` в запретную маску — внутри рисунка и таблицы строк не ищем.
+    Но ячейка, ставшая областью разбора, — как раз то место, где их искать НАДО, иначе краска в
+    ней погаснет до сегментации и разбор таблицы пропадёт вовсе. Разрешение возвращается только по
+    боксам самих ячеек, а не по всей таблице: линейки, поля и подписи между графами остаются под
+    запретом.
+
+    Args:
+        allowed: Маска разрешённого текста или ``None`` (запретов нет — и возвращать нечего).
+        cells: Области-ячейки.
+
+    Returns:
+        Копия маски с ``True`` по боксам ячеек, либо ``None``/исходная маска, если делать нечего.
+    """
+    if allowed is None or not cells:
+        return allowed
+    out = allowed.copy()
+    height, width = out.shape[:2]
+    for zone in cells:
+        x0, y0, x1, y1 = zone.box
+        out[max(0, y0) : min(height, y1), max(0, x0) : min(width, x1)] = True
+    return out
 
 
 def _ink_mask(work: np.ndarray) -> np.ndarray:

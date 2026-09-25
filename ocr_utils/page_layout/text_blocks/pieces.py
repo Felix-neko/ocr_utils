@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 
 # Длинный кусок: не меньше двух букв и шириной хотя бы в столько высот строчной. Два критерия

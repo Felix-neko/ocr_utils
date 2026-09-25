@@ -7,7 +7,7 @@
 же конвейер прогоняется двумя наборами размеров, и результаты сливаются: крупный сегмент
 принимается, если корпусные его не покрыли.
 
-Межколонники приходят снаружи (:mod:`ocr_utils.curved_layout.columns`): иначе строка двух
+Межколонники приходят снаружи (:mod:`ocr_utils.page_layout.text_blocks.columns`): иначе строка двух
 колонок сшивается через межколонник, ведь ``link_spans`` пускает разрыв до 2.5 высот.
 """
 
@@ -19,10 +19,10 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout import LINKING_DEFAULT, LINKING_ZONES, RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.columns import DOT_FILL_SHARE, gutter_filled
-from ocr_utils.curved_layout.leaders import flatten_axis, inside_spans, leaders_of, spans_at
-from ocr_utils.curved_layout.pieces import is_low_mark
+from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, LINKING_ZONES, RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, gutter_filled
+from ocr_utils.page_layout.text_blocks.leaders import flatten_axis, inside_spans, leaders_of, spans_at
+from ocr_utils.page_layout.text_blocks.pieces import is_low_mark
 from ocr_utils.page_layout import mm_to_px
 from ocr_utils.scan_markup.curved_lines.fitting import centreline, smooth_median
 
@@ -101,6 +101,18 @@ LETTER_MAX_FILL = 0.55
 # Буква заголовка тоже бывает высокой, но она и широкая, поэтому нужны оба признака.
 BRIDGE_HEIGHT_RATIO = 2.2
 BRIDGE_ASPECT = 1.6
+# Рамка, а не буква: компонента выше стольких медианных высот страницы И с заполнением бокса
+# краской ниже порога. Замер: вензель «Э» с ножками и чертой под заголовком (1973/11 с.79) —
+# 590 × 126 px при заполнении 0.04; через него смыкание RLSA сшивало обе строки заголовка в один
+# сгусток. Жирная буква заголовка даёт 0.5–0.7, по 33 полосам валидации буквы ниже 0.1 нет —
+# ниже только рамки таблиц, линии схем и вензели.
+FRAME_HEIGHT_RATIO = 2.2
+FRAME_MAX_FILL = 0.1
+# Две корпусные строки внутри крупной — разные ряды, только если они перекрываются по x хотя бы на
+# эту долю более короткой (иначе это слова одной строки на разной высоте). Замер: у склейки
+# «ЭКОНОМИЧЕСКОЕ / ОБРАЗОВАНИЕ КАДРОВ» (1973/11 с.79) перекрытие 1.0, у «Нам» и «пишут…»
+# (1975/05 с.97) — ноль.
+MULTI_ROW_OVERLAP = 0.5
 # Черта короче этого (мм) разделителем не считается: это дефис или тире. Разделитель сноски в
 # журнале — черта примерно в 6–8 мм (1973/06 с.65), поэтому порог низкий.
 RULE_MIN_LENGTH_MM = 5.0
@@ -272,6 +284,18 @@ def component_mask(work: np.ndarray, scale: Scale) -> np.ndarray:
     правый на другой, и ось взбирается со строки на строку — перескок, который никакой сцепкой
     уже не исправить. Узнаётся мостик по двум признакам сразу: он много выше медианной буквы
     страницы И вытянут по вертикали (буква заголовка тоже высокая, но она и широкая).
+
+    Так же выбрасывается РАМКА — высокая компонента с почти пустым боксом (вензель с чертой,
+    рамка таблицы, линия схемы): буквы, стоящие рядом с ней, смыкание RLSA пришивало к ней, и
+    строки над и под рамкой становились одним сгустком (1973/11 с.79, «ЭКОНОМИЧЕСКОЕ /
+    ОБРАЗОВАНИЕ КАДРОВ»).
+
+    Args:
+        work: Серая рабочая копия страницы.
+        scale: Масштаб, по пределам которого отбираются компоненты.
+
+    Returns:
+        Маска ``uint8`` размера ``work``: 1 — пиксель компоненты-буквы этого масштаба.
     """
     _, binary = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
@@ -286,11 +310,19 @@ def component_mask(work: np.ndarray, scale: Scale) -> np.ndarray:
             keep[index] = True
     heights = stats[1:, cv2.CC_STAT_HEIGHT][keep[1:]]
     if heights.size:
-        limit = BRIDGE_HEIGHT_RATIO * float(np.median(heights))
+        median_height = float(np.median(heights))
+        limit = BRIDGE_HEIGHT_RATIO * median_height
+        frame_limit = FRAME_HEIGHT_RATIO * median_height
         for index in np.nonzero(keep)[0]:
             height = float(stats[index, cv2.CC_STAT_HEIGHT])
             width = float(stats[index, cv2.CC_STAT_WIDTH])
+            # Мостик: высокая компонента, вытянутая по вертикали.
             if height > limit and height > BRIDGE_ASPECT * max(width, 1e-6):
+                keep[index] = False
+                continue
+            # Рамка: высокая компонента с почти пустым боксом.
+            fill = stats[index, cv2.CC_STAT_AREA] / max(1.0, width * height)
+            if height > frame_limit and fill < FRAME_MAX_FILL:
                 keep[index] = False
     return keep[labels].astype(np.uint8)
 
@@ -434,13 +466,13 @@ def _segments_at_scale(
         # Сцепка по зонам поиска: у каждого куска своя ось, от её концов выпущены «колбаски», и
         # соединяются только куски, чьи зоны встретились под малым углом. Копить ошибке нечего —
         # каждое соединение проверяется от исходного куска, а не от конца растущей цепочки.
-        from ocr_utils.curved_layout.zones import link_by_zones
+        from ocr_utils.page_layout.text_blocks.zones import link_by_zones
 
         return build(link_by_zones(stats, labels, mask, separators, scale, dpi, ink300, k, leaders, rules))
     # Прежний ход: жадная цепочка, по её длинным строкам поле, затем та же цепочка с полем как
     # ограничителем и сшивание обрывков одного уровня. Подробности и замеры — в legacy_linking.
-    from ocr_utils.curved_layout.legacy_linking.baselines import field_of
-    from ocr_utils.curved_layout.legacy_linking.linking import link_spans, merge_by_field
+    from ocr_utils.page_layout.text_blocks.legacy_linking.baselines import field_of
+    from ocr_utils.page_layout.text_blocks.legacy_linking.linking import link_spans, merge_by_field
 
     first = build(link_spans(stats, separators, scale, dpi, ink300, k))
     field = field_of(first, work.shape, k, dpi)
@@ -648,6 +680,39 @@ def _swallowed(small: Segment, big: Segment, height_ratio: float = SWALLOW_HEIGH
         return False
     overlap = max(0, min(small.x1, big.x1) - max(small.x0, big.x0))
     return overlap >= SWALLOW_SHARE * max(1, small.x1 - small.x0)
+
+
+def _multi_row(big: Segment, body: list[Segment]) -> bool:
+    """Склеены ли в крупной строке несколько рядов: внутри неё лежат корпусные строки разной высоты.
+
+    Крупный масштаб сшивает строки заголовка через рисунок или вензель, к которому пришиты буквы
+    обеих строк (1973/11 с.79: сгусток 591 × 126 px на «ЭКОНОМИЧЕСКОЕ / ОБРАЗОВАНИЕ КАДРОВ»). Ось
+    такого сгустка идёт между строками или прилипает к одной из них, а корпусные строки, найденные
+    верно, она поглощала (:func:`_body_sized`, :func:`_swallowed`). Признак склейки — две
+    корпусные строки внутри неё, не перекрывающиеся по y: у одной строки текста так не бывает, её
+    обрывки стоят на одной высоте.
+
+    Args:
+        big: Строка крупного масштаба.
+        body: Строки корпусного масштаба.
+
+    Returns:
+        ``True``, если в ``big`` лежат хотя бы два корпусных ряда один над другим.
+    """
+    # Корпусные строки, которые крупная накрывает целиком (высота не важна).
+    inner = [segment for segment in body if _swallowed(segment, big, height_ratio=1.0)]
+    # Ряды один над другим: строки перекрываются по x, а их середины разошлись больше чем на
+    # полвысоты. Одного расхождения по высоте мало: слова одной строки, стоящие РЯДОМ, тоже бывают
+    # на разной высоте — у «Нам пишут…» (1975/05 с.97) курсивная прописная «Н» поднимает середину
+    # «Нам» на 15 px над «пишут» при высоте 30, и строка без этого условия разваливалась на слова.
+    for index, upper in enumerate(inner):
+        for lower in inner[index + 1 :]:
+            overlap = min(upper.x1, lower.x1) - max(upper.x0, lower.x0)
+            shorter = max(1, min(upper.x1 - upper.x0, lower.x1 - lower.x0))
+            apart = abs(lower.cy - upper.cy) >= 0.5 * max(upper.height, lower.height)
+            if apart and overlap >= MULTI_ROW_OVERLAP * shorter:
+                return True
+    return False
 
 
 def _body_sized(body: list[Segment], large: list[Segment]) -> list[Segment]:
@@ -1009,6 +1074,9 @@ def segments_of(
         _segments_at_scale(gray300, work, ink300, separators, SCALES[0], dpi, leaders, rules, linking), leaders, dpi
     )
     large_all = _segments_at_scale(gray300, work, ink300, separators, SCALES[1], dpi, None, rules, linking)
+    # Крупная «строка», в которой корпус нашёл несколько рядов один над другим, — склейка рядов
+    # через рисунок или вензель: ей не верим, и корпусные ряды она не поглощает.
+    large_all = [segment for segment in large_all if not _multi_row(segment, body)]
     body = _body_sized(body, large_all)
     # Крупный масштаб добавляет только то, чего корпус не нашёл (заголовки, логотип).
     large = [segment for segment in large_all if not _covered(segment, body)]

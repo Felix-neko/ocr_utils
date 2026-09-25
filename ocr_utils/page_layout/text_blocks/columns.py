@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ocr_utils.curved_layout import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.page_layout.tables.ruling import find_lines
 from ocr_utils.page_layout.orientation.detectors.ink_axis import _smear, glyph_mask
@@ -456,6 +456,25 @@ def bounds_at(gutters: list[Gutter], x0: float, x1: float, y: float, width: int)
     return left, right
 
 
+def inside_gutter(gutters: list[Gutter], x0: float, x1: float, y: float) -> bool:
+    """Лежит ли отрезок ``[x0, x1]`` ЦЕЛИКОМ внутри живого на высоте ``y`` межколонника.
+
+    Такой кусок не принадлежит ни одной колонке: по геометрии он ровно в пустоте между ними.
+    Сам по себе он бывает и сором, и началом строки соседней графы, заехавшим в межколонник
+    (1971/10 с.93: межколонник 605..726, а строка правой графы начинается с 641), — решает это
+    уже разбор блоков, здесь только признак.
+
+    Args:
+        gutters: Локальные межколонники-ломаные.
+        x0, x1: Концы отрезка (пиксели рабочей копии).
+        y: Ордината, на которой смотрим.
+
+    Returns:
+        ``True``, если нашёлся живой межколонник, накрывающий отрезок целиком.
+    """
+    return any(gutter.alive_at(y) and gutter.x0_at(y) <= x0 and x1 <= gutter.x1_at(y) for gutter in gutters)
+
+
 def mark_cut_lines(
     axes: list, gutters: list[Gutter], dpi: float = WORK_DPI, ink: np.ndarray | None = None, k: float = 2.0
 ) -> list[bool]:
@@ -546,6 +565,7 @@ __all__ = [
     "Zone",
     "zones_of",
     "bounds_at",
+    "inside_gutter",
     "column_width_mm",
     "gutters_of",
     "rule_separators",

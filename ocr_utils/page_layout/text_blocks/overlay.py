@@ -7,10 +7,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout.alignment import Alignment
-from ocr_utils.curved_layout.blocks import dilate_polygon
-from ocr_utils.curved_layout.leaders import inside_spans
-from ocr_utils.curved_layout.page import PageAnalysis
+from ocr_utils.page_layout.text_blocks.alignment import Alignment
+from ocr_utils.page_layout.text_blocks.blocks import dilate_polygon
+from ocr_utils.page_layout.text_blocks.leaders import inside_spans
+from ocr_utils.page_layout.text_blocks.page import PageAnalysis
 
 # Цвета BGR: огибающая — синяя, крупная огибающая — фиолетовая, оси строк — зелёные,
 # найденные края рядов — оранжевые кружки, границы колонок — серые пунктиры.
@@ -36,6 +36,10 @@ COLOUR_COLUMN = (170, 170, 170)
 # Участок оси над точкой или запятой: там ось провисает к базовой линии, в меры формы строки он
 # не входит и на оверлее рисуется отдельным цветом, чтобы провисание не принимали за дефект.
 COLOUR_MARK = (0, 165, 255)
+# Хвост короткой последней строки блока — ось, достроенная до линии отсечки по изгибу предыдущей
+# строки (``blocks._tail_of``), и сама линия отсечки. Виртуальная, краски под ней нет, поэтому
+# своим цветом: розовый на оверлее больше ничем не занят (красный — у раздутой границы).
+COLOUR_TAIL = (180, 105, 255)
 COLOUR_TEXT = (20, 20, 20)
 # Раздутые границы: полсимвола — жёлтая, символ — красная, прочие доли — серая.
 COLOUR_DILATE = {0.5: (0, 200, 255), 1.0: (40, 40, 220)}
@@ -92,6 +96,10 @@ def draw(
             outline = dilate_polygon(block.envelope.polygon, share * glyph[0], share * glyph[1], block.dpi)
             _polyline(canvas, outline, COLOUR_DILATE.get(share, COLOUR_DILATE_OTHER), 1, scale, closed=True)
         for row in block.rows:
+            if row.tail is not None:
+                # Хвост продолжает ось той же толщиной; отсечка — тонкой линией того же цвета.
+                _polyline(canvas, row.tail, COLOUR_TAIL, 2, scale)
+                _polyline(canvas, row.cut, COLOUR_TAIL, 1, scale)
             for x in (row.x0, row.x1):
                 cv2.circle(canvas, (int(x * scale), int(row.y * scale)), 3, COLOUR_POINT, 1, cv2.LINE_AA)
         _caption(canvas, block, alignment, scale)
@@ -218,6 +226,7 @@ def _legend(canvas: np.ndarray, dilate_extra: tuple[float, ...], hints=None) -> 
         ("крупная огибающая", COLOUR_COARSE, 1.0),
         ("ось строки", COLOUR_AXIS, 1.0),
         ("ось над точкой, запятой", COLOUR_MARK, 1.0),
+        ("хвост последней строки и отсечка", COLOUR_TAIL, 1.0),
         ("края рядов", COLOUR_POINT, 1.0),
         ("межколонник", COLOUR_COLUMN, 1.0),
     ]

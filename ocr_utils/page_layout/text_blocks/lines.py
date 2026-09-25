@@ -14,10 +14,10 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.signal import savgol_filter
 
-from ocr_utils.curved_layout import WORK_DPI
-from ocr_utils.curved_layout.engines.base import EngineLine
+from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks.engines.base import EngineLine
 from ocr_utils.page_layout import mm_to_px, px_to_mm
-from ocr_utils.curved_layout.leaders import inside_spans
+from ocr_utils.page_layout.text_blocks.leaders import inside_spans
 from ocr_utils.scan_markup.curved_lines.fitting import fit_line, smooth_median
 
 # Шаг, с которым ось пересобирается: 1 мм — мельче кегля, но крупнее формы буквы.

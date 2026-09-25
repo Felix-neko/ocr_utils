@@ -7,7 +7,13 @@
 Что во что переходит:
 
 * **растр** (фотографии, печати) — в запрет: краска там не текст, и строк в ней быть не должно;
-* **таблицы и line art** — в рамки-запреты: через их рёбра строка не собирается, а блок делится;
+* **таблицы и line art** — в рамки-запреты: через их рёбра строка не собирается, а блок делится.
+  По запросу (``forbid_figures``) они идут ЕЩЁ И в запрет: внутри рисунка и таблицы строк не ищем
+  вовсе. Запрет буквален — на 1973/06 с.65 детектор line art накрывает заголовок-вензель
+  «ЭКОНОМИЧЕСКОЕ ОБРАЗОВАНИЕ КАДРОВ», и заголовок уходит из разбора вместе с зоной. Поэтому он и
+  не по умолчанию: там, где разбирают САМУ таблицу или схему (ячейки из `from_text_layer`,
+  боковые врезки блок-схем), запрет снимает ровно то, ради чего затевался разбор — замер по
+  стенду `run_layout_hints.sh`: 1967/07 с.73 осей 58 → 1, 1970/06 с.62 — 97 → 8;
 * **повёрнутый текст вне таблиц** — в боковые области. Сторона поворота детектором не
   определяется (см. `page_layout/rotated_text/detector.py`), и для геометрии она не нужна:
   берётся 90, а 270 дал бы те же оси и огибающие.
@@ -20,8 +26,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ocr_utils.curved_layout import WORK_DPI
-from ocr_utils.curved_layout.hints import LayoutHints, OrientedZone
+from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone
 
 # Боковая врезка тоньше этого в миллиметрах бумаги отдельной областью не делается: разбирать в
 # ней нечего, а вырезка в три пикселя только мешает.
@@ -29,7 +35,14 @@ MIN_ZONE_MM = 4.0
 
 
 def hints_of(
-    document, page_index: int, dpi: float = WORK_DPI, surya=None, width: int | None = None, height: int | None = None
+    document,
+    page_index: int,
+    dpi: float = WORK_DPI,
+    surya=None,
+    width: int | None = None,
+    height: int | None = None,
+    variant=None,
+    forbid_figures: bool = False,
 ) -> LayoutHints:
     """Подсказки для одной страницы PDF разбором ``page_layout``.
 
@@ -40,22 +53,38 @@ def hints_of(
         surya: ``SuryaSource`` или ``None`` — тогда разбор по одним пикселям, без модели.
         width, height: Размер рабочей копии; нужны, чтобы область «вся полоса» точно совпала с
             кадром разбора. ``None`` — берётся размер кадра ``page_layout``.
+        variant: Вариант картинки ``page_layout.image.Variant`` — ТОТ ЖЕ, что разбирается. Им
+            задаётся и ключ кэша surya: с ``FR_NOGEO`` на geo-PDF кэш читался бы чужой.
+            ``None`` — ``Variant.FR_NOGEO``.
+        forbid_figures: Запрещать ли текст ВНУТРИ таблиц и line art, а не только резать по их
+            рёбрам. Годится для набора сплошного текста, где таблица и схема — помеха; на
+            табличных полосах гасит сам разбираемый материал.
 
     Returns:
-        :class:`hints.LayoutHints` в пикселях рабочей копии.
+        :class:`hints.LayoutHints` в пикселях рабочей копии. Промах кэша surya не ошибка: разбор
+        повторяется по одним пикселям, без модели.
     """
     from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
     from ocr_utils.page_layout.image import PageImage, Variant
+    from ocr_utils.page_layout.surya.source import SuryaMissing
 
-    image = PageImage.from_pdf_page(document, page_index, Variant.FR_NOGEO)
-    options = LayoutOptions(use_surya=surya is not None and surya.enabled)
-    layout = PageLayout(image, {Find.RASTER, Find.TABLES, Find.LINE_ART, Find.ROTATED_TEXT}, options).process(surya)
+    image = PageImage.from_pdf_page(document, page_index, variant or Variant.FR_NOGEO)
+    finds = {Find.RASTER, Find.TABLES, Find.LINE_ART, Find.ROTATED_TEXT}
+    try:
+        options = LayoutOptions(use_surya=surya is not None and surya.enabled)
+        layout = PageLayout(image, finds, options).process(surya)
+    except SuryaMissing:
+        # Кэша на эту страницу нет, а модели в процессе тоже нет: детекторы умеют и по пикселям.
+        layout = PageLayout(image, finds, LayoutOptions(use_surya=False)).process(None)
     scale = dpi / image.dpi
     page_width = width if width is not None else int(round(image.width * scale))
     page_height = height if height is not None else int(round(image.height * scale))
+    # Рамки таблиц и схем режут сцепку всегда, а гасят краску внутри себя — только по запросу.
+    barriers = [_box(region.box, scale) for region in layout.tables + layout.line_arts]
+    forbidden = [_box(region.box, scale) for region in layout.raster_pics + layout.stamp_suspects]
     return build(
-        forbidden=[_box(region.box, scale) for region in layout.raster_pics + layout.stamp_suspects],
-        barriers=[_box(region.box, scale) for region in layout.tables + layout.line_arts],
+        forbidden=forbidden + (barriers if forbid_figures else []),
+        barriers=barriers,
         sideways=[_box(region.box, scale) for region in layout.rotated_text_not_in_tables_regions],
         width=page_width,
         height=page_height,

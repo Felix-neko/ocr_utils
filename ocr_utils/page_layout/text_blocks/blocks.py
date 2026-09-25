@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 import cv2
@@ -18,11 +18,12 @@ import numpy as np
 from scipy.ndimage import grey_dilation, grey_erosion
 from scipy.signal import savgol_filter
 
-from ocr_utils.curved_layout import RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.columns import DOT_FILL_SHARE, bounds_at, gutter_filled
-from ocr_utils.curved_layout.leaders import inside_spans, spans_at
-from ocr_utils.curved_layout.lines import LineAxis, with_column
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, bounds_at, gutter_filled, inside_gutter
+from ocr_utils.page_layout.text_blocks.leaders import inside_spans, spans_at
+from ocr_utils.page_layout.text_blocks.lines import LineAxis, with_column
 from ocr_utils.page_layout import mm_to_px, px_to_mm
+from ocr_utils.scan_markup.curved_lines.fitting import smooth_median
 
 # Край ряда ищется в пределах колонки с этим припуском: выносные элементы и кавычки вылезают за
 # границу колонки, найденную по профилю.
@@ -154,6 +155,9 @@ BODY_QUANTILE = 0.70
 # Сплошная черта делит блок, если она перекрывает колонку не меньше чем на эту долю ширины:
 # разделитель сноски в журнале — короткая черта примерно в четверть колонки.
 RULE_OVERLAP_SHARE = 0.15
+# Насколько далеко по ординате (в высотах строки) ищутся соседи оси, застрявшей в межколоннике,
+# и насколько близко к концу оси должно кончаться отточие, чтобы считаться её продолжением.
+LEADER_ROW_HEIGHTS = 0.6
 # Обрывок короче MIN_BLOCK_ROWS приклеивается к соседней группе, если разрыв не больше этого.
 MERGE_GAP_PITCHES = 6.0
 # Куски колонки из соседних зон считаются одной колонкой при таком перекрытии по ширине и
@@ -185,6 +189,27 @@ PROFILE_SMOOTH_MM = 6.0
 PROFILE_WINDOW_HEIGHTS = 0.9
 # Насколько кромке позволено выйти за диапазон краёв рядов (мм): дальше — экстраполяция.
 TREND_CLIP_MM = 3.0
+# Хвост последней строки блока (:func:`_tail_of`). Опора — ось предпоследней строки, сглаженная
+# окном ``TAIL_SMOOTH_MM`` (около двух слов: изгиб бумаги остаётся, форма отдельных букв уходит);
+# наклон линии отсечки — по последним ``TAIL_SLOPE_MM`` сглаженной опоры. Межстрочный интервал
+# меряется медианой по последним ``TAIL_OFFSET_GLYPHS`` символам последней строки (крайняя
+# ордината ненадёжна: ось на конце бывает поднырнувшей к засечке). Хвост строится, только если
+# недобор до отсечки не меньше ``TAIL_MIN_GLYPHS`` символа, а интервал между строками лежит в
+# ``TAIL_PITCH_RANGE`` шагов строк блока (иначе ряды не соседние). На первых ``TAIL_BLEND_GLYPHS``
+# символах хвоста интервал плавно переходит от фактического на конце оси к медианному.
+TAIL_SMOOTH_MM = 8.0
+TAIL_SLOPE_MM = 10.0
+TAIL_OFFSET_GLYPHS = 3.0
+TAIL_MIN_GLYPHS = 1.0
+TAIL_PITCH_RANGE = (0.5, 2.5)
+TAIL_BLEND_GLYPHS = 1.0
+# Хвост — добивка ПУСТОГО места справа от короткой строки. Если в полосе ``±TAIL_INK_BAND_HEIGHTS``
+# высоты строки вокруг хвоста (дальше одного символа от конца строки) краска стоит больше чем под
+# ``TAIL_MAX_INK_SHARE`` узлов, справа не пустота, а чужой текст, и хвост не строится. Замер по
+# 84 хвостам валидации: 77 без краски вовсе; 0.07–0.17 — своё (отточие строки, «__ г.» вне оси);
+# 0.40–0.89 — чужое (цифры соседней графы, сноска 1969/11 с.69, разрезанная на два блока).
+TAIL_INK_BAND_HEIGHTS = 0.4
+TAIL_MAX_INK_SHARE = 0.3
 
 
 @dataclass(frozen=True)
@@ -203,6 +228,13 @@ class Row:
     # верхняя и нижняя кромки блока — они повторяют изгиб строки и не режут её.
     top_edge: np.ndarray | None = None
     bottom_edge: np.ndarray | None = None
+    # Хвост последней строки блока ``(N, 2)``: ось, достроенная от конца настоящей оси до линии
+    # отсечки по изгибу предыдущей строки (:func:`_tail_of`). Виртуальный — краски под ним нет;
+    # учитывается только кромкой-ПОЛОСОЙ, в осях страницы и мерах выключки его нет.
+    tail: np.ndarray | None = None
+    # Отрезок линии отсечки ``(2, 2)`` — перпендикуляр к оси предыдущей строки в её конце; только
+    # для оверлея и JSON.
+    cut: np.ndarray | None = None
 
     @property
     def axis(self) -> LineAxis:
@@ -1056,26 +1088,106 @@ def _smooth(values: np.ndarray, window_nodes: int) -> np.ndarray:
     return savgol_filter(values, window_length=window, polyorder=2, mode="nearest")
 
 
-def _row_band(row: Row, margin: float) -> np.ndarray | None:
-    """Замкнутый контур КРАСКИ одного ряда: верхний профиль слева направо, нижний — обратно.
+def _row_axis(row: Row, with_tail: bool = False) -> np.ndarray | None:
+    """Точки осей ряда, слитые в одну кривую слева направо.
 
-    По этому контуру проверяется и чинится главное требование к границе блока: в неё должны
-    попадать все буквы всех его рядов. Профили краски (:func:`edge_profiles`) идут вдоль оси
-    строки и лежат снаружи всех её символов, так что контур ряда — это ровно его буквы.
+    Args:
+        row: Ряд блока.
+        with_tail: Дописать ли виртуальный хвост ряда (:attr:`Row.tail`), если он есть. Хвост
+            нужен кромке-ПОЛОСЕ, но не мерам по краске: под ним краски нет.
+
+    Returns:
+        Кривая ``(N, 2)``; ``None``, если осей у ряда нет.
+    """
+    if not row.axes:
+        return None
+    parts = [np.asarray(axis.points, dtype=np.float64) for axis in row.axes]
+    if with_tail and row.tail is not None and len(row.tail):
+        parts.append(np.asarray(row.tail, dtype=np.float64))
+    points = np.vstack(parts)
+    return points[np.argsort(points[:, 0])]
+
+
+def _row_span(row: Row, cap: CapKind) -> tuple[float, float]:
+    """Насколько широк ряд для кромки вида ``cap`` (пиксели рабочей копии).
+
+    Края по краске (``row.x0``/``row.x1``) ищет :func:`ink_edge` по заполненности столбца, и
+    тонкие элементы он отбрасывает: у заголовка-вензеля 1973/11 с.79 край ряда 163 при оси от
+    111, у 1973/06 с.65 — 220 при оси от 170. Ось через них проходит, поэтому у кромки-ПОЛОСЫ,
+    которая вокруг оси и строится, ряд считается широким до концов САМОЙ ОСИ; у кромки по краске
+    он по-прежнему кончается там, где кончается краска.
+
+    Args:
+        row: Ряд блока.
+        cap: Вид кромки.
+
+    Returns:
+        Пара ``(левый край, правый край)``.
+    """
+    if cap is not CapKind.BODY:
+        return row.x0, row.x1
+    # С хвостом: последний ряд блока широк до линии отсечки, и правая кромка его обводит.
+    points = _row_axis(row, with_tail=True)
+    if points is None:
+        return row.x0, row.x1
+    return min(row.x0, float(points[0, 0])), max(row.x1, float(points[-1, 0]))
+
+
+def _body_offset(row: Row, direction: float) -> float:
+    """На сколько кромка-ПОЛОСА отстоит от оси ряда в сторону ``direction`` (пиксели копии).
+
+    Квантиль ``BODY_QUANTILE`` отклонения профиля краски от оси: кромка проходит снаружи четырёх
+    столбцов краски из пяти, а выносные элементы (четверть-треть столбцов) остаются снаружи — в
+    этом и смысл полосы. Профиля нет (ряд пришёл не из :func:`rows_of`) — полвысоты ряда.
+
+    Args:
+        row: Ряд блока.
+        direction: ``-1`` — вверх (к верхней кромке), ``+1`` — вниз.
+
+    Returns:
+        Отступ в пикселях рабочей копии, неотрицательный.
+    """
+    profile = row.top_edge if direction < 0 else row.bottom_edge
+    points = _row_axis(row)
+    if profile is None or len(profile) < 2 or points is None:
+        return row.height / 2.0
+    own = np.interp(profile[:, 0], points[:, 0], points[:, 1])
+    return float(np.quantile(np.maximum(direction * (profile[:, 1] - own), 0.0), BODY_QUANTILE))
+
+
+def _row_band(row: Row, margin: float, cap: CapKind = CapKind.INK) -> np.ndarray | None:
+    """Замкнутый контур одного ряда: верхняя граница слева направо, нижняя — обратно.
+
+    По этому контуру проверяется и чинится главное требование к границе блока. Что именно должно
+    попасть внутрь, зависит от вида кромки:
+
+    * ``CapKind.INK`` — вся КРАСКА ряда. Профили краски (:func:`edge_profiles`) идут вдоль оси
+      строки и лежат снаружи всех её символов, так что контур ряда — это ровно его буквы;
+    * ``CapKind.BODY`` — ПОЛОСА вокруг оси: ось ряда, отодвинутая на :func:`_body_offset`, ровно
+      та же величина, которой отмеряются верх и низ блока (:func:`_cap_body`). Выносные элементы
+      в неё не входят по определению полосы, и подмешивать их значило бы вернуть вихляние.
 
     Args:
         row: Ряд блока.
         margin: Поле наружу (пиксели рабочей копии) по обеим осям.
+        cap: Вид кромки — по краске или полосой вокруг оси.
 
     Returns:
         Контур ``(N, 2)`` или ``None``, если у ряда нет ни профилей краски, ни осей.
     """
     top, bottom = row.top_edge, row.bottom_edge
-    if top is None or bottom is None or len(top) < 2 or len(bottom) < 2:
-        if not row.axes:
+    if cap is CapKind.BODY:
+        # Полоса идёт и вдоль хвоста: это «виртуальная область добивки» короткой последней строки,
+        # и через :func:`_swallow_rows` граница блока обязана её обвести.
+        points = _row_axis(row, with_tail=True)
+        if points is None:
             return None
-        points = np.vstack([np.asarray(axis.points, dtype=np.float64) for axis in row.axes])
-        points = points[np.argsort(points[:, 0])]
+        top = np.column_stack([points[:, 0], points[:, 1] - _body_offset(row, -1.0)])
+        bottom = np.column_stack([points[:, 0], points[:, 1] + _body_offset(row, +1.0)])
+    elif top is None or bottom is None or len(top) < 2 or len(bottom) < 2:
+        points = _row_axis(row)
+        if points is None:
+            return None
         top = np.column_stack([points[:, 0], points[:, 1] - row.height / 2.0])
         bottom = np.column_stack([points[:, 0], points[:, 1] + row.height / 2.0])
     upper = np.column_stack([top[:, 0], top[:, 1] - margin])
@@ -1087,8 +1199,8 @@ def _row_band(row: Row, margin: float) -> np.ndarray | None:
     return np.vstack([upper, lower[::-1]])
 
 
-def _swallow_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> np.ndarray:
-    """Дотянуть контур блока туда, где он режет краску своих же рядов.
+def _swallow_rows(polygon: np.ndarray, rows: list[Row], dpi: float, cap: CapKind = CapKind.INK) -> np.ndarray:
+    """Дотянуть контур блока туда, где он режет ленты своих же рядов.
 
     Гладкая рамка блока строится в осях «ордината → края»: боковые кромки — функции ``x(y)``, а
     верх и низ — профили краски крайних рядов, натянутые между кромками. Это верно, пока ряд
@@ -1098,26 +1210,42 @@ def _swallow_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> np.ndarra
     обязана обрушиться с x = 903 до x = 612 за восемь пикселей высоты — эта диагональ и срезала
     «Соч., т. 25,» (конец оси оказался на 17.6 px снаружи).
 
-    Чинится не рамка, а контур: к нему подмешивается краска рядов. Блоки, где резать нечего, не
-    меняются вовсе — проверка идёт по растру рамки, и объединение делается, только если хоть одна
-    точка ряда оказалась снаружи.
+    Чинится не рамка, а контур: к нему подмешиваются ленты рядов (:func:`_row_band`) — краска у
+    кромки ПО КРАСКЕ и полоса вокруг оси у кромки-ПОЛОСЫ.
+
+    **Обещания у двух кромок разные, поэтому и проверяются они по-разному.** Кромка по краске
+    обещает охват всех БУКВ — её проверка идёт по самой ленте. Полоса вокруг оси букв не обещает
+    (выносные элементы остаются снаружи по определению), она обещает охват своих ОСЕЙ — её
+    проверка идёт по точкам осей. Иначе объединение срабатывало бы от пиксельного выхода края
+    ленты за сглаженную боковую кромку, и растровый контур получали бы 94 % блоков вместо 2 %:
+    гладкая огибающая превращалась бы в лесенку на ровном месте.
+
+    Блоки, где резать нечего, не меняются вовсе.
 
     Args:
         polygon: Контур блока ``(N, 2)``, собранный обходом четырёх кромок.
         rows: Ряды блока.
         dpi: Разрешение рабочей копии.
+        cap: Вид кромки — им задаётся и что проверяется, и чем чинится.
 
     Returns:
-        Тот же контур, если он уже охватывает все ряды, иначе объединённый с их краской.
+        Тот же контур, если он уже охватывает обещанное, иначе объединённый с лентами рядов.
     """
     if polygon is None or len(polygon) < 3 or not rows:
         return polygon
     margin = mm_to_px(OUTWARD_MARGIN_MM, dpi)
-    bands = [band for band in (_row_band(row, margin) for row in rows) if band is not None and len(band) >= 3]
+    bands = [band for band in (_row_band(row, margin, cap) for row in rows) if band is not None and len(band) >= 3]
     if not bands:
         return polygon
+    probes = (
+        bands
+        if cap is not CapKind.BODY
+        else [item for item in (_row_axis(row, with_tail=True) for row in rows) if item is not None]
+    )
+    if not probes:
+        return polygon
     pad = mm_to_px(RASTER_PAD_MM, dpi)
-    points = np.vstack([polygon, *bands])
+    points = np.vstack([polygon, *bands, *probes])
     origin = np.floor(points.min(axis=0)) - pad
     size = np.ceil(points.max(axis=0) + pad - origin).astype(int)[::-1]
     if size.min() <= 2:
@@ -1127,7 +1255,8 @@ def _swallow_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> np.ndarra
     # Проверка по растру, а не ``pointPolygonTest`` по каждой точке: точек в профилях тысячи, а
     # индексация массива стоит копейки.
     shifted = [np.round(band - origin).astype(np.int32) for band in bands]
-    if all(bool(mask[band[:, 1], band[:, 0]].all()) for band in shifted):
+    checks = shifted if cap is not CapKind.BODY else [np.round(item - origin).astype(np.int32) for item in probes]
+    if all(bool(mask[item[:, 1], item[:, 0]].all()) for item in checks):
         return polygon
     cv2.fillPoly(mask, shifted, 255)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -1140,7 +1269,7 @@ def _swallow_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> np.ndarra
     if simple.shape[0] >= 3:
         check = np.zeros(tuple(size), dtype=np.uint8)
         cv2.fillPoly(check, [simple], 255)
-        if all(bool(check[band[:, 1], band[:, 0]].all()) for band in shifted):
+        if all(bool(check[item[:, 1], item[:, 0]].all()) for item in checks):
             contour = simple
     if contour.shape[0] < 3:
         return polygon
@@ -1161,16 +1290,16 @@ def _single_row_envelope(
     верх и низ — сама ось, поднятая и опущенная на полвысоты.
     """
     make_cap = _cap_body if cap is CapKind.BODY else _cap
-    top = make_cap(row, row.x0, row.x1, -1.0)
-    bottom = make_cap(row, row.x0, row.x1, 1.0)
+    x0, x1 = _row_span(row, cap)
+    top = make_cap(row, x0, x1, -1.0)
+    bottom = make_cap(row, x0, x1, 1.0)
     # Боковые кромки соединяют верх и низ ПО КРАСКЕ, а не отмеряют полвысоты ряда от оси: у
     # логотипа рубрики высота ряда 121 px при 76 px фактической краски, и из контура торчали
     # вертикальные «усы» на полсантиметра (1973/06 с.65).
-    left = np.array([[row.x0, top[0, 1]], [row.x0, bottom[0, 1]]])
-    right = np.array([[row.x1, top[-1, 1]], [row.x1, bottom[-1, 1]]])
+    left = np.array([[x0, top[0, 1]], [x0, bottom[0, 1]]])
+    right = np.array([[x1, top[-1, 1]], [x1, bottom[-1, 1]]])
     polygon = np.vstack([left, bottom, right[::-1], top[::-1]])
-    if cap is CapKind.INK:
-        polygon = _swallow_rows(polygon, [row], dpi)
+    polygon = _swallow_rows(polygon, [row], dpi, cap)
     return BlockEnvelope(
         left=left,
         right=right,
@@ -1202,8 +1331,9 @@ def envelope_of(
     if len(rows) == 1:
         return _single_row_envelope(rows[0], smooth_pitches, dpi, glyph, dilate, cap)
     ys = np.array([row.y for row in rows], dtype=np.float64)
-    xs_left = np.array([row.x0 for row in rows], dtype=np.float64)
-    xs_right = np.array([row.x1 for row in rows], dtype=np.float64)
+    spans = [_row_span(row, cap) for row in rows]
+    xs_left = np.array([span[0] for span in spans], dtype=np.float64)
+    xs_right = np.array([span[1] for span in spans], dtype=np.float64)
     step = mm_to_px(GRID_STEP_MM, dpi)
     top_row, bottom_row = rows[0], rows[-1]
     y_top = top_row.y - top_row.height / 2.0
@@ -1225,10 +1355,10 @@ def envelope_of(
     left_curve = _trim_to_caps(np.column_stack([left, grid]), top_curve, bottom_curve)
     right_curve = _trim_to_caps(np.column_stack([right, grid]), top_curve, bottom_curve)
     polygon = np.vstack([left_curve, bottom_curve, right_curve[::-1], top_curve[::-1]])
-    # Охват краски рядов обещает только кромка ПО КРАСКЕ: полоса вокруг оси выносные элементы не
-    # охватывает по определению, и подмешивать их в неё значило бы вернуть то самое вихляние.
-    if cap is CapKind.INK:
-        polygon = _swallow_rows(polygon, rows, dpi)
+    # Контур дотягивается до лент своих рядов — каждый вид кромки до своей: кромка ПО КРАСКЕ до
+    # букв, полоса вокруг оси до самих осей. Краску в полосу подмешивать нельзя: выносные
+    # элементы она не охватывает по определению, и это вернуло бы то самое вихляние.
+    polygon = _swallow_rows(polygon, rows, dpi, cap)
     return BlockEnvelope(
         left=left_curve,
         right=right_curve,
@@ -1390,9 +1520,10 @@ def _cap_body(row: Row, x_left: float, x_right: float, direction: float) -> np.n
     амплитудой в полвысоты строчной. Полоса вокруг оси этого не делает: она отстоит от оси на
     ОДНУ величину по всей длине ряда и потому гладка ровно настолько, насколько гладка ось.
 
-    Отступ — квантиль ``BODY_QUANTILE`` отклонения профиля краски от оси: кромка проходит снаружи
-    четырёх столбцов краски из пяти, а выносные элементы (четверть-треть столбцов) остаются
-    снаружи — в этом и смысл. Максимум брать нельзя: это и была бы кромка по краске.
+    Отступ (:func:`_body_offset`) — квантиль ``BODY_QUANTILE`` отклонения профиля краски от оси:
+    кромка проходит снаружи четырёх столбцов краски из пяти, а выносные элементы (четверть-треть
+    столбцов) остаются снаружи — в этом и смысл. Максимум брать нельзя: это и была бы кромка по
+    краске.
 
     Args:
         row: Крайний ряд блока.
@@ -1402,18 +1533,13 @@ def _cap_body(row: Row, x_left: float, x_right: float, direction: float) -> np.n
     Returns:
         Кривая ``(N, 2)`` слева направо.
     """
-    profile = row.top_edge if direction < 0 else row.bottom_edge
-    points = np.vstack([np.asarray(axis.points, dtype=np.float64) for axis in row.axes])
-    points = points[np.argsort(points[:, 0])]
+    # С хвостом: правее конца короткой последней строки низ блока идёт по достроенной оси, то
+    # есть по изгибу предыдущей строки, а не горизонталью :func:`_extend_ends`.
+    points = _row_axis(row, with_tail=True)
     dpi = row.axis.dpi
     xs = np.linspace(x_left, x_right, num=max(2, int(abs(x_right - x_left) / 4) + 2))
     axis_ys = _extend_ends(xs, np.interp(xs, points[:, 0], points[:, 1]), points, dpi)
-    if profile is None or len(profile) < 2:
-        offset = row.height / 2.0  # профиля нет (ряд пришёл не из ``rows_of``) — полвысоты ряда
-    else:
-        own = np.interp(profile[:, 0], points[:, 0], points[:, 1])
-        away = direction * (profile[:, 1] - own)
-        offset = float(np.quantile(np.maximum(away, 0.0), BODY_QUANTILE))
+    offset = _body_offset(row, direction)
     margin = direction * mm_to_px(OUTWARD_MARGIN_MM, dpi)
     return np.column_stack([xs, axis_ys + direction * offset + margin])
 
@@ -1450,6 +1576,163 @@ def _extend_ends(xs: np.ndarray, ys: np.ndarray, profile: np.ndarray, dpi: float
         distance = np.clip(xs[mask] - anchor[0], -reach, reach)
         out[mask] = anchor[1] + np.clip(slope * distance, -limit, limit)
     return out
+
+
+def _smoothed_axis(points: np.ndarray, dpi: float) -> tuple[np.ndarray, np.ndarray]:
+    """Ось, пересобранная на равномерную сетку ``GRID_STEP_MM`` и сильно сглаженная.
+
+    Оси ряда из нескольких обрывков идут с неравным шагом, а окна медианы и Савицкого–Голея
+    считаются в узлах, поэтому сначала пересборка, потом сглаживание окном ``TAIL_SMOOTH_MM``.
+
+    Args:
+        points: Точки оси ``(N, 2)`` слева направо, пиксели рабочей копии.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``(xs, ys)`` — узлы сетки и сглаженные ординаты в них.
+    """
+    step = mm_to_px(GRID_STEP_MM, dpi)
+    # Последний узел — ровно конец оси: сетка, вылезающая за него, сдвигала бы точку отсечки.
+    xs = np.arange(points[0, 0], points[-1, 0], step)
+    xs = np.append(xs, points[-1, 0]) if xs.size == 0 or points[-1, 0] - xs[-1] > 1e-6 else xs
+    ys = np.interp(xs, points[:, 0], points[:, 1])
+    nodes = max(3, int(round(TAIL_SMOOTH_MM / GRID_STEP_MM)))
+    return xs, _smooth(smooth_median(ys, nodes), nodes)
+
+
+def _tail_of(
+    last: Row, reference: Row, pitch: float, glyph_w: float, dpi: float, ink: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Хвост короткой последней строки: её ось, достроенная до линии отсечки по изгибу опоры.
+
+    Последняя строка абзаца (и блока) даже при выключке по формату до правого края не доходит, и
+    правее её конца у нижней кромки блока нет опоры: :func:`_extend_ends` продлевает её по наклону
+    конца строки не дальше ``END_EXTEND_MM``, а дальше ведёт горизонталью — изгиб бумаги кромка
+    не повторяет (1976/09 с.92: предпоследняя строка выгнута аркой, последняя кончается на трети
+    колонки). Хвост даёт кромке эту опору:
+
+    1. опора — ось предыдущей строки, сильно сглаженная (:func:`_smoothed_axis`);
+    2. линия отсечки — перпендикуляр к сглаженной опоре в её правом конце ``P``;
+    3. межстрочный интервал ``d`` — медиана расхождения последней строки с опорой по её
+       последним ``TAIL_OFFSET_GLYPHS`` символам;
+    4. хвост — опора, сдвинутая на ``d``, от конца оси последней строки до линии отсечки. Ось
+       доходит до края краски (замер на 1976/09 с.92: медиана −1.5 px, p90 +0.5), поэтому отступ
+       за отсечку на полсимвола не нужен.
+
+    Args:
+        last: Последний ряд блока.
+        reference: Ряд над ним (опора).
+        pitch: Шаг строк блока, пиксели рабочей копии.
+        glyph_w: Средняя ширина символа блока, пиксели рабочей копии.
+        dpi: Разрешение рабочей копии.
+        ink: Краска текста рендера ``RENDER_DPI``; ``None`` — не проверять, пусто ли под хвостом.
+
+    Returns:
+        ``(tail, cut)``: хвост ``(N, 2)`` слева направо без конца настоящей оси и отрезок линии
+        отсечки ``(2, 2)``; ``None``, если достраивать нечего или ряды не соседние.
+    """
+    own = _row_axis(last)
+    base = _row_axis(reference)
+    if own is None or base is None or len(own) < 2 or len(base) < 3 or pitch <= 0 or glyph_w <= 0:
+        return None
+    ref_xs, ref_ys = _smoothed_axis(base, dpi)
+    end_x, end_y = float(ref_xs[-1]), float(ref_ys[-1])
+    own_end = float(own[-1, 0])
+    if end_x <= own_end:
+        return None  # опора кончается левее последней строки — дотягивать не до чего
+    # Наклон опоры у её конца — МНК по последним TAIL_SLOPE_MM сглаженной оси.
+    near = ref_xs >= end_x - mm_to_px(TAIL_SLOPE_MM, dpi)
+    slope = float(np.polyfit(ref_xs[near], ref_ys[near], 1)[0]) if near.sum() >= 2 else 0.0
+
+    offset_window = TAIL_OFFSET_GLYPHS * glyph_w
+    # Межстрочный интервал по концу последней строки: только там, где под ней есть опора.
+    window = (own[:, 0] >= own_end - offset_window) & (own[:, 0] >= ref_xs[0])
+    if not window.any():
+        return None
+    gaps = own[window, 1] - np.interp(own[window, 0], ref_xs, ref_ys)
+    gap = float(np.median(gaps))
+    if not TAIL_PITCH_RANGE[0] * pitch <= gap <= TAIL_PITCH_RANGE[1] * pitch:
+        return None  # ряды не соседние по высоте: переносить изгиб не с чего
+    # Линия отсечки: перпендикуляр к опоре в P = (end_x, end_y), то есть точки с
+    # (x − end_x) + slope·(y − end_y) = 0. На высоте хвоста (y ≈ end_y + gap) она проходит через
+    # x = end_x − slope·gap.
+    cut_x = end_x - slope * gap
+    if cut_x - own_end < TAIL_MIN_GLYPHS * glyph_w:
+        return None  # строка почти доходит до отсечки — хвост был бы шумом
+    step = mm_to_px(GRID_STEP_MM, dpi)
+    xs = np.arange(own_end + step, cut_x, step)
+    xs = np.append(xs, cut_x)
+    # Опора за своим концом (отсечка правее P при наклоне вверх) продолжается по наклону конца.
+    base_ys = np.where(xs <= end_x, np.interp(xs, ref_xs, ref_ys), end_y + slope * (xs - end_x))
+    # Интервал плавно переходит от фактического на конце оси к медианному: без ступеньки.
+    start_gap = float(own[-1, 1]) - float(np.interp(own_end, ref_xs, ref_ys))
+    weight = np.clip((xs - own_end) / max(TAIL_BLEND_GLYPHS * glyph_w, 1e-6), 0.0, 1.0)
+    tail = np.column_stack([xs, base_ys + (1.0 - weight) * start_gap + weight * gap])
+    if ink is not None and _tail_ink_share(tail, own_end + glyph_w, last.height, ink, dpi) > TAIL_MAX_INK_SHARE:
+        return None  # справа от строки не пустота, а чужой текст
+    # Отрезок отсечки для оверлея: от полушага над опорой до полушага под хвостом, вдоль
+    # направления (−slope, 1), перпендикулярного опоре.
+    direction = np.array([-slope, 1.0]) / math.hypot(slope, 1.0)
+    anchor = np.array([end_x, end_y])
+    cut = np.vstack([anchor - 0.5 * pitch * direction, anchor + (gap + 0.5 * pitch) * direction])
+    return tail, cut
+
+
+def _tail_ink_share(tail: np.ndarray, x_from: float, height: float, ink: np.ndarray, dpi: float) -> float:
+    """Доля узлов хвоста правее ``x_from``, в полосе вокруг которых есть краска текста.
+
+    Args:
+        tail: Хвост ``(N, 2)``, пиксели рабочей копии.
+        x_from: С какой абсциссы считать: ближе одного символа к концу строки стоит краска её
+            последней буквы, и она не в счёт.
+        height: Высота строки, пиксели рабочей копии; полоса — ``±TAIL_INK_BAND_HEIGHTS`` её.
+        ink: Краска текста рендера ``RENDER_DPI``.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Доля от 0 до 1; 0, если узлов правее ``x_from`` нет.
+    """
+    far = tail[tail[:, 0] > x_from]
+    if not len(far):
+        return 0.0
+    k = RENDER_DPI / dpi
+    half = TAIL_INK_BAND_HEIGHTS * height
+    rows, cols = ink.shape
+    hits = 0
+    for x, y in far:
+        # Столбцы рендера под узлом (узел рабочей копии — k столбцов рендера) в полосе ±half.
+        y0, y1 = max(0, int((y - half) * k)), min(rows, int((y + half) * k))
+        x0, x1 = max(0, int(x * k)), min(cols, int((x + 1) * k))
+        if y1 > y0 and x1 > x0 and int((ink[y0:y1, x0:x1] > 0).sum()) >= EDGE_MIN_INK_PX:
+            hits += 1
+    return hits / len(far)
+
+
+def _with_tail(group: list[Row], pitch: float, glyph_w: float, dpi: float, ink: np.ndarray | None = None) -> list[Row]:
+    """Группа рядов блока, у последнего ряда которой достроен хвост (если его есть смысл строить).
+
+    Опора — всегда ПРЕДПОСЛЕДНИЙ ряд, даже если он сам короткий (конец абзаца, за которым идёт
+    абзац в одну строку): так решил пользователь. На перспективу можно искать ближайший ПОЛНЫЙ
+    ряд выше, но какой из них полный, до построения границы блока не известно — её правая кромка
+    как раз и строится после этого шага.
+
+    Args:
+        group: Ряды блока сверху вниз.
+        pitch: Шаг строк блока, пиксели рабочей копии.
+        glyph_w: Средняя ширина символа блока, пиксели рабочей копии.
+        dpi: Разрешение рабочей копии.
+        ink: Краска текста рендера ``RENDER_DPI`` — по ней хвост не пускается через чужой текст.
+
+    Returns:
+        Новый список рядов: последний заменён копией с хвостом; иначе тот же список.
+    """
+    if len(group) < 2:
+        return group
+    found = _tail_of(group[-1], group[-2], pitch, glyph_w, dpi, ink)
+    if found is None:
+        return group
+    tail, cut = found
+    return [*group[:-1], replace(group[-1], tail=tail, cut=cut)]
 
 
 def blocks_of(
@@ -1491,10 +1774,9 @@ def blocks_of(
     placed: set[tuple[int, int, int]] = set()
     for zone in zones:
         own_zone = [axis for axis in axes if zone.y0 <= axis.cy < zone.y1]
+        homes = _column_homes([axis for axis in own_zone if not axis.cross], zone, gutters, width, leaders)
         for column, span in enumerate(zone.columns):
-            own = [
-                with_column(axis, column) for axis in own_zone if not axis.cross and _inside(axis, span, gutters, width)
-            ]
+            own = [with_column(axis, column) for axis in own_zone if homes.get(_axis_key(axis)) == column]
             if not own:
                 continue
             rows = rows_of(own, ink, span, dpi, gutters=gutters, width=width, pad=pad, leaders=leaders)
@@ -1563,6 +1845,9 @@ def blocks_of(
             else:
                 own_height = float(np.median([row.height for row in group]))
                 glyph = (own_height * FALLBACK_ASPECT, own_height * FALLBACK_HEIGHT)
+            # Короткая последняя строка достраивается до линии отсечки по изгибу предпоследней,
+            # чтобы низ блока правее её конца повторял изгиб бумаги (1976/09 с.92).
+            group = _with_tail(group, pitch, glyph[0], dpi, ink)
             blocks.append(
                 TextBlock(
                     column=column,
@@ -1716,13 +2001,108 @@ def _axis_key(axis: LineAxis) -> tuple[int, int, int]:
     return (round(axis.cy), round(axis.x0), round(axis.x1))
 
 
+def _text_span(axis: LineAxis, leaders: list | None) -> tuple[float, float]:
+    """Где у оси кончается ТЕКСТ: её концы, обрезанные по отточию, которое ось продолжает.
+
+    Отточие («. . . . .») тянется от текста до чужой графы и входит в ось (``extend_with_leaders``),
+    поэтому по концам оси расстояние до соседа врёт: у строки «Кабели дальней связи . . . . .»
+    (1971/10 с.93) текст кончается на x ≈ 330, а ось — на 608. Для вопроса «чей это обрывок»
+    считается расстояние именно до текста.
+
+    Args:
+        axis: Ось строки.
+        leaders: Отточия страницы (``leaders.Leader``) или ``None``.
+
+    Returns:
+        Пара ``(начало текста, конец текста)``; без отточий — концы самой оси.
+    """
+    x0, x1 = axis.x0, axis.x1
+    if not leaders:
+        return x0, x1
+    reach = LEADER_ROW_HEIGHTS * max(axis.height, 1.0)
+    for leader in leaders:
+        if abs(leader.y - axis.cy) > reach or leader.x1 < x0 or leader.x0 > x1:
+            continue
+        if leader.x1 >= x1 - reach:
+            x1 = min(x1, leader.x0)
+        if leader.x0 <= x0 + reach:
+            x0 = max(x0, leader.x1)
+    return (x0, x1) if x1 > x0 else (axis.x0, axis.x1)
+
+
+def _column_homes(
+    axes: list[LineAxis], zone, gutters: list, width: int, leaders: list | None
+) -> dict[tuple[int, int, int], int]:
+    """В какую колонку зоны идёт каждая её ось.
+
+    Обычные оси раскладываются по колонкам проверкой :func:`_inside`. Остаются ОСИРОТЕВШИЕ —
+    те, что лежат целиком внутри межколонника (``columns.inside_gutter``) и потому не
+    принадлежат ни одной колонке по геометрии. Так выглядит начало строки соседней графы,
+    заехавшее в межколонник: на 1971/10 с.93 межколонник 605..726, а строка правой графы разобрана
+    осями 641..665, 681..705 и 719..863 — первые две целиком в пустоте.
+
+    Сирота уходит в колонку того соседа по высоте, чей ТЕКСТ ближе (:func:`_text_span`): отточия
+    в счёт не идут, иначе «425» приписывалось бы к «Кабели дальней связи» — до конца его отточий
+    33 px, а до конца самого текста 311 при 54 до «825, 1000 м». Разрешение повторяется, пока
+    что-то меняется: сироты цепляются цепочкой друг за друга.
+
+    Args:
+        axes: Оси зоны (без набранных ЧЕРЕЗ межколонник — у них своя судьба).
+        zone: Зона вёрстки (``columns.Zone``).
+        gutters: Локальные межколонники-ломаные.
+        width: Ширина рабочей копии.
+        leaders: Отточия страницы.
+
+    Returns:
+        Отображение «ключ оси → номер колонки зоны»; оси без колонки в нём отсутствуют.
+    """
+    homes: dict[tuple[int, int, int], int] = {}
+    orphans: list[LineAxis] = []
+    for axis in axes:
+        column = next((index for index, span in enumerate(zone.columns) if _inside(axis, span, gutters, width)), None)
+        if column is not None:
+            homes[_axis_key(axis)] = column
+        elif inside_gutter(gutters, axis.x0, axis.x1, axis.cy):
+            orphans.append(axis)
+    spans = {_axis_key(axis): _text_span(axis, leaders) for axis in axes}
+    while orphans:
+        moved: list[LineAxis] = []
+        for axis in orphans:
+            best, best_gap = None, None
+            for other in axes:
+                home = homes.get(_axis_key(other))
+                if home is None or other is axis:
+                    continue
+                if abs(other.cy - axis.cy) > LEADER_ROW_HEIGHTS * max(axis.height, other.height, 1.0):
+                    continue
+                x0, x1 = spans[_axis_key(other)]
+                gap = max(x0 - axis.x1, axis.x0 - x1, 0.0)
+                if best_gap is None or gap < best_gap:
+                    best, best_gap = home, gap
+            if best is None:
+                moved.append(axis)
+            else:
+                homes[_axis_key(axis)] = best
+        if len(moved) == len(orphans):
+            break
+        orphans = moved
+    return homes
+
+
 def _inside(axis: LineAxis, span: tuple[int, int], gutters: list, width: int) -> bool:
     """Ось лежит в колонке зоны — по границам колонки НА ВЫСОТЕ ЭТОЙ ОСИ.
 
     Границы берутся у межколонников-ломаных (:func:`columns.bounds_at`), а не у прямоугольника
     зоны: на трапеции колонка уезжает вбок, и прямая граница либо режет её, либо цепляет чужое
     (номер полосы, уехавший под блок).
+
+    Ось, лежащая ЦЕЛИКОМ внутри межколонника, не в колонке ни по какой границе: ``bounds_at``
+    сравнивает межколонник с серединой оси и такую ось попросту не ограничивает — границами
+    становится вся страница, и ось забирала первая же колонка слева. Её разбирает
+    :func:`_column_homes`.
     """
+    if inside_gutter(gutters, axis.x0, axis.x1, axis.cy):
+        return False
     left, right = bounds_at(gutters, axis.x0, axis.x1, axis.cy, width)
     # Колонка зоны и локальные границы должны быть той же колонкой: сравниваем по перекрытию.
     if min(right, span[1]) - max(left, span[0]) < 0.5 * (span[1] - span[0]):

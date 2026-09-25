@@ -39,6 +39,9 @@ HALF_ROW_SHARE = 0.7
 # этой доли межстрочного шага. Соседние строки разбора стоят на шаге друг от друга; перескок
 # подводит ось вплотную к соседней, даже когда формально её не пересекает.
 CONVERGE_SHARE = 0.45
+# На столько пикселей оси позволено выйти за контур своего блока: пиксель — это округление при
+# растеризации контура, а не настоящий выход.
+ESCAPE_MARGIN_PX = 1.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,8 @@ class PageMetrics:
     converging: int
     jumping: int
     outside: int
+    escaping: int
+    escaping_px: float
     half_rows: int
     rows: int
     blocks: int
@@ -62,8 +67,8 @@ class PageMetrics:
         """Строка markdown-таблицы."""
         return (
             f"| {self.key} | {self.axes} | {self.crossings} | {self.converging} | {self.jumping} | {self.outside} | "
-            f"{self.half_rows}/{self.rows} | {self.blocks} | {self.overlap_px2:.0f} | "
-            f"{self.ink_share:.1%} | {self.seconds:.1f} |"
+            f"{self.escaping} ({self.escaping_px:.0f}) | {self.half_rows}/{self.rows} | {self.blocks} | "
+            f"{self.overlap_px2:.0f} | {self.ink_share:.1%} | {self.seconds:.1f} |"
         )
 
 
@@ -176,6 +181,39 @@ def outside_of(axes: list[np.ndarray], polygons: list[np.ndarray]) -> int:
     return count
 
 
+def escaping_of(axes: list[np.ndarray], polygons: list[np.ndarray]) -> tuple[int, float]:
+    """Сколько осей ВЫХОДИТ ЗА КОНТУР своего блока и насколько далеко худшая (пиксели копии).
+
+    ``outside_of`` спрашивает только «попала ли середина оси хоть в какой-нибудь блок»; здесь
+    вопрос строже и отвечает ровно тому, что видно на оверлее: зелёная линия не должна вылезать
+    за синюю рамку своего блока. Свой блок определяется по середине оси — так же, как там.
+
+    Args:
+        axes: Точки осей полосы.
+        polygons: Контуры блоков.
+
+    Returns:
+        Пара ``(сколько осей вылезло, на сколько пикселей худшая)``.
+    """
+    hulls = [np.asarray(polygon, dtype=np.float32).reshape(-1, 1, 2) for polygon in polygons if len(polygon) >= 3]
+    count, worst = 0, 0.0
+    for axis in axes:
+        if axis.shape[0] == 0:
+            continue
+        middle = axis[axis.shape[0] // 2]
+        own = next(
+            (hull for hull in hulls if cv2.pointPolygonTest(hull, (float(middle[0]), float(middle[1])), False) >= 0),
+            None,
+        )
+        if own is None:
+            continue
+        away = -min(cv2.pointPolygonTest(own, (float(x), float(y)), True) for x, y in axis)
+        if away > ESCAPE_MARGIN_PX:
+            count += 1
+            worst = max(worst, away)
+    return count, worst
+
+
 def half_rows_of(blocks: list[dict]) -> tuple[int, int]:
     """Ряды-половинки и общее число рядов: шаг до соседа меньше доли медианного шага блока."""
     bad = total = 0
@@ -228,6 +266,7 @@ def metrics_of(page: dict) -> PageMetrics:
     polygons = [np.asarray(block["envelope"]["polygon"], dtype=np.float64) for block in blocks if block.get("envelope")]
     pitch = pitch_of(blocks)
     bad_rows, rows = half_rows_of(blocks)
+    escaping, escaping_px = escaping_of(axes, polygons)
     return PageMetrics(
         key=str(page.get("key") or f"{page.get('name')}_{page.get('page')}_{page.get('variant')}"),
         axes=len(axes),
@@ -235,6 +274,8 @@ def metrics_of(page: dict) -> PageMetrics:
         converging=converging_of(axes, pitch),
         jumping=jumping_of(axes, pitch),
         outside=outside_of(axes, polygons),
+        escaping=escaping,
+        escaping_px=escaping_px,
         half_rows=bad_rows,
         rows=rows,
         blocks=len(blocks),
@@ -293,6 +334,8 @@ def totals(pages: list[PageMetrics]) -> PageMetrics:
         converging=sum(page.converging for page in pages),
         jumping=sum(page.jumping for page in pages),
         outside=sum(page.outside for page in pages),
+        escaping=sum(page.escaping for page in pages),
+        escaping_px=max([page.escaping_px for page in pages], default=0.0),
         half_rows=sum(page.half_rows for page in pages),
         rows=sum(page.rows for page in pages),
         blocks=sum(page.blocks for page in pages),
@@ -311,8 +354,9 @@ def table(pages: list[PageMetrics], against: list[PageMetrics] | None = None, br
         brief: Печатать один итог без построчной части.
     """
     header = (
-        "| страница | осей | скрещиваний | сближений | от хорды | вне блоков | половинок | блоков | "
-        "пересечения px² | краска | с |\n|---|---|---|---|---|---|---|---|---|---|"
+        "| страница | осей | скрещиваний | сближений | от хорды | вне блоков | за контуром (px) | "
+        "половинок | блоков | пересечения px² | краска | с |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|"
     )
     if against is None:
         rows = [] if brief else [page.row() for page in pages]
@@ -326,6 +370,7 @@ __all__ = [
     "blocks_over_cells",
     "converging_of",
     "crossings_of",
+    "escaping_of",
     "pitch_of",
     "metrics_of",
     "read_pages",

@@ -7,19 +7,19 @@ import time
 import cv2
 import numpy as np
 
-from ocr_utils.curved_layout import LINKING_DEFAULT, RENDER_DPI, WORK_DPI
-from ocr_utils.curved_layout.columns import gutters_of, rule_separators, separators_for_segmentation
-from ocr_utils.curved_layout.engines.base import EngineLine, EngineResult
-from ocr_utils.curved_layout.hints import LayoutHints, barrier_rules, barrier_separators, masked_ink
-from ocr_utils.curved_layout.leaders import leaders_of
-from ocr_utils.curved_layout.segment import segments_of
+from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.columns import gutters_of, rule_separators, separators_for_segmentation
+from ocr_utils.page_layout.text_blocks.engines.base import EngineLine, EngineResult
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, barrier_rules, barrier_separators, masked_ink
+from ocr_utils.page_layout.text_blocks.leaders import leaders_of
+from ocr_utils.page_layout.text_blocks.segment import segments_of
 
 
 class InkEngine:
     """Свой ход: строки и центр-линии по краске рендера, без моделей и GPU.
 
-    Порядок важен: сначала межколонники (:mod:`ocr_utils.curved_layout.columns`), потом
-    сегментация с ними (:mod:`ocr_utils.curved_layout.segment`) — иначе сборка кусков строки
+    Порядок важен: сначала межколонники (:mod:`ocr_utils.page_layout.text_blocks.columns`), потом
+    сегментация с ними (:mod:`ocr_utils.page_layout.text_blocks.segment`) — иначе сборка кусков строки
     сшивает две колонки через межколонник шириной 3–4 мм.
     """
 
@@ -27,7 +27,7 @@ class InkEngine:
 
     def __init__(self, linking: str = LINKING_DEFAULT, hints: LayoutHints | None = None) -> None:
         """Args:
-        linking: Способ сцепки кусков в строки — ``zones`` или ``greedy`` (см. ``curved_layout``).
+        linking: Способ сцепки кусков в строки — ``zones`` или ``greedy`` (см. пакет ``text_blocks``).
         hints: Вспомогательная информация внешних детекторов (``hints.LayoutHints``): маска
             разрешённого текста и рамки таблиц и блок-схем. ``None`` — разбор как прежде.
         """
