@@ -659,3 +659,38 @@ def test_no_tail_across_foreign_text():
     y = int((1416.0 + _TAIL_PITCH) * k)
     ink[y - 8 : y + 8, 300 * k : 470 * k] = True
     assert blocks._tail_of(last, reference, _TAIL_PITCH, _TAIL_GLYPH, WORK_DPI, ink) is None
+
+
+def test_top_edge_follows_the_baseline_not_a_capital_word():
+    """Слово «из прописных» в первой строке поднимает ось, а верх блока — нет.
+
+    Слово синтетики — сплошной прямоугольник; «прописное» слово — тот же прямоугольник, выше на 40 %
+    при той же базовой линии. Ось (середина краски) над ним поднимается, линия середины строчной и
+    отмеренный от неё верх блока остаются на месте (1975/05 с.97, «В УМТС Башкирского»).
+    """
+    from tests.ocr_utils.page_layout.orientation.synthetic import GLYPH_H, INK
+
+    plain = column_page(columns=1, justify="both")
+    before = max(analyse_gray(plain, ENGINE).blocks, key=lambda block: len(block.rows))
+    row = before.rows[0]
+    y = int(round(row.y * 2))
+    band = (plain[y - GLYPH_H : y + GLYPH_H] < 128).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(band, 8)
+    words = sorted((stats[i] for i in range(1, count) if stats[i, cv2.CC_STAT_HEIGHT] >= GLYPH_H // 2), key=lambda s: s[0])
+    capital = plain.copy()
+    raise_px = int(0.4 * GLYPH_H)
+    chosen = words[len(words) // 2 : len(words) // 2 + 2]  # два слова подряд посередине строки
+    for left, top, width, _, _ in chosen:
+        top += y - GLYPH_H
+        capital[top - raise_px : top, left : left + width] = INK
+    after = max(analyse_gray(capital, ENGINE).blocks, key=lambda block: len(block.rows))
+    x0 = chosen[0][0] / 2.0 + 4
+    x1 = (chosen[-1][0] + chosen[-1][2]) / 2.0 - 4
+    xs = np.linspace(x0, x1, 12)
+    axis_before, axis_after = blocks._row_axis(before.rows[0]), blocks._row_axis(after.rows[0])
+    axis_shift = np.interp(xs, axis_after[:, 0], axis_after[:, 1]) - np.interp(xs, axis_before[:, 0], axis_before[:, 1])
+    top_shift = np.interp(xs, after.envelope.top[:, 0], after.envelope.top[:, 1]) - np.interp(
+        xs, before.envelope.top[:, 0], before.envelope.top[:, 1]
+    )
+    assert axis_shift.min() <= -1.0  # ось над «прописным» словом поднялась
+    assert np.abs(top_shift).max() < 0.6  # верх блока остался на месте

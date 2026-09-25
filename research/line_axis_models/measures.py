@@ -25,8 +25,10 @@ MATCH_PITCH_SHARE = 0.4
 PIECE_SHARE = 0.1
 # Доля длины на каждом конце строки, где меряется завиток.
 END_SHARE = 0.15
-# Доля самых изогнутых строк опоры (по |сагитте|), на которых меряется завиток концов.
-CURLED_SHARE = 0.2
+# Завиток концов меряется на строках опоры с |сагиттой| от этого порога, мм: на валидационном
+# наборе таких 138 из 2275 (медиана |сагитты| 0.13 мм, p95 1.15). Прежний отбор «верхние 20 % полосы»
+# брал почти прямые строки, и прямые оси surya проходили его не хуже кривых.
+CURLED_MM = 1.0
 # Шаг для меры вихляния по второй разности, мм: примерно ширина буквы.
 WOBBLE_STEP_MM = 1.0
 
@@ -80,7 +82,8 @@ class EngineScore:
         offset_mm: Медианный знаковый сдвиг оси движка от опоры, мм (+ — ниже).
         shape_mm: Медиана по строкам медианного |dy| после снятия сдвига строки, мм.
         shape_p90_mm: p90 по строкам максимального |dy| после снятия сдвига, мм.
-        curl_mm: Медиана |dy| после снятия сдвига на концах самых изогнутых строк опоры, мм.
+        curl_mm: Медиана по кривым строкам опоры (|сагитта| ≥ ``CURLED_MM``) наибольшего |dy| на концах
+            строки после снятия сдвига, мм.
         wobble_mm: Медиана по осям СКО второй разности ординаты с шагом ~1 мм, мм.
         crossings: Пар скрещённых осей.
         converging: Пар сблизившихся осей.
@@ -243,9 +246,6 @@ def score_engine(engine: str, pages: list[Page]) -> EngineScore:
         ref, run = group[REFERENCE], group[engine]
         tolerance = MATCH_PITCH_SHARE * ref.pitch if ref.pitch > 0 else 8.0
         columns = _columns_of(ref.axes, ref.raw.get("gutters", []))
-        # Порог изогнутости опоры: верхние CURLED_SHARE строк по |сагитте| на полосе.
-        sagittas = np.abs([axis.sagitta_mm for axis in ref.axes]) if ref.axes else np.zeros(0)
-        curled_from = float(np.quantile(sagittas, 1.0 - CURLED_SHARE)) if sagittas.size else np.inf
         # Какие строки опоры (и каких колонок) накрыла каждая ось движка.
         touched: dict[int, set[int]] = defaultdict(set)
         for index, target in enumerate(ref.axes):
@@ -268,10 +268,10 @@ def score_engine(engine: str, pages: list[Page]) -> EngineScore:
                 residual = dy[close] - np.median(dy[close])
                 shape.append(float(np.median(np.abs(residual))))
                 shape_max.append(float(np.abs(residual).max()))
-                if abs(target.sagitta_mm) >= curled_from and length > 0:
+                if abs(target.sagitta_mm) >= CURLED_MM and length > 0:
                     ends = (xs[close] < target.x0 + END_SHARE * length) | (xs[close] > target.x1 - END_SHARE * length)
                     if ends.any():
-                        curl.append(float(np.median(np.abs(residual[ends]))))
+                        curl.append(float(np.abs(residual[ends]).max()))
             covered_len += hit.mean() * length
             if count:
                 pieces.append(count)

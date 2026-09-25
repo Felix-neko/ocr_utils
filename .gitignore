@@ -122,5 +122,10 @@ research/deepseek_damage_lesson/выход/
 # Оверлеи исследования текстового слоя (картинки, вне git)
 reports/text_layer_fix/
 
+# Отладочные оверлеи curved_layout (десятки JPEG, в репо не тащим).
+reports/curved_layout/
+
 # Оверлеи стенда трасс линеек (research/table_traces): десятки JPEG, в репо не тащим.
 reports/curved_table_grid/оверлеи/
+reports/text_blocks_sides/
+reports/line_axis_models/

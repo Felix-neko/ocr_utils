@@ -11,6 +11,7 @@ from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPH
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS
 from ocr_utils.page_layout.text_blocks.page import Variant, analyse_gray, render_page
 from ocr_utils.page_layout.text_blocks.report import markdown, write_csv, write_json
+from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, SidesMethod
 
 from ocr_utils.page_layout.text_blocks.engines.catalog import WorkerEngineName
 
@@ -300,6 +301,63 @@ def metrics(out_dir: Path, against: Path | None, full: bool) -> None:
         click.echo(table(pages))
     else:
         click.echo(table(pages, brief=True))
+
+
+@main.command()
+@click.option("--geo-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--nogeo-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--pages", required=True, help="список ``pdf:страница`` через запятую")
+@click.option("--variant", type=click.Choice(["geo", "nogeo", "both"]), default="nogeo", show_default=True)
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
+@click.option("--dpi", default=WORK_DPI, show_default=True, type=float, help="разрешение рабочей копии")
+@click.option("--overlay-width", default=1000, show_default=True, type=int, help="ширина одной картинки")
+@click.option(
+    "--sides-method",
+    "--align-sides",
+    "sides_method",
+    type=click.Choice([item.value for item in SidesMethod]),
+    default=DEFAULT_SIDES_METHOD.value,
+    show_default=True,
+    help="разметка сторон по умолчанию: по ней рисуется выравнивание (оверлеи сторон — всеми тремя)",
+)
+def sides(
+    geo_dir: Path,
+    nogeo_dir: Path,
+    pages: str,
+    variant: str,
+    out_dir: Path,
+    dpi: float,
+    overlay_width: int,
+    sides_method: str,
+) -> None:
+    """Стороны границы блока и выравнивание по ним: все методы, оверлеи рядом и сводка сравнения."""
+    import json
+
+    from ocr_utils.page_layout.text_blocks import sides_overlay
+    from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
+    from ocr_utils.page_layout.text_blocks.report import sides_json, sides_markdown
+
+    variants = [Variant.GEO.value, Variant.NOGEO.value] if variant == "both" else [variant]
+    dirs = {Variant.GEO.value: geo_dir, Variant.NOGEO.value: nogeo_dir}
+    analyses = []
+    for name, page in parse_pages(pages):
+        for current in variants:
+            pdf = dirs[current] / f"{name}.pdf"
+            if not pdf.is_file():
+                click.echo(f"нет файла: {pdf}")
+                continue
+            gray300 = render_page(pdf, page)
+            # Разбор тот же, что у ``analyze`` без подсказок; стороны и выравнивание — поверх него.
+            analysis = analyse_gray(gray300, InkEngine(), dpi=dpi, name=name, page=page, variant=current)
+            sides_overlay.write_all(analysis, gray300, out_dir, overlay_width, SidesMethod(sides_method))
+            path = out_dir / "pages" / f"{analysis.key}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(sides_json(analysis), ensure_ascii=False), encoding="utf-8")
+            analyses.append(analysis)
+            click.echo(f"{analysis.key}: блоков {len(analysis.blocks)}")
+    if analyses:
+        (out_dir / "report.md").write_text(sides_markdown(analyses), encoding="utf-8")
+        click.echo(f"готово: {out_dir}")
 
 
 if __name__ == "__main__":  # pragma: no cover

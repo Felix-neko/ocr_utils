@@ -15,13 +15,15 @@ from enum import Enum
 
 import cv2
 import numpy as np
-from scipy.ndimage import grey_dilation, grey_erosion
+from scipy.ndimage import grey_dilation, grey_erosion, median_filter
 from scipy.signal import savgol_filter
+from skimage.morphology import skeletonize
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, bounds_at, gutter_filled, inside_gutter
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans, spans_at
 from ocr_utils.page_layout.text_blocks.lines import LineAxis, with_column
+from ocr_utils.page_layout.text_blocks.pieces import ANCHOR_ABOVE_BASELINE_XH, DESCENDER_MIN_XH, is_low_mark
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.scan_markup.curved_lines.fitting import smooth_median
 
@@ -127,6 +129,19 @@ HEIGHT_BREAK_RATIO = 1.6
 HEIGHT_WINDOW = 4
 # Толщина штриха по одну сторону границы больше, чем по другую, во столько раз — другой набор.
 STROKE_BREAK_RATIO = 1.5
+# Жирность (:attr:`Row.weight`) по одну сторону границы больше, чем по другую, во столько раз —
+# другой набор: полужирная подпись автора под колонкой. Замер по 34 валидационным полосам в двух
+# вариантах, окна от двух рядов. До правила: 2795 границ внутри блоков, медиана 1.015, p99 1.10, и
+# все границы выше 1.18 — подписи («Э. САВИНА» 1973/07 с.88, «Ф. ШАРИФЬЯНОВ» 1975/05 с.97, 1.25).
+# После него (подписи отделены): 2783 границы, медиана 1.011, p99 1.069, p99.9 1.169; выше порога
+# одна — фамилия против регалий внутри подписи (1.184, делить их пользователь разрешил).
+WEIGHT_BREAK_RATIO = 1.18
+# Одиночная крайняя строка (подпись автора одной строкой под колонкой, «Э. САВИНА» 1973/07 с.88:
+# 3.36 против 2.05) проверяется окном в один ряд, но только у большого блока, только если она
+# ЖИРНЕЕ соседей и с порогом строже: у мелких блоков таблиц крайний ряд скачет до 1.39 (640 крайних
+# рядов, p99 1.19), а у блоков от ``WEIGHT_EDGE_MIN_ROWS`` рядов выше 1.25 не было ни одного.
+WEIGHT_EDGE_RATIO = 1.25
+WEIGHT_EDGE_MIN_ROWS = 8
 # На короткой группе (окно меньше HEIGHT_WINDOW) хватает меньшей разницы, но сразу по обоим
 # признакам: и по высоте, и по штриху.
 SHORT_BREAK_RATIO = 1.3
@@ -209,6 +224,13 @@ TAIL_BLEND_GLYPHS = 1.0
 # 84 хвостам валидации: 77 без краски вовсе; 0.07–0.17 — своё (отточие строки, «__ г.» вне оси);
 # 0.40–0.89 — чужое (цифры соседней графы, сноска 1969/11 с.69, разрезанная на два блока).
 TAIL_INK_BAND_HEIGHTS = 0.4
+# Линия середины строчной (:func:`body_line`): буква меньше этой доли высоты ряда — пыль, а не
+# буква; поправка к оси сглаживается медианой по стольким соседним буквам (одна ошибочно
+# принятая буква не делает ступеньки, а слово из прописных в три-четыре буквы — делает, как и надо);
+# букв меньше — линии нет, кромка идёт от оси, как раньше.
+BODY_MIN_GLYPH_HEIGHTS = 0.2
+BODY_SMOOTH_LETTERS = 3
+BODY_MIN_LETTERS = 3
 TAIL_MAX_INK_SHARE = 0.3
 
 
@@ -222,6 +244,11 @@ class Row:
     x1: float
     axes: tuple[LineAxis, ...]
     stroke: float = 0.0  # толщина штриха, пиксели рабочей копии
+    # Средняя толщина штриха — удвоенное расстояние до фона на скелете (:func:`stroke_weight`),
+    # пиксели рабочей копии с дробной частью. Жирность, которую ``stroke`` (медиана пробегов на шаге
+    # 0.5 px) почти не различает: у текста колонки 1975/05 с.97 — 2.0–2.1, у регалий автора под
+    # ней — 2.5–2.7, у фамилии — 3.2; ``stroke`` у них 2.5 / 3.0 / 3.5.
+    weight: float = 0.0
     glyph_w: float = 0.0  # медианная ширина символа ряда, пиксели рабочей копии
     glyph_h: float = 0.0  # медианная высота символа ряда
     # Профили краски ряда ``(N, 2)``: верхняя и нижняя граница краски по столбцам. По ним идут
@@ -232,6 +259,12 @@ class Row:
     # отсечки по изгибу предыдущей строки (:func:`_tail_of`). Виртуальный — краски под ним нет;
     # учитывается только кромкой-ПОЛОСОЙ, в осях страницы и мерах выключки его нет.
     tail: np.ndarray | None = None
+    # Линия середины строчной ``(N, 2)`` по абсциссам оси: базовая линия букв, поднятая на
+    # полвысоты строчной (:func:`body_line`). Ось — середина КРАСКИ, и над словом из прописных,
+    # цифр или сокращением она поднимается ступенькой (1975/05 с.97, «В УМТС Башкирского»: 2 px),
+    # а базовая линия от регистра не зависит. От неё отмеряются верх и низ блока (кромка-полоса);
+    # ``None`` — букв не набралось, кромка идёт от оси.
+    body: np.ndarray | None = None
     # Отрезок линии отсечки ``(2, 2)`` — перпендикуляр к оси предыдущей строки в её конце; только
     # для оверлея и JSON.
     cut: np.ndarray | None = None
@@ -527,6 +560,7 @@ def rows_of(
         # исключить, строка таблицы выглядит «другим набором» и блок дробится.
         skip = _leader_columns(leaders, y, height, left, band.shape[1], k)
         stroke = stroke_width(band, skip) / k
+        weight = stroke_weight(band, skip) / k
         glyph_w, glyph_h = glyph_metrics(band, k, dpi, skip)
         left, right = left / k, right / k
         axis_points = np.vstack([np.asarray(item.points, dtype=np.float64) for item in group])
@@ -538,6 +572,7 @@ def rows_of(
         profile_x0 = min(left, float(axis_points[0, 0]))
         profile_x1 = max(right, float(axis_points[-1, 0]))
         top_edge, bottom_edge = edge_profiles(ink, axis_points, profile_x0, profile_x1, height, k, dpi)
+        body = body_line(ink, axis_points, profile_x0, profile_x1, height, k)
         # Край, вылезший за колонку дальше OVERHANG_MM, — не край этого ряда: так выглядит
         # строка, сшитая через межколонник (1973/07 с.88), и колонтитул во всю ширину.
         overhang = mm_to_px(OVERHANG_MM, dpi)
@@ -551,13 +586,48 @@ def rows_of(
                 x1=right,
                 axes=tuple(group),
                 stroke=stroke,
+                weight=weight,
                 glyph_w=glyph_w,
                 glyph_h=glyph_h,
                 top_edge=top_edge,
                 bottom_edge=bottom_edge,
+                body=body,
             )
         )
     return rows
+
+
+def stroke_weight(band: np.ndarray, skip: np.ndarray | None = None) -> float:
+    """Средняя толщина штриха ряда: удвоенное расстояние до фона на пикселях скелета (пиксели полосы).
+
+    Жирность набора. Медиана горизонтальных пробегов (:func:`stroke_width`) целочисленна и на
+    рабочей копии идёт шагом 0.5 px, а полужирный набор того же кегля толще обычного всего на
+    20–30 %: по пробегам регалии автора под колонкой (1975/05 с.97) не отличались от текста. Здесь
+    толщина берётся в каждой точке средней линии штриха (скелета) как удвоенное расстояние до фона и
+    усредняется — непрерывная мера по всем штрихам сразу: текст 4.05–4.19 px рендера, регалии
+    4.95–5.37, фамилия прописными 6.47. Прежняя мера «площадь / длина скелета» давала на тексте то
+    же, но на сплошных пятнах (у которых скелет короткий) скакала на 20 % от строки к строке.
+
+    Args:
+        band: Полоса краски ряда (``True`` — краска), рендер ``RENDER_DPI``.
+        skip: Столбцы отточий: точки — не штрихи и завышали бы меру.
+
+    Returns:
+        Толщина в пикселях полосы; 0.0, если краски нет.
+    """
+    if band.size == 0 or not band.any():
+        return 0.0
+    if skip is not None and skip.any() and not skip.all():
+        band = band[:, ~skip]
+    ink = band > 0
+    if not ink.any():
+        return 0.0
+    # Расстояние до ближайшего фона: на средней линии штриха это его полутолщина.
+    distance = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
+    middle = skeletonize(ink)
+    if not middle.any():
+        return 0.0
+    return float(2.0 * distance[middle].mean())
 
 
 def stroke_width(band: np.ndarray, skip: np.ndarray | None = None) -> float:
@@ -650,6 +720,97 @@ def edge_profiles(
     bottom = _smooth(grey_dilation(np.asarray(bottoms, dtype=np.float64), size=window, mode="nearest"), window)
     own = np.asarray(xs, dtype=np.float64)
     return np.column_stack([own, top]), np.column_stack([own, bottom])
+
+
+def body_line(
+    ink: np.ndarray, axis_points: np.ndarray, x0: float, x1: float, height: float, k: float
+) -> np.ndarray | None:
+    """Линия середины строчной: базовая линия букв ряда, поднятая на полвысоты строчной.
+
+    Ось строки — середина КРАСКИ по столбцам. Над словом из прописных, цифр или сокращением она
+    поднимается: у прописной верх на высоте прописной, а низ тот же (1975/05 с.97, «В УМТС» против
+    «Башкирского»: верх краски 1015.0 и 1018.5, низ 1026.5 и 1027.0 — середина на 2 px выше), и
+    отмеренная от оси граница блока повторяет эту ступеньку. Базовая линия от регистра не зависит,
+    поэтому верх и низ блока отмеряются от неё (приём тот же, что у якорей букв в ``pieces``).
+
+    Буквы — связные компоненты краски в окне ``±PROFILE_WINDOW_HEIGHTS`` высоты ряда вокруг оси.
+    Отбрасываются: пыль (ниже ``BODY_MIN_GLYPH_HEIGHTS`` высоты), выносные элементы соседних строк
+    (низ выше оси), точки и запятые (``pieces.is_low_mark``) и выносные вниз («р», «у», запятая:
+    низ ниже общего уровня больше чем на ``DESCENDER_MIN_XH`` икса — отсев односторонний, как в
+    ``pieces.baselines_of``). По каждой оставшейся букве берётся поправка к оси «базовая линия −
+    пол-икса − ось», сглаживается медианой по ``BODY_SMOOTH_LETTERS`` буквам и прибавляется к оси:
+    между буквами линия идёт по форме оси, а за крайними буквами — со сдвигом крайней поправки.
+
+    Args:
+        ink: Краска текста рендера ``RENDER_DPI``.
+        axis_points: Точки осей ряда ``(M, 2)`` слева направо, пиксели рабочей копии.
+        x0, x1: Края ряда по x, пиксели рабочей копии.
+        height: Высота ряда, пиксели рабочей копии.
+        k: Во сколько раз рендер крупнее рабочей копии.
+
+    Returns:
+        Линия ``(M, 2)`` по абсциссам оси или ``None``, если букв меньше ``BODY_MIN_LETTERS``.
+    """
+    if axis_points is None or len(axis_points) < 2 or x1 - x0 < 1:
+        return None
+    rows_count, cols_count = ink.shape
+    half = max(2.0, PROFILE_WINDOW_HEIGHTS * height)
+    left, right = max(0, int(x0 * k)), min(cols_count, int(x1 * k) + 1)
+    top = max(0, int((axis_points[:, 1].min() - half) * k))
+    bottom = min(rows_count, int((axis_points[:, 1].max() + half) * k) + 1)
+    if right - left < 2 or bottom - top < 2:
+        return None
+    crop = ink[top:bottom, left:right] > 0
+    # Окно едет вдоль оси: в каждом столбце краска берётся только в ±half от оси (как у профилей).
+    centres = np.interp(np.arange(left, right) / k, axis_points[:, 0], axis_points[:, 1]) * k - top
+    crop &= np.abs(np.arange(crop.shape[0])[:, None] - centres[None, :]) <= half * k
+    count, _, stats, _ = cv2.connectedComponentsWithStats(crop.astype(np.uint8), 8)
+    if count <= 1:
+        return None
+    widths = stats[1:, cv2.CC_STAT_WIDTH] / k
+    heights = stats[1:, cv2.CC_STAT_HEIGHT] / k
+    cxs = (left + stats[1:, cv2.CC_STAT_LEFT] + stats[1:, cv2.CC_STAT_WIDTH] / 2.0) / k
+    bottoms = (top + stats[1:, cv2.CC_STAT_TOP] + stats[1:, cv2.CC_STAT_HEIGHT]) / k
+    below = bottoms - np.interp(cxs, axis_points[:, 0], axis_points[:, 1])
+    # Буква своей строки: не пыль и низом ниже оси (у выносного элемента строки сверху низ выше).
+    letters = (heights >= BODY_MIN_GLYPH_HEIGHTS * height) & (below > 0)
+    if int(letters.sum()) < BODY_MIN_LETTERS:
+        return None
+    x_h = float(np.median(heights[letters]))
+    letters &= ~np.array([is_low_mark(w, h, x_h) for w, h in zip(widths, heights)])
+    if int(letters.sum()) < BODY_MIN_LETTERS:
+        return None
+    # Выносные вниз: низ ниже общего уровня букв (относительно оси) больше чем на DESCENDER_MIN_XH икса.
+    letters &= below - float(np.median(below[letters])) <= DESCENDER_MIN_XH * x_h
+    if int(letters.sum()) < BODY_MIN_LETTERS:
+        return None
+    order = np.argsort(cxs[letters])
+    xs = cxs[letters][order]
+    shift = (below[letters] - ANCHOR_ABOVE_BASELINE_XH * x_h)[order]
+    window = max(1, BODY_SMOOTH_LETTERS) | 1
+    if shift.size >= window:
+        shift = median_filter(shift, size=window, mode="nearest")
+    return np.column_stack([axis_points[:, 0], axis_points[:, 1] + np.interp(axis_points[:, 0], xs, shift)])
+
+
+def _cap_line(row: Row) -> np.ndarray | None:
+    """Кривая, от которой отмеряются верх и низ блока: ось с хвостом, сдвинутая на линию строчной.
+
+    Поправка «линия середины строчной − ось» (:attr:`Row.body`) переносится и на хвост — за концом
+    строки берётся крайняя поправка. Линии нет — ось с хвостом как есть.
+
+    Args:
+        row: Ряд блока.
+
+    Returns:
+        Кривая ``(N, 2)`` слева направо или ``None``, если у ряда нет осей.
+    """
+    points = _row_axis(row, with_tail=True)
+    real = _row_axis(row)
+    if points is None or real is None or row.body is None or len(row.body) < 2:
+        return points
+    correction = row.body[:, 1] - np.interp(row.body[:, 0], real[:, 0], real[:, 1])
+    return np.column_stack([points[:, 0], points[:, 1] + np.interp(points[:, 0], row.body[:, 0], correction)])
 
 
 def glyph_metrics(band: np.ndarray, k: float, dpi: float, skip: np.ndarray | None = None) -> tuple[float, float]:
@@ -834,6 +995,10 @@ def _style_break(rows: list[Row], index: int) -> bool:
     Returns:
         ``True``, если по обе стороны границы разный набор.
     """
+    # Жирность проверяется первой: у неё своё правило окон (одиночная крайняя строка большого блока
+    # допускается), и досрочный выход ниже по короткому окну её бы отключал.
+    if _heavy_break(rows, index):
+        return True
     # Окно в один ряд не годится: высота и штрих отдельной строки скачут (прописная в начале
     # абзаца, разрядка), и первая строка вводки отрывалась в свой блок (1970/02 с.90).
     window = min(HEIGHT_WINDOW, index + 1, len(rows) - index - 1)
@@ -872,6 +1037,67 @@ def _style_break(rows: list[Row], index: int) -> bool:
         return False
     size_ratio = 1.0 if same_size else heights[1] / heights[0]
     return size_ratio * (strokes[1] / strokes[0]) > STYLE_PRODUCT_RATIO
+
+
+def _weight_ratio(rows: list[Row], index: int) -> tuple[float, float]:
+    """Отношение жирности (:attr:`Row.weight`) по двум сторонам границы после ``index`` и его порог.
+
+    Окна — как у :func:`_style_break`: до ``HEIGHT_WINDOW`` рядов, но не меньше
+    ``MIN_BREAK_WINDOW`` с каждой стороны — по одному ряду жирность скачет (строка из цифр,
+    прописная в начале абзаца). Исключение — одиночная КРАЙНЯЯ строка большого блока, которая
+    жирнее соседей (подпись автора одной строкой): она сравнивается с медианой соседних рядов
+    с порогом ``WEIGHT_EDGE_RATIO``. Без этого подпись ловилась на границе раньше, где окно из
+    двух рядов смешивало её с последней строкой абзаца, и строка уходила в блок подписи.
+
+    Args:
+        rows: Ряды блока сверху вниз.
+        index: Граница между ``rows[index]`` и ``rows[index + 1]``.
+
+    Returns:
+        ``(отношение, порог)``: отношение большей медианы к меньшей (не меньше 1) и порог для
+        этой границы; ``(0.0, inf)`` — окна не набрались или меры нет.
+    """
+    none = (0.0, float("inf"))
+    count = len(rows)
+    if index < 0 or index >= count - 1:
+        return none
+    window = min(HEIGHT_WINDOW, index + 1, count - index - 1)
+    if window >= MIN_BREAK_WINDOW:
+        before = float(np.median([row.weight for row in rows[index + 1 - window : index + 1]]))
+        after = float(np.median([row.weight for row in rows[index + 1 : index + 1 + window]]))
+        if min(before, after) <= 0:
+            return none
+        return max(before, after) / min(before, after), WEIGHT_BREAK_RATIO
+    if count < WEIGHT_EDGE_MIN_ROWS:
+        return none
+    # Крайняя строка: первая (граница после неё) или последняя (граница перед ней).
+    edge, rest = (rows[0], rows[1 : 1 + HEIGHT_WINDOW]) if index == 0 else (rows[-1], rows[-1 - HEIGHT_WINDOW : -1])
+    if index not in (0, count - 2):
+        return none
+    body = float(np.median([row.weight for row in rest]))
+    if body <= 0 or edge.weight <= body:
+        return none  # крайняя строка не жирнее соседей — по одному ряду не решаем
+    return edge.weight / body, WEIGHT_EDGE_RATIO
+
+
+def _heavy_break(rows: list[Row], index: int) -> bool:
+    """Смена жирности на границе после ``index``: отношение выше порога и наибольшее среди соседних.
+
+    Окна захватывают полужирную подпись постепенно, и порог проходят несколько соседних границ
+    подряд (1975/05 с.97: 1.22, 1.25, 1.21). Резать на каждой — рассыпать подпись по строке и отдать
+    ей последнюю строку колонки; поэтому граница — только в максимуме.
+
+    Args:
+        rows: Ряды блока сверху вниз.
+        index: Граница между ``rows[index]`` и ``rows[index + 1]``.
+
+    Returns:
+        ``True``, если здесь меняется жирность набора.
+    """
+    ratio, threshold = _weight_ratio(rows, index)
+    if ratio <= threshold:
+        return False
+    return ratio >= _weight_ratio(rows, index - 1)[0] and ratio >= _weight_ratio(rows, index + 1)[0]
 
 
 def _same_glyph_size(before: list[Row], after: list[Row]) -> bool:
@@ -1133,7 +1359,7 @@ def _row_span(row: Row, cap: CapKind) -> tuple[float, float]:
     return min(row.x0, float(points[0, 0])), max(row.x1, float(points[-1, 0]))
 
 
-def _body_offset(row: Row, direction: float) -> float:
+def _body_offset(row: Row, direction: float, reference: np.ndarray | None = None) -> float:
     """На сколько кромка-ПОЛОСА отстоит от оси ряда в сторону ``direction`` (пиксели копии).
 
     Квантиль ``BODY_QUANTILE`` отклонения профиля краски от оси: кромка проходит снаружи четырёх
@@ -1143,12 +1369,14 @@ def _body_offset(row: Row, direction: float) -> float:
     Args:
         row: Ряд блока.
         direction: ``-1`` — вверх (к верхней кромке), ``+1`` — вниз.
+        reference: Кривая, от которой мерить (линия строчной у верха и низа блока, :func:`_cap_line`);
+            ``None`` — ось ряда.
 
     Returns:
         Отступ в пикселях рабочей копии, неотрицательный.
     """
     profile = row.top_edge if direction < 0 else row.bottom_edge
-    points = _row_axis(row)
+    points = _row_axis(row) if reference is None else reference
     if profile is None or len(profile) < 2 or points is None:
         return row.height / 2.0
     own = np.interp(profile[:, 0], points[:, 0], points[:, 1])
@@ -1534,12 +1762,14 @@ def _cap_body(row: Row, x_left: float, x_right: float, direction: float) -> np.n
         Кривая ``(N, 2)`` слева направо.
     """
     # С хвостом: правее конца короткой последней строки низ блока идёт по достроенной оси, то
-    # есть по изгибу предыдущей строки, а не горизонталью :func:`_extend_ends`.
-    points = _row_axis(row, with_tail=True)
+    # есть по изгибу предыдущей строки, а не горизонталью :func:`_extend_ends`. И не от самой оси,
+    # а от линии середины строчной (:func:`_cap_line`): ось над словом из прописных поднимается
+    # ступенькой, и граница блока повторяла её (1975/05 с.97).
+    points = _cap_line(row)
     dpi = row.axis.dpi
     xs = np.linspace(x_left, x_right, num=max(2, int(abs(x_right - x_left) / 4) + 2))
     axis_ys = _extend_ends(xs, np.interp(xs, points[:, 0], points[:, 1]), points, dpi)
-    offset = _body_offset(row, direction)
+    offset = _body_offset(row, direction, points)
     margin = direction * mm_to_px(OUTWARD_MARGIN_MM, dpi)
     return np.column_stack([xs, axis_ys + direction * offset + margin])
 

@@ -305,4 +305,172 @@ def markdown(analyses: list[PageAnalysis]) -> str:
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["CSV_FIELDS", "engines_summary", "markdown", "page_json", "rows_for_csv", "write_csv", "write_json"]
+def sides_json(analysis: PageAnalysis) -> dict:
+    """Разметка сторон всеми методами и выравнивание всеми методами — JSON по странице.
+
+    Args:
+        analysis: Разбор страницы.
+
+    Returns:
+        Словарь: ключ страницы и по блоку — контур, метки и угловые флаги каждого метода, меры
+        сторон без углов, а по вертикальным сторонам — концы строк с отклонениями у каждого метода
+        выравнивания.
+    """
+    from ocr_utils.page_layout.text_blocks.sides import AlignMethod, SideKind, SidesMethod, side_alignment
+    from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, edge_axis, side_measures, sides_of
+
+    blocks = []
+    for block in analysis.blocks:
+        methods = {}
+        for method in SidesMethod:
+            sides = sides_of(block, method)
+            methods[method.value] = {
+                "polygon": _curve(sides.polygon),
+                "labels": [label.value for label in sides.labels],
+                "corner": [bool(flag) for flag in sides.corner],
+                "uncertain": [bool(flag) for flag in sides.uncertain] if sides.uncertain is not None else None,
+                "measures": [
+                    {
+                        "side": item.side.value,
+                        "length_mm": round(item.length_mm, 1),
+                        "corner_share": round(item.corner_share, 3),
+                        "tilt_deg": round(item.tilt_deg, 3),
+                        "bend_mm": round(item.bend_mm, 2),
+                    }
+                    for item in side_measures(sides, block.dpi)
+                ],
+            }
+        align = {}
+        for method in AlignMethod:
+            own = {}
+            for side in (SideKind.LEFT, SideKind.RIGHT):
+                result = side_alignment(block, side, method)
+                if result is None:
+                    continue
+                own[side.value] = {
+                    "on_share": round(result.on_share, 3),
+                    "aligned_share": round(result.aligned_share, 3),
+                    "ends": [
+                        {
+                            "row": end.row,
+                            "point": [round(float(end.point[0]), 1), round(float(end.point[1]), 1)],
+                            "resid_mm": round(end.resid_mm, 2),
+                            "status": end.status.value,
+                            "aligned": end.aligned,
+                        }
+                        for end in result.ends
+                    ],
+                }
+            align[method.value] = own
+        edges = {}
+        for top, name in ((True, "top"), (False, "bottom")):
+            edge = edge_axis(block, top)
+            if edge is not None:
+                edges[name] = {
+                    "points": _curve(edge.points),
+                    "real_x": [round(edge.real_x0, 1), round(edge.real_x1, 1)],
+                    "reference": edge.reference,
+                    "gap": round(edge.gap, 1),
+                }
+        blocks.append(
+            {"column": block.column, "index": block.index, "edge_axes": edges, "sides": methods, "align": align}
+        )
+    return {
+        "key": analysis.key,
+        "name": analysis.name,
+        "page": analysis.page,
+        "variant": analysis.variant,
+        "width": analysis.width,
+        "height": analysis.height,
+        "dpi": analysis.dpi,
+        "default_sides_method": DEFAULT_SIDES_METHOD.value,
+        "blocks": blocks,
+    }
+
+
+def sides_markdown(analyses: list[PageAnalysis]) -> str:
+    """Сводка сравнения методов: согласие разметки сторон и выравнивание по сторонам.
+
+    Args:
+        analyses: Разборы страниц.
+
+    Returns:
+        Markdown: таблица согласия методов разметки по страницам (доля длины контура с одной и той
+        же стороной, попарно, и доля угловой длины) и таблица выравнивания — доля рядов на кривой и
+        в выровненных сериях по левой и правой стороне у каждого метода, по блокам из трёх и больше
+        рядов.
+    """
+    from ocr_utils.page_layout.text_blocks.sides import AlignMethod, SideKind, SidesMethod, label_agreement
+    from ocr_utils.page_layout.text_blocks.sides import side_alignment, sides_of
+
+    pairs = [
+        (SidesMethod.CONSTRUCT, SidesMethod.RAYS),
+        (SidesMethod.CONSTRUCT, SidesMethod.FRAME),
+        (SidesMethod.RAYS, SidesMethod.FRAME),
+    ]
+    lines = [
+        "# Стороны границы блока и выравнивание",
+        "",
+        "## Согласие методов разметки (доля длины контура)",
+        "",
+        "| страница | блоков | "
+        + " | ".join(f"{a.value}/{b.value}" for a, b in pairs)
+        + " | углов: "
+        + ", ".join(m.value for m in SidesMethod)
+        + " |",
+        "|---|---|" + "---|" * len(pairs) + "---|",
+    ]
+    for analysis in analyses:
+        if not analysis.blocks:
+            continue
+        agree = np.zeros(len(pairs))
+        corners = np.zeros(len(SidesMethod))
+        for block in analysis.blocks:
+            result = {method: sides_of(block, method) for method in SidesMethod}
+            agree += [label_agreement(result[a], result[b]) for a, b in pairs]
+            corners += [float(result[method].corner.mean()) for method in SidesMethod]
+        count = len(analysis.blocks)
+        lines.append(
+            f"| {analysis.key} | {count} | "
+            + " | ".join(f"{value / count:.3f}" for value in agree)
+            + " | "
+            + ", ".join(f"{value / count:.2f}" for value in corners)
+            + " |"
+        )
+    lines += [
+        "",
+        "## Выравнивание по вертикальным сторонам (блоки от трёх рядов)",
+        "",
+        "Ячейка — «доля рядов на кривой / доля рядов в выровненных сериях» слева и справа.",
+        "",
+        "| страница | блок | рядов | " + " | ".join(method.value for method in AlignMethod) + " |",
+        "|---|---|---|" + "---|" * len(AlignMethod),
+    ]
+    for analysis in analyses:
+        for block in analysis.blocks:
+            if len(block.rows) < 3:
+                continue
+            cells = []
+            for method in AlignMethod:
+                parts = []
+                for side in (SideKind.LEFT, SideKind.RIGHT):
+                    result = side_alignment(block, side, method)
+                    parts.append("—" if result is None else f"{result.on_share:.2f}/{result.aligned_share:.2f}")
+                cells.append(" · ".join(parts))
+            lines.append(
+                f"| {analysis.key} | {block.column}.{block.index} | {len(block.rows)} | " + " | ".join(cells) + " |"
+            )
+    return "\n".join(lines) + "\n"
+
+
+__all__ = [
+    "CSV_FIELDS",
+    "engines_summary",
+    "markdown",
+    "page_json",
+    "rows_for_csv",
+    "sides_json",
+    "sides_markdown",
+    "write_csv",
+    "write_json",
+]

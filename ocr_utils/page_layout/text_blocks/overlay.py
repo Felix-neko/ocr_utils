@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ocr_utils.page_layout.text_blocks.alignment import Alignment
+from ocr_utils.page_layout.text_blocks.alignment import AlignKind, Alignment
 from ocr_utils.page_layout.text_blocks.blocks import dilate_polygon
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
 from ocr_utils.page_layout.text_blocks.page import PageAnalysis
@@ -41,6 +41,25 @@ COLOUR_MARK = (0, 165, 255)
 # своим цветом: розовый на оверлее больше ничем не занят (красный — у раздутой границы).
 COLOUR_TAIL = (180, 105, 255)
 COLOUR_TEXT = (20, 20, 20)
+# Вердикт выравнивания крупной надписью на блоке: по формату — зелёный, по одному краю — синий,
+# по центру — фиолетовый, ни по одному — красный. ``ragged`` на картинке пишется как ``none`` (так просил пользователь; в
+# JSON и CSV значение прежнее).
+VERDICT_TEXT = {
+    AlignKind.RAGGED: "none",
+    AlignKind.LEFT: "left",
+    AlignKind.RIGHT: "right",
+    AlignKind.BOTH: "both",
+    AlignKind.CENTER: "center",
+}
+VERDICT_COLOUR = {
+    AlignKind.RAGGED: (0, 0, 220),
+    AlignKind.LEFT: (200, 90, 20),
+    AlignKind.RIGHT: (200, 90, 20),
+    AlignKind.BOTH: (0, 140, 0),
+    AlignKind.CENTER: (160, 60, 160),
+}
+# Подложка надписи полупрозрачная: под ней должен читаться текст полосы.
+VERDICT_ALPHA = 0.7
 # Раздутые границы: полсимвола — жёлтая, символ — красная, прочие доли — серая.
 COLOUR_DILATE = {0.5: (0, 200, 255), 1.0: (40, 40, 220)}
 COLOUR_DILATE_OTHER = (120, 120, 120)
@@ -103,6 +122,7 @@ def draw(
             for x in (row.x0, row.x1):
                 cv2.circle(canvas, (int(x * scale), int(row.y * scale)), 3, COLOUR_POINT, 1, cv2.LINE_AA)
         _caption(canvas, block, alignment, scale)
+        draw_verdict(canvas, block.envelope.polygon * scale, alignment.kind)
     return canvas
 
 
@@ -186,6 +206,34 @@ def _axis_line(canvas: np.ndarray, axis, scale: float) -> None:
         cv2.circle(canvas, (int(middle * scale), int(y * scale)), 3, COLOUR_MARK, -1, cv2.LINE_AA)
 
 
+def draw_verdict(canvas: np.ndarray, polygon: np.ndarray, kind: AlignKind) -> None:
+    """Крупная надпись вердикта выравнивания (none / left / right / both) посередине блока.
+
+    Args:
+        canvas: Холст.
+        polygon: Контур блока в пикселях ХОЛСТА.
+        kind: Вердикт.
+    """
+    text = VERDICT_TEXT[kind]
+    font, size, weight = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+    (w, h), base = cv2.getTextSize(text, font, size, weight)
+    x = int((polygon[:, 0].min() + polygon[:, 0].max()) / 2.0 - w / 2.0)
+    y = int((polygon[:, 1].min() + polygon[:, 1].max()) / 2.0 + h / 2.0)
+    x0, y0, x1, y1 = (
+        max(0, x - 5),
+        max(0, y - h - 5),
+        min(canvas.shape[1], x + w + 5),
+        min(canvas.shape[0], y + base + 3),
+    )
+    if x1 <= x0 or y1 <= y0:
+        return
+    # Полупрозрачная белая подложка, по ней — надпись цветом вердикта.
+    patch = canvas[y0:y1, x0:x1]
+    cv2.addWeighted(np.full_like(patch, 255), VERDICT_ALPHA, patch, 1.0 - VERDICT_ALPHA, 0, patch)
+    cv2.rectangle(canvas, (x0, y0), (x1, y1), VERDICT_COLOUR[kind], 1)
+    cv2.putText(canvas, text, (x, y), font, size, VERDICT_COLOUR[kind], weight, cv2.LINE_AA)
+
+
 def _caption(canvas: np.ndarray, block, alignment: Alignment, scale: float) -> None:
     """Подпись блока: колонка, строки, шаг, выключка и меры кромок."""
     lines = [
@@ -229,6 +277,10 @@ def _legend(canvas: np.ndarray, dilate_extra: tuple[float, ...], hints=None) -> 
         ("хвост последней строки и отсечка", COLOUR_TAIL, 1.0),
         ("края рядов", COLOUR_POINT, 1.0),
         ("межколонник", COLOUR_COLUMN, 1.0),
+        ("выравнивание both (по формату)", VERDICT_COLOUR[AlignKind.BOTH], 1.0),
+        ("выравнивание left / right", VERDICT_COLOUR[AlignKind.LEFT], 1.0),
+        ("выравнивание center (по центру)", VERDICT_COLOUR[AlignKind.CENTER], 1.0),
+        ("выравнивание none (рваный набор)", VERDICT_COLOUR[AlignKind.RAGGED], 1.0),
     ]
     lines += [
         (f"граница +{share:g} символа", COLOUR_DILATE.get(share, COLOUR_DILATE_OTHER), 1.0) for share in dilate_extra

@@ -18,7 +18,7 @@ cd "$SCRIPT_DIR/../.."
 
 OUT="${OUT:-/mnt/system/raw/mts/line_axis_models/text_and_toc}"
 PAGES="${PAGES:-full_1973_06:65,full_1971_10:87,full_1973_07:88,full_1967_10:63,full_1971_10:93,full_1973_11:79,full_1968_07:93,full_1973_07:77,full_1973_08:85,full_1971_10:95,full_1970_02:90,full_1975_05:97,full_1976_09:92}"
-ENGINES=(ink pero kraken eynollah surya orli paddle chronicling laypa craft docufcn textsnake)
+ENGINES=(ink pero kraken eynollah surya orli paddle paddle6 chronicling laypa craft docufcn textsnake)
 if [ "$#" -gt 0 ]; then ENGINES=("$@"); fi
 
 # Параметры постпроцесса — те же, что в валидационном прогоне ink (run_text_pages.sh).

@@ -42,7 +42,7 @@ def line_of(item: dict, scale: float) -> EngineLine | None:
 
     Args:
         item: Запись строки: ключи ``centre``, ``baseline``, ``boundary`` (списки ``[x, y]`` в пикселях
-            рендера 300 dpi), ``height`` (в тех же пикселях) и ``confidence`` — все необязательны.
+            рендера 300 dpi), ``height`` (в тех же пикселях), ``x_height`` (если нет ``height``) и ``confidence`` — все необязательны.
         scale: Множитель перевода пикселей рендера в пиксели рабочей копии.
 
     Returns:
@@ -51,6 +51,10 @@ def line_of(item: dict, scale: float) -> EngineLine | None:
     # Полигон строки нужен и для оси (если другого нет), и для высоты.
     boundary = polyline(item["boundary"], scale) if len(item.get("boundary") or []) >= 3 else None
     height = float(item.get("height") or 0.0) * scale
+    # Laypa (Loghi) полной высоты не даёт, только x-height: подъём базовой линии на её половину —
+    # как раз центр строчных букв, поэтому она и идёт высотой строки.
+    if height <= 0.0 and item.get("x_height"):
+        height = float(item["x_height"]) * scale
     if height <= 0.0 and boundary is not None:
         height = polygon_height(boundary)
     confidence = float(item["confidence"]) if item.get("confidence") is not None else float("nan")

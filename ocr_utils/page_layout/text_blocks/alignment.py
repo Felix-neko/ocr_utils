@@ -1,4 +1,4 @@
-"""Выключка блока: выровнен ли он по левому краю, по правому, по обоим — и насколько изогнут.
+"""Выключка блока: выровнен ли он по левому краю, по правому, по обоим, по центру — и насколько изогнут.
 
 Всё меряется ОТНОСИТЕЛЬНО гладкой огибающей, а не относительно вертикали: блок на кривой
 бумаге наклонён и изогнут сам по себе, и вертикаль тут ничего не говорит. Выключенная сторона
@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+
+from dataclasses import dataclass, replace
 from enum import Enum
 
 import numpy as np
@@ -26,6 +28,16 @@ CORE_SHARE = 0.8
 INDENT_MIN_MM = 2.5
 # Исключений больше этой доли рядов — сторона всё-таки рваная (в рваном наборе «отступ» у каждой второй).
 INDENT_MAX_SHARE = 0.45
+# Набор по центру (подпись автора, эпиграф, строки заголовка): середины рядов вдоль строк не дальше
+# ``CENTER_TOL_MM`` от их медианы у не меньше ``CENTER_SHARE`` рядов, при этом длины рядов заметно
+# различаются (размах больше ``CENTER_MIN_SPREAD_MM``: иначе это колонка по формату, у которой
+# середины совпадают тоже). Нужно от ``CENTER_MIN_ROWS`` рядов. Допуск 1.5 мм — по курсивной подписи
+# «В. ГУЛЕНКО, учёный секретарь экспертной комиссии ВАК» (1971/10 с.87): середины 771, 774 и 782 px,
+# третья строка отходит на 1.35 мм. Проверяется центр, только если ни одна сторона не выровнена.
+CENTER_TOL_MM = 1.5
+CENTER_SHARE = 0.8
+CENTER_MIN_SPREAD_MM = 3.0
+CENTER_MIN_ROWS = 2
 
 
 class Side(str, Enum):
@@ -42,6 +54,7 @@ class AlignKind(str, Enum):
     LEFT = "left"  # выключка влево (правый край рваный)
     RIGHT = "right"  # выключка вправо
     BOTH = "both"  # выключка по формату
+    CENTER = "center"  # по центру: середины строк на одной вертикали, края рваные
 
 
 @dataclass(frozen=True)
@@ -64,6 +77,7 @@ class Alignment:
     kind: AlignKind
     left: SideStats
     right: SideStats
+    center_share: float = 0.0  # доля рядов, чья середина на общей вертикали (``CENTER_TOL_MM``)
 
 
 def _core_curve(envelope: BlockEnvelope, side: Side) -> np.ndarray:
@@ -123,19 +137,100 @@ def side_stats(block: TextBlock, side: Side) -> SideStats:
     )
 
 
+def block_frame(rows: list[Row]) -> float:
+    """Медианный наклон строк блока (радианы) — поворот его системы координат.
+
+    Args:
+        rows: Ряды блока.
+
+    Returns:
+        Угол от горизонтали кадра; 0.0, если у рядов нет осей.
+    """
+    angles = []
+    for row in rows:
+        for axis in row.axes:
+            points = np.asarray(axis.points, dtype=np.float64)
+            if points.shape[0] >= 2 and points[-1, 0] - points[0, 0] > 0:
+                angles.append(math.atan2(points[-1, 1] - points[0, 1], points[-1, 0] - points[0, 0]))
+    return float(np.median(angles)) if angles else 0.0
+
+
+def center_share(rows: list[Row], dpi: float) -> float:
+    """Доля рядов, чья середина лежит на общей вертикали блока (в его системе координат).
+
+    Середина ряда — ``(x0 + x1) / 2`` на его ординате; точки поворачиваются на наклон строк блока
+    (:func:`block_frame`), и берётся координата вдоль строк — так наклон страницы не выдаёт центр за
+    рваный край. Отклонение меряется от медианы.
+
+    Args:
+        rows: Ряды блока.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Доля от 0 до 1; 0.0 — рядов меньше ``CENTER_MIN_ROWS``.
+    """
+    if len(rows) < CENTER_MIN_ROWS:
+        return 0.0
+    theta = block_frame(rows)
+    along = np.array([(row.x0 + row.x1) / 2.0 * math.cos(theta) + row.y * math.sin(theta) for row in rows])
+    deviation = np.array([px_to_mm(float(value), dpi) for value in np.abs(along - np.median(along))])
+    return float((deviation <= CENTER_TOL_MM).mean())
+
+
+def is_centered(rows: list[Row], dpi: float) -> bool:
+    """Набран ли блок по центру: середины рядов на одной вертикали, а длины рядов различаются.
+
+    Args:
+        rows: Ряды блока.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``True`` — набор по центру.
+    """
+    if len(rows) < CENTER_MIN_ROWS:
+        return False
+    widths = np.array([row.x1 - row.x0 for row in rows])
+    if px_to_mm(float(np.ptp(widths)), dpi) <= CENTER_MIN_SPREAD_MM:
+        return False  # строки одной длины: середины совпадают и у колонки по формату
+    return center_share(rows, dpi) >= CENTER_SHARE
+
+
+def verdict(left: bool, right: bool, centered: bool) -> AlignKind:
+    """Вердикт по выровненности сторон и центра: ``both`` → ``left`` → ``right`` → ``center`` → ``ragged``."""
+    if left and right:
+        return AlignKind.BOTH
+    if left:
+        return AlignKind.LEFT
+    if right:
+        return AlignKind.RIGHT
+    return AlignKind.CENTER if centered else AlignKind.RAGGED
+
+
 def alignment_of(block: TextBlock) -> Alignment:
-    """Выключка блока по обеим сторонам."""
+    """Выключка блока по обеим сторонам и по центру.
+
+    Однострочный блок выключки не имеет: оба края одной строки совпадают со своим трендом по
+    определению, и прежде такой блок получал ``both``. Теперь — ``ragged`` (на оверлее ``none``).
+    """
     left = side_stats(block, Side.LEFT)
     right = side_stats(block, Side.RIGHT)
-    if left.aligned and right.aligned:
-        kind = AlignKind.BOTH
-    elif left.aligned:
-        kind = AlignKind.LEFT
-    elif right.aligned:
-        kind = AlignKind.RIGHT
-    else:
-        kind = AlignKind.RAGGED
-    return Alignment(kind=kind, left=left, right=right)
+    if len(block.rows) < 2:
+        left, right = replace(left, aligned=False), replace(right, aligned=False)
+        return Alignment(kind=AlignKind.RAGGED, left=left, right=right)
+    share = center_share(list(block.rows), block.dpi)
+    kind = verdict(left.aligned, right.aligned, is_centered(list(block.rows), block.dpi))
+    return Alignment(kind=kind, left=left, right=right, center_share=share)
 
 
-__all__ = ["AlignKind", "Alignment", "Side", "SideStats", "alignment_of", "side_stats"]
+__all__ = [
+    "AlignKind",
+    "Alignment",
+    "Side",
+    "SideStats",
+    "alignment_of",
+    "block_frame",
+    "center_share",
+    "is_centered",
+    "side_stats",
+    "verdict",
+]

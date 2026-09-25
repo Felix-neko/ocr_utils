@@ -1,0 +1,359 @@
+"""Оверлеи сторон границы блока и выравнивания по ним: по методу на картинку и три метода рядом."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from ocr_utils.page_layout.text_blocks.alignment import CORE_SHARE, AlignKind, is_centered, verdict
+from ocr_utils.page_layout.text_blocks.overlay import COLOUR_TAIL, COLOUR_TEXT, VERDICT_COLOUR, _on_paper, draw_verdict
+from ocr_utils.page_layout.text_blocks.page import PageAnalysis
+from ocr_utils.page_layout.text_blocks.sides import (
+    AlignMethod,
+    BlockSides,
+    RowStatus,
+    SideAlignment,
+    SideKind,
+    SidesMethod,
+    aligned_segments,
+    side_alignment,
+    side_measures,
+    edge_axis,
+    sides_of,
+)
+
+# Палитра (BGR) по навыку draw-overlay. Вертикальные стороны — синий главной границы блока,
+# горизонтальные — оранжевый: на этих картинках точек и запятых нет, и цвет свободен. Угловые
+# звенья — пунктиром того же цвета. Оси строк — приглушённо: здесь они фон, а не предмет.
+COLOUR_VERTICAL = (220, 90, 20)
+COLOUR_HORIZONTAL = (0, 165, 255)
+COLOUR_AXIS_MUTED = (150, 205, 150)
+COLOUR_RAY = (150, 150, 150)
+# Выравнивание: выровненный участок стороны — зелёный, невыровненный — красный (как «принято /
+# отвергнуто» у этапных оверлеев), отступ — оранжевый, кривая, от которой мерили, — фиолетовая.
+COLOUR_ALIGNED = (0, 150, 0)
+COLOUR_RAGGED = (0, 0, 220)
+COLOUR_INDENT = (0, 165, 255)
+COLOUR_CURVE = (200, 60, 200)
+COLOUR_OTHER_SIDE = (170, 170, 170)
+SIDE_THICKNESS = 3
+# Пунктир угловых звеньев: штрих и промежуток в пикселях холста.
+DASH_ON, DASH_OFF = 7, 5
+
+
+def _scaled(points: np.ndarray, scale: float) -> np.ndarray:
+    """Точки рабочей копии → целые пиксели холста."""
+    return np.round(np.asarray(points, dtype=np.float64) * scale).astype(np.int32)
+
+
+def _segment(canvas: np.ndarray, a: np.ndarray, b: np.ndarray, colour, thickness: int) -> None:
+    """Отрезок между двумя точками холста."""
+    cv2.line(canvas, tuple(int(v) for v in a), tuple(int(v) for v in b), colour, thickness, cv2.LINE_AA)
+
+
+def _dashed_run(canvas: np.ndarray, points: np.ndarray, colour, thickness: int) -> None:
+    """Ломаная пунктиром: штрихи отмеряются по длине вдоль неё, а не по звеньям.
+
+    Args:
+        canvas: Холст.
+        points: Точки ломаной на холсте ``(n, 2)``.
+        colour: Цвет.
+        thickness: Толщина.
+    """
+    if len(points) < 2:
+        return
+    step = np.hypot(*np.diff(points.astype(np.float64), axis=0).T)
+    along = np.concatenate([[0.0], np.cumsum(step)])
+    period = DASH_ON + DASH_OFF
+    for start in np.arange(0.0, along[-1], period):
+        stop = min(start + DASH_ON, along[-1])
+        xs = np.interp([start, stop], along, points[:, 0])
+        ys = np.interp([start, stop], along, points[:, 1])
+        _segment(canvas, np.array([xs[0], ys[0]]), np.array([xs[1], ys[1]]), colour, thickness)
+
+
+def _runs(flags: list) -> list[tuple[int, int]]:
+    """Серии подряд идущих звеньев с одним и тем же ключом: пары ``(начало, конец)`` без конца."""
+    out, start = [], 0
+    for index in range(1, len(flags) + 1):
+        if index == len(flags) or flags[index] != flags[start]:
+            out.append((start, index))
+            start = index
+    return out
+
+
+def _draw_sides(canvas: np.ndarray, sides: BlockSides, scale: float) -> None:
+    """Контур блока по сторонам: вертикальные синим, горизонтальные оранжевым, углы пунктиром."""
+    points = _scaled(sides.polygon, scale)
+    n = len(points)
+    # Пунктиром — углы и неуверенные концы верха и низа: ни те, ни другие не идут в меры сторон.
+    keys = [(label.vertical, bool(flag)) for label, flag in zip(sides.labels, sides.excluded)]
+    for start, stop in _runs(keys):
+        vertical, corner = keys[start]
+        run = points[[(index % n) for index in range(start, stop + 1)]]
+        colour = COLOUR_VERTICAL if vertical else COLOUR_HORIZONTAL
+        if corner:
+            _dashed_run(canvas, run, colour, SIDE_THICKNESS)
+        else:
+            cv2.polylines(canvas, [run], False, colour, SIDE_THICKNESS, cv2.LINE_AA)
+    if sides.rays is not None:
+        for origin, hit in sides.rays:
+            _segment(canvas, _scaled(origin, scale), _scaled(hit, scale), COLOUR_RAY, 1)
+            cv2.circle(canvas, tuple(int(v) for v in _scaled(hit, scale)), 3, COLOUR_RAY, -1, cv2.LINE_AA)
+
+
+def _draw_edge_extensions(canvas: np.ndarray, block, scale: float) -> None:
+    """Продления коротких крайних строк (``sides.edge_axis``) розовым пунктиром: ось виртуальная.
+
+    Args:
+        canvas: Холст.
+        block: Текстовый блок.
+        scale: Масштаб «рабочая копия → холст».
+    """
+    for top in (True, False):
+        edge = edge_axis(block, top)
+        if edge is None or not edge.extended:
+            continue
+        for part in (edge.points[edge.points[:, 0] <= edge.real_x0], edge.points[edge.points[:, 0] >= edge.real_x1]):
+            if len(part) >= 2:
+                _dashed_run(canvas, _scaled(part, scale), COLOUR_TAIL, 2)
+
+
+def _draw_axes(canvas: np.ndarray, analysis: PageAnalysis, scale: float) -> None:
+    """Оси строк приглушённо — фон для сторон."""
+    for axis in analysis.axes:
+        cv2.polylines(canvas, [_scaled(axis.points, scale)], False, COLOUR_AXIS_MUTED, 1, cv2.LINE_AA)
+
+
+def _caption(canvas: np.ndarray, anchor: np.ndarray, lines: list[str]) -> None:
+    """Подпись на белой подложке над точкой ``anchor`` холста."""
+    x = int(anchor[0]) + 2
+    y = max(14, int(anchor[1]) - 6 - 11 * (len(lines) - 1))
+    for index, text in enumerate(lines):
+        (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_COMPLEX, 0.32, 1)
+        top = y + index * 11
+        cv2.rectangle(canvas, (x - 2, top - h - 2), (x + w + 2, top + 3), (255, 255, 255), -1)
+        cv2.putText(canvas, text, (x, top), cv2.FONT_HERSHEY_COMPLEX, 0.32, COLOUR_TEXT, 1, cv2.LINE_AA)
+
+
+def _legend(canvas: np.ndarray, lines: list[tuple[str, tuple[int, int, int], bool]]) -> None:
+    """Легенда в правом верхнем углу; пунктирные сущности — пунктирным образцом."""
+    width = 240
+    x = canvas.shape[1] - width
+    cv2.rectangle(canvas, (x - 6, 4), (canvas.shape[1] - 2, 10 + 14 * len(lines)), (255, 255, 255), -1)
+    for index, (text, colour, dashed) in enumerate(lines):
+        y = 16 + 14 * index
+        sample = np.array([[x, y - 3], [x + 18, y - 3]])
+        if dashed:
+            _dashed_run(canvas, sample, _on_paper(colour, 1.0), 2)
+        else:
+            cv2.line(canvas, (x, y - 3), (x + 18, y - 3), colour, 2, cv2.LINE_AA)
+        cv2.putText(canvas, text, (x + 22, y), cv2.FONT_HERSHEY_COMPLEX, 0.32, COLOUR_TEXT, 1, cv2.LINE_AA)
+
+
+def _page(gray300: np.ndarray, analysis: PageAnalysis, width: int) -> tuple[np.ndarray, float]:
+    """Холст страницы шириной ``width`` и масштаб «рабочая копия → холст»."""
+    height = int(gray300.shape[0] * width / gray300.shape[1])
+    page = cv2.resize(gray300, (width, height), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(page, cv2.COLOR_GRAY2BGR), width / analysis.width
+
+
+def _header(canvas: np.ndarray, analysis: PageAnalysis, what: str) -> None:
+    """Заголовок картинки: выпуск, полоса, вариант и что на ней."""
+    text = f"{analysis.name} с.{analysis.page} [{analysis.variant}] {what}"
+    cv2.putText(canvas, text, (10, 18), cv2.FONT_HERSHEY_COMPLEX, 0.5, COLOUR_TEXT, 1, cv2.LINE_AA)
+
+
+def draw_sides(analysis: PageAnalysis, gray300: np.ndarray, method: SidesMethod, width: int) -> np.ndarray:
+    """Оверлей разметки сторон одним методом.
+
+    Args:
+        analysis: Разбор страницы.
+        gray300: Серый рендер страницы.
+        method: Метод разметки.
+        width: Ширина картинки.
+
+    Returns:
+        Холст BGR.
+    """
+    canvas, scale = _page(gray300, analysis, width)
+    _draw_axes(canvas, analysis, scale)
+    for block in analysis.blocks:
+        sides = sides_of(block, method)
+        _draw_sides(canvas, sides, scale)
+        if method is not SidesMethod.FRAME:
+            _draw_edge_extensions(canvas, block, scale)
+        measures = {item.side: item for item in side_measures(sides, block.dpi)}
+        left, right = measures[SideKind.LEFT], measures[SideKind.RIGHT]
+        corners = np.mean([item.corner_share for item in measures.values()])
+        _caption(
+            canvas,
+            _scaled(sides.polygon.min(axis=0), scale),
+            [
+                f"{block.column}.{block.index}: L {left.tilt_deg:+.2f} гр, изгиб {left.bend_mm:.2f} мм",
+                f"R {right.tilt_deg:+.2f} гр, изгиб {right.bend_mm:.2f} мм, углы {corners:.0%}",
+            ],
+        )
+    _header(canvas, analysis, f"стороны: {method.value}")
+    legend = [
+        ("вертикальная сторона", COLOUR_VERTICAL, False),
+        ("горизонтальная сторона", COLOUR_HORIZONTAL, False),
+        ("угол, вертикальная часть", COLOUR_VERTICAL, True),
+        ("угол или неуверенный конец, горизонтальная часть", COLOUR_HORIZONTAL, True),
+        ("ось строки (фон)", COLOUR_AXIS_MUTED, False),
+    ]
+    if method is not SidesMethod.FRAME:
+        legend.append(("продление крайней строки по полной", COLOUR_TAIL, True))
+    if method is SidesMethod.RAYS:
+        legend.append(("луч из конца крайней строки", COLOUR_RAY, False))
+    _legend(canvas, legend)
+    return canvas
+
+
+def draw_alignment(
+    analysis: PageAnalysis, gray300: np.ndarray, method: AlignMethod, sides_method: SidesMethod, width: int
+) -> np.ndarray:
+    """Оверлей выравнивания по вертикальным сторонам одним методом.
+
+    Args:
+        analysis: Разбор страницы.
+        gray300: Серый рендер страницы.
+        method: Метод проверки выравнивания.
+        sides_method: Каким методом размечены стороны (какие звенья вертикальные).
+        width: Ширина картинки.
+
+    Returns:
+        Холст BGR.
+    """
+    canvas, scale = _page(gray300, analysis, width)
+    _draw_axes(canvas, analysis, scale)
+    for block in analysis.blocks:
+        sides = sides_of(block, sides_method)
+        points = _scaled(sides.polygon, scale)
+        n = len(points)
+        colours = [COLOUR_OTHER_SIDE] * n
+        texts = [f"{block.column}.{block.index}:"]
+        aligned = {}
+        for side in (SideKind.LEFT, SideKind.RIGHT):
+            alignment = side_alignment(block, side, method)
+            if alignment is None:
+                continue
+            # Сторона выровнена, если в выровненных сериях не меньше CORE_SHARE рядов — тот же
+            # порог, что у вердикта ``alignment.py`` для доли рядов на кривой.
+            aligned[side] = alignment.aligned_share >= CORE_SHARE
+            flags = aligned_segments(sides, alignment, block)
+            for index, label in enumerate(sides.labels):
+                if label is side:
+                    colours[index] = COLOUR_ALIGNED if flags[index] else COLOUR_RAGGED
+            _draw_ends(canvas, alignment, scale)
+            if alignment.curve is not None:
+                cv2.polylines(canvas, [_scaled(alignment.curve, scale)], False, COLOUR_CURVE, 1, cv2.LINE_AA)
+            texts.append(
+                f"{'L' if side is SideKind.LEFT else 'R'} на кривой {alignment.on_share:.0%}, "
+                f"в сериях {alignment.aligned_share:.0%}"
+            )
+        for start, stop in _runs(colours):
+            run = points[[(index % n) for index in range(start, stop + 1)]]
+            thick = 1 if colours[start] == COLOUR_OTHER_SIDE else SIDE_THICKNESS
+            cv2.polylines(canvas, [run], False, colours[start], thick, cv2.LINE_AA)
+        _caption(canvas, _scaled(sides.polygon.min(axis=0), scale), texts)
+        if aligned:
+            draw_verdict(canvas, sides.polygon * scale, _kind(aligned, block))
+    _header(canvas, analysis, f"выравнивание: {method.value} (стороны: {sides_method.value})")
+    _legend(
+        canvas,
+        [
+            ("сторона: выровнено", COLOUR_ALIGNED, False),
+            ("сторона: не выровнено", COLOUR_RAGGED, False),
+            ("горизонтальная сторона", COLOUR_OTHER_SIDE, False),
+            ("конец строки: на кривой", COLOUR_ALIGNED, False),
+            ("конец строки: мимо", COLOUR_RAGGED, False),
+            ("конец строки: отступ", COLOUR_INDENT, False),
+            ("кривая, от которой мерили", COLOUR_CURVE, False),
+            ("вердикт both / left, right / center / none", VERDICT_COLOUR[AlignKind.BOTH], False),
+        ],
+    )
+    return canvas
+
+
+def _kind(aligned: dict, block) -> AlignKind:
+    """Вердикт стенда: выровненность сторон этим способом, центр — общей мерой ``alignment.is_centered``.
+
+    Однострочный блок выключки не имеет — ``ragged`` (на оверлее ``none``), как и в ``alignment.py``.
+    """
+    if len(block.rows) < 2:
+        return AlignKind.RAGGED
+    centered = is_centered(list(block.rows), block.dpi)
+    return verdict(aligned.get(SideKind.LEFT, False), aligned.get(SideKind.RIGHT, False), centered)
+
+
+def _draw_ends(canvas: np.ndarray, alignment: SideAlignment, scale: float) -> None:
+    """Точки концов строк у стороны по их положению."""
+    colours = {RowStatus.ON: COLOUR_ALIGNED, RowStatus.OFF: COLOUR_RAGGED, RowStatus.INDENT: COLOUR_INDENT}
+    for end in alignment.ends:
+        cv2.circle(canvas, tuple(int(v) for v in _scaled(end.point, scale)), 3, colours[end.status], -1, cv2.LINE_AA)
+
+
+def side_by_side(images: list[np.ndarray], titles: list[str]) -> np.ndarray:
+    """Несколько картинок одной полосы рядом, с подписью метода над каждой.
+
+    Args:
+        images: Холсты одинаковой высоты.
+        titles: Подписи.
+
+    Returns:
+        Склейка BGR.
+    """
+    tiles = []
+    for image, title in zip(images, titles):
+        strip = np.full((26, image.shape[1], 3), 255, dtype=np.uint8)
+        cv2.putText(strip, title, (10, 19), cv2.FONT_HERSHEY_COMPLEX, 0.6, COLOUR_TEXT, 1, cv2.LINE_AA)
+        tiles.append(np.vstack([strip, image]))
+        tiles.append(np.zeros((tiles[-1].shape[0], 8, 3), dtype=np.uint8))
+    return np.hstack(tiles[:-1])
+
+
+def write_all(
+    analysis: PageAnalysis, gray300: np.ndarray, out_dir: Path, width: int, sides_method: SidesMethod
+) -> None:
+    """Все оверлеи полосы: по методу разметки, по методу выравнивания и две склейки для сравнения.
+
+    Args:
+        analysis: Разбор страницы.
+        gray300: Серый рендер страницы.
+        out_dir: Корень выкладки.
+        width: Ширина одной картинки.
+        sides_method: Разметка, по которой рисуется выравнивание.
+    """
+    quality = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+    sides_images = []
+    for method in SidesMethod:
+        image = draw_sides(analysis, gray300, method, width)
+        sides_images.append(image)
+        path = out_dir / f"sides_{method.value}" / f"{analysis.key}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), image, quality)
+    align_images = []
+    for method in AlignMethod:
+        image = draw_alignment(analysis, gray300, method, sides_method, width)
+        align_images.append(image)
+        path = out_dir / f"align_{method.value}" / f"{analysis.key}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), image, quality)
+    compare = out_dir / "compare"
+    compare.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(
+        str(compare / f"{analysis.key}_sides.jpg"),
+        side_by_side(sides_images, [method.value for method in SidesMethod]),
+        quality,
+    )
+    cv2.imwrite(
+        str(compare / f"{analysis.key}_align.jpg"),
+        side_by_side(align_images, [method.value for method in AlignMethod]),
+        quality,
+    )
+
+
+__all__ = ["draw_alignment", "draw_sides", "side_by_side", "write_all"]

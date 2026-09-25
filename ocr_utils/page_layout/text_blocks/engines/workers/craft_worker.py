@@ -25,7 +25,6 @@ import json
 import os
 import sys
 import time
-import types
 from collections import OrderedDict
 
 import cv2
@@ -158,6 +157,16 @@ def weighted_centroids(region: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.n
     return centres, peaks, stats[1:, cv2.CC_STAT_HEIGHT].astype(float)
 
 
+def to_input(points: np.ndarray, scale: float) -> list[list[float]]:
+    """Перевести точки (x, y) из пикселей карты в пиксели исходника.
+
+    Аргументы: ``points`` — N×2 координаты в пикселях карты, ``scale`` — сколько пикселей исходника в одном
+    пикселе карты (2 / ratio). Центр пикселя карты i лежит в (i + 0.5)·scale − 0.5 пикселя исходника.
+    Возвращает список [x, y].
+    """
+    return [[float((x + 0.5) * scale - 0.5), float((y + 0.5) * scale - 0.5)] for x, y in points]
+
+
 def column_thickness(mask: np.ndarray) -> float:
     """Медиана по столбцам числа пикселей маски — толщина полосы компоненты поперёк строки.
 
@@ -188,10 +197,6 @@ def build_lines(score: np.ndarray, ratio: float) -> tuple[list[dict], dict]:
     # Пиксель карты (i) покрывает пиксели входа сети 2i..2i+1: центр — 2i + 0.5; затем делим на ratio.
     scale = 2.0 / ratio
 
-    def to_input(points: np.ndarray) -> list[list[float]]:
-        """Перевести точки (x, y) из пикселей карты в пиксели исходника."""
-        return [[float((x + 0.5) * scale - 0.5), float((y + 0.5) * scale - 0.5)] for x, y in points]
-
     lines = []
     skipped_small = skipped_weak = 0
     for label in range(1, count):
@@ -213,8 +218,8 @@ def build_lines(score: np.ndarray, ratio: float) -> tuple[list[dict], dict]:
         lines.append(
             {
                 "baseline": [],
-                "boundary": to_input(contour),
-                "centre": to_input(own),
+                "boundary": to_input(contour, scale),
+                "centre": to_input(own, scale),
                 "height": column_thickness(crop) * scale,
             }
         )

@@ -166,6 +166,7 @@ def _back_row(row, size: tuple[int, int], zone: OrientedZone):
         # Хвост последней строки и линия отсечки — такие же кривые вырезки, как профили.
         tail=profile(row.tail),
         cut=profile(row.cut),
+        body=profile(row.body),
     )
 
 

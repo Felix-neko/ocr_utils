@@ -79,21 +79,32 @@ class LineAxis:
 def resample(points: np.ndarray, step_px: float) -> np.ndarray:
     """Пересборка ломаной с постоянным шагом по x: в каждом окне — медиана ординат.
 
+    Внутренние точки стоят в центрах окон, а первая и последняя — ровно на концах исходных данных.
+    Центр крайнего окна отстоит от конца строки на случайную долю шага, до полушага наружу: у
+    «…и цехов сосредоточить» (1973/07 с.88) краска и точки движка кончались на x = 497, а ось — на
+    500, на 0.5 мм в пустоту. По концам осей строится край ряда у кромки-полосы, и эта случайная
+    добавка выгибала боковую кромку блока наружу у одних строк и не трогала соседние.
+
     Args:
         points: Исходные точки ``(N, 2)``, отсортированные по x.
         step_px: Шаг сетки по x в пикселях.
 
     Returns:
-        Ломаная ``(M, 2)`` с шагом ``step_px``; окна без точек пропускаются.
+        Ломаная ``(M, 2)`` с шагом ``step_px`` внутри и концами на ``min``/``max`` исходных x;
+        окна без точек пропускаются.
     """
     xs, ys = points[:, 0], points[:, 1]
     if xs.size == 0:
         return points
-    grid = np.arange(xs.min(), xs.max() + step_px, step_px)
+    x_first, x_last = float(xs.min()), float(xs.max())
+    grid = np.arange(x_first, x_last + step_px, step_px)
     if xs.size < grid.size:
         # Редкая ломаная (базовая линия нейросетевого движка — три-четыре точки на строку):
-        # сетка заполняется интерполяцией, иначе после пересборки точек меньше минимума.
+        # сетка заполняется интерполяцией, иначе после пересборки точек меньше минимума. Узел
+        # за концом данных зажимается в сам конец, чтобы ось не выходила за строку.
+        grid = np.unique(np.minimum(grid, x_last))
         return np.column_stack([grid, np.interp(grid, xs, ys)])
+    # Номер окна сетки для каждой исходной точки.
     index = np.clip(np.searchsorted(grid, xs, side="right") - 1, 0, len(grid) - 1)
     out_x: list[float] = []
     out_y: list[float] = []
@@ -101,6 +112,9 @@ def resample(points: np.ndarray, step_px: float) -> np.ndarray:
         own = ys[index == cell]
         out_x.append(float(grid[cell] + step_px / 2.0))
         out_y.append(float(np.median(own)))
+    # Концы — на концах данных: иначе крайние точки уходят на полшага наружу справа и внутрь слева.
+    out_x[0] = x_first
+    out_x[-1] = x_last if len(out_x) > 1 else out_x[-1]
     return np.column_stack([out_x, out_y])
 
 

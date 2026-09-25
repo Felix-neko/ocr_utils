@@ -13,6 +13,7 @@ import numpy as np
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.alignment import Alignment, alignment_of
 from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
+from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column
@@ -332,12 +333,16 @@ def text_ink(
     колонка). ``glyph_mask`` оставляет только компоненты размером с глиф.
     """
     work = _work_copy(gray300, dpi) if work is None else work
-    mask = glyph_mask(work)
+    glyphs = glyph_mask(work)
+    mask = glyphs
     # Точки отточий (0.5 мм) ниже нижнего порога маски глифов (5 px), и без них край ряда
     # останавливается на последнем слове, а поле точек остаётся вне блока (1971/10 с.93).
     # Берутся не любые точки, а только собранные в цепочки — пыль краем ряда не станет.
     dots = leaders_mask(work, dpi, leaders) if leaders is not None else leaders_of(work, dpi)[1]
     mask = cv2.max(mask, dots)
+    # Дефисы (перенос, составные слова) тоже ниже порога маски глифов (5 × 3 px), и строка с
+    # переносом теряла край на 1 мм — правый край колонки по формату выглядел рваным (1976/09 с.92).
+    mask = cv2.max(mask, hyphens_mask(work, glyphs, dpi))
     glyphs = cv2.resize(mask, (gray300.shape[1], gray300.shape[0]), interpolation=cv2.INTER_NEAREST)
     return (gray300 < 128) & (glyphs > 0)
 
