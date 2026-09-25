@@ -192,3 +192,56 @@ def test_uncertain_ends_are_on_top_and_bottom_only(pages):
         own = labels == side.value
         letter = max(row.glyph_w, row.glyph_h) or max(block.glyph_size)
         assert float(lengths[own & sides.uncertain].sum()) == pytest.approx(2 * letter, abs=4 * 3.0)
+
+
+def test_fill_side_gaps_drops_ragged_ends_and_patches_the_middle():
+    """Невыровненные концы отброшены, невыровненная середина — заплатка, выровненные точки на месте."""
+    v = np.arange(8, dtype=np.float64) * 10.0
+    u = np.zeros(8)
+    aligned = np.array([False, True, True, False, False, True, True, False])
+    line_v, line_u, filled = sd.fill_side_gaps(v, u, aligned, step=3.0)
+    assert line_v[0] == pytest.approx(10.0) and line_v[-1] == pytest.approx(60.0)
+    assert np.all(np.diff(line_v) > 0)
+    # Заплатка — строго внутри разрыва 20…50, с узлами не реже шага.
+    assert np.all((line_v[filled] > 20.0) & (line_v[filled] < 50.0))
+    assert filled.sum() >= 9
+    assert not filled[line_v <= 20.0].any() and not filled[line_v >= 50.0].any()
+
+
+def test_fill_side_gaps_ignores_a_bump_in_the_ragged_middle():
+    """Выступ на невыровненном участке прямой стороны заплатка не повторяет: линия прямая, изгиб ≈ 0."""
+    v = np.arange(20, dtype=np.float64) * 10.0
+    u = 0.1 * v
+    aligned = np.ones(20, dtype=bool)
+    u[8:11] += 15.0  # выступ, например кромка у короткого конца абзаца
+    aligned[8:11] = False
+    line_v, line_u, filled = sd.fill_side_gaps(v, u, aligned, step=3.0)
+    assert filled.any()
+    assert np.allclose(line_u, 0.1 * line_v, atol=1e-6)
+    raw = sd._tilt_bend(np.column_stack([u, v]), True, 150.0)[1]
+    fixed = sd._tilt_bend(np.column_stack([line_u, line_v]), True, 150.0)[1]
+    assert raw > 2.0 and fixed < 0.01
+
+
+def test_fill_side_gaps_needs_two_aligned_levels():
+    """Меньше двух выровненных точек на разных высотах — линии нет; всё выровнено — линия и есть сторона."""
+    v = np.arange(5, dtype=np.float64)
+    u = np.zeros(5)
+    assert sd.fill_side_gaps(v, u, np.array([False, False, True, False, False]), step=1.0) is None
+    line_v, line_u, filled = sd.fill_side_gaps(v, u + v, np.ones(5, dtype=bool), step=0.3)
+    assert not filled.any()
+    assert np.array_equal(line_v, v) and np.array_equal(line_u, u + v)
+
+
+@pytest.mark.parametrize("method", list(sd.AlignMethod))
+def test_filled_side_on_a_justified_column_matches_the_side(pages, method):
+    """У колонки по формату дополнительная линия — сама сторона: меры те же, что у всей стороны."""
+    block = pages["plain"]
+    sides = sd.sides_of(block)
+    measures = {item.side: item for item in sd.side_measures(sides, block.dpi)}
+    for side in (sd.SideKind.LEFT, sd.SideKind.RIGHT):
+        line = sd.filled_side(sides, sd.side_alignment(block, side, method), block)
+        assert line is not None and line.side is side and line.method is method
+        assert line.raw_tilt_deg == pytest.approx(measures[side].tilt_deg, abs=1e-9)
+        assert line.raw_bend_mm == pytest.approx(measures[side].bend_mm, abs=1e-9)
+        assert abs(line.tilt_deg - line.raw_tilt_deg) < 0.2

@@ -317,10 +317,13 @@ def sides_json(analysis: PageAnalysis) -> dict:
         выравнивания.
     """
     from ocr_utils.page_layout.text_blocks.sides import AlignMethod, SideKind, SidesMethod, side_alignment
-    from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, edge_axis, side_measures, sides_of
+    from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, edge_axis, filled_side, side_measures
+    from ocr_utils.page_layout.text_blocks.sides import sides_of
 
     blocks = []
     for block in analysis.blocks:
+        # Дополнительная линия стороны строится по разметке сторон по умолчанию — той же, что на оверлеях.
+        default_sides = sides_of(block, DEFAULT_SIDES_METHOD)
         methods = {}
         for method in SidesMethod:
             sides = sides_of(block, method)
@@ -360,6 +363,7 @@ def sides_json(analysis: PageAnalysis) -> dict:
                         }
                         for end in result.ends
                     ],
+                    "filled": _filled_json(filled_side(default_sides, result, block)),
                 }
             align[method.value] = own
         edges = {}
@@ -388,6 +392,28 @@ def sides_json(analysis: PageAnalysis) -> dict:
     }
 
 
+def _filled_json(line) -> dict | None:
+    """Дополнительная линия стороны (``sides.FilledSide``) для JSON: точки, флаги заплатки и меры.
+
+    Args:
+        line: Линия или ``None``, если она не построилась.
+
+    Returns:
+        Словарь или ``None``.
+    """
+    if line is None:
+        return None
+    return {
+        "points": _curve(line.points),
+        "filled": [bool(flag) for flag in line.filled],
+        "length_mm": round(line.length_mm, 1),
+        "tilt_deg": round(line.tilt_deg, 3),
+        "bend_mm": round(line.bend_mm, 2),
+        "raw_tilt_deg": round(line.raw_tilt_deg, 3),
+        "raw_bend_mm": round(line.raw_bend_mm, 2),
+    }
+
+
 def sides_markdown(analyses: list[PageAnalysis]) -> str:
     """Сводка сравнения методов: согласие разметки сторон и выравнивание по сторонам.
 
@@ -398,10 +424,11 @@ def sides_markdown(analyses: list[PageAnalysis]) -> str:
         Markdown: таблица согласия методов разметки по страницам (доля длины контура с одной и той
         же стороной, попарно, и доля угловой длины) и таблица выравнивания — доля рядов на кривой и
         в выровненных сериях по левой и правой стороне у каждого метода, по блокам из трёх и больше
-        рядов.
+        рядов; третья таблица — наклон и изгиб вертикальных сторон всей стороной и дополнительной линией
+        (``sides.filled_side``) по каждому методу выравнивания.
     """
     from ocr_utils.page_layout.text_blocks.sides import AlignMethod, SideKind, SidesMethod, label_agreement
-    from ocr_utils.page_layout.text_blocks.sides import side_alignment, sides_of
+    from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, filled_side, side_alignment, sides_of
 
     pairs = [
         (SidesMethod.CONSTRUCT, SidesMethod.RAYS),
@@ -460,6 +487,39 @@ def sides_markdown(analyses: list[PageAnalysis]) -> str:
             lines.append(
                 f"| {analysis.key} | {block.column}.{block.index} | {len(block.rows)} | " + " | ".join(cells) + " |"
             )
+    lines += [
+        "",
+        "## Наклон и изгиб вертикальных сторон: вся сторона → дополнительная линия (блоки от трёх рядов)",
+        "",
+        "Дополнительная линия — сторона без невыровненных концов, невыровненная середина заменена "
+        "заплаткой PCHIP (`sides.filled_side`). Ячейка — «наклон °, изгиб мм» всей стороны и линии, у линии "
+        "в скобках её длина поперёк строк (на коротких наклон шумит); прочерк — линия не построилась "
+        "(выровненного меньше двух точек). Вся сторона от метода не зависит и дана одна.",
+        "",
+        "| страница | блок | сторона | вся сторона | " + " | ".join(method.value for method in AlignMethod) + " |",
+        "|---|---|---|---|" + "---|" * len(AlignMethod),
+    ]
+    for analysis in analyses:
+        for block in analysis.blocks:
+            if len(block.rows) < 3:
+                continue
+            sides = sides_of(block, DEFAULT_SIDES_METHOD)
+            for side in (SideKind.LEFT, SideKind.RIGHT):
+                raw = "—"
+                cells = []
+                for method in AlignMethod:
+                    result = side_alignment(block, side, method)
+                    line = None if result is None else filled_side(sides, result, block)
+                    if line is None:
+                        cells.append("—")
+                        continue
+                    raw = f"{line.raw_tilt_deg:+.2f}°, {line.raw_bend_mm:.1f}"
+                    cells.append(f"{line.tilt_deg:+.2f}°, {line.bend_mm:.1f} ({line.length_mm:.0f} мм)")
+                lines.append(
+                    f"| {analysis.key} | {block.column}.{block.index} | {side.value} | {raw} | "
+                    + " | ".join(cells)
+                    + " |"
+                )
     return "\n".join(lines) + "\n"
 
 

@@ -18,6 +18,9 @@
 по x от тренда тела блока (как ``alignment.py``), вдоль касательной к строке и устойчивой подгонкой
 кривой к концам строк в системе координат блока (как векторы табуляции Tesseract). Ряды собираются
 в серии, и вдоль стороны помечаются выровненные и невыровненные участки.
+
+Дополнительная линия вертикальной стороны (:func:`filled_side`) — сторона без невыровненных концов,
+с гладкой заплаткой PCHIP вместо невыровненной середины; по ней меряются наклон и изгиб стороны.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from enum import Enum
 
 import cv2
 import numpy as np
+from scipy.interpolate import PchipInterpolator
 
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.page_layout.text_blocks.alignment import ALIGN_TOL_MM, INDENT_MIN_MM, block_frame
@@ -179,6 +183,28 @@ class SideAlignment:
     aligned_share: float  # доля рядов в выровненных сериях среди рядов без отступов
     # Кривая, от которой мерились отклонения (кадр), — для оверлея.
     curve: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class FilledSide:
+    """Дополнительная линия вертикальной стороны: без невыровненных концов, с заплатками в середине.
+
+    ``points`` идут сверху вниз в кадре (пиксели рабочей копии); ``filled[i]`` — точка лежит на
+    заплатке (гладкой интерполяции поверх невыровненного участка), а не на самой стороне. Меры
+    ``tilt_deg``/``bend_mm`` — по этой линии, ``raw_*`` — по всей стороне без углов, той же формулой.
+    ``length_mm`` — длина линии поперёк строк: на коротком отрезке наклон шумит (сдвиг в 2 px на 9 мм
+    — уже 5°), и меры таких линий надо читать с оглядкой на длину.
+    """
+
+    side: SideKind
+    method: AlignMethod
+    points: np.ndarray
+    filled: np.ndarray
+    length_mm: float
+    tilt_deg: float
+    bend_mm: float
+    raw_tilt_deg: float
+    raw_bend_mm: float
 
 
 @dataclass(frozen=True)
@@ -911,19 +937,35 @@ def side_measures(sides: BlockSides, dpi: float) -> tuple[SideMeasure, ...]:
         corner_share = float(lengths[own & sides.excluded].sum() / total) if total > 0 else 0.0
         tilt = bend = 0.0
         if body.sum() >= 3:
-            pts = middles[body]
-            # У вертикальной стороны «абсцисса» — y (x как функция y), у горизонтальной — x.
-            along, across = (pts[:, 1], pts[:, 0]) if side.vertical else (pts[:, 0], pts[:, 1])
-            order = np.argsort(along)
-            along, across = along[order], across[order]
-            sample = slice(None, None, max(1, len(along) // 200))  # Тейл–Сен квадратичен по точкам
-            slope = _theil_sen(along[sample], across[sample])
-            tilt = math.degrees(math.atan(slope))
-            if along[-1] - along[0] > 0:
-                chord = across[0] + (across[-1] - across[0]) * (along - along[0]) / (along[-1] - along[0])
-                bend = px_to_mm(float(np.ptp(across - chord)), dpi)
+            tilt, bend = _tilt_bend(middles[body], side.vertical, dpi)
         out.append(SideMeasure(side, px_to_mm(total, dpi), corner_share, tilt, bend))
     return tuple(out)
+
+
+def _tilt_bend(points: np.ndarray, vertical: bool, dpi: float) -> tuple[float, float]:
+    """Наклон и изгиб кривой стороны — общая мера для всей стороны и для дополнительной линии.
+
+    Args:
+        points: Точки кривой ``(N, 2)`` в кадре, пиксели рабочей копии; порядок не важен.
+        vertical: Вертикальная ли сторона: у неё «абсцисса» — y (x как функция y), у горизонтальной — x.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``(tilt_deg, bend_mm)``: наклон Тейла–Сена в градусах (у вертикальной — от вертикали) и размах
+        остатка от хорды между крайними точками в мм. Меньше трёх точек — ``(0.0, 0.0)``.
+    """
+    if len(points) < 3:
+        return 0.0, 0.0
+    along, across = (points[:, 1], points[:, 0]) if vertical else (points[:, 0], points[:, 1])
+    order = np.argsort(along)
+    along, across = along[order], across[order]
+    sample = slice(None, None, max(1, len(along) // 200))  # Тейл–Сен квадратичен по точкам
+    tilt = math.degrees(math.atan(_theil_sen(along[sample], across[sample])))
+    bend = 0.0
+    if along[-1] - along[0] > 0:
+        chord = across[0] + (across[-1] - across[0]) * (along - along[0]) / (along[-1] - along[0])
+        bend = px_to_mm(float(np.ptp(across - chord)), dpi)
+    return tilt, bend
 
 
 def label_agreement(first: BlockSides, second: BlockSides) -> float:
@@ -1205,10 +1247,137 @@ def aligned_segments(sides: BlockSides, alignment: SideAlignment, block: TextBlo
     return out
 
 
+def fill_side_gaps(
+    v: np.ndarray, u: np.ndarray, aligned: np.ndarray, step: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Дополнительная линия стороны: невыровненные концы выкинуть, невыровненную середину заменить заплаткой.
+
+    Заплатка — PCHIP (кусочно-кубическая кривая Эрмита) через ВСЕ выровненные точки стороны: касательная
+    на стыке с настоящей стороной не ломается, изгиб выгнутой стороны не занижается, как у хорды, и
+    кривая не выходит за соседние значения (у сплайна на коротком разрыве бывали бы петли).
+
+    Args:
+        v: Координата поперёк строк (вниз по блоку) для точек стороны ``(N,)``.
+        u: Координата вдоль строк ``(N,)``.
+        aligned: Флаги ``(N,)``: точка стороны лежит против выровненного ряда.
+        step: Шаг узлов заплатки по ``v`` (пиксели): длинный разрыв заполняется кривой, а не парой точек.
+
+    Returns:
+        ``(v, u, filled)`` по возрастанию ``v`` — точки линии и флаги «заплатка»; ``None``, если
+        выровненных точек на разных высотах меньше двух.
+    """
+    order = np.argsort(v, kind="stable")
+    v, u, aligned = v[order], u[order], np.asarray(aligned, dtype=bool)[order]
+    green = np.flatnonzero(aligned)
+    if green.size < 2:
+        return None
+    # Опорные точки интерполяции: выровненные, одинаковые высоты слиты медианой (PCHIP требует
+    # строго возрастающей абсциссы).
+    levels, inverse = np.unique(v[green], return_inverse=True)
+    if levels.size < 2:
+        return None
+    values = np.array([float(np.median(u[green][inverse == index])) for index in range(levels.size)])
+    curve = PchipInterpolator(levels, values)
+    out_v: list[np.ndarray] = []
+    out_u: list[np.ndarray] = []
+    out_filled: list[np.ndarray] = []
+    # Проход от первой выровненной точки до последней: концы за ними отброшены.
+    index, last = int(green[0]), int(green[-1])
+    while index <= last:
+        if aligned[index]:
+            out_v.append(v[index : index + 1])
+            out_u.append(u[index : index + 1])
+            out_filled.append(np.zeros(1, dtype=bool))
+            index += 1
+            continue
+        # Невыровненная серия в середине: от предыдущей выровненной точки до следующей.
+        stop = index
+        while not aligned[stop]:
+            stop += 1
+        v_from, v_to = v[index - 1], v[stop]
+        grid = np.unique(np.concatenate([np.arange(v_from + step, v_to, step), v[index:stop]]))
+        grid = grid[(grid > v_from) & (grid < v_to)]
+        out_v.append(grid)
+        out_u.append(curve(grid))
+        out_filled.append(np.ones(grid.size, dtype=bool))
+        index = stop
+    return np.concatenate(out_v), np.concatenate(out_u), np.concatenate(out_filled)
+
+
+def _aligned_spans(alignment: SideAlignment, theta: float) -> list[tuple[float, float]]:
+    """Высоты выровненных серий: от конца первой строки серии до конца последней, поперёк строк.
+
+    Args:
+        alignment: Выравнивание стороны; концы строк идут сверху вниз.
+        theta: Медианный наклон строк блока (:func:`block_frame`), радианы.
+
+    Returns:
+        Пары ``(v_от, v_до)`` в системе блока (``v`` — поперёк строк), по одной на серию.
+    """
+    across = np.array([-math.sin(theta), math.cos(theta)])
+    out = []
+    start = None
+    for index, end in enumerate(alignment.ends):
+        if end.aligned and start is None:
+            start = index
+        last = index == len(alignment.ends) - 1
+        if start is not None and (not end.aligned or last):
+            stop = index if end.aligned else index - 1
+            out.append((float(alignment.ends[start].point @ across), float(alignment.ends[stop].point @ across)))
+            start = None
+    return out
+
+
+def filled_side(sides: BlockSides, alignment: SideAlignment, block: TextBlock) -> FilledSide | None:
+    """Дополнительная линия вертикальной стороны и её меры против мер всей стороны.
+
+    Берутся звенья стороны без углов и неуверенных концов (как у :func:`side_measures`). Середины звеньев
+    переводятся в систему блока (``u`` вдоль строк, ``v`` поперёк, поворот на медианный наклон строк
+    :func:`block_frame`), там строится :func:`fill_side_gaps`, и линия поворачивается обратно в кадр.
+
+    Выровненной считается точка, лежащая по ``v`` между концами первой и последней строки ОДНОЙ
+    выровненной серии (:func:`_aligned_spans`), а не точка против ближайшего выровненного ряда, как у
+    раскраски :func:`aligned_segments`. Иначе в линию попадала половина перехода от невыровненной
+    строки к выровненной: у пятистрочного блока 1970/02 с.90 со ступенькой абзацного отступа наклон
+    левой стороны выходил +4.4° вместо −0.15°.
+
+    Args:
+        sides: Разметка контура.
+        alignment: Выравнивание этой стороны (метод задаёт, какие участки выровнены).
+        block: Текстовый блок.
+
+    Returns:
+        :class:`FilledSide` или ``None``, если у стороны меньше трёх звеньев или выровненного на ней
+        меньше двух точек.
+    """
+    _, middles, _ = outward_normals(sides.polygon)
+    own = np.array([label is alignment.side for label in sides.labels]) & ~sides.excluded
+    if own.sum() < 3:
+        return None
+    points = middles[own]
+    theta = block_frame(list(block.rows))
+    cos, sin = math.cos(theta), math.sin(theta)
+    u = points[:, 0] * cos + points[:, 1] * sin
+    v = -points[:, 0] * sin + points[:, 1] * cos
+    flags = np.zeros(len(v), dtype=bool)
+    for v_from, v_to in _aligned_spans(alignment, theta):
+        flags |= (v >= v_from) & (v <= v_to)
+    result = fill_side_gaps(v, u, flags, mm_to_px(DENSIFY_MM, block.dpi))
+    if result is None:
+        return None
+    line_v, line_u, filled = result
+    line = np.column_stack([line_u * cos - line_v * sin, line_u * sin + line_v * cos])
+    tilt, bend = _tilt_bend(line, True, block.dpi)
+    raw_tilt, raw_bend = _tilt_bend(points, True, block.dpi)
+    length = px_to_mm(float(line_v[-1] - line_v[0]), block.dpi)
+    return FilledSide(alignment.side, alignment.method, line, filled, length, tilt, bend, raw_tilt, raw_bend)
+
+
 __all__ = [
     "AlignMethod",
     "BlockSides",
     "EdgeAxis",
+    "FilledSide",
     "CYCLE",
     "DEFAULT_SIDES_METHOD",
     "RowEnd",
@@ -1222,6 +1391,8 @@ __all__ = [
     "aligned_segments",
     "densify",
     "edge_axis",
+    "fill_side_gaps",
+    "filled_side",
     "label_agreement",
     "outward_normals",
     "ray_hit",

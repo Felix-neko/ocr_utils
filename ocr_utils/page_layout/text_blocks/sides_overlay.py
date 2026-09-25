@@ -1,4 +1,4 @@
-"""Оверлеи сторон границы блока и выравнивания по ним: по методу на картинку и три метода рядом."""
+"""Оверлеи сторон границы блока, выравнивания по ним и дополнительной линии вертикальных сторон."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from ocr_utils.page_layout.text_blocks.sides import (
     SideKind,
     SidesMethod,
     aligned_segments,
+    filled_side,
     side_alignment,
     side_measures,
     edge_axis,
@@ -41,6 +42,15 @@ COLOUR_OTHER_SIDE = (170, 170, 170)
 SIDE_THICKNESS = 3
 # Пунктир угловых звеньев: штрих и промежуток в пикселях холста.
 DASH_ON, DASH_OFF = 7, 5
+# Дополнительная линия вертикальной стороны (:func:`sides.filled_side`) — синий вертикальной стороны
+# (на оверлее «было / стало» он ничем не занят), толсто и полупрозрачно поверх тонкой исходной
+# стороны: под линией должны читаться и буквы, и зелёно-красная сторона. Заплатки — пунктиром.
+COLOUR_FILLED = COLOUR_VERTICAL
+FILLED_THICKNESS = 5
+# На оверлее выравнивания та же линия — подложкой под сторону толщиной SIDE_THICKNESS: шире её, чтобы
+# синий край был виден по обе стороны от зелёного и красного.
+UNDERLAY_THICKNESS = 9
+FILLED_ALPHA = 0.55
 
 
 def _scaled(points: np.ndarray, scale: float) -> np.ndarray:
@@ -138,18 +148,25 @@ def _caption(canvas: np.ndarray, anchor: np.ndarray, lines: list[str]) -> None:
         cv2.putText(canvas, text, (x, top), cv2.FONT_HERSHEY_COMPLEX, 0.32, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
-def _legend(canvas: np.ndarray, lines: list[tuple[str, tuple[int, int, int], bool]]) -> None:
-    """Легенда в правом верхнем углу; пунктирные сущности — пунктирным образцом."""
+def _legend(canvas: np.ndarray, lines: list[tuple]) -> None:
+    """Легенда в правом верхнем углу; пунктирные сущности — пунктирным образцом.
+
+    Args:
+        canvas: Холст.
+        lines: Строки ``(подпись, цвет, пунктир)`` или ``(подпись, цвет, пунктир, альфа)``: у
+            полупрозрачной линии образец смешивается с бумагой той же альфой (:func:`_on_paper`).
+    """
     width = 240
     x = canvas.shape[1] - width
     cv2.rectangle(canvas, (x - 6, 4), (canvas.shape[1] - 2, 10 + 14 * len(lines)), (255, 255, 255), -1)
-    for index, (text, colour, dashed) in enumerate(lines):
+    for index, (text, colour, dashed, *rest) in enumerate(lines):
         y = 16 + 14 * index
         sample = np.array([[x, y - 3], [x + 18, y - 3]])
+        paper = _on_paper(colour, rest[0] if rest else 1.0)
         if dashed:
-            _dashed_run(canvas, sample, _on_paper(colour, 1.0), 2)
+            _dashed_run(canvas, sample, paper, 2)
         else:
-            cv2.line(canvas, (x, y - 3), (x + 18, y - 3), colour, 2, cv2.LINE_AA)
+            cv2.line(canvas, (x, y - 3), (x + 18, y - 3), paper, 2, cv2.LINE_AA)
         cv2.putText(canvas, text, (x + 22, y), cv2.FONT_HERSHEY_COMPLEX, 0.32, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
@@ -217,6 +234,9 @@ def draw_alignment(
 ) -> np.ndarray:
     """Оверлей выравнивания по вертикальным сторонам одним методом.
 
+    Под зелёно-красной стороной — подложкой дополнительная линия стороны (:func:`sides.filled_side`):
+    широкая полупрозрачная синяя полоса, пунктир на заплатках.
+
     Args:
         analysis: Разбор страницы.
         gray300: Серый рендер страницы.
@@ -229,17 +249,30 @@ def draw_alignment(
     """
     canvas, scale = _page(gray300, analysis, width)
     _draw_axes(canvas, analysis, scale)
+    # Первый проход — разметка и выравнивание каждого блока, а дополнительные линии сторон сразу в слой:
+    # слой подмешивается ДО всего остального, и линия ложится подложкой под зелёно-красную сторону.
+    layer = canvas.copy()
+    prepared = []
     for block in analysis.blocks:
         sides = sides_of(block, sides_method)
+        alignments = {}
+        for side in (SideKind.LEFT, SideKind.RIGHT):
+            alignment = side_alignment(block, side, method)
+            if alignment is None:
+                continue
+            alignments[side] = alignment
+            line = filled_side(sides, alignment, block)
+            if line is not None:
+                _draw_filled_line(layer, line, scale, UNDERLAY_THICKNESS)
+        prepared.append((block, sides, alignments))
+    cv2.addWeighted(layer, FILLED_ALPHA, canvas, 1.0 - FILLED_ALPHA, 0, canvas)
+    for block, sides, alignments in prepared:
         points = _scaled(sides.polygon, scale)
         n = len(points)
         colours = [COLOUR_OTHER_SIDE] * n
         texts = [f"{block.column}.{block.index}:"]
         aligned = {}
-        for side in (SideKind.LEFT, SideKind.RIGHT):
-            alignment = side_alignment(block, side, method)
-            if alignment is None:
-                continue
+        for side, alignment in alignments.items():
             # Сторона выровнена, если в выровненных сериях не меньше CORE_SHARE рядов — тот же
             # порог, что у вердикта ``alignment.py`` для доли рядов на кривой.
             aligned[side] = alignment.aligned_share >= CORE_SHARE
@@ -272,7 +305,105 @@ def draw_alignment(
             ("конец строки: мимо", COLOUR_RAGGED, False),
             ("конец строки: отступ", COLOUR_INDENT, False),
             ("кривая, от которой мерили", COLOUR_CURVE, False),
+            ("доп. линия стороны: по стороне", COLOUR_FILLED, False, FILLED_ALPHA),
+            ("доп. линия стороны: заплатка PCHIP", COLOUR_FILLED, True, FILLED_ALPHA),
             ("вердикт both / left, right / center / none", VERDICT_COLOUR[AlignKind.BOTH], False),
+        ],
+    )
+    return canvas
+
+
+def _draw_filled_line(layer: np.ndarray, line, scale: float, thickness: int) -> None:
+    """Дополнительная линия стороны в слой: сплошная по самой стороне, пунктир на заплатках.
+
+    Args:
+        layer: Слой, который потом подмешивается к холсту с альфой ``FILLED_ALPHA``.
+        line: Линия стороны (``sides.FilledSide``).
+        scale: Масштаб «рабочая копия → холст».
+        thickness: Толщина линии, пиксели холста.
+    """
+    points = _scaled(line.points, scale)
+    # Серии «настоящая сторона / заплатка»; заплатка берёт крайние точки соседей, чтобы линия не рвалась.
+    for start, stop in _runs(list(line.filled)):
+        run = points[max(0, start - 1) : stop + 1] if line.filled[start] else points[start:stop]
+        if len(run) < 2:
+            continue
+        if line.filled[start]:
+            _dashed_run(layer, run, COLOUR_FILLED, thickness)
+        else:
+            cv2.polylines(layer, [run], False, COLOUR_FILLED, thickness, cv2.LINE_AA)
+
+
+def draw_filled(
+    analysis: PageAnalysis, gray300: np.ndarray, method: AlignMethod, sides_method: SidesMethod, width: int
+) -> np.ndarray:
+    """Оверлей «исходная вертикальная сторона против дополнительной линии» одним методом выравнивания.
+
+    Исходная сторона — тонко, зелёным и красным по выровненности (как на ``align_*``). Дополнительная
+    линия (:func:`sides.filled_side`) — толсто и полупрозрачно: сплошная на настоящих участках стороны,
+    пунктир на заплатках; отброшенные концы не рисуются, под ними видна красная исходная сторона.
+    Подпись блока — наклон и изгиб всей стороны → дополнительной линии.
+
+    Args:
+        analysis: Разбор страницы.
+        gray300: Серый рендер страницы.
+        method: Метод выравнивания — по нему размечены выровненные участки.
+        sides_method: Каким методом размечены стороны.
+        width: Ширина картинки.
+
+    Returns:
+        Холст BGR.
+    """
+    canvas, scale = _page(gray300, analysis, width)
+    _draw_axes(canvas, analysis, scale)
+    # Дополнительные линии копятся в отдельном слое и подмешиваются одним разом в конце; подписи
+    # печатаются уже после смешивания, иначе они бледнели бы вместе с линиями.
+    layer = canvas.copy()
+    captions = []
+    for block in analysis.blocks:
+        sides = sides_of(block, sides_method)
+        points = _scaled(sides.polygon, scale)
+        n = len(points)
+        colours = [None] * n
+        texts = [f"{block.column}.{block.index}:"]
+        for side in (SideKind.LEFT, SideKind.RIGHT):
+            alignment = side_alignment(block, side, method)
+            if alignment is None:
+                continue
+            flags = aligned_segments(sides, alignment, block)
+            for index, label in enumerate(sides.labels):
+                if label is side:
+                    colours[index] = COLOUR_ALIGNED if flags[index] else COLOUR_RAGGED
+            line = filled_side(sides, alignment, block)
+            if line is None:
+                continue
+            _draw_filled_line(layer, line, scale, FILLED_THICKNESS)
+            # Шрифт Hershey не знает «→» и «°» — стрелка и градусы пишутся ASCII и словом.
+            texts.append(
+                f"{'L' if side is SideKind.LEFT else 'R'} наклон {line.raw_tilt_deg:+.2f} -> {line.tilt_deg:+.2f} гр., "
+                f"изгиб {line.raw_bend_mm:.1f} -> {line.bend_mm:.1f} мм, линия {line.length_mm:.0f} мм"
+            )
+        # Исходная сторона — тонко и непрозрачно: одна-две пиксельные линии текст не закрывают. Она
+        # рисуется и на холсте, и в слое, поэтому после смешивания остаётся непрозрачной, а под
+        # дополнительной линией просвечивает.
+        for start, stop in _runs(colours):
+            if colours[start] is None:
+                continue
+            run = points[[(index % n) for index in range(start, stop + 1)]]
+            for target in (canvas, layer):
+                cv2.polylines(target, [run], False, colours[start], 1, cv2.LINE_AA)
+        captions.append((_scaled(sides.polygon.min(axis=0), scale), texts))
+    cv2.addWeighted(layer, FILLED_ALPHA, canvas, 1.0 - FILLED_ALPHA, 0, canvas)
+    for anchor, texts in captions:
+        _caption(canvas, anchor, texts)
+    _header(canvas, analysis, f"доп. линия сторон: {method.value} (стороны: {sides_method.value})")
+    _legend(
+        canvas,
+        [
+            ("сторона: выровнено", COLOUR_ALIGNED, False),
+            ("сторона: не выровнено", COLOUR_RAGGED, False),
+            ("доп. линия: по стороне", COLOUR_FILLED, False, FILLED_ALPHA),
+            ("доп. линия: заплатка PCHIP", COLOUR_FILLED, True, FILLED_ALPHA),
         ],
     )
     return canvas
@@ -318,7 +449,7 @@ def side_by_side(images: list[np.ndarray], titles: list[str]) -> np.ndarray:
 def write_all(
     analysis: PageAnalysis, gray300: np.ndarray, out_dir: Path, width: int, sides_method: SidesMethod
 ) -> None:
-    """Все оверлеи полосы: по методу разметки, по методу выравнивания и две склейки для сравнения.
+    """Все оверлеи полосы: по методу разметки, по методу выравнивания, дополнительные линии и склейки.
 
     Args:
         analysis: Разбор страницы.
@@ -342,8 +473,22 @@ def write_all(
         path = out_dir / f"align_{method.value}" / f"{analysis.key}.jpg"
         path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(path), image, quality)
+    fill_images = {}
+    for method in AlignMethod:
+        image = draw_filled(analysis, gray300, method, sides_method, width)
+        fill_images[method] = image
+        path = out_dir / f"fill_{method.value}" / f"{analysis.key}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), image, quality)
     compare = out_dir / "compare"
     compare.mkdir(parents=True, exist_ok=True)
+    # «Было / стало» по устойчивому методу: исходная раскраска стороны против дополнительной линии.
+    robust = list(AlignMethod).index(AlignMethod.ROBUST)
+    cv2.imwrite(
+        str(compare / f"{analysis.key}_fill.jpg"),
+        side_by_side([align_images[robust], fill_images[AlignMethod.ROBUST]], ["вся сторона", "доп. линия"]),
+        quality,
+    )
     cv2.imwrite(
         str(compare / f"{analysis.key}_sides.jpg"),
         side_by_side(sides_images, [method.value for method in SidesMethod]),
@@ -356,4 +501,4 @@ def write_all(
     )
 
 
-__all__ = ["draw_alignment", "draw_sides", "side_by_side", "write_all"]
+__all__ = ["draw_alignment", "draw_filled", "draw_sides", "side_by_side", "write_all"]
