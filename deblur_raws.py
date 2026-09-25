@@ -56,6 +56,7 @@ class Method(str, Enum):
 # Загрузка моделей
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _load_nafnet(variant: str, device: torch.device) -> nn.Module:
     import sys, types, importlib.util
 
@@ -110,6 +111,7 @@ def _load_restormer(device: torch.device) -> nn.Module:
 # Обработка изображений
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def read_raf_image(path: Path) -> np.ndarray:
     """Читает RAF и возвращает RGB uint8. Сначала JPEG-превью, потом rawpy."""
     with rawpy.imread(str(path)) as raw:
@@ -140,12 +142,7 @@ def compute_sharpness_map(rgb: np.ndarray, tile_size: int = 256) -> np.ndarray:
 
 
 def inference_tiled(
-    model: nn.Module,
-    img: np.ndarray,
-    tile_size: int,
-    overlap: int,
-    device: torch.device,
-    batch_size: int = 4,
+    model: nn.Module, img: np.ndarray, tile_size: int, overlap: int, device: torch.device, batch_size: int = 4
 ) -> np.ndarray:
     """Тайловый инференс с Hann-blend для сшивки без артефактов на границах."""
     h, w = img.shape[:2]
@@ -200,11 +197,7 @@ def inference_tiled(
 
 
 def adaptive_blend(
-    original: np.ndarray,
-    restored: np.ndarray,
-    sharpness_map: np.ndarray,
-    threshold: float,
-    scale: float = 100.0,
+    original: np.ndarray, restored: np.ndarray, sharpness_map: np.ndarray, threshold: float, scale: float = 100.0
 ) -> np.ndarray:
     """Blend: alpha→1 (restored) там где расфокус, alpha→0 (original) где резко."""
     h, w = original.shape[:2]
@@ -217,6 +210,7 @@ def adaptive_blend(
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @click.command()
 @click.argument("input_dir", default=str(DEFAULT_INPUT))
@@ -238,12 +232,7 @@ def adaptive_blend(
 @click.option("--tile-size", default=512, show_default=True, help="Размер тайла для инференса (пикс.)")
 @click.option("--overlap", default=64, show_default=True, help="Перекрытие тайлов (пикс.)")
 @click.option("--batch-size", default=4, show_default=True, help="Кол-во тайлов в батче")
-@click.option(
-    "--blend-threshold",
-    default=300.0,
-    show_default=True,
-    help="Порог Laplacian variance для adaptive blend",
-)
+@click.option("--blend-threshold", default=300.0, show_default=True, help="Порог Laplacian variance для adaptive blend")
 @click.option("--no-blend", is_flag=True, default=False, help="Деблюр без adaptive blend")
 def main(
     input_dir: str,
@@ -286,10 +275,14 @@ def main(
 
             sharpness_map = None if no_blend else compute_sharpness_map(rgb, tile_size=256)
 
-            restored = inference_tiled(model, rgb, tile_size=tile_size, overlap=overlap, device=device, batch_size=batch_size)
+            restored = inference_tiled(
+                model, rgb, tile_size=tile_size, overlap=overlap, device=device, batch_size=batch_size
+            )
 
-            result = restored if (no_blend or sharpness_map is None) else adaptive_blend(
-                rgb, restored, sharpness_map, threshold=blend_threshold
+            result = (
+                restored
+                if (no_blend or sharpness_map is None)
+                else adaptive_blend(rgb, restored, sharpness_map, threshold=blend_threshold)
             )
 
             out_file = out_path / (raf_path.stem + ".png")
@@ -299,6 +292,7 @@ def main(
         except Exception as e:
             tqdm.write(f"  Ошибка {raf_path.name}: {e}")
             import traceback
+
             tqdm.write(traceback.format_exc())
 
     click.echo(f"\nГотово. Результаты в {out_path}")

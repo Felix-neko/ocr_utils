@@ -40,7 +40,7 @@
 Запуск:
 
     uv run python compare_defocus_algorithms.py \
-        --labels-dir "/mnt/SYSTEM/raw/SI/focus_groups_186_FUJI_СИ_1985_07-09_чётная" \
+        --labels-dir "/mnt/system/raw/SI/focus_groups_186_FUJI_СИ_1985_07-09_чётная" \
         --reports-dir defocus_compare_186_fuji \
         --out defocus_algorithms_comparison_186_fuji.md
 """

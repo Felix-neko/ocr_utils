@@ -42,5 +42,7 @@ _DEFAULT_ORIGINS = (
 )
 
 CSRF_TRUSTED_ORIGINS = [
-    origin.strip() for origin in os.environ.get("CVAT_CSRF_TRUSTED_ORIGINS", _DEFAULT_ORIGINS).split(",") if origin.strip()
+    origin.strip()
+    for origin in os.environ.get("CVAT_CSRF_TRUSTED_ORIGINS", _DEFAULT_ORIGINS).split(",")
+    if origin.strip()
 ]

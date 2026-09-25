@@ -139,12 +139,14 @@ def write_targets(simple: list[list[str]], command: str) -> list[str]:
 
 
 def check_disks(command: str, simple: list[list[str]]) -> None:
-    """Диски с ловушками: корень Яндекс.Диска, NTFS-3G, регистр /mnt/SYSTEM, база разметки."""
-    bad_case = [m for m in re.findall(r"/mnt/[sS][yY][sS][tT][eE][mM]\b", command) if m != "/mnt/SYSTEM"]
+    """Диски с ловушками: корень Яндекс.Диска, NTFS-3G, регистр /mnt/system, база разметки."""
+    # С 2026-09-20 том смонтирован в /mnt/system строчными; прежний /mnt/SYSTEM заглавными больше не
+    # существует, но остался в старых отчётах и логах — команда с ним упадёт или уедет не туда.
+    bad_case = [m for m in re.findall(r"/mnt/[sS][yY][sS][tT][eE][mM]\b", command) if m != "/mnt/system"]
     if bad_case:
         deny(
-            f"Путь «{bad_case[0]}» — не тот том: регистр в /mnt/SYSTEM значим, строчный /mnt/system это пустой "
-            "каталог на системном диске, вывод тихо уедет туда. Писать /mnt/SYSTEM. См. docs/data_layout.md."
+            f"Путь «{bad_case[0]}» — не тот том: регистр в /mnt/system значим, том с данными смонтирован строчными, "
+            "а /mnt/SYSTEM заглавными с 2026-09-20 не существует. Писать /mnt/system. См. docs/data_layout.md."
         )
 
     targets = write_targets(simple, command)
@@ -152,14 +154,14 @@ def check_disks(command: str, simple: list[list[str]]) -> None:
         if t.startswith(YANDEX_ROOT):
             deny(
                 f"Запись в «{t}»: это корень живой синхронизации Яндекс.Диска, демон переименует новый файл поверх "
-                "исходника скана (уже терялись оригиналы). Результаты писать на /mnt/SYSTEM или в ~/Projects/mts_markup, "
+                "исходника скана (уже терялись оригиналы). Результаты писать на /mnt/system или в ~/Projects/mts_markup, "
                 "внутрь переносит пользователь руками при остановленном демоне. См. docs/data_layout.md."
             )
     for t in targets:
         if t.startswith(DUMP3):
             ask(
                 f"Запись в «{t}» на /mnt/dump3 — это медленный NTFS-3G на шпинделе, выход прогона обычно кладут на "
-                "/mnt/SYSTEM. Подтвердите, если запись туда действительно нужна."
+                "/mnt/system. Подтвердите, если запись туда действительно нужна."
             )
 
     for argv in simple:

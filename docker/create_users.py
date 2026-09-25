@@ -14,10 +14,7 @@ User = get_user_model()
 
 
 def ensure_user(username, password, email, is_superuser=False):
-    user, created = User.objects.get_or_create(
-        username=username,
-        defaults={"email": email},
-    )
+    user, created = User.objects.get_or_create(username=username, defaults={"email": email})
     user.email = email
     user.is_active = True
     user.is_staff = is_superuser
@@ -29,24 +26,17 @@ def ensure_user(username, password, email, is_superuser=False):
     try:
         from allauth.account.models import EmailAddress
 
-        EmailAddress.objects.update_or_create(
-            user=user,
-            email=email,
-            defaults={"verified": True, "primary": True},
-        )
+        EmailAddress.objects.update_or_create(user=user, email=email, defaults={"verified": True, "primary": True})
     except Exception as exc:  # noqa: BLE001
         print(f"  (пропущено создание EmailAddress: {exc})")
 
-    print(f"  пользователь {username!r}: {'создан' if created else 'обновлён'} "
-          f"(superuser={is_superuser})")
+    print(f"  пользователь {username!r}: {'создан' if created else 'обновлён'} " f"(superuser={is_superuser})")
     return user
 
 
 def ensure_membership(user, organization, role):
     membership, created = Membership.objects.get_or_create(
-        user=user,
-        organization=organization,
-        defaults={"role": role, "is_active": True, "joined_date": timezone.now()},
+        user=user, organization=organization, defaults={"role": role, "is_active": True, "joined_date": timezone.now()}
     )
     changed = False
     if membership.role != role:
@@ -70,8 +60,10 @@ def ensure_membership(user, organization, role):
             membership.save()
         except RequestsConnectionError as exc:
             print(f"  (аналитика недоступна, событие не отправлено: {exc.__class__.__name__}) ")
-    print(f"  членство {user.username!r} в {organization.slug!r}: роль={role} "
-          f"({'создано' if created else 'обновлено'})")
+    print(
+        f"  членство {user.username!r} в {organization.slug!r}: роль={role} "
+        f"({'создано' if created else 'обновлено'})"
+    )
 
 
 admin_user = os.environ["ADMIN_USER"]
@@ -93,10 +85,7 @@ print("Пользователи:")
 admin = ensure_user(admin_user, admin_pass, "admin@example.com", is_superuser=True)
 annotator = ensure_user(ann_user, ann_pass, "user@example.com", is_superuser=False)
 
-org, created = Organization.objects.get_or_create(
-    slug=org_slug,
-    defaults={"name": org_name, "owner": admin},
-)
+org, created = Organization.objects.get_or_create(slug=org_slug, defaults={"name": org_name, "owner": admin})
 if org.name != org_name or org.owner_id != admin.id:
     org.name = org_name
     org.owner = admin
