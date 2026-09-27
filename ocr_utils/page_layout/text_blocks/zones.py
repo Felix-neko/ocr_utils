@@ -105,6 +105,14 @@ AXIS_MAX_RESID_XH = 0.35
 # две зоны по 2.5 икса своего кегля дают вместе 87 px. Цифры и прописные в корпусе крупнее строчных
 # в 1.3–1.4 раза, но стоят через обычный пробел (12 px при пределе 50), и их это не задевает.
 MIXED_KEGL_RATIO = 1.25
+# Сор: кусок, у которого все глифы ниже ``SPECK_HEIGHT_XH`` и не шире ``SPECK_WIDTH_XH`` строчной
+# соседа (и это не точки отточия), сцепляется со строкой только через пустоту не шире
+# ``SPECK_MAX_GAP_XH`` строчной. Точка, запятая, кавычка стоят у слова вплотную, а обрывки карандашной
+# черты и рукописной цифры на полях — через поле в 2–3 строчных, и строка к ним «дотягивалась»
+# (1966/04 IMG_0046_1L: оси начинались на x 53–75 при крае текста 80).
+SPECK_HEIGHT_XH = 0.6
+SPECK_WIDTH_XH = 1.2
+SPECK_MAX_GAP_XH = 1.0
 # Сколько ближайших длинных кусков опрашивается ради наклона короткого и сколько их нужно.
 SLOPE_NEIGHBOURS = 7
 SLOPE_MIN_NEIGHBOURS = 3
@@ -120,6 +128,7 @@ class LinkVerdict(Enum):
     SIDE = "зона смотрит не туда"
     HEIGHT = "разный кегль"
     MIXED_GAP = "разный кегль через широкий зазор"
+    SPECK = "сор через пустоту"
     OVERLAP = "куски друг над другом"
     SLOPE = "наклон против местного"
     SEPARATOR = "межколонник"
@@ -422,6 +431,12 @@ def _verdict_of(
     if heights[1] > scale.link_height_ratio * heights[0]:
         return LinkVerdict.HEIGHT
     # Кегль у стыка — по крайним буквам: усреднённый икс сращённого куска разницу прячет.
+    # Сор через пустоту не сцепляется: обрывки карандашной черты и пометки на полях.
+    reference = max(left.x_h, right.x_h)
+    if (_is_speck(left, reference) or _is_speck(right, reference)) and (
+        right.x0 - left.x1 > SPECK_MAX_GAP_XH * reference
+    ):
+        return LinkVerdict.SPECK
     # Кусок из одной-двух букв кегля не мерит (правило тогда молчит).
     ends = (end_kegl(left, at_start=False), end_kegl(right, at_start=True))
     if None not in ends:
@@ -456,6 +471,25 @@ def _verdict_of(
     if left.leader_dots >= LEADER_RUN_MIN and right.leader_dots == 0:
         return LinkVerdict.LEADER
     return LinkVerdict.ACCEPTED
+
+
+def _is_speck(piece: Piece, reference: float) -> bool:
+    """Сор ли кусок: все его глифы ниже ``SPECK_HEIGHT_XH`` и не шире ``SPECK_WIDTH_XH`` строчной ``reference``.
+
+    Точки отточия сором не считаются: отточие идёт в строку своим ходом.
+
+    Args:
+        piece: Кусок.
+        reference: Высота строчной строки, с которой кусок сцепляется.
+
+    Returns:
+        ``True`` — кусок из мелочи: точки, крошки, обрывки карандаша.
+    """
+    if piece.leader_dots > 0 or piece.sizes.shape[0] == 0:
+        return False
+    return bool(
+        piece.sizes[:, 1].max() < SPECK_HEIGHT_XH * reference and piece.sizes[:, 0].max() < SPECK_WIDTH_XH * reference
+    )
 
 
 def _barrier_between(barriers, left: Piece, right: Piece) -> bool:

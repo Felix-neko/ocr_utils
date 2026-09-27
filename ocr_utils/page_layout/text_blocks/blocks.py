@@ -97,6 +97,15 @@ MIN_BLOCK_ROWS = 1
 OVERHANG_MM = 1.5
 # Насколько край ряда может отстоять от крайней оси строки (мм): дальше — не буква, а мусор.
 AXIS_REACH_MM = 6.0
+# Край ряда идёт от конца оси наружу только по СВЯЗНОЙ краске: пустота шире стольких высот ряда
+# обрывает поиск. За полем в две-три строчных стоят пометки на полях — карандашная черта,
+# рукописная цифра (1966/04 IMG_0046_1L: край ряда уходил на 52–58 при тексте с 80), — а тире в
+# начале строки и дефис переноса стоят к слову вплотную.
+EDGE_GAP_HEIGHTS = 0.6
+# Клочок краски за такой пустотой — край ряда, только если он не уже стольких высот ряда: обрывки
+# карандашной черты — 1–6 столбцов рендера, а короткое слово без своей оси («и», «в» у конца
+# строки) — от 15; при 1.2 высоты такие слова отрезались от ряда (1966/01 IMG_0007_2R).
+EDGE_WORD_HEIGHTS = 0.4
 # Ряд, вылезший за колонку, остаётся в ней, если она накрывает такую долю его длины; иначе он
 # уходит в отдельный кусок во всю ширину страницы.
 SPILL_KEEP_SHARE = 0.7
@@ -410,6 +419,63 @@ def ink_edge(ink: np.ndarray, x_lo: int, x_hi: int, y0: int, y1: int, side: str)
     return None
 
 
+def connected_edge(ink: np.ndarray, edge: float, anchor: float, y0: int, y1: int, max_gap: float, side: str) -> float:
+    """Край краски без пометок на полях: узкие клочки краски за пустотой шире ``max_gap`` отбрасываются.
+
+    ``ink_edge`` берёт самый дальний подтверждённый столбец окна, и пометка на полях (обрывок
+    карандашной черты, рукописная цифра) через пустоту становилась краем ряда. Здесь от конца оси идём
+    к найденному краю по «клочкам» краски — участкам без пустот шире ``max_gap``. Клочок за такой
+    пустотой принимается, только если он не уже ``EDGE_WORD_HEIGHTS`` высот ряда (слово, у которого
+    своей оси нет, — законный край ряда); узкий — пометка, и край ставится перед ним.
+
+    Args:
+        ink: Краска рендера.
+        edge: Край, найденный ``ink_edge`` (столбец ``ink``).
+        anchor: Конец оси с той же стороны (столбец ``ink``).
+        y0, y1: Полоса ряда.
+        max_gap: Наибольшая пустота (столбцов), через которую край тянется без проверки.
+        side: ``left`` или ``right`` — с какой стороны ряда край.
+
+    Returns:
+        Уточнённый край (не дальше ``edge`` от оси); край, лежащий внутри оси, — как есть.
+    """
+    if (side == "left" and edge >= anchor) or (side == "right" and edge <= anchor):
+        return edge
+    low, high = sorted((int(round(edge)), int(round(anchor))))
+    low, high = max(0, low), min(ink.shape[1], high + 1)
+    if high - low < 2:
+        return edge
+    filled = (ink[max(0, y0) : y1, low:high] > 0).sum(axis=0) >= EDGE_MIN_INK_PX
+    # Идём от оси к краю: слева — справа налево, справа — слева направо.
+    order = list(range(len(filled) - 1, -1, -1) if side == "left" else range(len(filled)))
+    height = max(1, y1 - y0)
+    min_word = EDGE_WORD_HEIGHTS * height
+    last = order[0]
+    position = 0
+    while position < len(order):
+        # Пустота от последней краски до следующей.
+        gap = 0
+        while position < len(order) and not filled[order[position]]:
+            gap += 1
+            position += 1
+        if position >= len(order):
+            break
+        # Следующий клочок краски: до пустоты шире ``max_gap``.
+        start, end, empty = position, position, 0
+        while position < len(order) and empty <= max_gap:
+            if filled[order[position]]:
+                end, empty = position, 0
+            else:
+                empty += 1
+            position += 1
+        width = end - start + 1
+        if gap > max_gap and width < min_word:
+            return float(low + last)
+        last = order[end]
+        position = end + 1
+    return edge
+
+
 def _axis_slope(axis: LineAxis, at_start: bool) -> float:
     """Наклон оси у её конца: по крайней доле ``AXIS_END_SHARE`` точек, но не круче правдоподобного.
 
@@ -700,6 +766,9 @@ def rows_of(
         right = ink_edge(ink, int(x_lo * k), int(x_hi * k), y0, y1, "right")
         if left is None or right is None:
             continue
+        max_gap = EDGE_GAP_HEIGHTS * height * k
+        left = connected_edge(ink, left, row_x0 * k, y0, y1, max_gap, "left")
+        right = connected_edge(ink, right, row_x1 * k, y0, y1, max_gap, "right")
         band = ink[max(0, y0) : y1, int(left) : int(right) + 1]
         # Точки отточия толще штриха корпуса вдвое и проходят нижний порог глифа: если их не
         # исключить, строка таблицы выглядит «другим набором» и блок дробится.

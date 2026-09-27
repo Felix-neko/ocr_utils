@@ -143,3 +143,4 @@ ocr_utils/page_layout/line_art/deepseek/vllm_env/.venv/
 /clip_examples/
 /finereader_landscape_not_ours/
 research/line_art_titles/vllm_env/sync.log
+reports/text_blocks_axis_body/
