@@ -200,12 +200,22 @@ def stage_pass2(work: Path, jobs: int) -> None:
     logger.info("Второй проход: %d из %d кандидатов", len(chosen), len(candidates))
 
 
-def stage_final(tasks, orientation, work: Path, out: Path, jobs: int) -> None:
-    """Стадия 6: итог полос, оверлеи по папкам, ``index.csv``."""
+def stage_final(tasks, orientation, work: Path, out: Path, jobs: int, redo: bool = False) -> None:
+    """Стадия 6: итог полос, оверлеи по папкам, ``index.csv``.
+
+    Args:
+        tasks: Полосы.
+        orientation: Вердикты ориентации по имени полосы.
+        work: Рабочая папка (JSON стадии кандидатов, вывод DeepSeek).
+        out: Корень выхода.
+        jobs: Воркеров пула.
+        redo: Пересчитать все полосы, а не только те, у которых итога ещё нет (после правки
+            детектора текстовых блоков или оверлея — остальные стадии при этом не трогаются).
+    """
     pass1 = read_jsonl_map(work / "deepseek" / "pass1" / "markdown.jsonl")
     pass2 = read_jsonl_map(work / "deepseek" / "pass2" / "markdown.jsonl")
     ready = [t for t in tasks if (work / "pages" / f"{page_key(t.name)}.json").is_file()]
-    todo = [t for t in ready if not (out / "pages" / f"{page_key(t.name)}.json").is_file()]
+    todo = ready if redo else [t for t in ready if not (out / "pages" / f"{page_key(t.name)}.json").is_file()]
     logger.info("Итог: полос %d, к обработке %d", len(ready), len(todo))
     payloads = []
     for task in todo:
@@ -272,6 +282,7 @@ def run(
     pages_file: Path | None,
     limit: int | None,
     detect_orientation: bool = True,
+    redo_final: bool = False,
 ) -> None:
     """Весь разбор по стадиям.
 
@@ -284,6 +295,7 @@ def run(
         limit: Только первые N полос.
         detect_orientation: Определять ли ориентацию; ``False`` — все полосы считаются прямыми
             (заострённые копии пака-1 экспортированы уже повёрнутыми, стадия там ничего не даёт).
+        redo_final: Пересчитать итоговую стадию у всех полос (см. :func:`stage_final`).
     """
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -298,7 +310,7 @@ def run(
     stage_deepseek(work / "jobs_pass1.jsonl", work / "deepseek" / "pass1", "markdown,ocr")
     stage_pass2(work, jobs)
     stage_deepseek(work / "jobs_pass2.jsonl", work / "deepseek" / "pass2", "markdown")
-    stage_final(tasks, orientation, work, out, jobs)
+    stage_final(tasks, orientation, work, out, jobs, redo=redo_final)
 
 
 def _read_jsonl(path: Path) -> list[dict]:

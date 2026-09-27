@@ -7,6 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, framed
 from ocr_utils.page_layout.text_blocks.alignment import AlignKind, Alignment
 from ocr_utils.page_layout.text_blocks.blocks import dilate_polygon
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
@@ -258,57 +259,52 @@ def _caption(canvas: np.ndarray, block, alignment: Alignment, scale: float) -> N
         cv2.putText(canvas, text, (x, y + i * 12), cv2.FONT_HERSHEY_COMPLEX, 0.33, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
-def _on_paper(colour: tuple[int, int, int], alpha: float) -> tuple[int, int, int]:
-    """Цвет, каким он ЛЯЖЕТ НА БУМАГУ при подмешивании с прозрачностью ``alpha``.
+def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None) -> list[LegendEntry]:
+    """Строки легенды разбора текстовых блоков: что означает каждый цвет.
 
-    Полупрозрачная линия на белой бумаге выглядит светлее своего цвета, и образец в легенде,
-    нарисованный непрозрачно, сбивал бы с толку: в легенде насыщенный синий, на странице —
-    блёклый. Поэтому образец смешивается с бумагой ровно так же, как сама линия.
+    Легенда печатается ВСЕГДА и в ПОЛЕ картинки (:mod:`ocr_utils.page_layout.overlay_frame`), а не
+    поверх страницы: на оверлее больше десятка сущностей, без легенды их не различить, а поверх
+    страницы она закрывает угол полосы. Образцы полупрозрачных линий показываются такими же
+    полупрозрачными.
+
+    Args:
+        dilate_extra: Доли размера символа, на которые дополнительно раздута граница блока.
+        hints: Подсказки внешних детекторов (``hints.LayoutHints``), если они нарисованы.
+
+    Returns:
+        Строки легенды в порядке значимости.
     """
-    return tuple(int(round(alpha * own + (1.0 - alpha) * 255)) for own in colour)
-
-
-def _legend(canvas: np.ndarray, dilate_extra: tuple[float, ...], hints=None) -> None:
-    """Легенда в правом верхнем углу: что означает каждый цвет.
-
-    Печатается ВСЕГДА: на оверлее семь сущностей, и без легенды их не различить. Образцы
-    полупрозрачных линий показываются такими же полупрозрачными (см. :func:`_on_paper`).
-    """
-    lines = [
-        ("граница блока: полоса вокруг оси", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
-        ("граница блока по краске, справочно", COLOUR_ENVELOPE_INK, ENVELOPE_ALPHA),
-        ("крупная огибающая", COLOUR_COARSE, 1.0),
-        ("ось строки", COLOUR_AXIS, 1.0),
-        ("ось над точкой, запятой", COLOUR_MARK, 1.0),
-        ("хвост последней строки и отсечка", COLOUR_TAIL, 1.0),
-        ("края рядов", COLOUR_POINT, 1.0),
-        ("межколонник", COLOUR_COLUMN, 1.0),
-        ("выравнивание both (по формату)", VERDICT_COLOUR[AlignKind.BOTH], 1.0),
-        ("выравнивание left / right", VERDICT_COLOUR[AlignKind.LEFT], 1.0),
-        ("выравнивание center (по центру)", VERDICT_COLOUR[AlignKind.CENTER], 1.0),
-        ("выравнивание none (рваный набор)", VERDICT_COLOUR[AlignKind.RAGGED], 1.0),
+    box = SampleStyle.BOX
+    entries = [
+        LegendEntry("граница блока: полоса вокруг оси", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
+        LegendEntry("граница блока по краске, справочно", COLOUR_ENVELOPE_INK, ENVELOPE_ALPHA),
+        LegendEntry("крупная огибающая", COLOUR_COARSE),
+        LegendEntry("ось строки", COLOUR_AXIS),
+        LegendEntry("ось над точкой, запятой", COLOUR_MARK),
+        LegendEntry("хвост последней строки и отсечка", COLOUR_TAIL),
+        LegendEntry("края рядов", COLOUR_POINT),
+        LegendEntry("межколонник", COLOUR_COLUMN),
+        LegendEntry("выравнивание both (по формату)", VERDICT_COLOUR[AlignKind.BOTH]),
+        LegendEntry("выравнивание left / right", VERDICT_COLOUR[AlignKind.LEFT]),
+        LegendEntry("выравнивание center (по центру)", VERDICT_COLOUR[AlignKind.CENTER]),
+        LegendEntry("выравнивание none (рваный набор)", VERDICT_COLOUR[AlignKind.RAGGED]),
     ]
-    lines += [
-        (f"граница +{share:g} символа", COLOUR_DILATE.get(share, COLOUR_DILATE_OTHER), 1.0) for share in dilate_extra
+    entries += [
+        LegendEntry(f"граница +{share:g} символа", COLOUR_DILATE.get(share, COLOUR_DILATE_OTHER))
+        for share in dilate_extra
     ]
     if hints is not None and not hints.empty:
-        lines.append(("подсказка: рамка таблицы, схемы", COLOUR_BARRIER, HINT_ALPHA))
+        entries.append(LegendEntry("подсказка: рамка таблицы, схемы", COLOUR_BARRIER, HINT_ALPHA, box))
         if hints.rules:
-            lines.append(("подсказка: линейка-барьер", COLOUR_BARRIER_LINE, 1.0))
+            entries.append(LegendEntry("подсказка: линейка-барьер", COLOUR_BARRIER_LINE))
         if any(zone.sideways for zone in hints.zones):
-            lines.append(("подсказка: боковой текст", COLOUR_SIDEWAYS, HINT_ALPHA))
+            entries.append(LegendEntry("подсказка: боковой текст", COLOUR_SIDEWAYS, HINT_ALPHA, box))
         if hints.text_allowed is not None:
-            lines.append(("подсказка: текста быть не должно", COLOUR_FORBIDDEN, HINT_ALPHA))
+            entries.append(LegendEntry("подсказка: текста быть не должно", COLOUR_FORBIDDEN, HINT_ALPHA, box))
         if any(_is_cell(zone, hints) for zone in hints.zones):
-            lines.append(("подсказка: ячейка таблицы", COLOUR_CELL, HINT_ALPHA))
-            lines.append(("подсказка: ячейка, текст боком", COLOUR_CELL_SIDEWAYS, HINT_ALPHA))
-    width = 250
-    x = canvas.shape[1] - width
-    cv2.rectangle(canvas, (x - 6, 4), (canvas.shape[1] - 2, 10 + 14 * len(lines)), (255, 255, 255), -1)
-    for index, (text, colour, alpha) in enumerate(lines):
-        y = 16 + 14 * index
-        cv2.line(canvas, (x, y - 3), (x + 18, y - 3), _on_paper(colour, alpha), 2, cv2.LINE_AA)
-        cv2.putText(canvas, text, (x + 22, y), cv2.FONT_HERSHEY_COMPLEX, 0.33, COLOUR_TEXT, 1, cv2.LINE_AA)
+            entries.append(LegendEntry("подсказка: ячейка таблицы", COLOUR_CELL, HINT_ALPHA, box))
+            entries.append(LegendEntry("подсказка: ячейка, текст боком", COLOUR_CELL_SIDEWAYS, HINT_ALPHA, box))
+    return entries
 
 
 def write(
@@ -319,16 +315,27 @@ def write(
     dilate_extra: tuple[float, ...] = (),
     hints=None,
 ) -> Path:
-    """Записать оверлей в файл, ужав страницу до ширины ``width``."""
+    """Записать оверлей в файл, ужав страницу до ширины ``width``; шапка и легенда — в полях.
+
+    Args:
+        analysis: Разбор страницы.
+        gray300: Серый рендер страницы.
+        path: Куда писать JPEG.
+        width: Ширина страницы на картинке.
+        dilate_extra: Доли размера символа для дополнительных границ блока.
+        hints: Подсказки внешних детекторов (рисуются, если заданы).
+
+    Returns:
+        Путь записанного файла.
+    """
     scale_page = width / gray300.shape[1]
     page = cv2.resize(gray300, (width, int(gray300.shape[0] * scale_page)), interpolation=cv2.INTER_AREA)
     canvas = draw(analysis, page, scale=width / analysis.width, dilate_extra=dilate_extra, hints=hints)
-    header = f"{analysis.name} с.{analysis.page} [{analysis.variant}] движок {analysis.engine}"
-    cv2.putText(canvas, header, (10, 18), cv2.FONT_HERSHEY_COMPLEX, 0.5, COLOUR_TEXT, 1, cv2.LINE_AA)
-    _legend(canvas, dilate_extra, hints)
+    header = [f"{analysis.name} с.{analysis.page} [{analysis.variant}] движок {analysis.engine}"]
+    picture = framed(canvas, header, legend_entries(dilate_extra, hints))
     path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    cv2.imwrite(str(path), picture, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     return path
 
 
-__all__ = ["draw", "write"]
+__all__ = ["draw", "legend_entries", "write"]

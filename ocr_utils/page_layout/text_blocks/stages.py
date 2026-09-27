@@ -30,6 +30,7 @@ from ocr_utils.page_layout.text_blocks.legacy_linking.linking import link_spans,
 from ocr_utils.page_layout.text_blocks.columns import gutters_of, rule_separators, separators_for_segmentation
 from ocr_utils.page_layout.text_blocks.leaders import flatten_axis, leaders_of, spans_at
 from ocr_utils.page_layout import mm_to_px, px_to_mm
+from ocr_utils.page_layout.overlay_frame import LegendEntry, framed
 from ocr_utils.scan_markup.curved_lines.fitting import centreline, smooth_median
 
 # Цвета (BGR) — одни и те же во всех картинках: принято, отвергнуто, вспомогательное, итог.
@@ -61,9 +62,23 @@ COLOUR_LINK_FORBIDDEN = COLOUR_HINT
 # толще и отдельным цветом.
 STEP_PITCH_SHARE = 0.6
 COLOUR_LINK_JUMP = (200, 0, 200)
-# Легенда в правом верхнем углу вырезки (пиксели увеличенной вырезки).
-LEGEND_WIDTH = 330
-LEGEND_ROW = 16
+
+# Легенды этапов 8 и 9 (зоны поиска и встречи зон): печатаются в поле под картинкой.
+ZONE_LEGEND = [
+    ("зона длинного куска (конус)", ZONE_LONG, ZONE_ALPHA),
+    ("первичная зона короткого", ZONE_PRIMARY, ZONE_ALPHA),
+    ("вторичная зона короткого", ZONE_SECOND, ZONE_ALPHA),
+    ("линия экстраполяции (ось зоны)", COLOUR_REACH, 1.0),
+    ("бокс куска", (120, 120, 120), 1.0),
+]
+LINK_LEGEND = [
+    ("принято, взаимно ближайшее", COLOUR_LINK_MUTUAL, 1.0),
+    ("принято, но не взаимно", COLOUR_LINK_ONE_WAY, 1.0),
+    (f"принято, ступенька > {STEP_PITCH_SHARE} шага", COLOUR_LINK_JUMP, 1.0),
+    ("отбито: угол подхода, сторона зоны", COLOUR_LINK_GEOMETRY, 1.0),
+    ("отбито: кегль, наклон, друг над другом", COLOUR_LINK_SHAPE, 1.0),
+    ("отбито: межколонник, черта, барьер", COLOUR_LINK_FORBIDDEN, 1.0),
+]
 
 # Размер вырезки вокруг разбираемой строки (пиксели рабочей копии): строка целиком плюс
 # по строке сверху и снизу — видно, откуда ось может перескочить.
@@ -92,96 +107,64 @@ def _canvas(work: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(light, cv2.COLOR_GRAY2BGR)
 
 
-# Знаки, которых нет в векторном шрифте OpenCV (рисуются вопросительным знаком).
-CAPTION_REPLACEMENTS = {
-    "—": "-",
-    "–": "-",
-    "×": "x",
-    "≥": ">=",
-    "≤": "<=",
-    "±": "+-",
-    "∫": "int ",
-    "θ": "a",
-    "²": "2",
-    "°": " град",
-    "«": '"',
-    "»": '"',
-}
+def _entries(legend: list[tuple[str, tuple[int, int, int], float]] | None) -> list[LegendEntry]:
+    """Строки легенды из ``(подпись, цвет BGR, прозрачность)``."""
+    return [LegendEntry(text, colour, alpha) for text, colour, alpha in legend or []]
 
 
-def _caption(canvas: np.ndarray, text: str) -> None:
-    """Подпись в левом верхнем углу картинки."""
-    for source, target in CAPTION_REPLACEMENTS.items():
-        text = text.replace(source, target)
-    cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 26), (255, 255, 255), -1)
-    cv2.putText(canvas, text, (8, 18), cv2.FONT_HERSHEY_COMPLEX, 0.5, COLOUR_TEXT, 1, cv2.LINE_AA)
+def _save(
+    canvas: np.ndarray,
+    path: Path,
+    header: list[str],
+    legend: list[tuple[str, tuple[int, int, int], float]] | None = None,
+    width: int = PAGE_WIDTH,
+) -> Path:
+    """Сохранить картинку страницы, ужав до ширины ``width``; шапка и легенда — в полях, не на странице.
 
+    Args:
+        canvas: Холст страницы с разметкой.
+        path: Куда писать JPEG.
+        header: Строки шапки (номер и название этапа, полоса, числа этапа).
+        legend: Строки легенды ``(подпись, цвет BGR, прозрачность)``; ``None`` — без легенды.
+        width: Ширина страницы на картинке.
 
-def _save(canvas: np.ndarray, path: Path, width: int = PAGE_WIDTH) -> Path:
-    """Сохранить картинку, ужав до ширины ``width``."""
+    Returns:
+        Путь записанного файла.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if canvas.shape[1] != width:
         scale = width / canvas.shape[1]
         canvas = cv2.resize(canvas, (width, int(canvas.shape[0] * scale)), interpolation=cv2.INTER_AREA)
-    cv2.imwrite(str(path), canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    cv2.imwrite(str(path), framed(canvas, header, _entries(legend)), [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     return path
-
-
-def _on_paper(colour: tuple[int, int, int], alpha: float) -> tuple[int, int, int]:
-    """Цвет полупрозрачной разметки, как он ложится на белую бумагу (для образца в легенде)."""
-    return tuple(int(round(alpha * own + (1.0 - alpha) * 255)) for own in colour)
-
-
-def _legend(canvas: np.ndarray, entries: list[tuple[str, tuple[int, int, int], float]]) -> None:
-    """Легенда в правом верхнем углу: образец цвета и русская подпись на строку.
-
-    Args:
-        canvas: Картинка, на которой печатается легенда (меняется на месте, как и вся отрисовка).
-        entries: ``(подпись, цвет BGR, прозрачность)``; образец смешивается с бумагой так же,
-            как сама разметка.
-    """
-    if not entries:
-        return
-    x = max(0, canvas.shape[1] - LEGEND_WIDTH)
-    bottom = 34 + LEGEND_ROW * len(entries)
-    cv2.rectangle(canvas, (x - 6, 28), (canvas.shape[1] - 2, bottom), (255, 255, 255), -1)
-    for index, (text, colour, alpha) in enumerate(entries):
-        y = 44 + LEGEND_ROW * index
-        cv2.line(canvas, (x, y - 4), (x + 22, y - 4), _on_paper(colour, alpha), 3, cv2.LINE_AA)
-        cv2.putText(canvas, text, (x + 28, y), cv2.FONT_HERSHEY_COMPLEX, 0.4, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
 def _save_crop(
     canvas: np.ndarray,
     crop: tuple[int, int, int, int],
     path: Path,
+    header: list[str],
     zoom: int = CROP_ZOOM,
     legend: list[tuple[str, tuple[int, int, int], float]] | None = None,
 ) -> Path:
-    """Сохранить вырезку ``(x0, y0, x1, y1)``, увеличив её в ``zoom`` раз.
+    """Сохранить вырезку ``(x0, y0, x1, y1)``, увеличив её в ``zoom`` раз; шапка и легенда — в полях.
 
     Args:
-        canvas: Картинка страницы (подпись уже напечатана).
+        canvas: Картинка страницы.
         crop: Вырезка в пикселях ``canvas``.
         path: Куда писать JPEG.
+        header: Строки шапки: на увеличенном куске иначе не понять, что это за этап.
         zoom: Во сколько раз увеличить.
-        legend: Легенда для вырезки (печатается после увеличения, чтобы читалась); ``None`` — без неё.
+        legend: Легенда для вырезки; ``None`` — без неё.
 
     Returns:
         Путь записанного файла.
     """
     x0, y0, x1, y1 = crop
-    title = canvas[:26].copy()
     piece = canvas[max(0, y0) : y1, max(0, x0) : x1]
     piece = cv2.resize(piece, (piece.shape[1] * zoom, piece.shape[0] * zoom), interpolation=cv2.INTER_NEAREST)
-    # Подпись страницы — в шапку вырезки: без неё на увеличенном куске не понять, что это за этап.
-    head = np.full((26, piece.shape[1], 3), 255, dtype=np.uint8)
-    width = min(piece.shape[1], title.shape[1])
-    head[:, :width] = title[:, :width]
-    piece = np.vstack([head, piece])
-    _legend(piece, legend or [])
     path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), piece, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
+    cv2.imwrite(str(path), framed(piece, header, _entries(legend)), [int(cv2.IMWRITE_JPEG_QUALITY), 94])
     return path
 
 
@@ -567,20 +550,9 @@ def _zone_stages(
         + f"; длина зоны длинного {zn.LONG_REACH_XH} икса, радиус {zn.LONG_RADIUS_XH} икса; "
         f"у коротких вверх {zn.SHORT_UP_XH}, вниз {zn.SHORT_DOWN_XH} икса; "
         f"вторичная {zn.SECOND_REACH_PITCHES} шага, радиус {zn.SECOND_RADIUS_XH} икса",
+        legend=ZONE_LEGEND,
     )
-    crop_picture(
-        canvas,
-        8,
-        "zones",
-        "Зоны поиска",
-        legend=[
-            ("зона длинного куска (конус)", ZONE_LONG, ZONE_ALPHA),
-            ("первичная зона короткого", ZONE_PRIMARY, ZONE_ALPHA),
-            ("вторичная зона короткого", ZONE_SECOND, ZONE_ALPHA),
-            ("линия экстраполяции (ось зоны)", COLOUR_REACH, 1.0),
-            ("бокс куска", (120, 120, 120), 1.0),
-        ],
-    )
+    crop_picture(canvas, 8, "zones", "Зоны поиска", legend=ZONE_LEGEND)
     zone_list = second_round if long_count >= min_long_pieces else first_round
 
     # --- 9. Вероятные соединения ----------------------------------------------------------
@@ -618,21 +590,9 @@ def _zone_stages(
         f"встреч {len(verdicts)}, взаимных принятых {len(accepted)}, из них со ступенькой больше "
         f"{STEP_PITCH_SHARE} шага {jumps}; "
         + ", ".join(f"{key} {value}" for key, value in sorted(counts_verdict.items(), key=lambda item: -item[1])),
+        legend=LINK_LEGEND,
     )
-    crop_picture(
-        canvas,
-        9,
-        "links",
-        "Встречи зон и решения",
-        legend=[
-            ("принято, взаимно ближайшее", COLOUR_LINK_MUTUAL, 1.0),
-            ("принято, но не взаимно", COLOUR_LINK_ONE_WAY, 1.0),
-            (f"принято, ступенька > {STEP_PITCH_SHARE} шага", COLOUR_LINK_JUMP, 1.0),
-            ("отбито: угол подхода, сторона зоны", COLOUR_LINK_GEOMETRY, 1.0),
-            ("отбито: кегль, наклон, друг над другом", COLOUR_LINK_SHAPE, 1.0),
-            ("отбито: межколонник, черта, барьер", COLOUR_LINK_FORBIDDEN, 1.0),
-        ],
-    )
+    crop_picture(canvas, 9, "links", "Встречи зон и решения", legend=LINK_LEGEND)
 
     # --- 10–12. Круги слияния -------------------------------------------------------------
     rounds = []
@@ -708,17 +668,18 @@ def render(
     analysis = analyse_gray(gray300, InkEngine(linking=linking), name=name, page=page, variant=variant)
     crop = crop or _worst_axis(analysis) or (0, 0, work.shape[1], work.shape[0])
 
-    def page_picture(canvas: np.ndarray, index: int, slug: str, title: str, note: str = "") -> None:
-        _caption(canvas, f"{index:02d}. {title} — {head}")
-        path = _save(canvas, out_dir / f"{index:02d}_{slug}.jpg")
+    def page_picture(
+        canvas: np.ndarray, index: int, slug: str, title: str, note: str = "", legend: list | None = None
+    ) -> None:
+        header = [f"{index:02d}. {title} — {head}"] + ([note] if note else [])
+        path = _save(canvas, out_dir / f"{index:02d}_{slug}.jpg", header, legend)
         out.append(StagePicture(slug, title, path, note))
 
     def crop_picture(
         canvas: np.ndarray, index: int, slug: str, title: str, note: str = "", legend: list | None = None
     ) -> None:
-        piece = canvas.copy()
-        _caption(piece, f"{index:02d}. {title} — {head}")
-        path = _save_crop(piece, crop, out_dir / f"{index:02d}_{slug}_zoom.jpg", legend=legend)
+        header = [f"{index:02d}. {title} — {head}"]
+        path = _save_crop(canvas, crop, out_dir / f"{index:02d}_{slug}_zoom.jpg", header, legend=legend)
         out.append(StagePicture(f"{slug}_zoom", title + " (крупно)", path, note))
 
     # --- 1. Бинаризация -------------------------------------------------------------------
@@ -864,13 +825,13 @@ def render(
             )
 
         def line_picture(canvas: np.ndarray, index: int, slug: str, title: str, note: str = "") -> None:
-            _caption(canvas, f"{index:02d}. {title} - {head}")
             canvas = cv2.resize(
                 canvas, (canvas.shape[1] * LINE_ZOOM, canvas.shape[0] * LINE_ZOOM), interpolation=cv2.INTER_NEAREST
             )
+            header = [f"{index:02d}. {title} — {head}"] + ([note] if note else [])
             path = out_dir / f"{index:02d}_{slug}.jpg"
             path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(path), canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
+            cv2.imwrite(str(path), framed(canvas, header, []), [int(cv2.IMWRITE_JPEG_QUALITY), 94])
             out.append(StagePicture(slug, title, path, note))
 
         canvas = line_canvas()

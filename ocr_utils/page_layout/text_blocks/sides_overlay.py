@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.text_blocks.alignment import CORE_SHARE, AlignKind, is_centered, verdict
-from ocr_utils.page_layout.text_blocks.overlay import COLOUR_TAIL, COLOUR_TEXT, VERDICT_COLOUR, _on_paper, draw_verdict
+from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, framed
+from ocr_utils.page_layout.text_blocks.overlay import COLOUR_TAIL, COLOUR_TEXT, VERDICT_COLOUR, draw_verdict
 from ocr_utils.page_layout.text_blocks.page import PageAnalysis
 from ocr_utils.page_layout.text_blocks.sides import (
     AlignMethod,
@@ -148,26 +149,20 @@ def _caption(canvas: np.ndarray, anchor: np.ndarray, lines: list[str]) -> None:
         cv2.putText(canvas, text, (x, top), cv2.FONT_HERSHEY_COMPLEX, 0.32, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
-def _legend(canvas: np.ndarray, lines: list[tuple]) -> None:
-    """Легенда в правом верхнем углу; пунктирные сущности — пунктирным образцом.
+def _legend_entries(lines: list[tuple]) -> list[LegendEntry]:
+    """Строки легенды из ``(подпись, цвет, пунктир[, альфа])``; пунктирные сущности — пунктирным образцом.
 
     Args:
-        canvas: Холст.
         lines: Строки ``(подпись, цвет, пунктир)`` или ``(подпись, цвет, пунктир, альфа)``: у
-            полупрозрачной линии образец смешивается с бумагой той же альфой (:func:`_on_paper`).
+            полупрозрачной линии образец смешивается с бумагой той же альфой.
+
+    Returns:
+        Строки для :func:`ocr_utils.page_layout.overlay_frame.legend_strip`.
     """
-    width = 240
-    x = canvas.shape[1] - width
-    cv2.rectangle(canvas, (x - 6, 4), (canvas.shape[1] - 2, 10 + 14 * len(lines)), (255, 255, 255), -1)
-    for index, (text, colour, dashed, *rest) in enumerate(lines):
-        y = 16 + 14 * index
-        sample = np.array([[x, y - 3], [x + 18, y - 3]])
-        paper = _on_paper(colour, rest[0] if rest else 1.0)
-        if dashed:
-            _dashed_run(canvas, sample, paper, 2)
-        else:
-            cv2.line(canvas, (x, y - 3), (x + 18, y - 3), paper, 2, cv2.LINE_AA)
-        cv2.putText(canvas, text, (x + 22, y), cv2.FONT_HERSHEY_COMPLEX, 0.32, COLOUR_TEXT, 1, cv2.LINE_AA)
+    return [
+        LegendEntry(text, colour, rest[0] if rest else 1.0, SampleStyle.DASHED if dashed else SampleStyle.LINE)
+        for text, colour, dashed, *rest in lines
+    ]
 
 
 def _page(gray300: np.ndarray, analysis: PageAnalysis, width: int) -> tuple[np.ndarray, float]:
@@ -177,10 +172,20 @@ def _page(gray300: np.ndarray, analysis: PageAnalysis, width: int) -> tuple[np.n
     return cv2.cvtColor(page, cv2.COLOR_GRAY2BGR), width / analysis.width
 
 
-def _header(canvas: np.ndarray, analysis: PageAnalysis, what: str) -> None:
-    """Заголовок картинки: выпуск, полоса, вариант и что на ней."""
-    text = f"{analysis.name} с.{analysis.page} [{analysis.variant}] {what}"
-    cv2.putText(canvas, text, (10, 18), cv2.FONT_HERSHEY_COMPLEX, 0.5, COLOUR_TEXT, 1, cv2.LINE_AA)
+def _framed(canvas: np.ndarray, analysis: PageAnalysis, what: str, lines: list[tuple]) -> np.ndarray:
+    """Холст с шапкой (выпуск, полоса, вариант и что на картинке) и легендой — обе в полях, не на странице.
+
+    Args:
+        canvas: Холст страницы с разметкой.
+        analysis: Разбор страницы (имя, полоса, вариант).
+        what: Что нарисовано.
+        lines: Строки легенды (см. :func:`_legend_entries`).
+
+    Returns:
+        Картинка BGR.
+    """
+    header = [f"{analysis.name} с.{analysis.page} [{analysis.variant}] {what}"]
+    return framed(canvas, header, _legend_entries(lines))
 
 
 def draw_sides(analysis: PageAnalysis, gray300: np.ndarray, method: SidesMethod, width: int) -> np.ndarray:
@@ -213,7 +218,6 @@ def draw_sides(analysis: PageAnalysis, gray300: np.ndarray, method: SidesMethod,
                 f"R {right.tilt_deg:+.2f} гр, изгиб {right.bend_mm:.2f} мм, углы {corners:.0%}",
             ],
         )
-    _header(canvas, analysis, f"стороны: {method.value}")
     legend = [
         ("вертикальная сторона", COLOUR_VERTICAL, False),
         ("горизонтальная сторона", COLOUR_HORIZONTAL, False),
@@ -225,8 +229,7 @@ def draw_sides(analysis: PageAnalysis, gray300: np.ndarray, method: SidesMethod,
         legend.append(("продление крайней строки по полной", COLOUR_TAIL, True))
     if method is SidesMethod.RAYS:
         legend.append(("луч из конца крайней строки", COLOUR_RAY, False))
-    _legend(canvas, legend)
-    return canvas
+    return _framed(canvas, analysis, f"стороны: {method.value}", legend)
 
 
 def draw_alignment(
@@ -294,9 +297,10 @@ def draw_alignment(
         _caption(canvas, _scaled(sides.polygon.min(axis=0), scale), texts)
         if aligned:
             draw_verdict(canvas, sides.polygon * scale, _kind(aligned, block))
-    _header(canvas, analysis, f"выравнивание: {method.value} (стороны: {sides_method.value})")
-    _legend(
+    return _framed(
         canvas,
+        analysis,
+        f"выравнивание: {method.value} (стороны: {sides_method.value})",
         [
             ("сторона: выровнено", COLOUR_ALIGNED, False),
             ("сторона: не выровнено", COLOUR_RAGGED, False),
@@ -310,7 +314,6 @@ def draw_alignment(
             ("вердикт both / left, right / center / none", VERDICT_COLOUR[AlignKind.BOTH], False),
         ],
     )
-    return canvas
 
 
 def _draw_filled_line(layer: np.ndarray, line, scale: float, thickness: int) -> None:
@@ -396,9 +399,10 @@ def draw_filled(
     cv2.addWeighted(layer, FILLED_ALPHA, canvas, 1.0 - FILLED_ALPHA, 0, canvas)
     for anchor, texts in captions:
         _caption(canvas, anchor, texts)
-    _header(canvas, analysis, f"доп. линия сторон: {method.value} (стороны: {sides_method.value})")
-    _legend(
+    return _framed(
         canvas,
+        analysis,
+        f"доп. линия сторон: {method.value} (стороны: {sides_method.value})",
         [
             ("сторона: выровнено", COLOUR_ALIGNED, False),
             ("сторона: не выровнено", COLOUR_RAGGED, False),
@@ -406,7 +410,6 @@ def draw_filled(
             ("доп. линия: заплатка PCHIP", COLOUR_FILLED, True, FILLED_ALPHA),
         ],
     )
-    return canvas
 
 
 def _kind(aligned: dict, block) -> AlignKind:
@@ -431,13 +434,19 @@ def side_by_side(images: list[np.ndarray], titles: list[str]) -> np.ndarray:
     """Несколько картинок одной полосы рядом, с подписью метода над каждой.
 
     Args:
-        images: Холсты одинаковой высоты.
+        images: Холсты (разной высоты — добиваются полем снизу).
         titles: Подписи.
 
     Returns:
         Склейка BGR.
     """
     tiles = []
+    # Легенды у методов разной длины, поэтому картинки добиваются белым полем снизу до общей высоты.
+    height = max(image.shape[0] for image in images)
+    images = [
+        np.vstack([image, np.full((height - image.shape[0], image.shape[1], 3), 255, dtype=np.uint8)])
+        for image in images
+    ]
     for image, title in zip(images, titles):
         strip = np.full((26, image.shape[1], 3), 255, dtype=np.uint8)
         cv2.putText(strip, title, (10, 19), cv2.FONT_HERSHEY_COMPLEX, 0.6, COLOUR_TEXT, 1, cv2.LINE_AA)

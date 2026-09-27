@@ -220,6 +220,11 @@ def analyze_command(
     show_default=True,
     help="Определять ориентацию полос; --no-orientation — полосы заранее прямые (пак-1: копии экспортированы повёрнутыми).",
 )
+@click.option(
+    "--redo-final",
+    is_flag=True,
+    help="Пересчитать итоговую стадию (текстовые блоки, JSON и оверлеи) у ВСЕХ полос; прочие стадии — из work/.",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def analyze_pack_command(
     sharpened_dir: Path,
@@ -229,13 +234,23 @@ def analyze_pack_command(
     pages_file: Path | None,
     limit: int | None,
     orientation: bool,
+    redo_final: bool,
     log_level: str,
 ) -> None:
     """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
     from ocr_utils.page_layout.pack_analysis.run import run
 
     _set_log_level(log_level)
-    run(sharpened_dir, cache_root, out_dir, jobs, pages_file, limit, detect_orientation=orientation)
+    run(
+        sharpened_dir,
+        cache_root,
+        out_dir,
+        jobs,
+        pages_file,
+        limit,
+        detect_orientation=orientation,
+        redo_final=redo_final,
+    )
 
 
 @main.command("prefill-surya")

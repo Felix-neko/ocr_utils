@@ -8,11 +8,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 from ocr_utils.page_layout.geometry import Box
 from ocr_utils.page_layout.line_art.classes import ObjectClass
 from ocr_utils.page_layout.line_art.deepseek.decide import Outcome
+from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, header_strip, legend_strip
 from ocr_utils.page_layout.pack_analysis.stages import PageTask, decide_candidates, load_image, page_key, write_json
 from ocr_utils.page_layout.regions import RegionKind
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
@@ -73,7 +73,6 @@ TITLE_COLOR = (150, 150, 150)  # надпись, снятая с line art (сп�
 RULE_COLOR = (60, 90, 210)  # линейки-сироты (text_blocks.overlay.COLOUR_BARRIER)
 FILL_ALPHA = 0.18
 OVERLAY_WIDTH = 1600
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
 def assemble(record: dict, decisions: list) -> dict:
@@ -207,9 +206,21 @@ def draw(image, analysis, hints, record: dict, objects: list[dict], titles: list
 
 
 def _frame(canvas: np.ndarray, record: dict, objects: list[dict], orientation: dict, analysis) -> np.ndarray:
-    """Шапка (полоса, поворот, счёт объектов и блоков) и легенда классов под картинкой."""
-    font = ImageFont.truetype(FONT_PATH, 18)
-    small = ImageFont.truetype(FONT_PATH, 15)
+    """Шапка (полоса, поворот, счёт объектов и блоков) и легенды классов и текстовых блоков — в полях.
+
+    Обе легенды печатаются ПОД страницей, а не поверх неё (:mod:`ocr_utils.page_layout.overlay_frame`):
+    поверх страницы легенда закрывала бы угол полосы.
+
+    Args:
+        canvas: Холст страницы с разметкой.
+        record: JSON полосы (имя полосы).
+        objects: Объекты полосы.
+        orientation: Вердикт ориентации.
+        analysis: Разбор текстовых блоков (счёт блоков и осей).
+
+    Returns:
+        Картинка BGR: шапка, страница, легенда объектов, легенда текстовых блоков.
+    """
     counts = {}
     for obj in objects:
         counts[obj["class"]] = counts.get(obj["class"], 0) + 1
@@ -219,36 +230,23 @@ def _frame(canvas: np.ndarray, record: dict, objects: list[dict], orientation: d
         if orientation.get("apply")
         else ("ориентация спорная" if orientation.get("disputed") else "прямая")
     )
-    lines = [
+    header = [
         f"{record['page']}   {turn_note}   текстовых блоков: {len(analysis.blocks)}, осей строк: {len(analysis.axes)}",
         "объекты: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "только текст"),
     ]
     width = canvas.shape[1]
-    head = Image.new("RGB", (width, 12 + 26 * len(lines)), (255, 255, 255))
-    draw_head = ImageDraw.Draw(head)
-    for index, line in enumerate(lines):
-        draw_head.text((10, 6 + 26 * index), line, font=font, fill=(20, 20, 20))
-    legend = [(CLASS_COLOR[c], c.value) for c in PageClass] + [
-        (TITLE_COLOR, "надпись (снята с line art)"),
-        (RULE_COLOR, "линейка-сирота"),
+    classes = [LegendEntry(c.value, CLASS_COLOR[c], FILL_ALPHA, SampleStyle.BOX) for c in PageClass] + [
+        LegendEntry("надпись (снята с line art)", TITLE_COLOR),
+        LegendEntry("линейка-сирота", RULE_COLOR),
     ]
-    columns = 4
-    rows = (len(legend) + columns - 1) // columns
-    foot = Image.new("RGB", (width, 12 + 24 * rows + 24), (255, 255, 255))
-    draw_foot = ImageDraw.Draw(foot)
-    for index, (color, name) in enumerate(legend):
-        x, y = 10 + (index % columns) * (width // columns), 6 + 24 * (index // columns)
-        fill = tuple(int(FILL_ALPHA * c + (1 - FILL_ALPHA) * 255) for c in color)
-        draw_foot.rectangle((x, y + 3, x + 28, y + 17), fill=fill[::-1], outline=color[::-1], width=2)
-        draw_foot.text((x + 36, y), name, font=small, fill=(20, 20, 20))
-    draw_foot.text(
-        (10, 6 + 24 * rows),
-        "текстовые блоки — огибающие и оси строк (легенда детектора блоков в углу картинки)",
-        font=small,
-        fill=(20, 20, 20),
+    return np.vstack(
+        [
+            header_strip(header, width),
+            canvas,
+            legend_strip(classes, width, "объекты"),
+            legend_strip(blocks_overlay.legend_entries(), width, "текстовые блоки"),
+        ]
     )
-    to_bgr = lambda picture: cv2.cvtColor(np.asarray(picture), cv2.COLOR_RGB2BGR)  # noqa: E731
-    return np.vstack([to_bgr(head), canvas, to_bgr(foot)])
 
 
 def final_page(task: PageTask, orientation: dict, deepseek: dict, work: Path, out: Path) -> dict:
