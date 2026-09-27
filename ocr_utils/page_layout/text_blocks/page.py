@@ -12,7 +12,7 @@ import numpy as np
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.alignment import Alignment, alignment_of
-from ocr_utils.page_layout.text_blocks.baseline_axis import body_axes, use_body
+from ocr_utils.page_layout.text_blocks.baseline_axis import body_axes, extend_to_ink, use_body
 from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
 from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
@@ -130,8 +130,6 @@ def analyse_gray(
     result = engine.segment(gray300, dpi)
     # Вторая ось (по базовой линии глифов) считается у всех строк сразу: ей нужны соседи.
     axes = body_axes(axes_of(result.lines, dpi, smooth_line))
-    if axis is AxisKind.BODY:
-        axes = use_body(axes)
     # Куски заголовка во всю ширину, набранные через межколонник, помечаются до сборки блоков.
     work = _work_copy(gray300, dpi)
     # Отточия считаются один раз на разбор: они нужны и колонкам (поле точек — не межколонник), и
@@ -139,6 +137,10 @@ def analyse_gray(
     page_leaders = list(result.leaders) if result.leaders else leaders_of(work, dpi)[0]
     gutters = result.gutters or gutters_of(work, dpi, page_leaders)
     ink = text_ink(gray300, dpi, work=work, leaders=page_leaders)
+    # Вторая ось доходит до края краски строки — дефиса переноса, точки (их нет среди глифов).
+    axes = extend_to_ink(axes, ink > 0, RENDER_DPI / dpi)
+    if axis is AxisKind.BODY:
+        axes = use_body(axes)
     cut = mark_cut_lines(axes, gutters, dpi, ink=gray300 < 128, k=RENDER_DPI / dpi)
     axes = [with_column(line, line.column, cross=flag) for line, flag in zip(axes, cut)]
     # Межколонники — свойство страницы, а не движка: чужие сегментаторы их не отдают, и без них

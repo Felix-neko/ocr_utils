@@ -42,6 +42,18 @@ CONVERGE_SHARE = 0.45
 # На столько пикселей оси позволено выйти за контур своего блока: пиксель — это округление при
 # растеризации контура, а не настоящий выход.
 ESCAPE_MARGIN_PX = 1.0
+# Ступенька оси (:func:`steps_of`) — мера перескока, не зависящая от изгиба строки. В каждой точке оси
+# по обе стороны от неё берутся участки ``[x ± STEP_GAP_PITCHES·шаг, x ± STEP_REACH_PITCHES·шаг]``,
+# через каждый проводится прямая, и обе прямые продолжаются до ``x``. У изогнутой или наклонённой
+# строки они встречаются (изгиб на отрезке в пару шагов — доли пикселя), у перескока расходятся на
+# высоту ступеньки. Ступенька больше ``STEP_PITCH_SHARE`` шага — перескок. Центральный зазор нужен,
+# чтобы косой переход через ряд (перескок бывает не отвесным: 1971/07 IMG_0020_1L — 40–80 px)
+# не попал ни в одну из прямых.
+STEP_GAP_PITCHES = 1.5
+STEP_REACH_PITCHES = 4.0
+STEP_PITCH_SHARE = 0.75
+# Наклоны сторон расходятся больше чем на столько градусов — изгиб, а не ступенька.
+STEP_BEND_DEG = 10.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,7 @@ class PageMetrics:
     crossings: int
     converging: int
     jumping: int
+    steps: int
     outside: int
     escaping: int
     escaping_px: float
@@ -66,7 +79,8 @@ class PageMetrics:
     def row(self) -> str:
         """Строка markdown-таблицы."""
         return (
-            f"| {self.key} | {self.axes} | {self.crossings} | {self.converging} | {self.jumping} | {self.outside} | "
+            f"| {self.key} | {self.axes} | {self.crossings} | {self.converging} | {self.steps} | {self.jumping} | "
+            f"{self.outside} | "
             f"{self.escaping} ({self.escaping_px:.0f}) | {self.half_rows}/{self.rows} | {self.blocks} | "
             f"{self.overlap_px2:.0f} | {self.ink_share:.1%} | {self.seconds:.1f} |"
         )
@@ -163,6 +177,87 @@ def jumping_of(axes: list[np.ndarray], pitch: float) -> int:
         if float(np.abs(ys - chord).max()) > 0.5 * pitch:
             count += 1
     return count
+
+
+def _side_slope(xs: np.ndarray, ys: np.ndarray, gap: float) -> float | None:
+    """Наклон одной стороны, если по ней его можно мерить: от трёх точек на охвате от ``gap / 3``."""
+    if xs.size < 3 or np.ptp(xs) < gap / 3.0:
+        return None
+    return float(np.polyfit(xs, ys, 1)[0])
+
+
+def _joint_step(xs: np.ndarray, ys: np.ndarray, at: float, gap: float, reach: float) -> float | None:
+    """Ступенька в точке ``at``: МНК ``y = a + b·(x − at) + c·[x > at]`` по участкам слева и справа от неё.
+
+    Наклон ``b`` общий для обеих сторон: у перескоковой оси точек мало и они с пропусками (крупный
+    масштаб собирает строку по отдельным высоким буквам), и прямая по двум узлам одной стороны,
+    продолженная на полтора шага, давала бы ложную ступеньку. Изгиб строки на участке в несколько
+    шагов — доли пикселя, ступенька перескока — шаг строки.
+
+    Args:
+        xs, ys: Точки оси.
+        at: Где мерить.
+        gap: Полуширина зазора вокруг ``at``, точки в котором не берутся (косой переход через ряд).
+        reach: До какого расстояния от ``at`` брать точки.
+
+    Returns:
+        Ступенька ``c`` в пикселях; ``None`` — с какой-то стороны меньше двух точек.
+    """
+    offset = xs - at
+    left = (offset <= -gap) & (offset >= -reach)
+    right = (offset >= gap) & (offset <= reach)
+    if left.sum() < 2 or right.sum() < 2:
+        return None
+    # Если обе стороны сами по себе прямые и их наклоны расходятся — это изгиб (завиток конца строки у
+    # корешка: 1966/01 IMG_0049_1L, «…как при»), а не ступенька: общий наклон его не описывает.
+    slopes = [_side_slope(offset[side], ys[side], gap) for side in (left, right)]
+    if None not in slopes and abs(slopes[0] - slopes[1]) > np.tan(np.radians(STEP_BEND_DEG)):
+        return None
+    chosen = left | right
+    design = np.column_stack([np.ones(chosen.sum()), offset[chosen], right[chosen].astype(np.float64)])
+    coefficients, *_ = np.linalg.lstsq(design, ys[chosen], rcond=None)
+    # Ступенька не больше размаха самих точек: при коротком крутом участке на конце строки общий
+    # наклон и ступенька делят изгиб между собой, и МНК мог насчитать ступеньку втрое больше размаха.
+    spread = float(np.ptp(ys[chosen]))
+    return float(np.clip(coefficients[2], -spread, spread))
+
+
+def step_of(axis: np.ndarray, pitch: float) -> float:
+    """Наибольшая ступенька оси (пиксели): см. :func:`_joint_step`, точки проверки — через пятую долю шага.
+
+    Args:
+        axis: Ось ``(n, 2)`` слева направо.
+        pitch: Межстрочный шаг.
+
+    Returns:
+        Ступенька в пикселях; 0.0, если ось короче, чем нужно для двух участков.
+    """
+    if pitch <= 0 or axis.shape[0] < 4:
+        return 0.0
+    xs, ys = axis[:, 0], axis[:, 1]
+    gap, reach = STEP_GAP_PITCHES * pitch, STEP_REACH_PITCHES * pitch
+    best = 0.0
+    for at in np.arange(xs[0] + gap, xs[-1] - gap, max(1.0, pitch / 5.0)):
+        step = _joint_step(xs, ys, float(at), gap, reach)
+        if step is not None:
+            best = max(best, abs(step))
+    return best
+
+
+def steps_of(axes: list[np.ndarray], pitch: float) -> int:
+    """Сколько осей со ступенькой больше ``STEP_PITCH_SHARE`` шага — прямая мера перескока (см. ``step_of``).
+
+    В отличие от «отклонения от хорды» (:func:`jumping_of`) не срабатывает на изогнутых и наклонённых
+    строках: прогиб в целый шаг на длине строки — плавный, а перескок — ступенька.
+
+    Args:
+        axes: Оси страницы.
+        pitch: Межстрочный шаг страницы.
+
+    Returns:
+        Число осей.
+    """
+    return sum(1 for axis in axes if step_of(axis, pitch) > STEP_PITCH_SHARE * pitch)
 
 
 def outside_of(axes: list[np.ndarray], polygons: list[np.ndarray]) -> int:
@@ -273,6 +368,7 @@ def metrics_of(page: dict) -> PageMetrics:
         crossings=crossings_of(axes),
         converging=converging_of(axes, pitch),
         jumping=jumping_of(axes, pitch),
+        steps=steps_of(axes, pitch),
         outside=outside_of(axes, polygons),
         escaping=escaping,
         escaping_px=escaping_px,
@@ -333,6 +429,7 @@ def totals(pages: list[PageMetrics]) -> PageMetrics:
         crossings=sum(page.crossings for page in pages),
         converging=sum(page.converging for page in pages),
         jumping=sum(page.jumping for page in pages),
+        steps=sum(page.steps for page in pages),
         outside=sum(page.outside for page in pages),
         escaping=sum(page.escaping for page in pages),
         escaping_px=max([page.escaping_px for page in pages], default=0.0),
@@ -354,9 +451,9 @@ def table(pages: list[PageMetrics], against: list[PageMetrics] | None = None, br
         brief: Печатать один итог без построчной части.
     """
     header = (
-        "| страница | осей | скрещиваний | сближений | от хорды | вне блоков | за контуром (px) | "
+        "| страница | осей | скрещиваний | сближений | ступенек | от хорды | вне блоков | за контуром (px) | "
         "половинок | блоков | пересечения px² | краска | с |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     )
     if against is None:
         rows = [] if brief else [page.row() for page in pages]
@@ -369,6 +466,8 @@ __all__ = [
     "PageMetrics",
     "blocks_over_cells",
     "converging_of",
+    "step_of",
+    "steps_of",
     "crossings_of",
     "escaping_of",
     "pitch_of",

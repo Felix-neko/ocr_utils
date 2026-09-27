@@ -58,3 +58,18 @@ def test_line_x_height_ignores_capitals_and_descenders():
     tall = [[0, 5, 8, 21], [0, 10, 8, 26]]
     glyphs = np.array(lower + tall, dtype=float)
     assert line_x_height(glyphs) == 11.0
+
+
+def test_body_axis_reaches_the_hyphen_at_the_line_end():
+    """Вторая ось доходит до края последнего символа — и до дефиса переноса, которого среди глифов нет."""
+    image, tops = glyph_line_page(amplitude=0.0, seed=7)
+    top = int(tops[0])
+    # Дефис вплотную за последней буквой первой строки: низкая широкая чёрточка на середине строчной.
+    row = image[top : top + LETTER_X_H]
+    last = int(np.nonzero((row < 128).any(axis=0))[0].max())
+    image[top + LETTER_X_H // 2 - 2 : top + LETTER_X_H // 2 + 2, last + 3 : last + 17] = 0
+    analysis = analyse_gray(image, InkEngine())
+    first = min(analysis.axes, key=lambda axis: axis.cy)
+    assert first.body_points is not None
+    assert first.body_points[-1, 0] >= (last + 17) / K - 1.5
+    assert first.body_points[0, 0] <= first.points[0, 0] + 0.5

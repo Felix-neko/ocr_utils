@@ -70,6 +70,10 @@ X_HEIGHT_SPREAD = 1.2
 BRIDGE_XH = 2.3
 # Меньше стольких принятых низов — у строки второй оси нет (слишком мало данных).
 MIN_SAMPLES = 3
+# Продление второй оси до края краски строки (:func:`extend_to_ink`): пустота не шире стольких
+# строчных (дефис переноса стоит вплотную, точка — через пару пикселей) и всего не дальше стольких.
+EXTEND_GAP_XH = 0.5
+EXTEND_MAX_XH = 3.0
 # Соседи: сколько строк сверху и снизу опрашивается, насколько далеко (в шагах строки), какое
 # перекрытие по x нужно и какой вес у члена соседей там, где своих данных нет совсем.
 NEIGHBOURS_EACH_SIDE = 2
@@ -241,10 +245,12 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     if centres.size < MIN_SAMPLES:
         return None
     step = mm_to_px(GRID_STEP_MM, axis.dpi)
-    start, stop = float(min(axis.x0, xs.min())), float(max(axis.x1, xs.max()))
-    grid = np.arange(start, stop + step * 0.5, step)
-    if grid.size < 2:
-        grid = np.array([start, start + step])
+    # Охват оси — до КРАЁВ крайних глифов и концов первой оси (она идёт по краске и захватывает дефис
+    # переноса, которого среди глифов нет): для границы блока и выключки ось должна доходить до конца
+    # последнего символа. Концы охвата — узлы сетки (равномерная сетка ровно на охвате).
+    start = float(min(axis.x0, glyphs[usable, 0].min()))
+    stop = float(max(axis.x1, glyphs[usable, 2].max()))
+    grid = np.linspace(start, stop, max(2, int(np.ceil((stop - start) / step)) + 1))
     # Начальная кривая — первая ось, опущенная на полвысоты строчной к базовой линии.
     anchor = np.interp(grid, axis.points[:, 0], axis.points[:, 1]) + x_h / 2.0
     stiffness = (SMOOTH_XH * x_h / step) ** 4 / max(xs.size / grid.size, 1e-3) * 1e-2
@@ -439,9 +445,7 @@ def body_axes(axes: list[LineAxis]) -> list[LineAxis]:
                 )
         lift = _body_lift(axis, fit, base)
         points = np.column_stack([fit.grid, base - lift])
-        # Ось обрезается по охвату первой оси: сетка могла выйти за неё на крайний глиф.
-        inside = (points[:, 0] >= axis.x0 - 1e-6) & (points[:, 0] <= axis.x1 + 1e-6)
-        out.append(replace(axis, body_points=points[inside] if inside.sum() >= 2 else points))
+        out.append(replace(axis, body_points=points))
     return out
 
 
@@ -461,6 +465,81 @@ def _body_lift(axis: LineAxis, fit: BaselineFit, base: np.ndarray) -> float:
     return fit.x_height / 2.0
 
 
+def _ink_reach(cols: np.ndarray, start: int, direction: int, max_gap: int, limit: int) -> int:
+    """Последний столбец краски, достижимый от ``start`` в сторону ``direction`` без пустоты шире ``max_gap``.
+
+    Args:
+        cols: Столбцы полосы строки: есть ли краска.
+        start: Столбец конца оси.
+        direction: +1 — вправо, −1 — влево.
+        max_gap: Наибольшая пустота (столбцов).
+        limit: Не дальше стольких столбцов от ``start``.
+
+    Returns:
+        Столбец края (``start``, если краски дальше нет).
+    """
+    last, gap = start, 0
+    for step in range(1, limit + 1):
+        x = start + direction * step
+        if x < 0 or x >= cols.size:
+            break
+        if cols[x]:
+            last, gap = x, 0
+        else:
+            gap += 1
+            if gap > max_gap:
+                break
+    return last
+
+
+def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineAxis]:
+    """Вторые оси, продлённые до края краски строки: дефиса переноса, точки, крайней буквы.
+
+    Глифы строки (по ним строится вторая ось) не содержат дефиса и мелких знаков — маска глифов их
+    выбрасывает, — и ось обрывалась раньше последнего символа (1966/01 IMG_0049_1L). Здесь от каждого
+    конца оси вдоль полосы в высоту строчной идём по краске текста (``page.text_ink``: глифы, дефисы,
+    отточия) без пустот шире ``EXTEND_GAP_XH`` строчной и продлеваем ось по касательной до края.
+
+    Args:
+        axes: Оси страницы со вторыми осями.
+        ink: Краска текста рендера ``RENDER_DPI`` (``bool``).
+        k: Во сколько раз рендер крупнее рабочей копии.
+
+    Returns:
+        Оси с продлёнными ``body_points``.
+    """
+    out: list[LineAxis] = []
+    for axis in axes:
+        points = axis.body_points
+        if points is None or points.shape[0] < 2 or axis.glyphs is None:
+            out.append(axis)
+            continue
+        x_h = line_x_height(axis.glyphs)
+        new = points
+        for at_end in (False, True):
+            index, neighbour = (-1, -2) if at_end else (0, 1)
+            x, y = points[index]
+            half = 0.6 * x_h * k
+            top, bottom = max(0, int((y * k) - half)), min(ink.shape[0], int((y * k) + half) + 1)
+            cols = ink[top:bottom].sum(axis=0) >= 2
+            start = int(round(x * k))
+            if not 0 <= start < cols.size:
+                continue
+            reach = _ink_reach(
+                cols, start, 1 if at_end else -1, int(EXTEND_GAP_XH * x_h * k), int(EXTEND_MAX_XH * x_h * k)
+            )
+            edge = reach / k
+            if abs(edge - x) < 0.5:
+                continue
+            # Наклон конца — по двум крайним узлам (сетка равномерная, разность абсцисс ненулевая).
+            run = points[index, 0] - points[neighbour, 0]
+            slope = (points[index, 1] - points[neighbour, 1]) / run if abs(run) > 1e-6 else 0.0
+            extra = np.array([[edge, y + slope * (edge - x)]])
+            new = np.vstack([new, extra]) if at_end else np.vstack([extra, new])
+        out.append(replace(axis, body_points=new))
+    return out
+
+
 def use_body(axes: list[LineAxis]) -> list[LineAxis]:
     """Оси, у которых основной стала вторая ось (по базовой линии), где она есть.
 
@@ -472,4 +551,4 @@ def use_body(axes: list[LineAxis]) -> list[LineAxis]:
     ]
 
 
-__all__ = ["BaselineFit", "body_axes", "fit_baseline", "line_x_height", "use_body"]
+__all__ = ["BaselineFit", "body_axes", "extend_to_ink", "fit_baseline", "line_x_height", "use_body"]
