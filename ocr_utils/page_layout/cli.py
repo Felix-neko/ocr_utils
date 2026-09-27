@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import click
+import numpy as np
 
 from ocr_utils.page_layout.image import Variant
 from ocr_utils.page_layout.surya.cache import SuryaCache, import_legacy
@@ -74,6 +75,8 @@ OVERLAY_COLORS = {
     "rotated_text": (92, 105, 0),
 }
 OVERLAY_SIDE = 1400
+# Непристроенные линейки — цвет подсказки-барьера детектора текстовых блоков (text_blocks.overlay.COLOUR_BARRIER).
+LOOSE_RULE_COLOR = (60, 90, 210)
 
 
 def _source_and_model(cache_root: Path | None, use_surya: bool, readonly: bool):
@@ -106,6 +109,10 @@ def _draw_overlay(image, layout, out: Path) -> None:
         cv2.rectangle(work, (b.x0, b.y0), (b.x1, b.y1), color, 3)
         label = region.kind.value + (f" {region.confidence:.2f}" if region.confidence is not None else "")
         cv2.putText(work, label, (b.x0 + 4, max(14, b.y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    # Непристроенные линейки — ломаной поверх, цветом подсказки «барьер» детектора текстовых блоков.
+    for rule in layout.loose_rules:
+        points = np.array([[round(x * k), round(y * k)] for x, y in rule.points], np.int32)
+        cv2.polylines(work, [points], False, LOOSE_RULE_COLOR, 2)
     scale = min(1.0, OVERLAY_SIDE / max(work.shape[:2]))
     if scale < 1.0:
         work = cv2.resize(work, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
@@ -186,6 +193,7 @@ def analyze_command(
                 {"kind": r.kind.value, "box": list(r.box.as_tuple()), "confidence": r.confidence, "info": r.info}
                 for r in layout.regions
             ],
+            "loose_rules": [rule.to_json() for rule in layout.loose_rules],
             "orientation": (
                 None
                 if layout.best_page_orientation is None
@@ -197,6 +205,37 @@ def analyze_command(
         }
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+@main.command("analyze-pack")
+@click.option("--sharpened-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--cache", "cache_root", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--out-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--jobs", default=16, show_default=True, type=int, help="Воркеров CPU-пула.")
+@click.option("--pages", "pages_file", default=None, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--limit", default=None, type=int, help="Только первые N полос.")
+@click.option(
+    "--orientation/--no-orientation",
+    default=True,
+    show_default=True,
+    help="Определять ориентацию полос; --no-orientation — полосы заранее прямые (пак-1: копии экспортированы повёрнутыми).",
+)
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def analyze_pack_command(
+    sharpened_dir: Path,
+    cache_root: Path,
+    out_dir: Path,
+    jobs: int,
+    pages_file: Path | None,
+    limit: int | None,
+    orientation: bool,
+    log_level: str,
+) -> None:
+    """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
+    from ocr_utils.page_layout.pack_analysis.run import run
+
+    _set_log_level(log_level)
+    run(sharpened_dir, cache_root, out_dir, jobs, pages_file, limit, detect_orientation=orientation)
 
 
 @main.command("prefill-surya")

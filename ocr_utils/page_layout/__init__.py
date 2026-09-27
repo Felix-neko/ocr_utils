@@ -47,9 +47,12 @@ def px_to_mm(px: float, dpi: float) -> float:
 # Поднимать при ЛЮБОМ изменении, меняющем результат семейства: пороги, морфология, правило вида,
 # состав затравок. Не поднимать за оверлеи, сообщения, переименования.
 RASTER_VERSION = 10  # растровый детектор: тот же алгоритм, что DETECTOR_VERSION 10 у scan_markup
-TABLES_VERSION = 1  # детектор таблиц v4.2 (бывший TABLE_DETECTOR_VERSION)
-LINE_ART_VERSION = 2  # единый line art: схемы детектора таблиц + surya Figure/Form/Picture + пятна и линейки, вне растра и таблиц; v2 — без формул (surya Equation)
-ROTATED_TEXT_VERSION = 1  # зоны повёрнутого текста вне таблиц (Docstrum)
+TABLES_VERSION = 3  # детектор таблиц v4.4 (бывший TABLE_DETECTOR_VERSION); v2 — линейки у края вырезки не укорачиваются; v3 — открытые таблицы, разрез по мосту, таблица в две графы
+# Формулы (surya Equation с достроенной рамкой) — своё семейство; в строку версии разбора не входит,
+# пока формулы не пишутся в базу.
+FORMULA_VERSION = 1
+LINE_ART_VERSION = 5  # единый line art: схемы детектора таблиц + surya Figure/Form/Picture + пятна и линейки, вне растра и таблиц; v2 — без формул (surya Equation); v3, v4 — затравки из детектора таблиц v4.3, v4.4; v5 — рамки подсказок surya достраиваются до краёв пятен (line_art.expand), блоки Equation — отдельный выход формул
+ROTATED_TEXT_VERSION = 2  # зоны повёрнутого текста вне таблиц (Docstrum); v2 — без диакритики и тонких штрихов в цепочках, проверка чтением tesseract
 ORIENTATION_VERSION = 1  # ориентация полосы (бывший scan_markup.orientation.ORIENTATION_VERSION)
 
 

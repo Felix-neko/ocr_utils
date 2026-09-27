@@ -29,9 +29,15 @@ import numpy as np
 
 from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.page_layout import WORK_DPI
-from ocr_utils.page_layout.geometry import Box, TableBox
+from ocr_utils.page_layout.geometry import Box, LooseRule, TableBox
 from ocr_utils.page_layout.image import PageImage
-from ocr_utils.page_layout.line_art.detector import LineArtInputs, detect_line_art
+from ocr_utils.page_layout.line_art.detector import (
+    LineArtInputs,
+    detect_formulas,
+    detect_line_art,
+    hints_from_surya,
+    hints_from_tables,
+)
 from ocr_utils.page_layout.orientation.analysis import combine, run_cpu_detectors
 from ocr_utils.page_layout.orientation.detectors.base import ROTATIONS, Verdict
 from ocr_utils.page_layout.orientation.image_io import frame_from_gray
@@ -74,7 +80,7 @@ from ocr_utils.page_layout.rotated_text.detector import rotated_zones
 from ocr_utils.page_layout.surya.blocks import PICTURE_LABELS, LayoutBlocks
 from ocr_utils.page_layout.surya.cache import SuryaCache
 from ocr_utils.page_layout.surya.source import SuryaSource
-from ocr_utils.page_layout.tables.detector import detect as detect_tables
+from ocr_utils.page_layout.tables.detector import detect_all as detect_tables_all
 
 logger = logging.getLogger(__name__)
 
@@ -199,12 +205,18 @@ class PageLayout:
         self.stamp_suspects: list[Region] = []
         self.tables: list[Region] = []
         self.line_arts: list[Region] = []
+        # Выносные формулы (surya ``Equation``, достроенные): отдельно от ``regions`` — в базу пока не пишутся.
+        self.formulas: list[Region] = []
         self.rotated_text_not_in_tables_regions: list[Region] = []
+        # Линейки полосы, не вошедшие ни в таблицу, ни в схему, ни в line art, ни в растр —
+        # барьеры для детектора текстовых блоков; родные пиксели.
+        self.loose_rules: list[LooseRule] = []
         self.best_page_orientation: Verdict | None = None
         self.orientation_verdicts: dict[str, Verdict] = {}
 
         self._raster: RasterPrep | None = None
         self._table_boxes: list[TableBox] = []  # находки детектора таблиц в пикселях копии
+        self._loose_work: list[LooseRule] = []  # непристроенные линейки детектора таблиц, пиксели копии
         self._cpu_orientation: dict[str, Verdict] = {}
         self._orientation_done = False
 
@@ -307,6 +319,8 @@ class PageLayout:
             image.bgr_at(self.raster_dpi)
         if Find.LINE_ART in self.find or Find.ROTATED_TEXT in self.find:
             image.bitonal_at(self.work_dpi)
+        if Find.ROTATED_TEXT in self.find:
+            image.gray_at(min(ROTATED_READ_DPI, image.dpi))
         if options.use_surya:
             image.surya_frame
         image.drop_full_frames()
@@ -376,8 +390,9 @@ class PageLayout:
         raster_work = [r.box.scaled(1.0 / native) for r in raster_known]
 
         if Find.TABLES in self.find or Find.LINE_ART in self.find:
-            found = detect_tables(image.gray_at(work_dpi), work_dpi, layout=work_blocks)
-            self._table_boxes = [t for t in found if not _covered_by(t.box, raster_work, 0.5)]
+            detection = detect_tables_all(image.gray_at(work_dpi), work_dpi, layout=work_blocks)
+            self._table_boxes = [t for t in detection.found if not _covered_by(t.box, raster_work, 0.5)]
+            self._loose_work = detection.loose_rules
             if Find.TABLES in self.find:
                 self.tables = [_table_region(t, native, image) for t in self._table_boxes if t.kind == TABLE_KIND_RU]
         if Find.TABLES in self.find:
@@ -388,19 +403,38 @@ class PageLayout:
             table_work = [r.box.scaled(1.0 / native) for r in self.known.get(Find.TABLES, [])]
 
         if Find.LINE_ART in self.find:
+            # Исключения — растр и таблицы; подсказки — схемы/рисунки детектора таблиц и блоки surya
+            # (рамки surya достраиваются до краёв пятен, которые режут; формулы — отдельный выход).
+            drawings = [t for t in self._table_boxes if t.kind != TABLE_KIND_RU]
+            bitonal = image.bitonal_at(work_dpi)
+            excluded = raster_work + table_work
+            surya_hints = hints_from_surya(work_blocks, bitonal == 0, work_dpi, excluded)
             inputs = LineArtInputs(
-                image.bitonal_at(work_dpi),
-                work_dpi,
-                raster_work,
-                table_work,
-                [t for t in self._table_boxes if t.kind != TABLE_KIND_RU],
-                work_blocks,
+                bitonal, work_dpi, excluded_boxes=excluded, hinted_boxes=hints_from_tables(drawings) + surya_hints
             )
             self.line_arts = [_to_native(r, native, image) for r in detect_line_art(inputs)]
+            self.formulas = [_to_native(r, native, image) for r in detect_formulas(inputs)]
+
+        if Find.TABLES in self.find or Find.LINE_ART in self.find:
+            # Непристроенные линейки: без тех, что лежат в line art или растре (в текст они не лезут).
+            taken = [r.box.scaled(1.0 / native) for r in self.line_arts] + raster_work
+            self.loose_rules = [
+                rule.scaled(native)
+                for rule in self._loose_work
+                if not any(_centre_inside(rule.box, box) for box in taken)
+            ]
 
         if Find.ROTATED_TEXT in self.find:
             art_work = [r.box.scaled(1.0 / native) for r in self.line_arts]
-            zones = rotated_zones(image.bitonal_at(work_dpi), work_dpi, raster_work + table_work, art_work)
+            # Проверка чтением — по серой копии 300 dpi, заготовленной в prepare (на 150 dpi мелкие подписи не читаются).
+            zones = rotated_zones(
+                image.bitonal_at(work_dpi),
+                work_dpi,
+                raster_work + table_work,
+                art_work,
+                gray=image.gray_at(min(ROTATED_READ_DPI, image.dpi)),
+                gray_dpi=min(ROTATED_READ_DPI, image.dpi),
+            )
             self.rotated_text_not_in_tables_regions = [_to_native(r, native, image) for r in zones]
         self.finished = True
 
@@ -452,8 +486,17 @@ class PageLayout:
         self.raster_pics, self.stamp_suspects = pics, stamps
 
 
+# Разрешение серой копии, по которой зоны повёрнутого текста проверяются чтением.
+ROTATED_READ_DPI = 300
+
 # Русские виды детектора таблиц: «таблица» против схемы/рисунка.
 TABLE_KIND_RU = "таблица"
+
+
+def _centre_inside(inner: Box, outer: Box) -> bool:
+    """Лежит ли центр рамки ``inner`` внутри ``outer``."""
+    cx, cy = (inner.x0 + inner.x1) / 2, (inner.y0 + inner.y1) / 2
+    return outer.x0 <= cx <= outer.x1 and outer.y0 <= cy <= outer.y1
 
 
 def _covered_by(box: Box, others: list[Box], share: float) -> bool:

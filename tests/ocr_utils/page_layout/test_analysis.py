@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from ocr_utils.page_layout import WORK_DPI
 from ocr_utils.page_layout.analysis import Find, LayoutOptions, PageLayout
@@ -26,6 +26,7 @@ PHOTO = (300, 400, 1700, 1600)  # растр (x1, y1, x2, y2) в оригина�
 TABLE = (2200, 400, 3700, 1500)
 DRAWING = (300, 2300, 2200, 4200)
 INK = 25
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
 def _ruled_table(gray: np.ndarray, box) -> None:
@@ -53,11 +54,15 @@ def _drawing(gray: np.ndarray, box, seed: int = 0) -> None:
     cv2.polylines(gray, [points], False, INK, 7)
 
 
-def _rotated_text(gray: np.ndarray, x: int, y: int, glyphs: int = 24, glyph=(24, 46), step: int = 30) -> None:
-    """Колонка «букв» лёжа: цепочка глифов по вертикали, как боковая подпись оси."""
-    w, h = glyph
-    for i in range(glyphs):
-        gray[y + i * step : y + i * step + w, x : x + h] = INK
+def _rotated_text(gray: np.ndarray, x: int, y: int) -> None:
+    """Боковая подпись оси («Техническое снабжение», снизу вверх) кеглем около 3 мм при 600 dpi, до 820 px в высоту."""
+    font = ImageFont.truetype(FONT, 60)
+    text = "Техническое снабжение"
+    label = Image.new("L", (int(font.getlength(text)) + 10, 100), 255)
+    ImageDraw.Draw(label).text((5, 5), text, fill=INK, font=font)
+    rotated = np.asarray(label.rotate(90, expand=True))
+    h, w = rotated.shape
+    gray[y : y + h, x : x + w] = np.minimum(gray[y : y + h, x : x + w], rotated)
 
 
 def _page_array(photo=True, table=True, drawing=True, rotated: "tuple[int, int] | None" = None) -> np.ndarray:
@@ -186,7 +191,7 @@ def test_rotated_text_outside_tables_only(tmp_path: Path) -> None:
     layout = PageLayout(image, options=NO_SURYA).process()
     zones = layout.rotated_text_not_in_tables_regions
     assert zones and all(z.kind is RegionKind.ROTATED_TEXT for z in zones)
-    assert any(z.box.x0 <= 3000 <= z.box.x1 and z.box.y0 <= 2700 <= z.box.y1 for z in zones)
+    assert any(z.box.x0 <= 3040 <= z.box.x1 and z.box.y0 <= 2700 <= z.box.y1 for z in zones)
     assert all(_overlap(z.box, TABLE) == 0 for z in zones)
 
     inside = _image(tmp_path, name="1977/01/0011_1L", rotated=(TABLE[0] + 500, TABLE[1] + 300))
