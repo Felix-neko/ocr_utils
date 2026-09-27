@@ -22,6 +22,8 @@ ENVELOPE_ALPHA = 0.55
 # Подсказки внешних детекторов: рамка-запрет (таблица, схема), область бокового текста и поле,
 # где текста быть не должно (растр). Все три — заливкой, значит полупрозрачно.
 COLOUR_BARRIER = (60, 90, 210)
+# Линейка-барьер — тот же тон, что рамка-запрет, но линией: насыщеннее заливки.
+COLOUR_BARRIER_LINE = (30, 50, 170)
 COLOUR_SIDEWAYS = (170, 90, 40)
 COLOUR_FORBIDDEN = (120, 120, 120)
 # Ячейка таблицы как область разбора: их на полосе бывает под полторы сотни, поэтому только
@@ -156,6 +158,10 @@ def _hints(canvas: np.ndarray, hints, scale: float) -> None:
                 layer, _at(zone.box[0], zone.box[1], scale), _at(zone.box[2], zone.box[3], scale), COLOUR_SIDEWAYS, -1
             )
     cv2.addWeighted(layer, HINT_ALPHA, canvas, 1.0 - HINT_ALPHA, 0, canvas)
+    # Линейки-барьеры — тонкой непрозрачной ломаной: через них не сращиваются строки и блоки.
+    for line in hints.rules:
+        points = np.array([_at(x, y, scale) for x, y in line], np.int32)
+        cv2.polylines(canvas, [points], False, COLOUR_BARRIER_LINE, 2, cv2.LINE_AA)
 
 
 def _is_cell(zone, hints) -> bool:
@@ -287,6 +293,8 @@ def _legend(canvas: np.ndarray, dilate_extra: tuple[float, ...], hints=None) -> 
     ]
     if hints is not None and not hints.empty:
         lines.append(("подсказка: рамка таблицы, схемы", COLOUR_BARRIER, HINT_ALPHA))
+        if hints.rules:
+            lines.append(("подсказка: линейка-барьер", COLOUR_BARRIER_LINE, 1.0))
         if any(zone.sideways for zone in hints.zones):
             lines.append(("подсказка: боковой текст", COLOUR_SIDEWAYS, HINT_ALPHA))
         if hints.text_allowed is not None:

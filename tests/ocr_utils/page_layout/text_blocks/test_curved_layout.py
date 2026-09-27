@@ -466,6 +466,113 @@ def test_row_keeps_neighbouring_lines_apart():
     assert not _same_row([left], right)
 
 
+def _glyph_ink(spans: list[tuple[float, float, float, float]], shape: tuple[int, int] = (1600, 1800)) -> np.ndarray:
+    """Краска рендера 300 dpi: по каждому отрезку ``(x0, x1, y, глиф)`` рабочей копии — ряд квадратных «букв».
+
+    Буквы — квадраты со стороной ``глиф`` px рабочей копии через пробел в полбуквы, по центру ``y``.
+    """
+    ink = np.zeros(shape, dtype=np.uint8)
+    k = 2
+    for x0, x1, y, glyph in spans:
+        x = x0
+        while x + glyph <= x1:
+            top = int((y - glyph / 2.0) * k)
+            ink[top : top + int(glyph * k), int(x * k) : int((x + glyph) * k)] = 255
+            x += 1.5 * glyph
+    return ink
+
+
+def test_row_splits_a_small_signature_from_a_large_heading():
+    """«доцент,» (глиф 9 px) и «в новых условиях» (18 px) на одной высоте через 32 мм — два ряда.
+
+    1967/05, IMG_0059_1L: подпись автора слева и заголовок справа сливались в один ряд, после чего
+    ни подпись, ни заголовок нельзя было отделить друг от друга.
+    """
+    small = _fragment(152, 206, 655, height=18.0)
+    large = _fragment(398, 750, 658, height=31.5)
+    assert _same_row([small], large)  # по одной ординате они сливаются
+    ink = _glyph_ink([(152, 206, 655, 9.0), (398, 750, 658, 18.0)])
+    pieces = blocks._split_by_glyph([small, large], ink, 2.0, WORK_DPI)
+    assert pieces == [[small], [large]]
+
+
+def test_row_keeps_a_wide_spaced_heading_of_one_size():
+    """Заголовок одного кегля с широким пробелом (бокс слова вдвое выше) остаётся одним рядом.
+
+    1970/10 IMG_0040_1L: «Механизация работ на базе» — высоты осей 25 и 45 px через 4.7 мм, а глиф
+    у обеих 24 px.
+    """
+    first = _fragment(150, 400, 700, height=45.0)
+    second = _fragment(430, 700, 700, height=25.0)
+    ink = _glyph_ink([(150, 400, 700, 24.0), (430, 700, 700, 24.0)])
+    group = [first, second]
+    assert blocks._split_by_glyph(group, ink, 2.0, WORK_DPI) == [group]
+
+
+def test_row_keeps_a_small_gap_between_sizes():
+    """Разный глиф через обычный пробел (цифры рядом со строчными) — один ряд."""
+    first = _fragment(150, 300, 700, height=14.0)
+    second = _fragment(310, 500, 700, height=14.0)
+    ink = _glyph_ink([(150, 300, 700, 9.0), (310, 500, 700, 14.0)])
+    group = [first, second]
+    assert blocks._split_by_glyph(group, ink, 2.0, WORK_DPI) == [group]
+
+
+def _sized(row: Row, glyph_h: float) -> Row:
+    """Тот же ряд с заданной медианной высотой глифа (мера кегля)."""
+    return Row(**{**row.__dict__, "glyph_h": glyph_h})
+
+
+def test_heading_and_signature_side_by_side_are_two_streams():
+    """Заголовок справа и подпись слева перемежаются по y — два потока по три ряда; корпус ниже — третий.
+
+    1967/05, IMG_0059_1L: глиф заголовка 23 px, подписи 10–14 px (у «доцент,» не мерится).
+    """
+    heading = [
+        _sized(_row(355, 784, [567.0] * 4, 31.0), 23.0),
+        _sized(_row(354, 635, [613.0] * 4, 31.0), 23.0),
+        _sized(_row(363, 750, [658.0] * 4, 31.5), 23.0),
+    ]
+    signature = [
+        _sized(_row(110, 248, [635.0] * 4, 16.0), 14.0),
+        _row(151, 206, [655.0] * 4, 18.0),
+        _sized(_row(62, 296, [673.0] * 4, 17.0), 10.0),
+    ]
+    body = [_sized(_row(60, 786, [752.0 + 22.0 * index] * 4, 16.0), 11.5) for index in range(3)]
+    rows = sorted([*heading, *signature, *body], key=lambda row: row.y)
+    streams = blocks._streams(rows, 22.0, WORK_DPI)
+    assert [[row.y for row in stream] for stream in streams] == [
+        [567.0, 613.0, 658.0],
+        [635.0, 655.0, 673.0],
+        [752.0, 774.0, 796.0],
+    ]
+
+
+def test_same_size_rows_side_by_side_stay_one_stream():
+    """Полу-ряды таблицы одного кегля бок о бок (текст графы и число) потоков не заводят."""
+    rows = [
+        _sized(_row(187, 560, [1037.0] * 4, 14.0), 10.0),
+        _sized(_row(609, 684, [1036.0] * 4, 10.0), 11.0),
+        _sized(_row(188, 560, [1055.0] * 4, 10.0), 10.0),
+        _sized(_row(600, 684, [1058.0] * 4, 10.0), 11.0),
+    ]
+    streams = blocks._streams(rows, 22.0, WORK_DPI)
+    assert len(streams) == 1 and streams[0] is rows
+
+
+def test_plain_column_with_a_paragraph_end_is_one_stream():
+    """Колонка с концом абзаца в одно слово и красной строкой — один поток, тот же список рядов."""
+    rows = [
+        _row(60, 786, [100.0] * 4, 15.0),
+        _row(60, 786, [122.0] * 4, 15.0),
+        _row(60, 100, [144.0] * 4, 15.0),
+        _row(110, 786, [166.0] * 4, 15.0),
+        _row(60, 786, [188.0] * 4, 15.0),
+    ]
+    streams = blocks._streams(rows, 22.0, WORK_DPI)
+    assert len(streams) == 1 and streams[0] is rows
+
+
 def test_body_contour_holds_all_its_axes():
     """Контур-ПОЛОСА охватывает оси всех своих рядов, даже когда изгиб строки больше шага рядов.
 
@@ -676,7 +783,9 @@ def test_top_edge_follows_the_baseline_not_a_capital_word():
     y = int(round(row.y * 2))
     band = (plain[y - GLYPH_H : y + GLYPH_H] < 128).astype(np.uint8)
     count, _, stats, _ = cv2.connectedComponentsWithStats(band, 8)
-    words = sorted((stats[i] for i in range(1, count) if stats[i, cv2.CC_STAT_HEIGHT] >= GLYPH_H // 2), key=lambda s: s[0])
+    words = sorted(
+        (stats[i] for i in range(1, count) if stats[i, cv2.CC_STAT_HEIGHT] >= GLYPH_H // 2), key=lambda s: s[0]
+    )
     capital = plain.copy()
     raise_px = int(0.4 * GLYPH_H)
     chosen = words[len(words) // 2 : len(words) // 2 + 2]  # два слова подряд посередине строки

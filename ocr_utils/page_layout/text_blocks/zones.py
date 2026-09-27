@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -101,6 +102,21 @@ SLOPE_NEIGHBOURS = 7
 SLOPE_MIN_NEIGHBOURS = 3
 # Наклон строки на скане не круче этого: медиана по соседям зажимается.
 SLOPE_LIMIT_DEG = 5.0
+
+
+class LinkVerdict(Enum):
+    """Решение по вероятному соединению двух кусков: принято или чем отбито (для отладочных картинок)."""
+
+    ACCEPTED = "принято"
+    ANGLE = "угол подхода"
+    SIDE = "зона смотрит не туда"
+    HEIGHT = "разный кегль"
+    OVERLAP = "куски друг над другом"
+    SLOPE = "наклон против местного"
+    SEPARATOR = "межколонник"
+    RULE = "черта"
+    LEADER = "после отточия"
+    BARRIER = "линейка-барьер"
 
 
 @dataclass(frozen=True)
@@ -265,7 +281,7 @@ def _pairs(zones: list[Zone]) -> set[tuple[int, int]]:
     return tree.query_pairs(r=float(2.0 * reaches.max()))
 
 
-def links_of(
+def link_verdicts(
     zones: list[Zone],
     pieces: list[Piece],
     scale,
@@ -274,8 +290,12 @@ def links_of(
     ink300: np.ndarray,
     k: float,
     slopes: np.ndarray | None = None,
-) -> list[Link]:
-    """Вероятные соединения: зоны встретились, углы подхода в допуске, запрета между кусками нет.
+    barriers=None,
+) -> list[tuple[Link, LinkVerdict]]:
+    """Все встречи зон с решением по каждой: принята или какой проверкой отбита.
+
+    Боевой ход (:func:`links_of`) берёт отсюда только принятые; отладочные картинки
+    (:mod:`stages`) красят отбитые по причине.
 
     Args:
         zones: Зоны поиска всех кусков.
@@ -287,13 +307,15 @@ def links_of(
         k: Во сколько раз рендер крупнее рабочей копии.
         slopes: Местный наклон строк в месте каждого куска (медиана по соседям). С ним сверяется
             наклон соединения; ``None`` — сверка с горизонталью.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`): через них куски не сцепляются.
 
     Returns:
-        Соединения без дубликатов: для каждой пары кусков — самое близкое.
+        Пары ``(соединение, решение)`` по каждой встрече зон разных кусков, с повторами: одна пара
+        кусков может встретиться несколькими зонами.
     """
     from ocr_utils.page_layout.text_blocks.segment import _crosses
 
-    best: dict[tuple[int, int], Link] = {}
+    out: list[tuple[Link, LinkVerdict]] = []
     for first, second in _pairs(zones):
         one, other = zones[first], zones[second]
         if one.piece == other.piece:
@@ -303,64 +325,133 @@ def links_of(
         contact = contact_of(one.capsule, other.capsule, lever_one, lever_other)
         if contact is None:
             continue
-        if one.checked and contact.angle_first > ANGLE_LIMIT_DEG:
-            continue
-        if other.checked and contact.angle_second > ANGLE_LIMIT_DEG:
-            continue
+        # Левый кусок — тот, что начинается левее; его зона и точка встречи идут первыми.
         left_index, right_index = one.piece, other.piece
         left_zone, right_zone = one, other
         if pieces[left_index].x0 > pieces[right_index].x0:
             left_index, right_index = right_index, left_index
             left_zone, right_zone = other, one
+        reach_left = contact.reach_first if left_zone is one else contact.reach_second
+        reach_right = contact.reach_second if left_zone is one else contact.reach_first
+        link = Link(left=left_index, right=right_index, reach_left=reach_left, reach_right=reach_right, gap=contact.gap)
+        # Проверки идут в прежнем порядке: угол подхода, сторона зоны, запреты между кусками.
+        if (one.checked and contact.angle_first > ANGLE_LIMIT_DEG) or (
+            other.checked and contact.angle_second > ANGLE_LIMIT_DEG
+        ):
+            out.append((link, LinkVerdict.ANGLE))
+            continue
         # Зона, смотрящая не в ту сторону, соединения не даёт: правый кусок ловится ПРАВОЙ зоной.
         if left_zone.side == -1 or right_zone.side == 1:
+            out.append((link, LinkVerdict.SIDE))
             continue
         left_piece, right_piece = pieces[left_index], pieces[right_index]
         local = 0.0 if slopes is None else float((slopes[left_index] + slopes[right_index]) / 2.0)
-        if not _allowed(left_piece, right_piece, scale, separators, rules, ink300, k, _crosses, local):
+        verdict = _verdict_of(left_piece, right_piece, scale, separators, rules, ink300, k, _crosses, local)
+        if (
+            verdict is LinkVerdict.ACCEPTED
+            and barriers is not None
+            and _barrier_between(barriers, left_piece, right_piece)
+        ):
+            verdict = LinkVerdict.BARRIER
+        out.append((link, verdict))
+    return out
+
+
+def links_of(
+    zones: list[Zone],
+    pieces: list[Piece],
+    scale,
+    separators: list[tuple[int, int, int, int]],
+    rules: list | None,
+    ink300: np.ndarray,
+    k: float,
+    slopes: np.ndarray | None = None,
+    barriers=None,
+) -> list[Link]:
+    """Вероятные соединения: зоны встретились, углы подхода в допуске, запрета между кусками нет.
+
+    Args:
+        zones, pieces, scale, separators, rules, ink300, k, slopes, barriers: Как у
+            :func:`link_verdicts`.
+
+    Returns:
+        Соединения без дубликатов: для каждой пары кусков — самое близкое из принятых.
+    """
+    best: dict[tuple[int, int], Link] = {}
+    for link, verdict in link_verdicts(zones, pieces, scale, separators, rules, ink300, k, slopes, barriers):
+        if verdict is not LinkVerdict.ACCEPTED:
             continue
-        reach_left = contact.reach_first if left_zone is one else contact.reach_second
-        reach_right = contact.reach_second if left_zone is one else contact.reach_first
-        key = (left_index, right_index)
-        link = Link(left=left_index, right=right_index, reach_left=reach_left, reach_right=reach_right, gap=contact.gap)
+        key = (link.left, link.right)
         if key not in best or link.reach_left < best[key].reach_left:
             best[key] = link
     return list(best.values())
 
 
-def _allowed(left: Piece, right: Piece, scale, separators, rules, ink300, k, crosses, local_slope: float = 0.0) -> bool:
+def _verdict_of(
+    left: Piece, right: Piece, scale, separators, rules, ink300, k, crosses, local_slope: float = 0.0
+) -> LinkVerdict:
     """Можно ли вообще соединять эти два куска: наклон, запреты, кегль, отточия.
 
     Наклон соединения сверяется с МЕСТНЫМ наклоном строк ``local_slope``, а не с горизонталью:
     в изогнутом углу полосы соседние слова одной строки законно стоят с перепадом в десять
     градусов, а в середине полосы столько же — уже перескок.
+
+    Args:
+        left, right: Левый и правый кусок.
+        scale: Размеры масштаба набора.
+        separators: Межколонники и вертикальные линейки.
+        rules: Сплошные горизонтальные черты.
+        ink300: Краска рендера.
+        k: Во сколько раз рендер крупнее рабочей копии.
+        crosses: Проверка межколонника (``segment._crosses``).
+        local_slope: Местный наклон строк (тангенс).
+
+    Returns:
+        ``LinkVerdict.ACCEPTED`` или причина отказа.
     """
     heights = sorted((max(left.x_h, 1e-6), max(right.x_h, 1e-6)))
     if heights[1] > scale.link_height_ratio * heights[0]:
-        return False
+        return LinkVerdict.HEIGHT
     # Куски одной строки не накрывают друг друга по x (черта под словом — не сосед по строке).
     overlap = min(left.x1, right.x1) - max(left.x0, right.x0)
     shorter = max(1e-6, min(left.x1 - left.x0, right.x1 - right.x0))
     if overlap > MERGE_OVERLAP_MAX_SHARE * shorter:
-        return False
+        return LinkVerdict.OVERLAP
     # Куски одной строки не стоят друг над другом: наклон соединения не должен уходить от
     # местного наклона строк дальше допуска.
     run = (right.x0 + right.x1) / 2.0 - (left.x0 + left.x1) / 2.0
     rise = right.cy - left.cy
     expected = local_slope * run
     if abs(rise - expected) > np.tan(np.radians(MERGE_SLOPE_TOLERANCE_DEG)) * max(abs(run), 1e-6):
-        return False
+        return LinkVerdict.SLOPE
     cy = (left.cy + right.cy) / 2.0
     height = max(left.height, right.height)
     if crosses(separators, left.x1, right.x0, cy, height, ink300, k):
-        return False
+        return LinkVerdict.SEPARATOR
     if rules and _rule_between(rules, left.x1, right.x0, left.cy, right.cy):
-        return False
+        return LinkVerdict.RULE
     # Цепочка, в которой уже есть отточие, справа приращивает только другое отточие: иначе текст
     # левой графы таблицы сошьётся с числом правой через ряд точек (1971/10 с.93).
     if left.leader_dots >= LEADER_RUN_MIN and right.leader_dots == 0:
-        return False
-    return True
+        return LinkVerdict.LEADER
+    return LinkVerdict.ACCEPTED
+
+
+def _barrier_between(barriers, left: Piece, right: Piece) -> bool:
+    """Проходит ли линейка-барьер между кусками: отрезок от правого конца левого куска к левому
+    концу правого (по их осям) пересекает линейку.
+
+    Args:
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`).
+        left: Левый кусок.
+        right: Правый кусок.
+
+    Returns:
+        ``True`` — соединять нельзя.
+    """
+    start = (float(left.x1), float(left.y_at(left.x1)))
+    end = (float(right.x0), float(right.y_at(right.x0)))
+    return barriers.crosses(start, end)
 
 
 def _rule_between(rules: list, left: float, right: float, y_left: float, y_right: float) -> bool:
@@ -428,11 +519,12 @@ def _round(
     rules: list | None,
     ink300: np.ndarray,
     k: float,
+    barriers=None,
 ) -> tuple[list[Piece], int]:
-    """Один круг: построить зоны, отобрать взаимно ближайшие пары, слить их."""
+    """Один круг: построить зоны, отобрать взаимно ближайшие пары, слить их (не через линейки-барьеры)."""
     slopes = neighbour_slopes(pieces)
     zones = zones_of(pieces, pitch, secondary, slopes)
-    links = accept(links_of(zones, pieces, scale, separators, rules, ink300, k, slopes), len(pieces))
+    links = accept(links_of(zones, pieces, scale, separators, rules, ink300, k, slopes, barriers), len(pieces))
     if not links:
         return pieces, 0
     taken = [False] * len(pieces)
@@ -462,6 +554,8 @@ def link_by_zones(
     k: float,
     leaders: list | None = None,
     rules: list | None = None,
+    barriers=None,
+    min_long_pieces: int = MIN_LONG_PIECES,
 ) -> list[list[int]]:
     """Сцепить куски строк по зонам поиска; отдаёт наборы индексов сгустков, как прежняя сцепка.
 
@@ -476,6 +570,9 @@ def link_by_zones(
         k: Во сколько раз рендер крупнее рабочей копии.
         leaders: Отточия страницы.
         rules: Сплошные горизонтальные черты.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`) или ``None``.
+        min_long_pieces: От скольких длинных кусков делается второй круг (вторичные зоны).
+            Крупному масштабу текстовой полосы передаётся 0: см. ``segment.segments_of``.
 
     Returns:
         Наборы индексов сгустков — по одному на строку.
@@ -491,13 +588,24 @@ def link_by_zones(
     # Первый круг: длинные куски и первичные зоны коротких. Второй: у коротких появляются
     # вторичные зоны, и они сцепляются между собой — так собирается строка вразрядку и ряд точек.
     for secondary in (False, True):
-        if secondary and long_count < MIN_LONG_PIECES:
+        if secondary and long_count < min_long_pieces:
             break
         for _ in range(MAX_ROUNDS):
-            pieces, joined = _round(pieces, pitch, secondary, scale, separators, rules, ink300, k)
+            pieces, joined = _round(pieces, pitch, secondary, scale, separators, rules, ink300, k, barriers)
             if not joined:
                 break
     return [list(piece.blobs) for piece in pieces]
 
 
-__all__ = ["Link", "Zone", "accept", "link_by_zones", "links_of", "long_zones", "primary_zone", "zones_of"]
+__all__ = [
+    "Link",
+    "LinkVerdict",
+    "Zone",
+    "accept",
+    "link_by_zones",
+    "link_verdicts",
+    "links_of",
+    "long_zones",
+    "primary_zone",
+    "zones_of",
+]

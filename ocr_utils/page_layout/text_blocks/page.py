@@ -129,7 +129,18 @@ def analyse_gray(
     # три колонки заметки слипались в один блок (1975/05 с.97, pero). Считаем сами по рендеру.
     zones = zones_of(gutters, height, width, dpi)
     blocks = blocks_of(
-        axes, zones, gutters, width, ink, result.rules, dpi, smooth_block, coarse_factor, dilate, page_leaders
+        axes,
+        zones,
+        gutters,
+        width,
+        ink,
+        result.rules,
+        dpi,
+        smooth_block,
+        coarse_factor,
+        dilate,
+        page_leaders,
+        hints.barrier_lines,
     )
     alignments = [alignment_of(block) for block in blocks]
     share = ink_share(axes, ink, dpi)
@@ -197,9 +208,19 @@ def _analyse_areas(
         crop = upright(masked_ink(gray300, allowed), area, scale)
         if crop.size == 0 or min(crop.shape[:2]) < scale * 4:
             continue
+        # Подсказки области — в координатах её выпрямленной вырезки: рамки-запреты и линейки-барьеры.
+        # Маска разрешённого текста уже применена к вырезке и дальше не нужна.
+        area_hints = LayoutHints(
+            barriers=_shifted_barriers(hints.barriers, area),
+            rules=hints.barrier_lines.in_area(area.box, area.rotate_cw, _forward_points).as_tuples(),
+            dpi=dpi,
+        )
+        # Движок с подсказками (``InkEngine``) получает подсказки ОБЛАСТИ: со страничными он резал
+        # бы вырезку по чужим координатам.
+        area_engine = engine.with_hints(area_hints) if hasattr(engine, "with_hints") else engine
         inner = analyse_gray(
             crop,
-            engine,
+            area_engine,
             dpi=dpi,
             smooth_line=smooth_line,
             smooth_block=smooth_block,
@@ -208,7 +229,7 @@ def _analyse_areas(
             name=name,
             page=page,
             variant=variant,
-            hints=LayoutHints(barriers=_shifted_barriers(hints.barriers, area), dpi=dpi),
+            hints=area_hints,
         )
         axes.extend(back_axis(axis, size, area) for axis in inner.axes)
         for block, alignment in zip(inner.blocks, inner.alignments):

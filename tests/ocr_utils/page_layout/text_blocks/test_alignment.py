@@ -87,5 +87,8 @@ def test_overlapping_pieces_are_not_linked():
         return SimpleNamespace(x0=x0, x1=x1, cy=cy, x_h=10.0, height=18.0, leader_dots=0)
 
     word, next_word, rule = piece(500, 600, 143.5), piece(606, 663, 143.7), piece(109, 909, 145.0)
-    assert zones._allowed(word, next_word, scale, [], [], None, 2.0, lambda *args: False)
-    assert not zones._allowed(rule, next_word, scale, [], [], None, 2.0, lambda *args: False)
+    allowed = zones.LinkVerdict.ACCEPTED
+    assert zones._verdict_of(word, next_word, scale, [], [], None, 2.0, lambda *args: False) is allowed
+    assert (
+        zones._verdict_of(rule, next_word, scale, [], [], None, 2.0, lambda *args: False) is zones.LinkVerdict.OVERLAP
+    )

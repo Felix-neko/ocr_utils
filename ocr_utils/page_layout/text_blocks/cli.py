@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -9,6 +10,7 @@ import click
 from ocr_utils.page_layout.text_blocks import LINKING_CHOICES, LINKING_DEFAULT, RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS
+from ocr_utils.page_layout.text_blocks.segment import SCALES
 from ocr_utils.page_layout.text_blocks.page import Variant, analyse_gray, render_page
 from ocr_utils.page_layout.text_blocks.report import markdown, write_csv, write_json
 from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, SidesMethod
@@ -105,6 +107,13 @@ def main() -> None:
     help="кэш surya page_layout: включает подсказки — растр, таблицы, схемы, боковой текст",
 )
 @click.option(
+    "--rule-barriers/--no-rule-barriers",
+    default=True,
+    show_default=True,
+    help="линейки полосы, не вошедшие в таблицы и line art, — барьеры сращения строк и блоков "
+    "(нужен --layout-cache); --no-rule-barriers — для сравнения «было / стало»",
+)
+@click.option(
     "--forbid-figures",
     is_flag=True,
     default=False,
@@ -143,6 +152,7 @@ def analyze(
     layout_cache: Path | None,
     text_layer_cache: Path | None,
     forbid_figures: bool,
+    rule_barriers: bool,
     **options,
 ) -> None:
     """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку."""
@@ -166,6 +176,8 @@ def analyze(
                     continue
                 gray300 = render_page(pdf, page)
                 hints = _page_hints(pdf, page, gray300, dpi, surya, text_layer_cache, current, forbid_figures)
+                if hints is not None and not rule_barriers:
+                    hints = replace(hints, rules=())
                 engine = make_engine(engine_name, {**options, "hints": hints})
                 analysis = analyse_gray(
                     gray300,
@@ -256,8 +268,20 @@ def _page_hints(
 
 
 @main.command()
-@click.option("--pdf", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
-@click.option("--page", type=int, required=True)
+@click.option("--pdf", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--page", type=int, default=None)
+@click.option(
+    "--key",
+    default=None,
+    help="полоса пака по ключу «год/выпуск/полоса» (1971/07/IMG_0020_1L) — заострённая копия вместо --pdf/--page",
+)
+@click.option(
+    "--sharpened-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path("/mnt/system/raw/mts/pack1_background_blurred_v2/sharpened"),
+    show_default=True,
+    help="корень заострённых копий пака (для --key)",
+)
 @click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
 @click.option("--variant", default="nogeo", show_default=True, help="подпись варианта рендера")
 @click.option("--dpi", default=WORK_DPI, show_default=True, type=float, help="разрешение рабочей копии")
@@ -267,13 +291,45 @@ def _page_hints(
     help="вырезка ``x0,y0,x1,y1`` в пикселях рабочей копии; по умолчанию — вокруг самой непрямой оси",
 )
 @click.option("--linking", type=click.Choice(LINKING_CHOICES), default=LINKING_DEFAULT, show_default=True)
-def stages(pdf: Path, page: int, out_dir: Path, variant: str, dpi: float, crop: str | None, linking: str) -> None:
-    """Отладочные оверлеи по ЭТАПАМ построения осевой линии для одной полосы."""
+@click.option(
+    "--scale",
+    "scale_name",
+    type=click.Choice([scale.name for scale in SCALES]),
+    default=SCALES[0].name,
+    show_default=True,
+    help="масштаб сегментации, этапы которого рисовать: корпус или крупный (заголовки)",
+)
+def stages(
+    pdf: Path | None,
+    page: int | None,
+    key: str | None,
+    sharpened_dir: Path,
+    out_dir: Path,
+    variant: str,
+    dpi: float,
+    crop: str | None,
+    linking: str,
+    scale_name: str,
+) -> None:
+    """Отладочные оверлеи по ЭТАПАМ построения осевой линии для одной полосы (PDF или ключ пака)."""
     from ocr_utils.page_layout.text_blocks import stages as stages_module
 
-    gray300 = render_page(pdf, page)
+    if key is not None:
+        # Заострённая копия пака приводится к RENDER_DPI так же, как в разборе пака (pack_analysis).
+        from ocr_utils.page_layout.image import PageImage
+        from ocr_utils.page_layout.image import Variant as ImageVariant
+        from ocr_utils.page_layout.pack_analysis.stages import DEFAULT_DPI
+
+        image = PageImage.from_file(sharpened_dir / f"{key}.jpg", ImageVariant.SHARPENED, key, default_dpi=DEFAULT_DPI)
+        gray300 = image.gray_at(RENDER_DPI)
+        name, number = key.replace("/", "_"), 0
+    elif pdf is not None and page is not None:
+        gray300 = render_page(pdf, page)
+        name, number = pdf.stem, page
+    else:
+        raise click.UsageError("нужен --key или пара --pdf и --page")
     box = tuple(int(value) for value in crop.split(",")) if crop else None
-    pictures = stages_module.render(gray300, out_dir, pdf.stem, page, variant, dpi, box, linking)
+    pictures = stages_module.render(gray300, out_dir, name, number, variant, dpi, box, linking, scale_name)
     for picture in pictures:
         click.echo(f"{picture.path.name}: {picture.title}" + (f" — {picture.note}" if picture.note else ""))
     click.echo(f"готово: {out_dir}")

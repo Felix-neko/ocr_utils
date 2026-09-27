@@ -34,6 +34,17 @@ class InkEngine:
         self.linking = linking
         self.hints = hints or LayoutHints()
 
+    def with_hints(self, hints: LayoutHints) -> "InkEngine":
+        """Тот же движок с другими подсказками — для прохода по области в её собственных координатах.
+
+        Args:
+            hints: Подсказки в пикселях выпрямленной вырезки области.
+
+        Returns:
+            Новый движок с тем же способом сцепки.
+        """
+        return InkEngine(self.linking, hints)
+
     def segment(self, gray300: np.ndarray, dpi: float = WORK_DPI) -> EngineResult:
         """Строки страницы в пикселях рабочей копии ``dpi``.
 
@@ -57,10 +68,16 @@ class InkEngine:
         # Границей строки служат и пустые межколонники, и вертикальные линейки таблицы.
         # Рёбра рамок таблиц и блок-схем — такие же запреты: вертикальные ложатся к
         # межколонникам, горизонтальные к чертам, по которым делится блок.
+        # Линейки-барьеры: вертикальные куски — те же полосы запрета, а сами ломаные режут
+        # смыкание RLSA и сцепку кусков строки (см. :mod:`barriers`).
+        barrier_lines = self.hints.barrier_lines
         separators = (
-            separators_for_segmentation(gutters) + rule_separators(work, dpi) + barrier_separators(self.hints.barriers)
+            separators_for_segmentation(gutters)
+            + rule_separators(work, dpi)
+            + barrier_separators(self.hints.barriers)
+            + barrier_lines.separators()
         )
-        segments, rules = segments_of(gray300, separators, dpi, leaders, self.linking)
+        segments, rules = segments_of(gray300, separators, dpi, leaders, self.linking, barrier_lines)
         rules = list(rules) + barrier_rules(self.hints.barriers)
         lines = [
             EngineLine(

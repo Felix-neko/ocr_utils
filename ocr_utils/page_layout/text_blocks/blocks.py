@@ -39,6 +39,19 @@ EDGE_CONFIRM_MIN = 2
 ROW_PAD_HEIGHTS = 0.15
 # Сегменты с центрами ближе этой доли высоты — один ряд.
 ROW_TOL_HEIGHTS = 0.5
+# Две соседние по x оси ряда разного КЕГЛЯ через пустоту — не один ряд, а строки двух блоков бок о
+# бок: подпись автора слева и заголовок справа (1967/05 с.10 скана IMG_0059_1L: «доцент,» и «в новых
+# условиях» на одной высоте через 32 мм). Кегль — медианная высота глифа оси (не высота оси: у
+# заголовка с широкими пробелами бокс слова с выносными в 1.8 раза выше соседнего, а глиф тот же).
+# Замер по 1184 полосам пака-1, 397 пар осей одного ряда через разрыв больше 2 мм: у подписей рядом
+# с заголовком отношение глифов 1.5–3.4 при разрыве от 4 мм; у таблиц (цифры против строчных) —
+# 1.3–1.47; у корпуса с отношением от 1.44 («(ВЦ).», «85%») разрыв — пробел 2.1–2.7 мм.
+ROW_GLYPH_RATIO = 1.5
+ROW_GLYPH_GAP_MM = 3.5
+# Для оси хватает трёх глифов: «доцент,» — шесть букв, а у ряда порог ``MIN_GLYPHS_FOR_SIZE``.
+AXIS_MIN_GLYPHS = 3
+# Полоса оси для замера глифа — столько её высот в каждую сторону от ординаты.
+AXIS_GLYPH_BAND_HEIGHTS = 0.65
 # Доля точек оси с каждого конца, по которой меряется её наклон на этом конце.
 AXIS_END_SHARE = 0.2
 # Насколько далеко за свой конец ось продолжается по наклону конца (мм бумаги).
@@ -469,6 +482,98 @@ def _level_at(axis: LineAxis, x: float) -> float:
     return y_ref + _axis_slope(axis, at_start) * float(np.clip(x - x_ref, -reach, reach))
 
 
+def _split_by_barrier(group: list[LineAxis], axis: LineAxis, barriers) -> bool:
+    """Разделяет ли линейка-барьер ось и ближайшую ось ряда: отрезок между их ближними концами
+    (на уровнях самих осей) пересекает линейку.
+
+    Args:
+        group: Оси, уже набранные в ряд.
+        axis: Очередная ось.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`).
+
+    Returns:
+        ``True`` — ось в этот ряд не идёт.
+    """
+    if barriers.empty:
+        return False
+    nearest = min(group, key=lambda item: _x_distance(item, axis))
+    left, right = (nearest, axis) if nearest.x0 <= axis.x0 else (axis, nearest)
+    start = (float(left.x1), float(_level_at(left, left.x1)))
+    end = (float(right.x0), float(_level_at(right, right.x0)))
+    return barriers.crosses(start, end)
+
+
+def axis_glyph_height(axis: LineAxis, ink: np.ndarray, k: float, dpi: float) -> float:
+    """Медианная высота глифа ОДНОЙ оси — мера её кегля (пиксели рабочей копии).
+
+    Полоса берётся на ``AXIS_GLYPH_BAND_HEIGHTS`` высоты оси в каждую сторону от её медианной
+    ординаты и по абсциссам самой оси; глифов достаточно ``AXIS_MIN_GLYPHS``.
+
+    Args:
+        axis: Ось строки.
+        ink: Краска рендера ``RENDER_DPI`` (ненулевое — краска).
+        k: Во сколько раз рендер крупнее рабочей копии.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Высота глифа; ``0.0``, если глифов не набралось.
+    """
+    half = AXIS_GLYPH_BAND_HEIGHTS * axis.height
+    y0 = max(0, int((axis.cy - half) * k))
+    y1 = int((axis.cy + half) * k) + 1
+    band = ink[y0:y1, max(0, int(axis.x0 * k)) : int(axis.x1 * k) + 1]
+    return glyph_metrics(band, k, dpi, min_glyphs=AXIS_MIN_GLYPHS)[1]
+
+
+def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float) -> list[list[LineAxis]]:
+    """Разрезать набранный ряд там, где через пустоту соседствуют оси разного кегля.
+
+    ``_same_row`` сводит оси только по ординате, и подпись автора слева («доцент,», глиф 9 px)
+    сливалась в ряд с третьей строкой заголовка справа («в новых условиях», глиф 18 px) через 32 мм
+    пустоты (1967/05, IMG_0059_1L). Такой ряд потом не даёт разделить ни подпись, ни заголовок.
+    Оси упорядочиваются по x; разрез — в пустоте шире ``ROW_GLYPH_GAP_MM`` между кусками, у которых
+    глифы различаются не меньше чем в ``ROW_GLYPH_RATIO`` раз. Оси, перекрытые по x (половинки
+    строки), не режутся никогда.
+
+    Args:
+        group: Оси одного ряда.
+        ink: Краска рендера ``RENDER_DPI``.
+        k: Во сколько раз рендер крупнее рабочей копии.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Части ряда слева направо; без разрезов — ``[group]`` как есть (тот же объект).
+    """
+    if len(group) < 2:
+        return [group]
+    ordered = sorted(group, key=lambda item: item.x0)
+    limit = mm_to_px(ROW_GLYPH_GAP_MM, dpi)
+    # Кандидаты на разрез: пустота между правым краем всего, что левее, и началом следующей оси.
+    cuts = []
+    reach = ordered[0].x1
+    for index in range(1, len(ordered)):
+        if ordered[index].x0 - reach > limit:
+            cuts.append(index)
+        reach = max(reach, ordered[index].x1)
+    if not cuts:
+        return [group]
+    # Кегль мерится по кускам между кандидатами целиком: у куска из нескольких осей глифов больше.
+    bounds = [0, *cuts, len(ordered)]
+    pieces = [ordered[start:end] for start, end in zip(bounds[:-1], bounds[1:])]
+    heights = [float(np.median([axis_glyph_height(axis, ink, k, dpi) for axis in piece])) for piece in pieces]
+    out: list[list[LineAxis]] = [list(pieces[0])]
+    for previous, current, piece in zip(heights[:-1], heights[1:], pieces[1:]):
+        low, high = sorted((previous, current))
+        # Молчащая мера ничего не режет: глифов не набралось — куски остаются одним рядом.
+        if low > 0 and high >= ROW_GLYPH_RATIO * low:
+            out.append(list(piece))
+        else:
+            out[-1].extend(piece)
+    if len(out) == 1:
+        return [group]
+    return out
+
+
 def rows_of(
     axes: list[LineAxis],
     ink: np.ndarray,
@@ -479,6 +584,7 @@ def rows_of(
     pad: float | None = None,
     leaders: list | None = None,
     fallback: bool = False,
+    barriers=None,
 ) -> list[Row]:
     """Ряды колонки: оси с близкими ординатами сливаются, края берутся по краске рендера.
 
@@ -498,6 +604,8 @@ def rows_of(
             одиннадцать строк правой части 1971/10 с.93: межколонник там по высоте ряда
             интерполируется широким (x 606–726), текст начинается с x 641, и ряд не проходил
             проверку вылета. Слияние осей в ряд через живой межколонник запрещено и здесь.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`): оси по разные стороны линейки
+            в один ряд не сливаются. ``None`` — нет.
 
     Returns:
         Ряды сверху вниз; ряды, у которых край не нашёлся, выбрасываются.
@@ -512,10 +620,16 @@ def rows_of(
         # потом не помещается ни в одну колонку (1971/10 с.93, низ).
         if close and gutters is not None and _split_by_gutter(groups[-1], axis, gutters):
             close = False
+        # Через линейку-барьер ряд тоже не сращивается (межколонная вертикаль, линейка графы).
+        if close and barriers is not None and _split_by_barrier(groups[-1], axis, barriers):
+            close = False
         if close:
             groups[-1].append(axis)
         else:
             groups.append([axis])
+    # Ряд, собранный через пустоту из осей разного кегля (подпись автора и заголовок бок о бок),
+    # режется на части — каждая становится своим рядом.
+    groups = [piece for group in groups for piece in _split_by_glyph(group, ink, k, dpi)]
     rows: list[Row] = []
     for group in groups:
         height = float(np.median([item.height for item in group]))
@@ -813,7 +927,9 @@ def _cap_line(row: Row) -> np.ndarray | None:
     return np.column_stack([points[:, 0], points[:, 1] + np.interp(points[:, 0], row.body[:, 0], correction)])
 
 
-def glyph_metrics(band: np.ndarray, k: float, dpi: float, skip: np.ndarray | None = None) -> tuple[float, float]:
+def glyph_metrics(
+    band: np.ndarray, k: float, dpi: float, skip: np.ndarray | None = None, min_glyphs: int = MIN_GLYPHS_FOR_SIZE
+) -> tuple[float, float]:
     """Медианные ширина и высота символа в полосе ряда (пиксели рабочей копии).
 
     Размер символа нужен, чтобы раздуть границу блока на его половину: кромка идёт по самым
@@ -828,6 +944,8 @@ def glyph_metrics(band: np.ndarray, k: float, dpi: float, skip: np.ndarray | Non
         band: Краска полосы ряда (пиксели рендера).
         k: Во сколько раз рендер крупнее рабочей копии.
         dpi: Разрешение рабочей копии.
+        skip: Столбцы полосы, которые не считаются (точки отточий); ``None`` — все.
+        min_glyphs: Сколько глифов нужно для замера; меньше — размера нет.
 
     Returns:
         Пара ``(ширина, высота)``; ``(0.0, 0.0)``, если глифов не нашлось.
@@ -849,7 +967,7 @@ def glyph_metrics(band: np.ndarray, k: float, dpi: float, skip: np.ndarray | Non
             continue
         widths.append(width / k)
         heights.append(height / k)
-    if len(widths) < MIN_GLYPHS_FOR_SIZE:
+    if len(widths) < min_glyphs:
         return 0.0, 0.0
     return float(np.median(widths)), float(np.median(heights))
 
@@ -1143,6 +1261,28 @@ def _rule_between(previous: Row, row: Row, rules: list, span: tuple[int, int]) -
     return False
 
 
+def _barrier_between_rows(previous: Row, row: Row, barriers, span: tuple[int, int] | None) -> bool:
+    """Проходит ли линейка-барьер между двумя рядами (над их общей шириной, а без неё — над колонкой).
+
+    Args:
+        previous: Верхний ряд.
+        row: Нижний ряд.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`) или ``None``.
+        span: Границы колонки — на случай, когда ряды не перекрываются по x.
+
+    Returns:
+        ``True`` — ряды разделены линейкой.
+    """
+    if barriers is None or barriers.empty:
+        return False
+    x0, x1 = max(previous.x0, row.x0), min(previous.x1, row.x1)
+    if x1 <= x0:
+        if span is None:
+            return False
+        x0, x1 = span
+    return barriers.between_rows(x0, x1, previous.y, row.y)
+
+
 def _weak_overlap(previous: Row, row: Row, reference: float) -> bool:
     """Расходятся ли соседние ряды по горизонтали настолько, что это разные блоки.
 
@@ -1188,6 +1328,7 @@ def split_blocks(
     rules: list | None = None,
     span: tuple[int, int] | None = None,
     body_height: float = 0.0,
+    barriers=None,
 ) -> list[list[Row]]:
     """Разделить ряды колонки на блоки по вертикальным разрывам больше ``BLOCK_GAP_PITCHES`` шагов.
 
@@ -1195,6 +1336,9 @@ def split_blocks(
     не относится сам по себе: он приклеивается к соседней группе, если разрыв до неё меньше
     ``MERGE_GAP_PITCHES`` шагов. Настоящий разрыв между заметками (1975/05 с.97 — полтора десятка
     шагов) так не склеится.
+
+    Линейка-барьер (``barriers``, :class:`barriers.BarrierLines`) между соседними рядами режет
+    блок при любом разрыве, и через неё обрывки обратно не приклеиваются.
     """
     if len(rows) < 2:
         return [rows]
@@ -1217,6 +1361,7 @@ def split_blocks(
             or (gap > SOFT_GAP_PITCHES * pitch and _soft_style_break(previous, row))
             or _weak_overlap(previous, row, reference)
             or (span is not None and _rule_between(previous, row, rules, span))
+            or _barrier_between_rows(previous, row, barriers, span)
         )
         if divided:
             groups.append([row])
@@ -1237,12 +1382,116 @@ def split_blocks(
             and gap <= MERGE_GAP_PITCHES * pitch
             and not _style_break([*merged[-1], *group], len(merged[-1]) - 1)
             and not (span is not None and _rule_between(merged[-1][-1], group[0], rules, span))
+            and not _barrier_between_rows(merged[-1][-1], group[0], barriers, span)
         )
         if joinable:
             merged[-1].extend(group)
         else:
             merged.append(group)
     return merged
+
+
+def _side_by_side(rows: list[Row], dpi: float) -> set[int]:
+    """Ряды колонки, у которых есть сосед БОК О БОК другого кегля: на одной высоте через пустоту шире ``ROW_GLYPH_GAP_MM``.
+
+    Кегль пары обязан различаться (глиф ряда — не меньше чем в ``ROW_GLYPH_RATIO`` раз): полу-ряды
+    таблицы с отточиями (текст графы и число на соседних ординатах) тоже стоят бок о бок, но
+    набраны одним кеглем и потоков не заводят.
+
+    Args:
+        rows: Ряды колонки.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Номера рядов (в ``rows``), входящих хотя бы в одну такую пару; пусто — пар нет.
+    """
+    limit = mm_to_px(ROW_GLYPH_GAP_MM, dpi)
+    marked: set[int] = set()
+    for index, first in enumerate(rows):
+        for other in range(index + 1, len(rows)):
+            second = rows[other]
+            # По высоте ряды перекрываются, если их середины ближе полусуммы высот.
+            if abs(first.y - second.y) >= (first.height + second.height) / 2.0:
+                continue
+            if max(first.x0, second.x0) - min(first.x1, second.x1) <= limit:
+                continue
+            # Молчащая мера (глифов не набралось) пару не засчитывает.
+            low, high = sorted((first.glyph_h, second.glyph_h))
+            if low > 0 and high >= ROW_GLYPH_RATIO * low:
+                marked.update((index, other))
+    return marked
+
+
+def _streams(rows: list[Row], pitch: float, dpi: float) -> list[list[Row]]:
+    """Разложить ряды колонки на ПОТОКИ — стопки рядов, стоящих друг под другом.
+
+    ``split_blocks`` идёт по рядам сверху вниз одной цепочкой, и два блока бок о бок в одной колонке
+    (подпись автора слева, заголовок справа — межколонника между ними нет, рядом они лишь на
+    три строки) перемежаются по y: заголовок, заголовок, автор, автор, заголовок, автор. Любая
+    граница такой цепочки рвёт оба блока (1967/05, IMG_0059_1L). Поэтому каждый ряд привязывается к
+    БЛИЖАЙШЕМУ выше ряду, с которым он перекрывается по x (не меньше ``MIN_ROW_OVERLAP`` более
+    короткого из двух), если разрыв до него не больше ``BLOCK_GAP_PITCHES`` шагов (у крупного
+    набора — ``GAP_HEIGHTS`` высот меньшего ряда, как в ``split_blocks``): дальше блок и так делится.
+    Кандидат в поток — связная компонента этих привязок.
+
+    Отдельным потоком остаётся только компонента, в которой есть ряд из пары «бок о бок, разный
+    кегль» (:func:`_side_by_side`); все прочие компоненты колонки сводятся обратно в один поток и
+    делятся по-старому. Иначе рассыпались таблицы с отточиями ниже подписи: их полу-ряды по x не
+    перекрываются ни с чем выше, и шапка «в %» с первым числом уходила в свой блок (1968/01,
+    IMG_0026_2R). Нет таких пар — колонка один поток, разбор бит в бит прежний.
+
+    Args:
+        rows: Ряды колонки сверху вниз.
+        pitch: Межстрочный шаг колонки (пиксели рабочей копии).
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Потоки, каждый — ряды сверху вниз; потоки упорядочены по первому ряду.
+    """
+    marked = _side_by_side(rows, dpi) if len(rows) > 1 else set()
+    if not marked:
+        return [rows]
+    order = sorted(range(len(rows)), key=lambda index: rows[index].y)
+    # Компоненты привязок — через массив «родителей» (объединение множеств).
+    parent = list(range(len(rows)))
+    for position, index in enumerate(order):
+        row = rows[index]
+        for above_index in reversed(order[:position]):
+            above = rows[above_index]
+            limit = max(BLOCK_GAP_PITCHES * pitch, GAP_HEIGHTS * min(above.height, row.height))
+            # Порог зависит от высот пары, поэтому дальние ряды не отсекаются досрочно.
+            if row.y - above.y > limit:
+                continue
+            # Стоят в столбик, только если перекрытие — заметная доля КОРОТКОГО ряда: строка подписи
+            # «А. ФАЛЗУЛИН,» задевала первую букву заголовка на 56 px из 256 и сцепляла подпись с
+            # заголовком (1970/12, IMG_0117_1L).
+            overlap = min(above.x1, row.x1) - max(above.x0, row.x0)
+            if overlap < MIN_ROW_OVERLAP * min(above.x1 - above.x0, row.x1 - row.x0):
+                continue
+            parent[_root(parent, index)] = _root(parent, above_index)
+            break
+    # Компоненты с рядом из пары бок о бок — свои потоки; остальное — общий поток колонки.
+    own = {_root(parent, index) for index in marked}
+    streams: dict[int, list[Row]] = {}
+    rest: list[Row] = []
+    for index in order:
+        root = _root(parent, index)
+        if root in own:
+            streams.setdefault(root, []).append(rows[index])
+        else:
+            rest.append(rows[index])
+    out = list(streams.values()) + ([rest] if rest else [])
+    if len(out) == 1:
+        return [rows]
+    return sorted(out, key=lambda stream: stream[0].y)
+
+
+def _root(parent: list[int], index: int) -> int:
+    """Корень компоненты элемента ``index`` в массиве родителей (с укорачиванием пути)."""
+    while parent[index] != index:
+        parent[index] = parent[parent[index]]
+        index = parent[index]
+    return index
 
 
 def pitch_of(rows: list[Row]) -> float:
@@ -1301,8 +1550,11 @@ def _local_line(ys: np.ndarray, xs: np.ndarray, grid: np.ndarray, window: float)
         if own.sum() >= 2 and weights.sum() > 0:
             slope, intercept = np.polyfit(ys[own], xs[own], 1, w=np.sqrt(weights))
             out[i] = slope * node + intercept
-        else:
+        elif weights.sum() > 0:
             out[i] = float(np.average(xs[own], weights=weights))
+        else:
+            # Все ряды окна ровно на его краю (вес трикуба — ноль): простое среднее (1974/05 с.77).
+            out[i] = float(xs[own].mean())
     return out
 
 
@@ -1977,6 +2229,7 @@ def blocks_of(
     coarse_factor: float = COARSE_FACTOR,
     dilate: float = DILATE_GLYPHS,
     leaders: list | None = None,
+    barriers=None,
 ) -> list[TextBlock]:
     """Блоки страницы: колонки зон вёрстки, склеенные по вертикали и разделённые разрывами.
 
@@ -1995,6 +2248,8 @@ def blocks_of(
         dpi: Разрешение рабочей копии.
         smooth_pitches: Окно основной огибающей в межстрочных интервалах.
         coarse_factor: Во сколько раз шире окно крупной огибающей.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`): через них не сращиваются ряды
+            и блоки. ``None`` — нет.
 
     Returns:
         Блоки, слева направо и сверху вниз.
@@ -2009,7 +2264,9 @@ def blocks_of(
             own = [with_column(axis, column) for axis in own_zone if homes.get(_axis_key(axis)) == column]
             if not own:
                 continue
-            rows = rows_of(own, ink, span, dpi, gutters=gutters, width=width, pad=pad, leaders=leaders)
+            rows = rows_of(
+                own, ink, span, dpi, gutters=gutters, width=width, pad=pad, leaders=leaders, barriers=barriers
+            )
             # Пристроенной считается ось, реально вошедшая в РЯД, а не всякая, попавшая в колонку:
             # ``rows_of`` выбрасывает ряд, вылезающий за колонку дальше ``OVERHANG_MM``, и раньше
             # такие оси пропадали совсем. На 1971/10 с.93 так терялись одиннадцать строк правой
@@ -2025,11 +2282,20 @@ def blocks_of(
     rest = [axis for axis in axes if _axis_key(axis) not in placed]
     if rest:
         rows = rows_of(
-            rest, ink, (0, width), dpi, gutters=gutters, width=width, pad=pad, leaders=leaders, fallback=True
+            rest,
+            ink,
+            (0, width),
+            dpi,
+            gutters=gutters,
+            width=width,
+            pad=pad,
+            leaders=leaders,
+            fallback=True,
+            barriers=barriers,
         )
         if rows:
             pieces.append(((0, width), rows))
-    pieces = _absorb_continuation(pieces, width, dpi)
+    pieces = _absorb_continuation(pieces, width, dpi, barriers)
     merged = _merge_pieces(pieces, dpi)
     widths = [span[1] - span[0] for span, _ in merged]
     typical = float(np.median(widths)) if widths else 0.0
@@ -2064,7 +2330,22 @@ def blocks_of(
         wide = typical and span[1] - span[0] > WIDE_BLOCK_RATIO * typical and len(rows) < WIDE_BLOCK_ROWS
         if wide and np.mean([len(row.axes) > 1 for row in rows]) >= GLUED_ROWS_SHARE:
             continue
-        for number, group in enumerate(split_blocks(rows, pitch_of(rows), rules, span, body_height)):
+        # Блоки бок о бок в одной колонке (подпись автора и заголовок) делятся каждый в своём
+        # потоке; без рядов бок о бок поток один — вся колонка, и шаг прежний.
+        column_pitch = pitch_of(rows)
+        streams = _streams(rows, column_pitch, dpi)
+        if len(streams) == 1:
+            groups = split_blocks(rows, column_pitch, rules, span, body_height, barriers)
+        else:
+            # Шаг — колонки, а не потока: у таблицы с отточиями полу-ряды стоят на соседних
+            # ординатах, шаг потока выходит в пару пикселей, и таблица рассыпалась (1968/01, IMG_0026_2R).
+            groups = [
+                group
+                for stream in streams
+                for group in split_blocks(stream, column_pitch, rules, span, body_height, barriers)
+            ]
+            groups.sort(key=lambda group: group[0].y)
+        for number, group in enumerate(groups):
             if len(group) < MIN_BLOCK_ROWS:
                 continue
             pitch = pitch_of(group)
@@ -2095,7 +2376,7 @@ def blocks_of(
 
 
 def _absorb_continuation(
-    pieces: list[tuple[tuple[int, int], list[Row]]], width: int, dpi: float
+    pieces: list[tuple[tuple[int, int], list[Row]]], width: int, dpi: float, barriers=None
 ) -> list[tuple[tuple[int, int], list[Row]]]:
     """Вернуть широкому блоку его же последние строки, уместившиеся в одну колонку.
 
@@ -2109,6 +2390,8 @@ def _absorb_continuation(
         pieces: Куски блоков ``(границы колонки, ряды)`` до склейки по зонам.
         width: Ширина рабочей копии.
         dpi: Разрешение рабочей копии.
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`): строка под линейкой не
+            забирается. ``None`` — нет.
 
     Returns:
         Те же куски; пустые (всё забрали) выброшены.
@@ -2132,6 +2415,8 @@ def _absorb_continuation(
                 # Левый край должен совпасть с краем широкого блока: у колонки под заголовком
                 # он другой (заголовок набран по центру), и её строки так не уводятся.
                 if abs(row.x0 - tail.x0) > mm_to_px(CONTINUATION_EDGE_MM, dpi):
+                    break
+                if _barrier_between_rows(tail, row, barriers, None):
                     break
                 out[index][1].append(row)
                 taken += 1

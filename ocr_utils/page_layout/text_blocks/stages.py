@@ -49,6 +49,21 @@ ZONE_LONG = (60, 190, 60)
 ZONE_PRIMARY = (220, 120, 40)
 ZONE_SECOND = (0, 170, 255)
 ZONE_ALPHA = 0.55
+# Линия экстраполяции — ось зоны поиска от конца куска до дальнего края зоны.
+COLOUR_REACH = (40, 40, 40)
+# Соединения на этапе 9 по решению: принято и взаимно, принято, но не взаимно; отказы — группами.
+COLOUR_LINK_MUTUAL = COLOUR_OK
+COLOUR_LINK_ONE_WAY = (0, 165, 255)
+COLOUR_LINK_GEOMETRY = (170, 170, 170)
+COLOUR_LINK_SHAPE = COLOUR_BAD
+COLOUR_LINK_FORBIDDEN = COLOUR_HINT
+# Принятое соединение со ступенькой на стыке больше этой доли шага — вероятный перескок: рисуется
+# толще и отдельным цветом.
+STEP_PITCH_SHARE = 0.6
+COLOUR_LINK_JUMP = (200, 0, 200)
+# Легенда в правом верхнем углу вырезки (пиксели увеличенной вырезки).
+LEGEND_WIDTH = 330
+LEGEND_ROW = 16
 
 # Размер вырезки вокруг разбираемой строки (пиксели рабочей копии): строка целиком плюс
 # по строке сверху и снизу — видно, откуда ось может перескочить.
@@ -112,11 +127,59 @@ def _save(canvas: np.ndarray, path: Path, width: int = PAGE_WIDTH) -> Path:
     return path
 
 
-def _save_crop(canvas: np.ndarray, crop: tuple[int, int, int, int], path: Path, zoom: int = CROP_ZOOM) -> Path:
-    """Сохранить вырезку ``(x0, y0, x1, y1)``, увеличив её в ``zoom`` раз."""
+def _on_paper(colour: tuple[int, int, int], alpha: float) -> tuple[int, int, int]:
+    """Цвет полупрозрачной разметки, как он ложится на белую бумагу (для образца в легенде)."""
+    return tuple(int(round(alpha * own + (1.0 - alpha) * 255)) for own in colour)
+
+
+def _legend(canvas: np.ndarray, entries: list[tuple[str, tuple[int, int, int], float]]) -> None:
+    """Легенда в правом верхнем углу: образец цвета и русская подпись на строку.
+
+    Args:
+        canvas: Картинка, на которой печатается легенда (меняется на месте, как и вся отрисовка).
+        entries: ``(подпись, цвет BGR, прозрачность)``; образец смешивается с бумагой так же,
+            как сама разметка.
+    """
+    if not entries:
+        return
+    x = max(0, canvas.shape[1] - LEGEND_WIDTH)
+    bottom = 34 + LEGEND_ROW * len(entries)
+    cv2.rectangle(canvas, (x - 6, 28), (canvas.shape[1] - 2, bottom), (255, 255, 255), -1)
+    for index, (text, colour, alpha) in enumerate(entries):
+        y = 44 + LEGEND_ROW * index
+        cv2.line(canvas, (x, y - 4), (x + 22, y - 4), _on_paper(colour, alpha), 3, cv2.LINE_AA)
+        cv2.putText(canvas, text, (x + 28, y), cv2.FONT_HERSHEY_COMPLEX, 0.4, COLOUR_TEXT, 1, cv2.LINE_AA)
+
+
+def _save_crop(
+    canvas: np.ndarray,
+    crop: tuple[int, int, int, int],
+    path: Path,
+    zoom: int = CROP_ZOOM,
+    legend: list[tuple[str, tuple[int, int, int], float]] | None = None,
+) -> Path:
+    """Сохранить вырезку ``(x0, y0, x1, y1)``, увеличив её в ``zoom`` раз.
+
+    Args:
+        canvas: Картинка страницы (подпись уже напечатана).
+        crop: Вырезка в пикселях ``canvas``.
+        path: Куда писать JPEG.
+        zoom: Во сколько раз увеличить.
+        legend: Легенда для вырезки (печатается после увеличения, чтобы читалась); ``None`` — без неё.
+
+    Returns:
+        Путь записанного файла.
+    """
     x0, y0, x1, y1 = crop
+    title = canvas[:26].copy()
     piece = canvas[max(0, y0) : y1, max(0, x0) : x1]
     piece = cv2.resize(piece, (piece.shape[1] * zoom, piece.shape[0] * zoom), interpolation=cv2.INTER_NEAREST)
+    # Подпись страницы — в шапку вырезки: без неё на увеличенном куске не понять, что это за этап.
+    head = np.full((26, piece.shape[1], 3), 255, dtype=np.uint8)
+    width = min(piece.shape[1], title.shape[1])
+    head[:, :width] = title[:, :width]
+    piece = np.vstack([head, piece])
+    _legend(piece, legend or [])
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), piece, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
     return path
@@ -352,11 +415,60 @@ def _greedy_stages(
     return merge_by_field(guarded, stats, field, separators, scale, ink300, k, leaders, None)
 
 
+def _link_colour(verdict, mutual: bool, jump: bool) -> tuple[tuple[int, int, int], int]:
+    """Цвет и толщина соединения на этапе 9 по решению сцепки.
+
+    Args:
+        verdict: :class:`zones.LinkVerdict`.
+        mutual: Принятое соединение взаимно ближайшее (пойдёт в слияние).
+        jump: Ступенька на стыке больше ``STEP_PITCH_SHARE`` шага.
+
+    Returns:
+        ``(цвет BGR, толщина)``.
+    """
+    from ocr_utils.page_layout.text_blocks.zones import LinkVerdict
+
+    if verdict is LinkVerdict.ACCEPTED:
+        if jump:
+            return COLOUR_LINK_JUMP, 2
+        return (COLOUR_LINK_MUTUAL, 2) if mutual else (COLOUR_LINK_ONE_WAY, 1)
+    if verdict in (LinkVerdict.ANGLE, LinkVerdict.SIDE):
+        return COLOUR_LINK_GEOMETRY, 1
+    if verdict in (LinkVerdict.HEIGHT, LinkVerdict.OVERLAP, LinkVerdict.SLOPE):
+        return COLOUR_LINK_SHAPE, 1
+    return COLOUR_LINK_FORBIDDEN, 1
+
+
+def _junction_step(left, right) -> float:
+    """Ступенька на стыке двух кусков: ордината оси правого в его начале минус левого в его конце."""
+    return float(right.y_at(right.x0) - left.y_at(left.x1))
+
+
 def _zone_stages(
-    work, stats, labels, mask, candidates, separators, rules, leaders, scale, dpi, ink300, k, page_picture, crop_picture
+    work,
+    stats,
+    labels,
+    mask,
+    candidates,
+    separators,
+    rules,
+    leaders,
+    scale,
+    dpi,
+    ink300,
+    k,
+    page_picture,
+    crop_picture,
+    min_long_pieces: int | None = None,
 ) -> list[list[int]]:
-    """Этапы 6–12 сцепки по зонам: куски, их оси, зоны, соединения, круги слияния."""
+    """Этапы 6–12 сцепки по зонам: куски, их оси, зоны, соединения, круги слияния.
+
+    ``min_long_pieces`` — от скольких длинных кусков делается второй круг (``None`` —
+    ``zones.MIN_LONG_PIECES``; крупному масштабу текстовой полосы боевой разбор передаёт 0).
+    """
     from ocr_utils.page_layout.text_blocks import zones as zn
+
+    min_long_pieces = zn.MIN_LONG_PIECES if min_long_pieces is None else min_long_pieces
     from ocr_utils.page_layout.text_blocks.pieces import page_x_height, pieces_of, pitch_of
 
     pieces = pieces_of(stats, labels, mask, candidates, dpi, leaders)
@@ -411,8 +523,11 @@ def _zone_stages(
     # Рисуются полупрозрачно и РАЗНЫМИ цветами: зелёным — зоны длинных кусков (от концов оси по
     # касательной), синим — первичные зоны коротких (свой охват, раздутый вверх сильнее, чем
     # вниз), оранжевым — вторичные зоны коротких (второй круг, по наклону соседних длинных).
-    first_round = zn.zones_of(pieces, pitch, False)
-    second_round = zn.zones_of(pieces, pitch, True)
+    # Местный наклон строк — тот же, что берёт боевой круг сцепки (``zones._round``): по нему
+    # направлены вторичные зоны и с ним сверяется наклон соединения.
+    slopes = zn.neighbour_slopes(pieces)
+    first_round = zn.zones_of(pieces, pitch, False, slopes)
+    second_round = zn.zones_of(pieces, pitch, True, slopes)
     primary = {(zone.piece, zone.side, zone.capsule) for zone in first_round}
     layer = _canvas(work)
     counts = {"длинных": 0, "первичных": 0, "вторичных": 0}
@@ -424,16 +539,23 @@ def _zone_stages(
         else:
             colour, key = ZONE_SECOND, "вторичных"
         counts[key] += 1
+        # Зона — конус: радиус растёт от конца куска к дальнему краю (``Capsule.radius_at``).
+        # Рисуется кругами вдоль оси, чтобы было видно раскрытие.
         capsule = zone.capsule
-        cv2.line(
-            layer,
-            (int(round(capsule.ax)), int(round(capsule.ay))),
-            (int(round(capsule.bx)), int(round(capsule.by))),
-            colour,
-            max(1, int(round(2 * capsule.radius))),
-            cv2.LINE_AA,
-        )
+        steps = max(2, int(capsule.length // 2) + 1)
+        for along in np.linspace(0.0, 1.0, steps):
+            x = capsule.ax + (capsule.bx - capsule.ax) * along
+            y = capsule.ay + (capsule.by - capsule.ay) * along
+            cv2.circle(layer, (int(round(x)), int(round(y))), max(1, int(round(capsule.radius_at(along)))), colour, -1)
     canvas = cv2.addWeighted(_canvas(work), 1.0 - ZONE_ALPHA, layer, ZONE_ALPHA, 0)
+    # Линии экстраполяции: ось каждой направленной зоны от конца куска, с точкой на дальнем краю.
+    for zone in second_round:
+        if zone.side == 0:
+            continue
+        capsule = zone.capsule
+        end = (int(round(capsule.bx)), int(round(capsule.by)))
+        cv2.line(canvas, (int(round(capsule.ax)), int(round(capsule.ay))), end, COLOUR_REACH, 1, cv2.LINE_AA)
+        cv2.circle(canvas, end, 1, COLOUR_REACH, -1)
     for piece in pieces:
         cv2.rectangle(canvas, (int(piece.x0), int(piece.y0)), (int(piece.x1), int(piece.y1)), (120, 120, 120), 1)
     page_picture(
@@ -446,32 +568,76 @@ def _zone_stages(
         f"у коротких вверх {zn.SHORT_UP_XH}, вниз {zn.SHORT_DOWN_XH} икса; "
         f"вторичная {zn.SECOND_REACH_PITCHES} шага, радиус {zn.SECOND_RADIUS_XH} икса",
     )
-    crop_picture(canvas, 8, "zones", "Зоны поиска")
-    zone_list = first_round
+    crop_picture(
+        canvas,
+        8,
+        "zones",
+        "Зоны поиска",
+        legend=[
+            ("зона длинного куска (конус)", ZONE_LONG, ZONE_ALPHA),
+            ("первичная зона короткого", ZONE_PRIMARY, ZONE_ALPHA),
+            ("вторичная зона короткого", ZONE_SECOND, ZONE_ALPHA),
+            ("линия экстраполяции (ось зоны)", COLOUR_REACH, 1.0),
+            ("бокс куска", (120, 120, 120), 1.0),
+        ],
+    )
+    zone_list = second_round if long_count >= min_long_pieces else first_round
 
     # --- 9. Вероятные соединения ----------------------------------------------------------
-    links = zn.links_of(zone_list, pieces, scale, separators, rules, ink300, k)
-    accepted = zn.accept(links, len(pieces))
+    # Все встречи зон с решением сцепки (те же проверки, что в боевом круге). Рисуются по осям
+    # кусков: от конца левого к началу правого, — так ступенька на стыке видна как наклон отрезка.
+    verdicts = zn.link_verdicts(zone_list, pieces, scale, separators, rules, ink300, k, slopes)
+    accepted = zn.accept(zn.links_of(zone_list, pieces, scale, separators, rules, ink300, k, slopes), len(pieces))
     accepted_keys = {(link.left, link.right) for link in accepted}
     canvas = _canvas(work)
-    for link in links:
+    counts_verdict: dict[str, int] = {}
+    jumps = 0
+    drawn: set[tuple[int, int, object]] = set()
+    # Сначала отказы, потом принятые — чтобы принятые не прятались под отказами той же пары.
+    ordered = sorted(verdicts, key=lambda item: item[1] is zn.LinkVerdict.ACCEPTED)
+    for link, verdict in ordered:
+        counts_verdict[verdict.value] = counts_verdict.get(verdict.value, 0) + 1
+        if (link.left, link.right, verdict) in drawn:
+            continue
+        drawn.add((link.left, link.right, verdict))
         left, right = pieces[link.left], pieces[link.right]
-        colour = COLOUR_OK if (link.left, link.right) in accepted_keys else COLOUR_BAD
-        cv2.line(canvas, (int(left.x1), int(left.cy)), (int(right.x0), int(right.cy)), colour, 1, cv2.LINE_AA)
+        step = _junction_step(left, right)
+        jump = verdict is zn.LinkVerdict.ACCEPTED and abs(step) > STEP_PITCH_SHARE * pitch
+        jumps += 1 if jump and (link.left, link.right) in accepted_keys else 0
+        colour, thickness = _link_colour(verdict, (link.left, link.right) in accepted_keys, jump)
+        start = (int(left.x1), int(round(left.y_at(left.x1))))
+        end = (int(right.x0), int(round(right.y_at(right.x0))))
+        cv2.line(canvas, start, end, colour, thickness, cv2.LINE_AA)
+    for piece in pieces:
+        cv2.rectangle(canvas, (int(piece.x0), int(piece.y0)), (int(piece.x1), int(piece.y1)), (150, 150, 150), 1)
     page_picture(
         canvas,
         9,
         "links",
-        "Соединения: зелёные приняты (взаимно ближайшие), красные отброшены",
-        f"вероятных {len(links)}, принято {len(accepted)}; допуск угла {zn.ANGLE_LIMIT_DEG}°, "
-        f"рычаг {zn.ANGLE_LEVER_XH} икса",
+        "Встречи зон: принятые и отбитые по причине",
+        f"встреч {len(verdicts)}, взаимных принятых {len(accepted)}, из них со ступенькой больше "
+        f"{STEP_PITCH_SHARE} шага {jumps}; "
+        + ", ".join(f"{key} {value}" for key, value in sorted(counts_verdict.items(), key=lambda item: -item[1])),
     )
-    crop_picture(canvas, 9, "links", "Вероятные и принятые соединения")
+    crop_picture(
+        canvas,
+        9,
+        "links",
+        "Встречи зон и решения",
+        legend=[
+            ("принято, взаимно ближайшее", COLOUR_LINK_MUTUAL, 1.0),
+            ("принято, но не взаимно", COLOUR_LINK_ONE_WAY, 1.0),
+            (f"принято, ступенька > {STEP_PITCH_SHARE} шага", COLOUR_LINK_JUMP, 1.0),
+            ("отбито: угол подхода, сторона зоны", COLOUR_LINK_GEOMETRY, 1.0),
+            ("отбито: кегль, наклон, друг над другом", COLOUR_LINK_SHAPE, 1.0),
+            ("отбито: межколонник, черта, барьер", COLOUR_LINK_FORBIDDEN, 1.0),
+        ],
+    )
 
     # --- 10–12. Круги слияния -------------------------------------------------------------
     rounds = []
     for secondary in (False, True):
-        if secondary and long_count < zn.MIN_LONG_PIECES:
+        if secondary and long_count < min_long_pieces:
             break
         for _ in range(zn.MAX_ROUNDS):
             pieces, joined = zn._round(pieces, pitch, secondary, scale, separators, rules, ink300, k)
@@ -505,6 +671,7 @@ def render(
     dpi: float = WORK_DPI,
     crop: tuple[int, int, int, int] | None = None,
     linking: str = LINKING_DEFAULT,
+    scale_name: str = "корпус",
 ) -> list[StagePicture]:
     """Нарисовать все этапы построения оси для одной страницы.
 
@@ -518,6 +685,9 @@ def render(
         crop: Вырезка ``(x0, y0, x1, y1)`` в пикселях рабочей копии; по умолчанию — вокруг самой
             непрямой оси страницы.
         linking: Способ сцепки: ``zones`` — этапы 6–10 про зоны поиска, ``greedy`` — прежний ход.
+        scale_name: Масштаб сегментации (``Scale.name``): ``корпус`` или ``крупный``. У крупного
+            маска глифов берётся, как в боевом разборе, без краски корпусных строк
+            (``segment._claimed_mask``).
 
     Returns:
         Список нарисованных картинок по порядку этапов.
@@ -531,8 +701,8 @@ def render(
     work = cv2.resize(gray300, size, interpolation=cv2.INTER_AREA)
     threshold, _ = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     ink300 = gray300 <= threshold
-    scale = seg.SCALES[0]
-    head = f"{name} с.{page} [{variant}]"
+    scale = next(item for item in seg.SCALES if item.name == scale_name)
+    head = f"{name} с.{page} [{variant}] масштаб {scale.name}"
 
     # Готовый разбор страницы нужен, чтобы выбрать вырезку и показать итог.
     analysis = analyse_gray(gray300, InkEngine(linking=linking), name=name, page=page, variant=variant)
@@ -543,10 +713,12 @@ def render(
         path = _save(canvas, out_dir / f"{index:02d}_{slug}.jpg")
         out.append(StagePicture(slug, title, path, note))
 
-    def crop_picture(canvas: np.ndarray, index: int, slug: str, title: str, note: str = "") -> None:
+    def crop_picture(
+        canvas: np.ndarray, index: int, slug: str, title: str, note: str = "", legend: list | None = None
+    ) -> None:
         piece = canvas.copy()
         _caption(piece, f"{index:02d}. {title} — {head}")
-        path = _save_crop(piece, crop, out_dir / f"{index:02d}_{slug}_zoom.jpg")
+        path = _save_crop(piece, crop, out_dir / f"{index:02d}_{slug}_zoom.jpg", legend=legend)
         out.append(StagePicture(f"{slug}_zoom", title + " (крупно)", path, note))
 
     # --- 1. Бинаризация -------------------------------------------------------------------
@@ -558,6 +730,18 @@ def render(
 
     # --- 2. Маска глифов ------------------------------------------------------------------
     mask, verdicts = _glyph_verdicts(work, scale)
+    min_long_pieces = None
+    if scale is not seg.SCALES[0]:
+        # Крупный масштаб в боевом разборе не видит краски корпусных строк основного кегля.
+        separators_body = separators_for_segmentation(gutters_of(work, dpi, leaders_of(work, dpi)[0]))
+        separators_body += rule_separators(work, dpi)
+        body = seg._segments_at_scale(
+            gray300, work, ink300, separators_body, seg.SCALES[0], dpi, None, seg.rules_of(work, dpi), linking
+        )
+        claimed = seg._claimed_mask(seg._text_rows(body), work.shape[:2])
+        if claimed is not None:
+            min_long_pieces = seg._second_round_gate(mask, scale, dpi, None, None)
+            mask = seg._without_claimed(mask, claimed)
     canvas = _canvas(work)
     counts: dict[str, int] = {}
     for (x, y, width, height), reason in verdicts:
@@ -644,6 +828,7 @@ def render(
             k,
             page_picture,
             crop_picture,
+            min_long_pieces,
         )
     else:
         spans = _greedy_stages(

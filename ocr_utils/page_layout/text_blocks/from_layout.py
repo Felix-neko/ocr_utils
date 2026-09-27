@@ -89,6 +89,7 @@ def hints_of(
         width=page_width,
         height=page_height,
         dpi=dpi,
+        rules=[rule.scaled(scale).points for rule in layout.loose_rules],
     )
 
 
@@ -99,6 +100,7 @@ def build(
     width: int,
     height: int,
     dpi: float = WORK_DPI,
+    rules: list | None = None,
 ) -> LayoutHints:
     """Собрать подсказки из готовых рамок (пиксели рабочей копии).
 
@@ -111,6 +113,8 @@ def build(
         sideways: Рамки повёрнутого текста.
         width, height: Размер рабочей копии.
         dpi: Её разрешение.
+        rules: Линейки-барьеры — ломаные ``((x, y), ...)`` в пикселях рабочей копии (непристроенные
+            линейки детектора таблиц); ``None`` — нет.
 
     Returns:
         Подсказки: маска разрешённого текста, области (полоса целиком плюс боковые) и запреты.
@@ -126,7 +130,11 @@ def build(
     zones = [OrientedZone((0, 0, width, height), 0)]
     zones += [OrientedZone((x0, y0, x1, y1), 90) for x0, y0, x1, y1 in sideways if min(x1 - x0, y1 - y0) >= limit]
     return LayoutHints(
-        text_allowed=allowed, zones=tuple(zones) if len(zones) > 1 else (), barriers=tuple(barriers), dpi=dpi
+        text_allowed=allowed,
+        zones=tuple(zones) if len(zones) > 1 else (),
+        barriers=tuple(barriers),
+        rules=tuple(tuple((float(x), float(y)) for x, y in points) for points in (rules or ())),
+        dpi=dpi,
     )
 
 

@@ -73,18 +73,29 @@ class LayoutHints:
         zones: Области с ориентацией текста. Пусто — вся полоса прямая, одной областью.
         barriers: Рамки таблиц и блок-схем ``(x0, y0, x1, y1)``: через их рёбра строка не
             собирается и блок не тянется.
+        rules: Линейки-барьеры — ломаные ``((x, y), ...)``, возможно изогнутые (непристроенные
+            линейки детектора таблиц, ``PageLayout.loose_rules``): через них не сращиваются ни
+            строки, ни ряды, ни блоки (см. :mod:`barriers`).
         dpi: Разрешение, в котором заданы координаты; служит только проверкой на несовпадение.
     """
 
     text_allowed: np.ndarray | None = None
     zones: tuple[OrientedZone, ...] = ()
     barriers: tuple[tuple[int, int, int, int], ...] = ()
+    rules: tuple[tuple[tuple[float, float], ...], ...] = ()
     dpi: float = WORK_DPI
 
     @property
     def empty(self) -> bool:
         """Нечего подсказывать: разбор пойдёт ровно как без подсказок."""
-        return self.text_allowed is None and not self.zones and not self.barriers
+        return self.text_allowed is None and not self.zones and not self.barriers and not self.rules
+
+    @property
+    def barrier_lines(self) -> "BarrierLines":
+        """Линейки-барьеры набором :class:`barriers.BarrierLines` (пустой, если линеек нет)."""
+        from ocr_utils.page_layout.text_blocks.barriers import BarrierLines
+
+        return BarrierLines.of(self.rules)
 
     def zones_or_page(self, width: int, height: int) -> tuple[OrientedZone, ...]:
         """Области разбора: заданные подсказкой или одна на всю полосу.

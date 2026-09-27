@@ -84,6 +84,7 @@ def hints_of(
         text_allowed=_allow_cells(base.text_allowed, cells),
         zones=zones,
         barriers=base.barriers + tuple(barriers),
+        rules=base.rules,
         dpi=dpi,
     )
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -24,6 +25,9 @@ from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, gutter_fil
 from ocr_utils.page_layout.text_blocks.leaders import flatten_axis, inside_spans, leaders_of, spans_at
 from ocr_utils.page_layout.text_blocks.pieces import is_low_mark
 from ocr_utils.page_layout import mm_to_px
+
+if TYPE_CHECKING:
+    from ocr_utils.page_layout.text_blocks.barriers import BarrierLines
 from ocr_utils.scan_markup.curved_lines.fitting import centreline, smooth_median
 
 # Окно медианного сглаживания центр-линии в высотах строки (как в ``line_fit``).
@@ -52,8 +56,35 @@ LEADER_BACK_MM = 25.0
 LEADER_ABOVE_HEIGHTS = 0.2
 LEADER_BELOW_HEIGHTS = 0.9
 LEADER_AXIS_STEP_MM = 1.0
-# Крупный сегмент, накрытый корпусными на эту долю длины, — дубль и не берётся.
+# Крупный сегмент, накрытый корпусными на эту долю длины, — дубль и не берётся. Накрытие
+# меряется ПО ОСИ: точка оси крупной строки накрыта, если на том же x в пределах
+# ``COVER_DY_HEIGHTS`` высоты проходит ось корпусной строки. Прежняя мера по боксу пропускала
+# ровно перескоки: у диагонали через два ряда бокс в два шага высотой, и ни один корпусный ряд
+# не перекрывал его по y на 40 % (1971/07 IMG_0020_1L, 1969/04 IMG_0020_1L).
 COVER_SHARE = 0.6
+COVER_DY_HEIGHTS = 0.5
+# Сколько точек оси крупной строки опрашивается при проверке накрытия и скрещивания.
+COVER_SAMPLES = 32
+# Скрещивание осей: разность ординат должна уйти за этот запас в обе стороны (пиксели рабочей
+# копии), как в ``metrics.crossings_of``, — иначе шум оси на общей строке читается как смена мест.
+CROSS_MARGIN_PX = 2.0
+# Краска корпусных строк основного кегля скрывается от крупного масштаба: компонента его маски
+# глифов, лежащая в полосах корпусных строк на эту долю площади и больше, выбрасывается. Без этого
+# на корпусе крупный масштаб видит одни высокие буквы («р», «д», «б», прописные, цифры): кусок в
+# одну букву, высота строчной 17 px вместо 12, шаг 39 px вместо 23, — его зоны поиска дотягиваются
+# до соседнего ряда, и строка перепрыгивает через ряд со ступенькой ровно в шаг. Замер на трёх
+# полосах (1971/07 IMG_0020_1L, 1967/09 IMG_0135_1L, 1969/04 IMG_0020_1L): 15–20 таких соединений
+# на полосу через зазор 20–96 px. Заголовки выше кегля корпуса (``BODY_HEIGHT_RATIO``) не
+# скрываются: их корпус собирает хуже, и они по-прежнему отдаются крупному масштабу.
+CLAIMED_SHARE = 0.5
+# Полуширина полосы корпусной строки вокруг её оси, в высотах строки.
+CLAIMED_HALF_HEIGHTS = 0.5
+# Забирается только строка АБЗАЦА: у неё есть ряд сверху или снизу (перекрытие по x не меньше
+# ``MULTI_ROW_OVERLAP`` более короткой) ближе стольких высот. Одиночная строка кеглем корпуса —
+# чаще всего часть заголовка («лет» в «50 лет», 1967/10 с.63: ближайший ряд за 17 высот), и её
+# краска должна остаться крупному масштабу, иначе заголовок теряет ось. У рядов абзаца
+# расстояние 1.3–1.5 высоты.
+TEXT_ROW_NEIGHBOUR_HEIGHTS = 2.5
 # Крупная строка считается «той же самой», если она выше обрывка во столько раз и накрывает
 # его по x на такую долю длины.
 SWALLOW_HEIGHT_RATIO = 1.5
@@ -416,13 +447,26 @@ def _segments_at_scale(
     leaders: list | None = None,
     rules: list["Rule"] | None = None,
     linking: str = LINKING_DEFAULT,
+    barriers: "BarrierLines | None" = None,
+    claimed: np.ndarray | None = None,
 ) -> list[Segment]:
     """Строки одного масштаба; ``leaders`` — отточия страницы (по ним выравнивается ось),
     ``rules`` — сплошные черты (через ребро ячейки строка не сшивается), ``linking`` — способ
-    сцепки кусков (``zones`` — по зонам поиска, ``greedy`` — прежняя жадная цепочка)."""
+    сцепки кусков (``zones`` — по зонам поиска, ``greedy`` — прежняя жадная цепочка),
+    ``barriers`` — линейки-барьеры (через них не смыкается RLSA и не сцепляются куски),
+    ``claimed`` — маска краски, уже забранной строками другого масштаба (``_claimed_mask``):
+    компоненты, лежащие в ней, этот масштаб не видит; ``None`` — видит всё."""
     mask = component_mask(work, scale)
-    smeared = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((1, scale.gap), np.uint8))
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(smeared, 8)
+    # Порог второго круга сцепки (вторичные зоны) по числу длинных кусков: на полосе-схеме подписи
+    # разбросаны, и сцеплять их вторичными зонами нельзя. Если краска абзацев скрыта, порог
+    # считается по маске ДО скрытия — решение остаётся тем же, что было без неё: у заголовка
+    # «50 лет» (1967/10 с.63) после скрытия всего четыре куска, и без этого он не собирался, а на
+    # полосе чертежей (1968/01 с.54) второй круг и прежде не шёл.
+    min_long = None
+    if claimed is not None:
+        min_long = _second_round_gate(mask, scale, dpi, leaders, barriers)
+        mask = _without_claimed(mask, claimed)
+    count, labels, stats = _smeared(mask, scale, barriers)
     if count <= 1:
         return []
     k = RENDER_DPI / dpi
@@ -466,9 +510,26 @@ def _segments_at_scale(
         # Сцепка по зонам поиска: у каждого куска своя ось, от её концов выпущены «колбаски», и
         # соединяются только куски, чьи зоны встретились под малым углом. Копить ошибке нечего —
         # каждое соединение проверяется от исходного куска, а не от конца растущей цепочки.
-        from ocr_utils.page_layout.text_blocks.zones import link_by_zones
+        from ocr_utils.page_layout.text_blocks.zones import MIN_LONG_PIECES, link_by_zones
 
-        return build(link_by_zones(stats, labels, mask, separators, scale, dpi, ink300, k, leaders, rules))
+        # Порог второго круга: свой (по кускам этой маски) или решённый до скрытия абзацев.
+        min_long = MIN_LONG_PIECES if min_long is None else min_long
+        return build(
+            link_by_zones(
+                stats,
+                labels,
+                mask,
+                separators,
+                scale,
+                dpi,
+                ink300,
+                k,
+                leaders,
+                rules,
+                barriers,
+                min_long_pieces=min_long,
+            )
+        )
     # Прежний ход: жадная цепочка, по её длинным строкам поле, затем та же цепочка с полем как
     # ограничителем и сшивание обрывков одного уровня. Подробности и замеры — в legacy_linking.
     from ocr_utils.page_layout.text_blocks.legacy_linking.baselines import field_of
@@ -480,6 +541,56 @@ def _segments_at_scale(
         return first
     guarded = link_spans(stats, separators, scale, dpi, ink300, k, field=field)
     return build(merge_by_field(guarded, stats, field, separators, scale, ink300, k, leaders, rules))
+
+
+def _smeared(mask: np.ndarray, scale: Scale, barriers: "BarrierLines | None") -> tuple[int, np.ndarray, np.ndarray]:
+    """Смыкание RLSA маски глифов и сгустки после него.
+
+    Args:
+        mask: Маска глифов масштаба (``uint8``).
+        scale: Масштаб (ширина ядра смыкания ``gap``).
+        barriers: Линейки-барьеры: по ним сгусток режется; ``None`` — нет.
+
+    Returns:
+        ``(число меток, карта меток, статистика компонент)`` — как у ``connectedComponentsWithStats``.
+    """
+    smeared = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((1, scale.gap), np.uint8))
+    if barriers is not None and not barriers.empty:
+        # Смыкание на 8/24 px перекинуло бы слово через вертикальную линейку: по линейке сгусток
+        # режется, и дальше по обе стороны — разные куски.
+        smeared[barriers.mask(smeared.shape[:2])] = 0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(smeared, 8)
+    return count, labels, stats
+
+
+def _second_round_gate(
+    mask: np.ndarray, scale: Scale, dpi: float, leaders: list | None, barriers: "BarrierLines | None"
+) -> int:
+    """Порог второго круга сцепки, решённый по маске до скрытия краски абзацев.
+
+    Сцепка по зонам делает второй круг, если длинных кусков не меньше ``zones.MIN_LONG_PIECES``.
+    Здесь это решение принимается по ПОЛНОЙ маске, а отдаётся порогом для скрытой: 0 — второй
+    круг делать, ``MIN_LONG_PIECES`` — решать, как обычно, по своим кускам.
+
+    Args:
+        mask: Полная маска глифов масштаба.
+        scale: Масштаб.
+        dpi: Разрешение рабочей копии.
+        leaders: Отточия страницы.
+        barriers: Линейки-барьеры.
+
+    Returns:
+        Порог числа длинных кусков для сцепки по скрытой маске.
+    """
+    from ocr_utils.page_layout.text_blocks.pieces import pieces_of
+    from ocr_utils.page_layout.text_blocks.zones import MIN_LONG_PIECES
+
+    count, labels, stats = _smeared(mask, scale, barriers)
+    if count <= 1:
+        return MIN_LONG_PIECES
+    pieces = pieces_of(stats, labels, mask, candidates_of(stats, scale, dpi), dpi, leaders)
+    long_count = sum(1 for piece in pieces if piece.long)
+    return 0 if long_count >= MIN_LONG_PIECES else MIN_LONG_PIECES
 
 
 def _glyph_boxes(
@@ -648,14 +759,172 @@ def _split_at_gutters(
     return list(groups.values())
 
 
+def _axis_samples(segment: Segment, count: int = COVER_SAMPLES) -> tuple[np.ndarray, np.ndarray]:
+    """Точки оси строки, равномерно по x от начала до конца.
+
+    Args:
+        segment: Строка.
+        count: Сколько точек взять.
+
+    Returns:
+        ``(xs, ys)`` в пикселях рабочей копии; пустые массивы, если оси нет.
+    """
+    if segment.xs.size == 0:
+        return np.empty(0), np.empty(0)
+    order = np.argsort(segment.xs)
+    xs, ys = segment.xs[order], segment.ys[order]
+    grid = np.linspace(float(xs[0]), float(xs[-1]), count)
+    return grid, np.interp(grid, xs, ys)
+
+
+def _other_y(other: Segment, grid: np.ndarray) -> np.ndarray:
+    """Ординаты оси ``other`` в точках ``grid``; вне её охвата по x — ``nan``.
+
+    Args:
+        other: Строка, чья ось опрашивается.
+        grid: Абсциссы (пиксели рабочей копии).
+
+    Returns:
+        Массив той же длины, что ``grid``.
+    """
+    out = np.full(grid.shape, np.nan)
+    if other.xs.size == 0:
+        return out
+    order = np.argsort(other.xs)
+    xs, ys = other.xs[order], other.ys[order]
+    inside = (grid >= xs[0]) & (grid <= xs[-1])
+    out[inside] = np.interp(grid[inside], xs, ys)
+    return out
+
+
 def _covered(segment: Segment, others: list[Segment]) -> bool:
-    """Накрыт ли сегмент другими: та же полоса по y и больше ``COVER_SHARE`` длины."""
-    covered = 0.0
+    """Накрыт ли сегмент другими: вдоль ``COVER_SHARE`` его оси рядом идёт ось другой строки.
+
+    Точка оси накрыта, если на том же x ось какой-нибудь строки из ``others`` проходит ближе
+    ``COVER_DY_HEIGHTS`` высоты (берётся большая из двух высот). Мера по оси, а не по боксу: бокс
+    диагонали через два ряда высок, и прежняя мера её «не накрывала».
+
+    Args:
+        segment: Проверяемая строка (крупного масштаба).
+        others: Строки, которые могут её накрывать (корпусные).
+
+    Returns:
+        ``True``, если строка — дубль уже найденного.
+    """
+    grid, ys = _axis_samples(segment)
+    if grid.size == 0:
+        return False
+    covered = np.zeros(grid.shape, dtype=bool)
     for other in others:
-        if min(segment.y1, other.y1) - max(segment.y0, other.y0) <= 0.4 * (segment.y1 - segment.y0):
+        if other.x1 < segment.x0 or other.x0 > segment.x1:
             continue
-        covered += max(0, min(segment.x1, other.x1) - max(segment.x0, other.x0))
-    return covered >= COVER_SHARE * max(1, segment.x1 - segment.x0)
+        near = np.abs(_other_y(other, grid) - ys) <= COVER_DY_HEIGHTS * max(segment.height, other.height)
+        covered |= near  # сравнение с nan даёт False
+    return float(covered.mean()) >= COVER_SHARE
+
+
+def _crosses_body(segment: Segment, body: list[Segment]) -> bool:
+    """Скрещивает ли ось строки ось какой-нибудь корпусной строки (меняются местами по y).
+
+    Строка текста не может пройти СКВОЗЬ соседний ряд: если на общем охвате по x разность ординат
+    уходит за ``CROSS_MARGIN_PX`` в обе стороны, строка перепрыгнула через ряд.
+
+    Args:
+        segment: Проверяемая строка (крупного масштаба).
+        body: Корпусные строки.
+
+    Returns:
+        ``True`` — строка скрещивается хотя бы с одной корпусной.
+    """
+    grid, ys = _axis_samples(segment)
+    if grid.size == 0:
+        return False
+    for other in body:
+        if other.x1 < segment.x0 or other.x0 > segment.x1:
+            continue
+        difference = ys - _other_y(other, grid)
+        difference = difference[~np.isnan(difference)]
+        if difference.size >= 2 and (difference < -CROSS_MARGIN_PX).any() and (difference > CROSS_MARGIN_PX).any():
+            return True
+    return False
+
+
+def _text_rows(body: list[Segment]) -> list[Segment]:
+    """Корпусные строки абзацев: основного кегля и с рядом сверху или снизу.
+
+    Основной кегль — не выше ``BODY_HEIGHT_RATIO`` медианы (заголовок, который корпус тоже нашёл,
+    остаётся крупному масштабу, см. ``_body_sized``). Ряд сверху или снизу — строка, перекрытая по
+    x на ``MULTI_ROW_OVERLAP`` более короткой, с серединой не дальше
+    ``TEXT_ROW_NEIGHBOUR_HEIGHTS`` высот (одиночная строка кеглем корпуса — часть заголовка).
+
+    Args:
+        body: Корпусные строки страницы.
+
+    Returns:
+        Строки абзацев; пустой список, если корпусных строк меньше ``BODY_MIN_SEGMENTS``.
+    """
+    if len(body) < BODY_MIN_SEGMENTS:
+        return []
+    median_height = float(np.median([segment.height for segment in body]))
+    eligible = [
+        segment for segment in body if segment.height <= BODY_HEIGHT_RATIO * median_height and segment.xs.size > 0
+    ]
+    out: list[Segment] = []
+    for segment in eligible:
+        for other in eligible:
+            if other is segment:
+                continue
+            overlap = min(segment.x1, other.x1) - max(segment.x0, other.x0)
+            shorter = max(1, min(segment.x1 - segment.x0, other.x1 - other.x0))
+            near = abs(other.cy - segment.cy) <= TEXT_ROW_NEIGHBOUR_HEIGHTS * max(segment.height, other.height)
+            # Сама с собой по высоте строка не совпадает: ряд — это строка ВЫШЕ или НИЖЕ.
+            apart = abs(other.cy - segment.cy) >= 0.5 * max(segment.height, other.height)
+            if overlap >= MULTI_ROW_OVERLAP * shorter and near and apart:
+                out.append(segment)
+                break
+    return out
+
+
+def _claimed_mask(rows: list[Segment], shape: tuple[int, int]) -> np.ndarray | None:
+    """Маска краски, забранной строками абзацев: полоса ``CLAIMED_HALF_HEIGHTS`` высоты вокруг каждой оси.
+
+    Args:
+        rows: Строки абзацев (:func:`_text_rows`).
+        shape: Размер рабочей копии ``(высота, ширина)``.
+
+    Returns:
+        Маска ``bool`` размера ``shape`` или ``None``, если строк нет.
+    """
+    if not rows:
+        return None
+    canvas = np.zeros(shape, dtype=np.uint8)
+    for segment in rows:
+        order = np.argsort(segment.xs)
+        points = np.column_stack([segment.xs[order], segment.ys[order]]).round().astype(np.int32)
+        thickness = max(1, int(round(2.0 * CLAIMED_HALF_HEIGHTS * segment.height)))
+        cv2.polylines(canvas, [points], False, 1, thickness)
+    return canvas.astype(bool)
+
+
+def _without_claimed(mask: np.ndarray, claimed: np.ndarray) -> np.ndarray:
+    """Маска глифов без компонент, лежащих в забранной краске на ``CLAIMED_SHARE`` и больше.
+
+    Args:
+        mask: Маска глифов масштаба (``uint8``, 1 — буква).
+        claimed: Маска забранной краски (``bool``) того же размера.
+
+    Returns:
+        Новая маска ``uint8``.
+    """
+    count, labels = cv2.connectedComponents(mask, connectivity=8)
+    if count <= 1:
+        return mask
+    # Площадь каждой компоненты и её часть внутри забранной краски — одним проходом bincount.
+    area = np.bincount(labels.ravel(), minlength=count)
+    inside = np.bincount(labels[claimed], minlength=count)
+    keep = inside < CLAIMED_SHARE * np.maximum(area, 1)
+    keep[0] = False
+    return keep[labels].astype(np.uint8)
 
 
 def _swallowed(small: Segment, big: Segment, height_ratio: float = SWALLOW_HEIGHT_RATIO) -> bool:
@@ -1046,6 +1315,7 @@ def segments_of(
     dpi: float = WORK_DPI,
     leaders: list | None = None,
     linking: str = LINKING_DEFAULT,
+    barriers: "BarrierLines | None" = None,
 ) -> tuple[list[Segment], list[Rule]]:
     """Строки страницы с центр-линиями по краске, в обоих масштабах, и сплошные черты.
 
@@ -1055,6 +1325,8 @@ def segments_of(
         dpi: Разрешение рабочей копии (боксы и высоты отдаются в нём).
         leaders: Готовые отточия страницы; ``None`` — посчитать самим.
         linking: Способ сцепки кусков: ``zones`` (по зонам поиска) или ``greedy`` (прежний ход).
+        barriers: Линейки-барьеры (:class:`barriers.BarrierLines`) в пикселях рабочей копии: через
+            них не смыкается RLSA и не сцепляются куски строки. ``None`` — нет.
 
     Returns:
         Строки сверху вниз (сначала корпус, затем крупные строки, не накрытые корпусными) и
@@ -1070,10 +1342,25 @@ def segments_of(
     leaders = leaders_of(work, dpi)[0] if leaders is None else leaders
     # Черты нужны сборке (через ребро ячейки строка не сшивается), поэтому ищутся заранее.
     rules = rules_of(work, dpi)
+    # Продление по отточиям не заходит за линейку-барьер (её вертикальные куски — полосы запрета).
+    barrier_separators = barriers.separators() if barriers is not None and not barriers.empty else None
     body = extend_with_leaders(
-        _segments_at_scale(gray300, work, ink300, separators, SCALES[0], dpi, leaders, rules, linking), leaders, dpi
+        _segments_at_scale(gray300, work, ink300, separators, SCALES[0], dpi, leaders, rules, linking, barriers),
+        leaders,
+        dpi,
+        barrier_separators,
     )
-    large_all = _segments_at_scale(gray300, work, ink300, separators, SCALES[1], dpi, None, rules, linking)
+    # Крупный масштаб не видит строк абзацев основного кегля, уже собранных корпусом: иначе по их
+    # высоким буквам он сцепляет соседние ряды (см. ``CLAIMED_SHARE``).
+    rows = _text_rows(body)
+    claimed = _claimed_mask(rows, work.shape[:2])
+    large_all = _segments_at_scale(
+        gray300, work, ink300, separators, SCALES[1], dpi, None, rules, linking, barriers, claimed
+    )
+    # Вторая линия обороны: крупная строка, чья ось скрещивает корпусную, — перескок через ряд.
+    # Сверка — только со строками абзацев: корпусные обрывки самого заголовка стоят на чуть разной
+    # высоте, и ось заголовка «скрещивала» бы их (1970/02 с.90, 1975/05 с.97).
+    large_all = [segment for segment in large_all if not _crosses_body(segment, rows)]
     # Крупная «строка», в которой корпус нашёл несколько рядов один над другим, — склейка рядов
     # через рисунок или вензель: ей не верим, и корпусные ряды она не поглощает.
     large_all = [segment for segment in large_all if not _multi_row(segment, body)]
