@@ -61,6 +61,11 @@ TANGENT_SHARE = 0.33
 # разминулись, и строка распалась. Наклон всего куска устойчив, поэтому конец зажимается вокруг
 # него.
 TANGENT_CLAMP_DEG = 5.0
+# Кегль у конца куска (:func:`end_kegl`) меряется по стольким крайним буквам; меньше
+# ``END_KEGL_MIN_LETTERS`` букв — не меряется.
+END_KEGL_LETTERS = 4
+END_KEGL_MIN_XH = 0.6
+END_KEGL_MIN_LETTERS = 2
 # Разумные пределы межстрочного шага (мм бумаги) — те же, что были у поля хода строк.
 PITCH_MIN_MM = 2.0
 PITCH_MAX_MM = 12.0
@@ -432,6 +437,36 @@ def merged(first: Piece, second: Piece) -> Piece:
     )
 
 
+def end_kegl(piece: Piece, at_start: bool, letters: int = END_KEGL_LETTERS) -> float | None:
+    """Кегль у конца куска: вторая по малости высота ``letters`` крайних букв, низкие метки и тире не в счёт.
+
+    Сращённый кусок хранит УСРЕДНЁННЫЙ икс (:func:`merged`), и кусок «науки Р С Ф С Р» (11 и
+    15 px), пришитый к заголовку (20 px), выглядит как 18 px — разница кегля у стыка растворяется.
+    Крайние буквы её не прячут.
+
+    Args:
+        piece: Кусок.
+        at_start: ``True`` — левый конец, ``False`` — правый.
+        letters: Сколько крайних букв брать.
+
+    Returns:
+        Высота в пикселях рабочей копии; ``None``, если букв меньше ``END_KEGL_MIN_LETTERS``:
+        по одной букве с точкой («Т.») кегль не измерить.
+    """
+    # Мерят кегль только буквы: низкие метки (точка, запятая) и тонкие широкие знаки (тире, дефис —
+    # ниже ``END_KEGL_MIN_XH`` икса) дают высоту в пару пикселей, и «кегль у стыка» с ними
+    # проваливался: подпись под фото «…Романова — зам.» рвалась на каждом тире (1971/03 IMG_0103_1L).
+    letter = ~piece.marks & (piece.sizes[:, 1] >= END_KEGL_MIN_XH * piece.x_h)
+    heights = piece.sizes[letter, 1]
+    if heights.size < END_KEGL_MIN_LETTERS:
+        return None
+    chosen = np.sort(heights[:letters] if at_start else heights[-letters:])
+    # Вторая по малости, а не медиана: у стыка часто стоят прописные инициалы («отдела;
+    # Т. Б. Соболева», 16–17 px при строчных 11), и кегль набора выдаёт строчная, а не прописная.
+    # И не самая малая: один знак препинания («;» — 8 px) её сбивал бы.
+    return float(chosen[1])
+
+
 def axis_residual(piece: Piece) -> float:
     """Среднеквадратичный остаток якорей от оси куска (пиксели).
 
@@ -505,6 +540,7 @@ __all__ = [
     "is_low_mark",
     "letters_of",
     "merged",
+    "end_kegl",
     "page_x_height",
     "pieces_of",
     "pitch_of",

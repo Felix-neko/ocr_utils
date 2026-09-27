@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
+
 from ocr_utils.page_layout.text_blocks import blocks, zones
 from ocr_utils.page_layout.text_blocks.alignment import AlignKind, is_centered, verdict
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
@@ -84,7 +86,10 @@ def test_overlapping_pieces_are_not_linked():
     scale = SimpleNamespace(link_height_ratio=1.8)
 
     def piece(x0, x1, cy):
-        return SimpleNamespace(x0=x0, x1=x1, cy=cy, x_h=10.0, height=18.0, leader_dots=0)
+        # Буквы куска — десять одинаковой высоты: кегль у стыка тот же, что икс.
+        sizes = np.tile([7.0, 10.0], (10, 1))
+        marks = np.zeros(10, dtype=bool)
+        return SimpleNamespace(x0=x0, x1=x1, cy=cy, x_h=10.0, height=18.0, leader_dots=0, sizes=sizes, marks=marks)
 
     word, next_word, rule = piece(500, 600, 143.5), piece(606, 663, 143.7), piece(109, 909, 145.0)
     allowed = zones.LinkVerdict.ACCEPTED

@@ -36,6 +36,7 @@ from ocr_utils.page_layout.text_blocks.pieces import (
     Piece,
     axis_residual,
     chord_slope,
+    end_kegl,
     merged,
     page_x_height,
     pieces_of,
@@ -97,6 +98,13 @@ MERGE_OVERLAP_MAX_SHARE = 0.3
 # Предохранитель слияния: остаток якорей от оси после слияния. Перескок на соседнюю строку даёт
 # ступеньку в полшага (11 px на корпусе пака-1), и остаток подскакивает сразу.
 AXIS_MAX_RESID_XH = 0.35
+# Разный кегль у стыка: крайние буквы кусков различаются больше чем в столько раз. Тогда зазор
+# между кусками не может быть длиннее двух зон МЕНЬШЕГО кегля: зона крупного куска считается от
+# его икса и дотягивается дальше, и подпись автора «…науки Р С Ф С Р» (буквы 15 px) сцеплялась
+# с подзаголовком «лесопромышленного сырья» (20 px) через пустоту в 90 px (1966/01 IMG_0027_2R) —
+# две зоны по 2.5 икса своего кегля дают вместе 87 px. Цифры и прописные в корпусе крупнее строчных
+# в 1.3–1.4 раза, но стоят через обычный пробел (12 px при пределе 50), и их это не задевает.
+MIXED_KEGL_RATIO = 1.25
 # Сколько ближайших длинных кусков опрашивается ради наклона короткого и сколько их нужно.
 SLOPE_NEIGHBOURS = 7
 SLOPE_MIN_NEIGHBOURS = 3
@@ -111,6 +119,7 @@ class LinkVerdict(Enum):
     ANGLE = "угол подхода"
     SIDE = "зона смотрит не туда"
     HEIGHT = "разный кегль"
+    MIXED_GAP = "разный кегль через широкий зазор"
     OVERLAP = "куски друг над другом"
     SLOPE = "наклон против местного"
     SEPARATOR = "межколонник"
@@ -412,6 +421,18 @@ def _verdict_of(
     heights = sorted((max(left.x_h, 1e-6), max(right.x_h, 1e-6)))
     if heights[1] > scale.link_height_ratio * heights[0]:
         return LinkVerdict.HEIGHT
+    # Кегль у стыка — по крайним буквам: усреднённый икс сращённого куска разницу прячет.
+    # Кусок из одной-двух букв кегля не мерит (правило тогда молчит).
+    ends = (end_kegl(left, at_start=False), end_kegl(right, at_start=True))
+    if None not in ends:
+        low, high = sorted(ends)
+        # Разница кегля у стыка сверх допуска масштаба — разный набор при любом зазоре: строка
+        # подписи и строка заголовка на одной высоте («…АН УССР» + «в угольной промышленности»,
+        # 1967/06 IMG_0121_1L). Усреднённый икс сращённого куска эту разницу прятал.
+        if high > scale.link_height_ratio * low:
+            return LinkVerdict.HEIGHT
+        if high > MIXED_KEGL_RATIO * low and right.x0 - left.x1 > 2.0 * LONG_REACH_XH * low:
+            return LinkVerdict.MIXED_GAP
     # Куски одной строки не накрывают друг друга по x (черта под словом — не сосед по строке).
     overlap = min(left.x1, right.x1) - max(left.x0, right.x0)
     shorter = max(1e-6, min(left.x1 - left.x0, right.x1 - right.x0))

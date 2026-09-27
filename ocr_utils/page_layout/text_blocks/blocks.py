@@ -48,6 +48,29 @@ ROW_TOL_HEIGHTS = 0.5
 # 1.3–1.47; у корпуса с отношением от 1.44 («(ВЦ).», «85%») разрыв — пробел 2.1–2.7 мм.
 ROW_GLYPH_RATIO = 1.5
 ROW_GLYPH_GAP_MM = 3.5
+# При СИЛЬНОЙ разнице кегля (от 1.8 раза) ряд режется и в узкой пустоте: подпись автора стоит к
+# строке заголовка вплотную («начальник отдела УМТС» 10 px + «мелкооптовой торговли» 20 px через
+# 10 px, 1969/05 IMG_0062_2R). Цифры и прописные корпуса крупнее строчных лишь в 1.3–1.45 раза.
+ROW_GLYPH_STRONG_RATIO = 1.8
+ROW_GLYPH_STRONG_GAP_MM = 1.0
+# Балл разницы НАБОРА двух рядов (:func:`style_distance`) — сумма превышений отношений кегля и
+# жирности над единицей: (r_кегль − 1) + (r_жирность − 1). Одно отношение кегля не видело подписи
+# рядом с заголовком того же кегля, но вдвое жирнее («современную» / «АЛФЕРЬЕВ», 1966/01 IMG_0017_1L:
+# глиф 19 против 15, жирность 4.6 против 2.2), а жирные рубрики оглавления рядом с обычным текстом
+# не видело вовсе. Замер по 800 случайным полосам пака-1 (``calib_style``): у соседних рядов внутри
+# блоков корпуса балл p99 = 0.51; у пар бок о бок одного набора (ячейки таблиц) медиана 0.16, у
+# пар «заголовок | автор» и «рубрика | текст оглавления» — от 0.8. При пороге 0.75 новое правило
+# добавило 11 пар (все — рубрики и заголовки рядом с текстом) и сняло 11 (все — ячейки таблиц:
+# цифры против строчных одной жирности).
+SIDE_STYLE_DISTANCE = 0.75
+# Ряды «одного набора» (балл ниже этого — p99 соседей внутри блоков): у такой пары крупного
+# набора разрыв меряется в КЕГЛЯХ, а не в высотах ряда. Высота ряда у строк одного заголовка
+# скачет от выносных и прописных (35, 28 и 21 px при одном глифе 19–20 px), и разрыв в 2.4 меньшей
+# высоты резал заголовок с разрежённым интервалом (1966/01 IMG_0007_2R: 68 px при пределе 67.2).
+# Интервал того заголовка — 3.0–3.5 кегля; у корпуса (кегль 11 px) предел в 4 кегля — 44 px, меньше
+# обычного ``BLOCK_GAP_PITCHES`` шагов, и на тексте ничего не меняет.
+SAME_STYLE_DISTANCE = 0.5
+SAME_STYLE_GAP_GLYPHS = 4.0
 # Для оси хватает трёх глифов: «доцент,» — шесть букв, а у ряда порог ``MIN_GLYPHS_FOR_SIZE``.
 AXIS_MIN_GLYPHS = 3
 # Полоса оси для замера глифа — столько её высот в каждую сторону от ординаты.
@@ -532,8 +555,9 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
     сливалась в ряд с третьей строкой заголовка справа («в новых условиях», глиф 18 px) через 32 мм
     пустоты (1967/05, IMG_0059_1L). Такой ряд потом не даёт разделить ни подпись, ни заголовок.
     Оси упорядочиваются по x; разрез — в пустоте шире ``ROW_GLYPH_GAP_MM`` между кусками, у которых
-    глифы различаются не меньше чем в ``ROW_GLYPH_RATIO`` раз. Оси, перекрытые по x (половинки
-    строки), не режутся никогда.
+    глифы различаются не меньше чем в ``ROW_GLYPH_RATIO`` раз, или в пустоте от
+    ``ROW_GLYPH_STRONG_GAP_MM`` при разнице от ``ROW_GLYPH_STRONG_RATIO``. Оси, перекрытые по x
+    (половинки строки), не режутся никогда.
 
     Args:
         group: Оси одного ряда.
@@ -548,12 +572,18 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
         return [group]
     ordered = sorted(group, key=lambda item: item.x0)
     limit = mm_to_px(ROW_GLYPH_GAP_MM, dpi)
+    strong_limit = mm_to_px(ROW_GLYPH_STRONG_GAP_MM, dpi)
     # Кандидаты на разрез: пустота между правым краем всего, что левее, и началом следующей оси.
+    # Узкая пустота (от ``ROW_GLYPH_STRONG_GAP_MM``) — тоже кандидат, но режет только сильная
+    # разница кегля; широкая — обычная (``ROW_GLYPH_RATIO``).
     cuts = []
+    wide = []
     reach = ordered[0].x1
     for index in range(1, len(ordered)):
-        if ordered[index].x0 - reach > limit:
+        gap = ordered[index].x0 - reach
+        if gap > strong_limit:
             cuts.append(index)
+            wide.append(gap > limit)
         reach = max(reach, ordered[index].x1)
     if not cuts:
         return [group]
@@ -562,10 +592,11 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
     pieces = [ordered[start:end] for start, end in zip(bounds[:-1], bounds[1:])]
     heights = [float(np.median([axis_glyph_height(axis, ink, k, dpi) for axis in piece])) for piece in pieces]
     out: list[list[LineAxis]] = [list(pieces[0])]
-    for previous, current, piece in zip(heights[:-1], heights[1:], pieces[1:]):
+    for previous, current, piece, is_wide in zip(heights[:-1], heights[1:], pieces[1:], wide):
         low, high = sorted((previous, current))
+        ratio = ROW_GLYPH_RATIO if is_wide else ROW_GLYPH_STRONG_RATIO
         # Молчащая мера ничего не режет: глифов не набралось — куски остаются одним рядом.
-        if low > 0 and high >= ROW_GLYPH_RATIO * low:
+        if low > 0 and high >= ratio * low:
             out.append(list(piece))
         else:
             out[-1].extend(piece)
@@ -1246,17 +1277,20 @@ def _same_glyph_size(before: list[Row], after: list[Row]) -> bool:
 
 
 def _rule_between(previous: Row, row: Row, rules: list, span: tuple[int, int]) -> bool:
-    """Проходит ли между рядами сплошная черта, перекрывающая колонку.
+    """Проходит ли между рядами сплошная черта, перекрывающая колонку — и сами ряды.
 
     Разделитель сноски — именно такая черта: текст под ней относится к сноске, а не к блоку
-    (1973/06 с.65, правая колонка).
+    (1973/06 с.65, правая колонка). Черта обязана лежать и ПОД рядами (перекрывать по x оба): иначе
+    подчёркивание фамилии автора слева резало заголовок справа, стоящий в той же колонке на той же
+    высоте (1966/01 IMG_0007_2R, «О постепенном / переходе»).
     """
     width = max(1, span[1] - span[0])
     for rule in rules:
         if not (previous.y < rule.cy < row.y):
             continue
         overlap = min(rule.x1, span[1]) - max(rule.x0, span[0])
-        if overlap >= RULE_OVERLAP_SHARE * width:
+        under_rows = min(rule.x1, previous.x1, row.x1) - max(rule.x0, previous.x0, row.x0) > 0
+        if overlap >= RULE_OVERLAP_SHARE * width and under_rows:
             return True
     return False
 
@@ -1355,9 +1389,13 @@ def split_blocks(
         # двойной интервал, и колонка порвалась бы посреди абзаца.
         smaller = min(previous.height, row.height)
         large_type = body_height > 0 and smaller > LARGE_TYPE_RATIO * body_height
+        # Строки одного заголовка (крупный набор, один стиль) меряются только своим пределом в
+        # кеглях: шаг колонки — шаг КОРПУСА, и 2.5 таких шага резали заголовок с разрежённым
+        # интервалом (1966/01 IMG_0007_2R: разрыв 66.6 px при 59.4).
+        one_headline = large_type and style_distance(previous, row) < SAME_STYLE_DISTANCE
         divided = (
-            gap > limit
-            or (large_type and gap > GAP_HEIGHTS * smaller)
+            (gap > limit and not one_headline)
+            or (large_type and gap > _large_gap_limit(previous, row))
             or (gap > SOFT_GAP_PITCHES * pitch and _soft_style_break(previous, row))
             or _weak_overlap(previous, row, reference)
             or (span is not None and _rule_between(previous, row, rules, span))
@@ -1391,12 +1429,50 @@ def split_blocks(
     return merged
 
 
-def _side_by_side(rows: list[Row], dpi: float) -> set[int]:
-    """Ряды колонки, у которых есть сосед БОК О БОК другого кегля: на одной высоте через пустоту шире ``ROW_GLYPH_GAP_MM``.
+def row_glyph_size(row: Row) -> float:
+    """Кегль ряда: медианная высота глифа, а если глифов не намерилось — доля высоты ряда.
 
-    Кегль пары обязан различаться (глиф ряда — не меньше чем в ``ROW_GLYPH_RATIO`` раз): полу-ряды
-    таблицы с отточиями (текст графы и число на соседних ординатах) тоже стоят бок о бок, но
-    набраны одним кеглем и потоков не заводят.
+    Глифы молчат у жирного набора, где буквы слиплись в слово (компонента шире
+    ``GLYPH_MAX_WIDTH_RATIO`` высот не считается символом): «технику» в заголовке 1966/01
+    IMG_0017_1L. Запасная оценка — ``FALLBACK_HEIGHT`` высоты ряда, как у ``glyph_metrics``.
+
+    Args:
+        row: Ряд.
+
+    Returns:
+        Кегль в пикселях рабочей копии.
+    """
+    return row.glyph_h if row.glyph_h > 0 else FALLBACK_HEIGHT * row.height
+
+
+def style_distance(first: Row, second: Row) -> float:
+    """Балл разницы набора двух рядов: (r_кегль − 1) + (r_жирность − 1), где r = max(a/b, b/a) ≥ 1.
+
+    Складываются ПРЕВЫШЕНИЯ отношений над единицей, а не сами отношения (их сумма всегда не
+    меньше двух): одинаковый набор даёт 0, и каждый признак добавляет свою долю отличия. Кегль —
+    :func:`row_glyph_size`, жирность — ``Row.weight`` (толщина по скелету на рендере, непрерывная
+    мера); признак, который у одного из рядов не намерился, в балл не входит.
+
+    Args:
+        first: Первый ряд.
+        second: Второй ряд.
+
+    Returns:
+        Балл от нуля; порог «разный набор» — ``SIDE_STYLE_DISTANCE``.
+    """
+    score = 0.0
+    for a, b in ((row_glyph_size(first), row_glyph_size(second)), (first.weight, second.weight)):
+        if a > 0 and b > 0:
+            score += max(a, b) / min(a, b) - 1.0
+    return score
+
+
+def _side_by_side(rows: list[Row], dpi: float) -> set[int]:
+    """Ряды колонки, у которых есть сосед БОК О БОК другого набора: на одной высоте через пустоту шире ``ROW_GLYPH_GAP_MM``.
+
+    Набор пары обязан различаться (балл :func:`style_distance` не меньше ``SIDE_STYLE_DISTANCE``):
+    полу-ряды таблицы с отточиями (текст графы и число на соседних ординатах) тоже стоят бок о бок,
+    но набраны одним набором и потоков не заводят.
 
     Args:
         rows: Ряды колонки.
@@ -1415,11 +1491,30 @@ def _side_by_side(rows: list[Row], dpi: float) -> set[int]:
                 continue
             if max(first.x0, second.x0) - min(first.x1, second.x1) <= limit:
                 continue
-            # Молчащая мера (глифов не набралось) пару не засчитывает.
-            low, high = sorted((first.glyph_h, second.glyph_h))
-            if low > 0 and high >= ROW_GLYPH_RATIO * low:
+            if style_distance(first, second) >= SIDE_STYLE_DISTANCE:
                 marked.update((index, other))
     return marked
+
+
+def _large_gap_limit(first: Row, second: Row) -> float:
+    """Предел разрыва пары рядов крупного набора, пиксели рабочей копии.
+
+    У разного набора — ``GAP_HEIGHTS`` меньшей высоты ряда, как прежде: логотип рубрики над
+    заголовком делится. У одного набора (балл ниже ``SAME_STYLE_DISTANCE``) — большее из
+    ``GAP_HEIGHTS`` большей высоты и ``SAME_STYLE_GAP_GLYPHS`` кеглей: высота ряда у строк одного
+    заголовка скачет, а кегль нет, и заголовок с разрежённым интервалом не режется.
+
+    Args:
+        first: Верхний ряд.
+        second: Нижний ряд.
+
+    Returns:
+        Предел разрыва.
+    """
+    if style_distance(first, second) >= SAME_STYLE_DISTANCE:
+        return GAP_HEIGHTS * min(first.height, second.height)
+    glyph = max(row_glyph_size(first), row_glyph_size(second))
+    return max(GAP_HEIGHTS * max(first.height, second.height), SAME_STYLE_GAP_GLYPHS * glyph)
 
 
 def _streams(rows: list[Row], pitch: float, dpi: float) -> list[list[Row]]:
@@ -1458,7 +1553,7 @@ def _streams(rows: list[Row], pitch: float, dpi: float) -> list[list[Row]]:
         row = rows[index]
         for above_index in reversed(order[:position]):
             above = rows[above_index]
-            limit = max(BLOCK_GAP_PITCHES * pitch, GAP_HEIGHTS * min(above.height, row.height))
+            limit = max(BLOCK_GAP_PITCHES * pitch, _large_gap_limit(above, row))
             # Порог зависит от высот пары, поэтому дальние ряды не отсекаются досрочно.
             if row.y - above.y > limit:
                 continue
