@@ -20,6 +20,7 @@ class RegionKind(str, Enum):
     TABLE = "table"  # таблица с линейками
     LINE_ART = "line_art_schema"  # схема, чертёж, график, рисунок штрихом
     ROTATED_TEXT = "rotated_text"  # повёрнутый текст вне таблиц
+    FORMULA = "formula"  # выносная формула (пока только разбор page_layout, в базу не пишется)
 
     @property
     def is_raster(self) -> bool:

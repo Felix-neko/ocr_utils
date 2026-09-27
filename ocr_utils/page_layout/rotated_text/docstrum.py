@@ -75,6 +75,25 @@ BRIDGED_GAP_GLYPHS = 6.0
 # Зона должна быть вытянута вертикально хотя бы во столько раз, иначе это пятно, а не строка.
 MIN_ELONGATION = 1.6
 
+# Надстрочный знак (дужка «й», точки «ё»): площадь меньше этой доли медианной площади знаков
+# цепочки. В длину цепочки он не засчитывается: буква строкой выше, дужка и «й» стояли друг над
+# другом вплотную и давали «боковое слово» из трёх знаков — больше трети ложных зон пака-1
+# (просмотр 60 зон полного прогона, 2026-09-27).
+MARK_AREA_FRAC = 0.25
+
+# Тонкий вертикальный штрих (отрезок пунктира, кусок линейки или тени у корешка): толщина меньше
+# THIN_MM и вытянут вдоль цепочки хотя бы в THIN_ELONGATION раз. Глифом не считается. Повёрнутая
+# «l» или «1» тоже тонкая, но вытянута поперёк цепочки — её правило не задевает.
+THIN_MM = 0.45
+THIN_ELONGATION = 3.0
+# Прямой штрих: компонента, у которой по моментам второго порядка длина больше толщины хотя бы в
+# STROKE_ELONGATION раз (штрих пунктира, линия штриховки, отрезок). Цепочка, где такие штрихи —
+# не меньше STROKE_SHARE знаков, — пунктир или штриховка, а не повёрнутый текст: на паке-1 это
+# 4 из 6 ложных зон, оставшихся после проверки чтением (внутри line art, где чтение смягчено).
+# Буквы, даже курсивные, компактнее; отдельные «1», «l», «-» в подписи — меньшинство.
+STROKE_ELONGATION = 4.0
+STROKE_SHARE = 0.5
+
 
 @dataclass
 class GlyphStats:
@@ -84,6 +103,8 @@ class GlyphStats:
     boxes: np.ndarray  # (n, 4) — x0, y0, x1, y1
     heights: np.ndarray  # (n,)
     widths: np.ndarray  # (n,)
+    # (n,) bool — компонента является прямым штрихом (STROKE_ELONGATION); None — не вычислялось.
+    strokes: "np.ndarray | None" = None
 
     def __len__(self) -> int:
         return int(len(self.centers))
@@ -101,17 +122,24 @@ def glyph_components(gray: np.ndarray, dpi: int, exclude: "list[Box] | None" = N
         Статистика компонент, прошедших отбор по размеру и заполнению.
     """
     ink = (gray < 128).astype(np.uint8)
-    count, _, stats, centroids = cv2.connectedComponentsWithStats(ink, 8)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(ink, 8)
     if count <= 1:
         empty = np.empty((0, 2))
-        return GlyphStats(empty, np.empty((0, 4)), np.empty(0), np.empty(0))
+        return GlyphStats(empty, np.empty((0, 4)), np.empty(0), np.empty(0), np.empty(0, bool))
+    strokes = _stroke_flags(labels, count)
     stats, centroids = stats[1:], centroids[1:]
     width = stats[:, cv2.CC_STAT_WIDTH].astype(float)
     height = stats[:, cv2.CC_STAT_HEIGHT].astype(float)
     area = stats[:, cv2.CC_STAT_AREA].astype(float)
     low, high = mm_to_px(GLYPH_MIN_MM, dpi), mm_to_px(GLYPH_MAX_MM, dpi)
+    thin_vertical = (width < mm_to_px(THIN_MM, dpi)) & (height >= THIN_ELONGATION * width)
     keep = (
-        (height >= low) & (height <= high) & (width >= 2) & (width <= high) & (area >= GLYPH_MIN_FILL * width * height)
+        (height >= low)
+        & (height <= high)
+        & (width >= 2)
+        & (width <= high)
+        & (area >= GLYPH_MIN_FILL * width * height)
+        & ~thin_vertical
     )
     if exclude:
         cx, cy = centroids[:, 0], centroids[:, 1]
@@ -119,7 +147,35 @@ def glyph_components(gray: np.ndarray, dpi: int, exclude: "list[Box] | None" = N
             keep &= ~((cx >= box.x0) & (cx <= box.x1) & (cy >= box.y0) & (cy <= box.y1))
     left, top = stats[keep, cv2.CC_STAT_LEFT], stats[keep, cv2.CC_STAT_TOP]
     boxes = np.stack([left, top, left + width[keep], top + height[keep]], axis=1).astype(float)
-    return GlyphStats(centroids[keep].astype(float), boxes, height[keep], width[keep])
+    return GlyphStats(centroids[keep].astype(float), boxes, height[keep], width[keep], strokes[keep])
+
+
+def _stroke_flags(labels: np.ndarray, count: int) -> np.ndarray:
+    """Какие компоненты — прямые штрихи: отношение осей эллипса моментов не меньше STROKE_ELONGATION.
+
+    Args:
+        labels: Метки компонент (0 — фон) из ``cv2.connectedComponentsWithStats``.
+        count: Число меток вместе с фоном.
+
+    Returns:
+        (count - 1,) bool по компонентам без фона.
+    """
+    ys, xs = np.nonzero(labels)
+    ids = labels[ys, xs]
+    xs, ys = xs.astype(float), ys.astype(float)
+    # Моменты по всем компонентам разом: суммы по меткам через bincount.
+    n = np.bincount(ids, minlength=count).astype(float)
+    n[n == 0] = 1.0
+    mx = np.bincount(ids, xs, count) / n
+    my = np.bincount(ids, ys, count) / n
+    sxx = np.bincount(ids, xs * xs, count) / n - mx * mx
+    syy = np.bincount(ids, ys * ys, count) / n - my * my
+    sxy = np.bincount(ids, xs * ys, count) / n - mx * my
+    # Собственные числа ковариации 2×2: большая и малая полуоси эллипса (в квадрате).
+    half_trace = (sxx + syy) / 2
+    root = np.sqrt(np.maximum(half_trace**2 - (sxx * syy - sxy * sxy), 0.0))
+    major, minor = half_trace + root, np.maximum(half_trace - root, 1e-6)
+    return (np.sqrt(major / minor) >= STROKE_ELONGATION)[1:]
 
 
 def vertical_edges(stats: GlyphStats, reach: float = NEIGHBOR_REACH, k: int = NEIGHBORS) -> np.ndarray:
@@ -194,6 +250,20 @@ def _glyph_in_gap(stats: GlyphStats, first: Box, second: Box) -> bool:
     return bool(np.any((cx >= x0) & (cx <= x1) & (cy > y0) & (cy < y1)))
 
 
+def _mostly_strokes(stats: GlyphStats, group: list[int]) -> bool:
+    """Состоит ли цепочка в основном из прямых штрихов (пунктир, штриховка), см. ``STROKE_SHARE``."""
+    if stats.strokes is None:
+        return False
+    return float(np.mean(stats.strokes[group])) >= STROKE_SHARE
+
+
+def _full_glyphs(stats: GlyphStats, group: list[int]) -> int:
+    """Сколько в цепочке знаков, не считая надстрочных (площадь меньше ``MARK_AREA_FRAC`` медианной)."""
+    boxes = stats.boxes[group]
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    return int(np.count_nonzero(areas >= MARK_AREA_FRAC * float(np.median(areas))))
+
+
 def cluster_rotated(stats: GlyphStats, dpi: int, reach: float = NEIGHBOR_REACH) -> list[Box]:
     """Зоны бокового текста: вертикальные цепочки глифов, склеенные в многострочные подписи.
 
@@ -208,7 +278,11 @@ def cluster_rotated(stats: GlyphStats, dpi: int, reach: float = NEIGHBOR_REACH) 
     edges = vertical_edges(stats, reach)
     if len(edges) == 0:
         return []
-    chains = [group for group in _components(len(stats), edges) if len(group) >= MIN_CHAIN]
+    chains = [
+        group
+        for group in _components(len(stats), edges)
+        if _full_glyphs(stats, group) >= MIN_CHAIN and not _mostly_strokes(stats, group)
+    ]
     chain_boxes: list[Box] = []
     for group in chains:
         boxes = stats.boxes[group]
@@ -271,7 +345,8 @@ def transposed(stats: GlyphStats) -> GlyphStats:
     """
     centers = stats.centers[:, ::-1].copy() if len(stats) else stats.centers
     boxes = stats.boxes[:, [1, 0, 3, 2]].copy() if len(stats) else stats.boxes
-    return GlyphStats(centers, boxes, stats.widths.copy(), stats.heights.copy())
+    strokes = None if stats.strokes is None else stats.strokes.copy()
+    return GlyphStats(centers, boxes, stats.widths.copy(), stats.heights.copy(), strokes)
 
 
 def cluster_lines(stats: GlyphStats, dpi: int, vertical: bool = True, reach: "float | None" = None) -> list[Box]:

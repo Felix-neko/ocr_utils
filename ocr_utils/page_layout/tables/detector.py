@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -45,7 +45,15 @@ from ocr_utils.page_layout.tables.ruling import (
     find_lines,
     mm_to_px,
 )
-from ocr_utils.page_layout.geometry import KIND_DIAGRAM, KIND_DRAWING, KIND_TABLE, Box, TableBox, intersection
+from ocr_utils.page_layout.geometry import (
+    KIND_DIAGRAM,
+    KIND_DRAWING,
+    KIND_TABLE,
+    Box,
+    LooseRule,
+    TableBox,
+    intersection,
+)
 from ocr_utils.page_layout.surya.blocks import FIGURE_LABELS, FORM_LABELS, TABLE_LABELS, LayoutBlocks
 
 logger = logging.getLogger(__name__)
@@ -389,13 +397,14 @@ def _layout_kind(layout: "LayoutBlocks | None", box: Box) -> tuple[str, "Box | N
     return "", None
 
 
-def detect(
-    gray: np.ndarray, dpi: int = WORK_DPI, verify_findings: bool = True, layout: "LayoutBlocks | None" = None
-) -> list[TableBox]:
-    """Таблицы, схемы и рисунки четвёртой версии. Координаты — в пикселях поданного изображения.
+def _find(
+    gray: np.ndarray, dpi: int, verify_findings: bool, layout: "LayoutBlocks | None"
+) -> tuple[list[TableBox], Lines]:
+    """Таблицы, схемы и рисунки четвёртой версии и линейки полосы, по которым они найдены.
 
     ``layout`` — разметка surya в тех же пикселях (см. ``layout.surya.load``); без неё вид
-    решают признаки решётки, а рост — только связность.
+    решают признаки решётки, а рост — только связность. Линейки — после выброса теней у края
+    кадра (``refine.drop_border_rules``); координаты — в пикселях поданного изображения.
     """
     from ocr_utils.page_layout.tables import verify as verification
 
@@ -406,9 +415,9 @@ def detect(
     lines = refine.drop_border_rules(raw, (height, width), dpi)
     seeds = cluster_tables(lines, dpi, binary, POLICY, grouping="cores")
     if not seeds:
-        return []
+        return [], lines
     if not verify_findings:
-        return seeds
+        return seeds, lines
 
     ink = _text_ink(binary, lines)
     components = quality.glyph_components(ink)
@@ -469,7 +478,7 @@ def detect(
         extra = {**kind_signs.as_row(), "kind_conflict": conflict, "glyph_p90_mm": round(glyph_p90, 2)}
         accepted.append((seed, rule_box, found_kind, signs, extra, block))
     if not accepted:
-        return []
+        return [], lines
 
     # Второй проход: рост по виду. Соседи известны только теперь. Таблице преграда — любая
     # соседняя находка; схеме и рисунку — только таблицы: две затравки одной схемы (верх с
@@ -555,7 +564,117 @@ def detect(
                 )
             repushed.append(table)
         merged = repushed
-    return _deduplicate(merged)
+    return _deduplicate(merged), lines
+
+
+@dataclass(frozen=True)
+class TableDetection:
+    """Итог детектора: находки и линейки полосы, не вошедшие ни в одну из них."""
+
+    found: list[TableBox]
+    loose_rules: list[LooseRule]
+
+
+# Трасса считается той же линейкой, что отрезок, если перекрывает его вдоль оси на эту долю
+# более короткого из двух и лежит поперёк не дальше ``LOOSE_MATCH_MM``.
+LOOSE_MATCH_OVERLAP = 0.5
+LOOSE_MATCH_MM = 1.5
+# Шаг ломаной изогнутой линейки: 2 мм — изгиб полосы на таком шаге меньше пикселя.
+LOOSE_STEP_MM = 2.0
+
+
+def detect(
+    gray: np.ndarray, dpi: int = WORK_DPI, verify_findings: bool = True, layout: "LayoutBlocks | None" = None
+) -> list[TableBox]:
+    """Таблицы, схемы и рисунки четвёртой версии. Координаты — в пикселях поданного изображения.
+
+    Args:
+        gray: Серая полоса в рабочем разрешении.
+        dpi: Её разрешение.
+        verify_findings: ``False`` — вернуть сырые затравки без проверки и роста.
+        layout: Разметка surya в тех же пикселях или ``None``.
+
+    Returns:
+        Находки (см. :func:`detect_all`, если нужны ещё и непристроенные линейки).
+    """
+    return _find(gray, dpi, verify_findings, layout)[0]
+
+
+def detect_all(
+    gray: np.ndarray, dpi: int = WORK_DPI, verify_findings: bool = True, layout: "LayoutBlocks | None" = None
+) -> TableDetection:
+    """Находки детектора и линейки полосы, которые он не отнёс ни к таблице, ни к схеме, ни к рисунку.
+
+    Непристроенная линейка — линейка полосы (без теней у края кадра), центр которой не лежит ни в
+    одной находке. Её форма берётся из трассы ``traces.trace_rules`` (сплайн — изогнутая линейка
+    остаётся изогнутой); нет трассы — прямой отрезок по габариту и наклону.
+
+    Args:
+        gray: Серая полоса в рабочем разрешении.
+        dpi: Её разрешение.
+        verify_findings: ``False`` — находки без проверки и роста (линейки считаются от них же).
+        layout: Разметка surya в тех же пикселях или ``None``.
+
+    Returns:
+        :class:`TableDetection` в пикселях поданного изображения.
+    """
+    found, lines = _find(gray, dpi, verify_findings, layout)
+    boxes = [table.box for table in found]
+    loose = [
+        segment
+        for segment in list(lines.horizontal) + list(lines.vertical)
+        if not any(_centre_inside(segment.box, box) for box in boxes)
+    ]
+    if not loose:
+        return TableDetection(found, [])
+    from ocr_utils.page_layout.tables.traces import trace_rules
+
+    traced = trace_rules(gray, dpi)
+    return TableDetection(found, [_loose_rule(segment, traced.all, dpi) for segment in loose])
+
+
+def _loose_rule(segment: Segment, traced: list, dpi: int) -> LooseRule:
+    """Ломаная непристроенной линейки: по совпавшей трассе или прямым отрезком.
+
+    Args:
+        segment: Отрезок линейки (габарит и наклон).
+        traced: Трассы линеек полосы (``traces.RuleTrace``).
+        dpi: Разрешение полосы.
+
+    Returns:
+        Линейка с осью ломаной в пикселях полосы.
+    """
+    box = segment.box
+    lo, hi = (box.x0, box.x1) if segment.horizontal else (box.y0, box.y1)
+    centre = (box.y0 + box.y1) / 2 if segment.horizontal else (box.x0 + box.x1) / 2
+    best, best_overlap = None, 0.0
+    for trace in traced:
+        if trace.horizontal != segment.horizontal:
+            continue
+        start, end = sorted((trace.start_out, trace.end_out))
+        overlap = min(hi, end) - max(lo, start)
+        shorter = max(1.0, min(hi - lo, end - start))
+        if overlap < LOOSE_MATCH_OVERLAP * shorter:
+            continue
+        middle = (max(lo, start) + min(hi, end)) / 2
+        across = float(np.asarray(trace.across_at(middle)).ravel()[0])
+        if abs(across - centre) > mm_to_px(LOOSE_MATCH_MM, dpi):
+            continue
+        if overlap > best_overlap:
+            best, best_overlap = trace, overlap
+    if best is not None:
+        points = best.sample(LOOSE_STEP_MM)
+        return LooseRule(tuple((float(x), float(y)) for x, y in points), segment.horizontal, float(best.thickness_px))
+    # Прямой отрезок через центр габарита с наклоном отрезка.
+    slope = float(np.tan(np.radians(segment.angle_deg)))
+    if segment.horizontal:
+        cx = (box.x0 + box.x1) / 2
+        ends = ((box.x0, centre + slope * (box.x0 - cx)), (box.x1, centre + slope * (box.x1 - cx)))
+    else:
+        cy = (box.y0 + box.y1) / 2
+        ends = ((centre - slope * (box.y0 - cy), box.y0), (centre - slope * (box.y1 - cy), box.y1))
+    thickness = float(box.height if segment.horizontal else box.width)
+    return LooseRule(tuple((float(x), float(y)) for x, y in ends), segment.horizontal, thickness)
 
 
 def _merge_diagrams(tables: list[TableBox], dpi: int) -> list[TableBox]:

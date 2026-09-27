@@ -120,17 +120,39 @@ def binarize(gray: np.ndarray) -> np.ndarray:
 
 
 def _axis_mask(binary: np.ndarray, length_px: int, horizontal: bool) -> np.ndarray:
-    """Что тянется вдоль оси не меньше ``length_px`` подряд."""
+    """Что тянется вдоль оси не меньше ``length_px`` подряд.
+
+    Args:
+        binary: Бинарная картинка (краска 255, бумага 0).
+        length_px: Длина ядра и порог длины линейки, px.
+        horizontal: ``True`` — искать горизонтали, ``False`` — вертикали.
+
+    Returns:
+        Маска линеек того же размера, что ``binary``.
+    """
     shape = (1, length_px) if horizontal else (length_px, 1)
     kernel = np.ones(shape, np.uint8)
-    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    # ПОЛЕ БУМАГИ ВОКРУГ КАДРА на длину ядра вдоль оси. Закрытие ниже идёт с нулём за краем
+    # (``borderValue=0``, см. ниже), и его сжатие без поля срезало с каждого конца линейки,
+    # упёршейся в край кадра, до половины ядра — 4 мм при 8-миллиметровом ядре. Вырезка
+    # затравки на проверке «а таблица ли это» идёт вплотную по линейкам, и у шапки таблицы
+    # высотой 11 мм от вертикалей оставалось 18 px из 54: граница граф не находилась, шапка
+    # склеивалась в одну ячейку и отклонялась как «заголовок в рамке» (1968/05 с. 86,
+    # 1975/01 с. 24). С полем расширение успевает дойти до края кадра и за него, а сжатие
+    # возвращает линейку ровно к её концу.
+    pad = length_px
+    pad_y, pad_x = (0, pad) if horizontal else (pad, 0)
+    padded = cv2.copyMakeBorder(binary, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=0)
+    opened = cv2.morphologyEx(padded, cv2.MORPH_OPEN, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
     # Закрытие тем же ядром сшивает линейку, разорванную буквой или дырой в бумаге.
     #
     # ``borderValue=0`` обязателен. По умолчанию OpenCV считает, что за краем кадра всё
     # белое, и тогда сжатие после расширения у самого края не отрабатывает: линейка,
     # начинающаяся в 30 px от края, расползается ДО края и тянет за собой рамку таблицы.
     # На синтетическом тесте это давало рамку во весь кадр вместо рамки по линейкам.
-    return cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    height, width = binary.shape[:2]
+    return np.ascontiguousarray(closed[pad_y : pad_y + height, pad_x : pad_x + width])
 
 
 def _segments(mask: np.ndarray, horizontal: bool, max_thickness_px: int) -> list[Segment]:

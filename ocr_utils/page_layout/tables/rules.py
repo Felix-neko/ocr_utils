@@ -103,6 +103,34 @@ LONG_RULE_SPAN = 0.8
 ALIGNED_SHARE = 0.5
 ALIGNED_TOL_MM = 1.0
 
+# ОТКРЫТАЯ ТАБЛИЦА: шапка в линейках, а в теле только вертикали граф, и те разорваны
+# подзаголовками разделов («а) продукция машиностроения…») — нижней линейки нет, горизонталей
+# в теле нет, куски вертикалей ни с чем не пересекаются и в ядро не попадают. Затравкой
+# становилась одна шапка и отклонялась как «заголовок в рамке» (1970/12 с.87, 1975/02 с.75).
+# Кусок тела продолжает графы ядра, если начинается не дальше этого зазора ниже него: замер
+# разрывов на двух полосах — 6,3–11,2 мм (строка подзаголовка с отбивками при шаге строк 3,8 мм),
+# порог с запасом на подзаголовок в две строки не берём.
+OPEN_BODY_GAP_MM = 13.0
+# Шаг тела принимается, только если продолжаются хотя бы столько граф ядра одновременно:
+# одна вертикаль под шапкой — это и межколонная линейка вёрстки, её тянуть нельзя.
+OPEN_BODY_MIN_COLUMNS = 2
+# Куски одного шага тела перекрываются по y хотя бы на эту долю более короткого.
+OPEN_BODY_ROW_OVERLAP = 0.5
+# Графы считаются только внутренние: вертикаль ближе этого к боку рамки — боковина, а не графа.
+OPEN_BODY_SIDE_MM = 4.0
+# Верхняя линейка раздела ищется в этой полосе от его верха: есть — это отдельная таблица.
+OPEN_BODY_TOP_RULE_MM = 2.0
+
+# МОСТ: две полные таблицы одна под другой связывает в одно ядро одна-единственная длинная
+# линейка — правая вертикаль, идущая вдоль обеих (1969/02 IMG_0074_2R: таблица 2 и таблица ниже
+# через вертикаль x ≈ 815 px на 150 dpi). Правило стопок (``_should_merge``: две полные таблицы с
+# несовпадающими графами не сливать) до них не доходило — связность решала раньше. Теперь ядро
+# режется по такой линейке, если без неё куски не слились бы и по правилу стопок.
+# Кандидаты в мосты — самые длинные линейки ядра по каждой оси (мост всегда длиннее кусков).
+BRIDGE_CANDIDATES_PER_AXIS = 4
+# Ядра крупнее этого не режутся: разбор идёт по кандидатам за квадрат от числа линеек.
+BRIDGE_MAX_RULES = 150
+
 
 @dataclass(frozen=True)
 class Fragment:
@@ -463,6 +491,294 @@ def _should_merge(
     return incomplete or _aligned(group_a, group_b, dpi)
 
 
+def _centre_x(segment: Segment) -> float:
+    """Центр отрезка по x, px."""
+    return (segment.box.x0 + segment.box.x1) / 2
+
+
+def _body_step(column_xs: list[float], box: Box, pool: list[int], segments: list[Segment], dpi: int) -> list[int]:
+    """Одна «строка» тела открытой таблицы под рамкой ``box``: куски вертикалей на графах ядра.
+
+    Args:
+        column_xs: Центры вертикалей ядра по x — графы, которые продолжаются вниз.
+        box: Текущая рамка ядра; кусок ищется ниже её низа.
+        pool: Индексы вертикалей, которые ещё можно взять (не из ядер с горизонталями).
+        segments: Все линейки полосы; индексы ``pool`` — в этот список.
+        dpi: Разрешение кадра.
+
+    Returns:
+        Индексы кусков этого шага; пустой список — тело кончилось.
+    """
+    gap = mm_to_px(OPEN_BODY_GAP_MM, dpi)
+    tolerance = mm_to_px(ALIGNED_TOL_MM, dpi)
+    # Кандидаты: начало не выше низа рамки (с допуском) и не дальше зазора, x — на графе ядра.
+    near = [
+        index
+        for index in pool
+        if box.y1 - tolerance <= segments[index].box.y0 <= box.y1 + gap
+        and any(abs(_centre_x(segments[index]) - x) <= tolerance for x in column_xs)
+    ]
+    if not near:
+        return []
+    # Строка тела — куски, перекрывающиеся по y с самым верхним из кандидатов.
+    anchor = min(near, key=lambda index: segments[index].box.y0)
+    top, bottom = segments[anchor].box.y0, segments[anchor].box.y1
+    step = []
+    for index in near:
+        piece = segments[index].box
+        overlap = min(bottom, piece.y1) - max(top, piece.y0)
+        if overlap >= OPEN_BODY_ROW_OVERLAP * min(bottom - top, piece.y1 - piece.y0):
+            step.append(index)
+    # Сколько разных граф ядра продолжено: меньше порога — это не тело таблицы.
+    matched = {
+        min(range(len(column_xs)), key=lambda k: abs(column_xs[k] - _centre_x(segments[index]))) for index in step
+    }
+    return step if len(matched) >= OPEN_BODY_MIN_COLUMNS else []
+
+
+def _continues_columns(column_xs: list[float], box: Box, other: list[int], segments: list[Segment], dpi: int) -> bool:
+    """Продолжает ли ядро ``other`` графы ядра над ним: начинается в пределах зазора открытого тела,
+    и наверху у него вертикали хотя бы на ``OPEN_BODY_MIN_COLUMNS`` графах ядра.
+
+    Args:
+        column_xs: Центры вертикалей верхнего ядра.
+        box: Рамка верхнего ядра.
+        other: Индексы линеек нижнего ядра.
+        segments: Все линейки полосы.
+        dpi: Разрешение кадра.
+
+    Returns:
+        ``True`` — это следующий раздел той же открытой таблицы.
+    """
+    gap = mm_to_px(OPEN_BODY_GAP_MM, dpi)
+    tolerance = mm_to_px(ALIGNED_TOL_MM, dpi)
+    below = _extent([segments[i] for i in other])
+    if not (box.y1 - tolerance <= below.y0 <= box.y1 + gap):
+        return False
+    overlap = min(box.x1, below.x1) - max(box.x0, below.x0)
+    if overlap < STACK_OVERLAP * min(box.width, below.width):
+        return False
+    # Раздел тела начинается голыми вертикалями; своя верхняя линейка во всю ширину — это уже
+    # отдельная таблица со своей шапкой. Без этого условия склеивались «Таблица 1» и «Таблица 2»
+    # одна под другой (1966/06 с.52, 1967/05 с.69, 1972/07 с.73, 1969/12 с.53 — 8 полос пака).
+    top_band = mm_to_px(OPEN_BODY_TOP_RULE_MM, dpi)
+    if any(
+        segments[i].horizontal
+        and (segments[i].box.y0 + segments[i].box.y1) // 2 <= below.y0 + top_band
+        and segments[i].length >= LONG_RULE_SPAN * max(1, below.width)
+        for i in other
+    ):
+        return False
+    # Внутренние вертикали, начинающиеся у верха нижнего ядра (с допуском на зазор), на графах
+    # верхнего. Совпасть должна не просто пара граф, а не меньше ``ALIGNED_SHARE`` граф меньшей
+    # из частей — как у шапки и тела одной таблицы в правиле стопок (``_aligned``); две разные
+    # таблицы одной ширины совпадают разве что боковинами, а они сюда не входят.
+    side = mm_to_px(OPEN_BODY_SIDE_MM, dpi)
+    lower_xs = sorted(
+        {
+            _centre_x(segments[i])
+            for i in other
+            if not segments[i].horizontal
+            and segments[i].box.y0 <= below.y0 + gap
+            and below.x0 + side <= _centre_x(segments[i]) <= below.x1 - side
+        }
+    )
+    if not lower_xs:
+        return False
+    matched = {k for x_low in lower_xs for k, x in enumerate(column_xs) if abs(x_low - x) <= tolerance}
+    return len(matched) >= max(OPEN_BODY_MIN_COLUMNS, ALIGNED_SHARE * min(len(column_xs), len(lower_xs)))
+
+
+def _inner_columns(members: list[int], box: Box, segments: list[Segment], dpi: int) -> list[float]:
+    """Центры ВНУТРЕННИХ вертикалей ядра — графы без боковин рамки.
+
+    Боковины есть у любой обрамлённой таблицы, и по ним две разные таблицы одной ширины
+    «совпадали бы графами»; поэтому вертикали ближе ``OPEN_BODY_SIDE_MM`` к бокам не считаются.
+
+    Args:
+        members: Индексы линеек ядра.
+        box: Рамка ядра.
+        segments: Все линейки полосы.
+        dpi: Разрешение кадра.
+
+    Returns:
+        Отсортированные центры внутренних вертикалей, px.
+    """
+    side = mm_to_px(OPEN_BODY_SIDE_MM, dpi)
+    return sorted(
+        {
+            _centre_x(segments[i])
+            for i in members
+            if not segments[i].horizontal and box.x0 + side <= _centre_x(segments[i]) <= box.x1 - side
+        }
+    )
+
+
+def extend_open_bodies(groups: list[list[int]], segments: list[Segment], dpi: int) -> list[list[int]]:
+    """Дотянуть ядра-шапки вниз по кускам вертикалей, продолжающим их графы (открытая таблица).
+
+    Args:
+        groups: Ядра — списки индексов в ``segments``.
+        segments: Все линейки полосы (сначала горизонтали, потом вертикали, как в :func:`cores`).
+        dpi: Разрешение кадра.
+
+    Returns:
+        Новые ядра: ядра с горизонталями, дотянутые вниз; ядра из одних вертикалей, целиком
+        ушедшие в тело чужой таблицы, удалены.
+    """
+    with_rules = [g for g in groups if any(segments[i].horizontal for i in g)]
+    # Вертикали, которые можно брать в тело: не из ядер с горизонталями.
+    owned = {i for g in with_rules for i in g}
+    pool = [i for i, s in enumerate(segments) if not s.horizontal and i not in owned]
+    taken: set[int] = set()
+    extended: list[list[int]] = []
+    # Сверху вниз: верхнее ядро забирает нижние разделы своей таблицы раньше, чем они сами
+    # начнут расти.
+    order = sorted(range(len(with_rules)), key=lambda k: _extent([segments[i] for i in with_rules[k]]).y0)
+    absorbed: set[int] = set()
+    for k in order:
+        if k in absorbed:
+            continue
+        members = list(with_rules[k])
+        box = _extent([segments[i] for i in members])
+        column_xs = _inner_columns(members, box, segments, dpi)
+        if len(column_xs) >= OPEN_BODY_MIN_COLUMNS:
+            while True:
+                # Шаг — сирые куски вертикалей на графах ядра…
+                step = _body_step(column_xs, box, [i for i in pool if i not in taken], segments, dpi)
+                if step:
+                    taken.update(step)
+                    members += step
+                    box = _extent([segments[i] for i in members])
+                    continue
+                # …или следующий раздел той же таблицы, ставший своим ядром (у него есть горизонталь:
+                # двойная линейка над «Итого»).
+                follower = next(
+                    (
+                        j
+                        for j in order
+                        if j != k
+                        and j not in absorbed
+                        and _continues_columns(column_xs, box, with_rules[j], segments, dpi)
+                    ),
+                    None,
+                )
+                if follower is None:
+                    break
+                absorbed.add(follower)
+                members += with_rules[follower]
+                box = _extent([segments[i] for i in members])
+        extended.append(members)
+    # Ядра из одних вертикалей: остаток без ушедших в тело кусков, если в нём ещё ≥ 2 линеек.
+    for group in groups:
+        if any(segments[i].horizontal for i in group):
+            continue
+        rest = [i for i in group if i not in taken]
+        if len(rest) >= 2:
+            extended.append(rest)
+    return extended
+
+
+def _local_components(members: list[int], segments: list[Segment], dpi: int) -> list[list[int]]:
+    """Связные компоненты набора линеек по тем же рёбрам, что у :func:`cores`.
+
+    Args:
+        members: Индексы линеек в ``segments``.
+        segments: Все линейки полосы.
+        dpi: Разрешение кадра.
+
+    Returns:
+        Компоненты — списки индексов в ``segments``.
+    """
+    tolerance = mm_to_px(CROSS_TOL_MM, dpi)
+    edges: list[tuple[int, int]] = []
+    horizontal = [k for k, i in enumerate(members) if segments[i].horizontal]
+    vertical = [k for k, i in enumerate(members) if not segments[i].horizontal]
+    # Пересечения горизонталей с вертикалями.
+    for a in horizontal:
+        for b in vertical:
+            if crosses(segments[members[b]], segments[members[a]], tolerance):
+                edges.append((a, b))
+    # Продолжения вдоль оси (порванная линейка).
+    for axis in (horizontal, vertical):
+        as_fragments = [_as_fragment(segments[members[k]]) for k in axis]
+        edges += [(axis[a], axis[b]) for a, b in _chain_edges(as_fragments, dpi, CHAIN_GAP_MM)]
+    return [[members[k] for k in comp] for comp in components(len(members), edges)]
+
+
+def _stacked_apart(first: Box, second: Box) -> bool:
+    """Стоят ли две рамки одна над другой без перекрытия по y и с общей шириной (``STACK_OVERLAP``)."""
+    overlap_x = min(first.x1, second.x1) - max(first.x0, second.x0)
+    apart_y = first.y1 <= second.y0 or second.y1 <= first.y0
+    return apart_y and overlap_x >= STACK_OVERLAP * min(first.width, second.width)
+
+
+def _clipped_to(bridge: Segment, box: Box) -> "Segment | None":
+    """Кусок моста в пределах рамки части по его оси; ``None`` — мост её не касается."""
+    b = bridge.box
+    if bridge.horizontal:
+        x0, x1 = max(b.x0, box.x0), min(b.x1, box.x1)
+        return Segment(Box(x0, b.y0, x1, b.y1), True, bridge.angle_deg) if x1 > x0 else None
+    y0, y1 = max(b.y0, box.y0), min(b.y1, box.y1)
+    return Segment(Box(b.x0, y0, b.x1, y1), False, bridge.angle_deg) if y1 > y0 else None
+
+
+def split_bridged(group: list[int], segments: list[Segment], dpi: int) -> list[list[int]]:
+    """Разрезать ядро по линейке-мосту, если без неё куски — отдельные таблицы по правилу стопок.
+
+    Каждой части достаётся копия моста, обрезанная по её рамке: у обеих таблиц остаётся своя
+    боковая линейка. Копии дописываются в конец ``segments`` (список расширяется на месте —
+    это список самой :func:`cores`, наружу он не отдаётся).
+
+    Args:
+        group: Индексы линеек ядра в ``segments``.
+        segments: Все линейки полосы; сюда же дописываются обрезки моста.
+        dpi: Разрешение кадра.
+
+    Returns:
+        Ядра после разрезов (одно — если резать нечего).
+    """
+    if len(group) > BRIDGE_MAX_RULES:
+        return [group]
+    # Кандидаты в мосты: самые длинные линейки каждой оси.
+    candidates: list[int] = []
+    for horizontal in (True, False):
+        axis = sorted((i for i in group if segments[i].horizontal == horizontal), key=lambda i: -segments[i].length)
+        candidates += axis[:BRIDGE_CANDIDATES_PER_AXIS]
+    for bridge in candidates:
+        rest = [i for i in group if i != bridge]
+        parts = [p for p in _local_components(rest, segments, dpi) if len(p) >= 2]
+        if len(parts) < 2:
+            continue
+        boxes = [_extent([segments[i] for i in p]) for p in parts]
+        # Режем только две и больше ПОЛНЫХ таблиц одна над другой. Без этого условия мостом
+        # становилась линия-стрелка блок-схемы: схема 1970/11 с.82 распадалась на коробки, и ни
+        # одна из них уже не была схемой — находка пропадала целиком.
+        complete = all(
+            _long_rules([segments[i] for i in p], box) >= COMPLETE_LONG_RULES for p, box in zip(parts, boxes)
+        )
+        stacked = all(_stacked_apart(boxes[a], boxes[b]) for a in range(len(parts)) for b in range(a + 1, len(parts)))
+        if not (complete and stacked):
+            continue
+        # Если хоть одна пара частей слилась бы и без моста — это одна таблица, мост не мост.
+        glued = any(
+            _should_merge([segments[i] for i in parts[a]], boxes[a], [segments[i] for i in parts[b]], boxes[b], [], dpi)
+            for a in range(len(parts))
+            for b in range(a + 1, len(parts))
+        )
+        if glued:
+            continue
+        result: list[list[int]] = []
+        for part, box in zip(parts, boxes):
+            piece = _clipped_to(segments[bridge], box)
+            if piece is not None:
+                segments.append(piece)
+                part = part + [len(segments) - 1]
+            result += split_bridged(part, segments, dpi)
+        return result
+    return [group]
+
+
 def cores(lines: Lines, dpi: int) -> list[list[Segment]]:
     """Связные ядра линеек: группы, в которых линейки пересекаются или продолжают друг друга.
 
@@ -483,10 +799,49 @@ def cores(lines: Lines, dpi: int) -> list[list[Segment]]:
         as_fragments = [_as_fragment(s) for s in axis_items]
         edges += [(base + a, base + b) for a, b in _chain_edges(as_fragments, dpi, CHAIN_GAP_MM)]
     groups = [g for g in components(len(segments), edges) if len(g) >= 2]
+    # Две полные таблицы, связанные одной длинной линейкой, — два ядра (см. ``split_bridged``).
+    groups = [part for g in groups for part in split_bridged(g, segments, dpi)]
     in_core = {i for g in groups for i in g}
     orphans = [segments[i] for i in range(len(segments)) if i not in in_core]
 
     # Слияние стопок — по рамкам ядер, до сходимости.
+    groups = _merge_stacks(groups, segments, orphans, dpi)
+    boxes = [_extent([segments[i] for i in g]) for g in groups]
+
+    taken = {i for g in groups for i in g}
+    # Поглощение: линейка не из ядра, целиком лежащая внутри рамки ядра, добавляется к нему.
+    slack = mm_to_px(1.0, dpi)
+    for index, segment in enumerate(segments):
+        if index in taken:
+            continue
+        for g_index, box in enumerate(boxes):
+            if _inside(segment.box, box, slack):
+                groups[g_index].append(index)
+                taken.add(index)
+                break
+    # Открытые таблицы: шапка забирает куски вертикалей тела, продолжающие её графы.
+    groups = extend_open_bodies(groups, segments, dpi)
+    # Ещё одно слияние стопок: открытое тело, дотянутое вниз, встаёт вплотную к своей итоговой
+    # строке под двойной линейкой («Итого в среднем…», 1973/08 с.20) — у той свои вертикали и своё ядро.
+    groups = _merge_stacks(groups, segments, orphans, dpi)
+    return [[segments[i] for i in g] for g in groups]
+
+
+def _merge_stacks(
+    groups: list[list[int]], segments: list[Segment], orphans: list[Segment], dpi: int
+) -> list[list[int]]:
+    """Слить ядра, стоящие стопкой, по правилу :func:`_should_merge`, до сходимости.
+
+    Args:
+        groups: Ядра — списки индексов в ``segments``.
+        segments: Все линейки полосы.
+        orphans: Линейки вне ядер — мостики между частями бланка.
+        dpi: Разрешение кадра.
+
+    Returns:
+        Новый список ядер; вход не меняется.
+    """
+    groups = [list(g) for g in groups]
     boxes = [_extent([segments[i] for i in g]) for g in groups]
     merged = True
     while merged and len(groups) > 1:
@@ -504,19 +859,7 @@ def cores(lines: Lines, dpi: int) -> list[list[Segment]]:
                     break
             if merged:
                 break
-
-    taken = {i for g in groups for i in g}
-    # Поглощение: линейка не из ядра, целиком лежащая внутри рамки ядра, добавляется к нему.
-    slack = mm_to_px(1.0, dpi)
-    for index, segment in enumerate(segments):
-        if index in taken:
-            continue
-        for g_index, box in enumerate(boxes):
-            if _inside(segment.box, box, slack):
-                groups[g_index].append(index)
-                taken.add(index)
-                break
-    return [[segments[i] for i in g] for g in groups]
+    return groups
 
 
 def _extent(segments: list[Segment]) -> Box:

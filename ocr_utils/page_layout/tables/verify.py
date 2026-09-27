@@ -55,6 +55,12 @@ class Features:
     edge_fill: float
     cells: int
     filled_cells: float
+    # Признаки таблицы в две графы (см. :func:`is_two_column_table`).
+    closed_frame: bool = False
+    has_header: bool = False
+    divider_span: float = 0.0
+    text_lines: int = 0
+    both_sides_text: bool = False
 
     def as_row(self) -> dict[str, float | int]:
         return {
@@ -69,6 +75,11 @@ class Features:
             "edge_fill": round(self.edge_fill, 3),
             "cells": self.cells,
             "filled_cells": round(self.filled_cells, 3),
+            "closed_frame": int(self.closed_frame),
+            "has_header": int(self.has_header),
+            "divider_span": round(self.divider_span, 3),
+            "text_lines": self.text_lines,
+            "both_sides_text": int(self.both_sides_text),
         }
 
 
@@ -84,6 +95,11 @@ HEADER = (
     "edge_fill",
     "cells",
     "filled_cells",
+    "closed_frame",
+    "has_header",
+    "divider_span",
+    "text_lines",
+    "both_sides_text",
 )
 
 # Ячейка считается заполненной, если краски глифов в ней не меньше этой доли площади.
@@ -137,6 +153,8 @@ def is_table(found: Features) -> tuple[bool, str]:
     if found.inner_vertical < MIN_INNER_VERTICAL:
         return False, "нет внутренних вертикальных линеек — это рамка вокруг текста"
     if found.inner_vertical == 1:
+        if is_two_column_table(found):
+            return True, ""
         if found.cells < SINGLE_COLUMN_MIN_CELLS:
             return False, f"одна вертикаль и всего {found.cells} ячейки — это колонтитул, а не таблица"
         if found.glyph_of_ink < SINGLE_COLUMN_GLYPH_OF_INK:
@@ -194,6 +212,46 @@ BLANK_MIN_FILLED = 0.5
 # внутренних горизонталей хотя бы одна, под нож не попадает ни одна.
 BANNER_MAX_CELLS = 3
 
+# ТАБЛИЦА В ДВЕ ГРАФЫ. Одна внутренняя вертикаль — вырожденный случай, и правила выше режут
+# её как колонтитул («ячеек < 4») или как баннер («горизонталей нет, ячеек ≤ 3»), хотя это
+# обычная таблица: «Наименование статей издержек | Годовой процент» (1966/06 с.85),
+# «Классификационные группы работ | Наименование блоков» (1974/01 с.21), итог капвложений
+# с отточиями (1967/12). От колонтитула и обложки её отличают не ячейки, а устройство:
+# замкнутая рамка со всех четырёх сторон или шапка (верхняя линейка и отбивка шапки во всю ширину —
+# у открытой таблицы без боковин, 1974/01 с.21), разделитель во всю высоту тела, текст по обе
+# стороны и несколько строк (у баннера рубрики строка одна-две). Ни одного признака от surya.
+# Сторона рамки — линейка у края находки (ближе ``INNER_MARGIN_MM``) не короче этой доли стороны.
+FRAME_SIDE_SPAN = 0.9
+# Отбивка шапки ищется в верхней части находки не ниже этой доли её высоты.
+HEADER_MAX_SHARE = 0.35
+# Разделитель граф покрывает хотя бы такую долю высоты тела (от отбивки шапки или от верха).
+DIVIDER_MIN_SPAN = 0.9
+# Строк текста не меньше этого: баннер рубрики — одна-две строки.
+TWO_COLUMN_MIN_LINES = 3
+# Строка текста — полоса строк кадра с краской глифов не ниже этой высоты, мм (ниже — пыль, точки).
+TEXT_LINE_MIN_MM = 1.0
+# Строка кадра «с текстом», если глифы занимают хотя бы такую долю её ширины.
+TEXT_ROW_SHARE = 0.01
+
+
+def is_two_column_table(found: Features) -> bool:
+    """Таблица ли это в две графы: рамка или шапка, разделитель во всю высоту тела, текст по обе стороны.
+
+    Args:
+        found: Признаки находки.
+
+    Returns:
+        ``True`` — таблица в две графы; иначе решают общие правила.
+    """
+    return (
+        found.inner_vertical == 1
+        and (found.closed_frame or found.has_header)
+        and found.divider_span >= DIVIDER_MIN_SPAN
+        and found.both_sides_text
+        and found.text_lines >= TWO_COLUMN_MIN_LINES
+        and found.glyph_of_ink >= SINGLE_COLUMN_GLYPH_OF_INK
+    )
+
 
 def is_table_v3(found: Features) -> tuple[bool, str]:
     """Правило третьей версии: то же, что :func:`is_table`, плюс пол и ветка для бланка.
@@ -206,6 +264,9 @@ def is_table_v3(found: Features) -> tuple[bool, str]:
     ``PLAUSIBLE_EDGE_FILL`` и одной вертикали до ``MANY_COLUMNS``. Двигать порог на 0.006 под
     один случай — это подгонка, а не калибровка, и она сломается на первой же новой полосе.
     """
+    # Таблица в две графы проверяется до баннера: у неё тоже нет внутренних горизонталей.
+    if is_two_column_table(found):
+        return True, ""
     if found.inner_horizontal == 0 and found.cells <= BANNER_MAX_CELLS:
         return False, (
             f"внутренних горизонталей нет, ячеек {found.cells} — это одна строка, "
@@ -348,6 +409,102 @@ def _edge_fill(lines: Lines, shape: tuple[int, int], dpi: int) -> float:
     return sum(present) / len(present) if present else 0.0
 
 
+def _cover(segments: list, horizontal: bool, size: int) -> float:
+    """Доля стороны длиной ``size``, покрытая объединением отрезков (порванная линейка — несколько кусков)."""
+    covered = np.zeros(max(1, size), bool)
+    for s in segments:
+        start, end = (s.box.x0, s.box.x1) if horizontal else (s.box.y0, s.box.y1)
+        covered[max(0, start) : min(size, end)] = True
+    return float(covered.mean())
+
+
+def _frame_and_divider(lines: Lines, shape: tuple[int, int], dpi: int) -> tuple[bool, bool, float, "int | None"]:
+    """Устройство находки с одной вертикалью: рамка, шапка и разделитель граф.
+
+    Args:
+        lines: Линейки вырезки.
+        shape: Её размер (высота, ширина).
+        dpi: Разрешение.
+
+    Returns:
+        (рамка замкнута со всех четырёх сторон; есть шапка — верхняя линейка и отбивка шапки во
+        всю ширину в верхней части; доля высоты тела под самым длинным разделителем — от отбивки
+        шапки, если она есть, иначе от верха; x разделителя или ``None``).
+    """
+    height, width = shape
+    margin = mm_to_px(INNER_MARGIN_MM, dpi)
+    tolerance = mm_to_px(CROSS_TOL_MM, dpi)
+
+    def centre_y(s) -> int:
+        return (s.box.y0 + s.box.y1) // 2
+
+    def centre_x(s) -> int:
+        return (s.box.x0 + s.box.x1) // 2
+
+    # Стороны рамки: линейки у самого края находки, по объединению кусков.
+    top_rules = [s for s in lines.horizontal if centre_y(s) < margin]
+    top = _cover(top_rules, True, width) >= FRAME_SIDE_SPAN
+    bottom = _cover([s for s in lines.horizontal if centre_y(s) > height - margin], True, width) >= FRAME_SIDE_SPAN
+    left = _cover([s for s in lines.vertical if centre_x(s) < margin], False, height) >= FRAME_SIDE_SPAN
+    right = _cover([s for s in lines.vertical if centre_x(s) > width - margin], False, height) >= FRAME_SIDE_SPAN
+    # Отбивка шапки: внутренняя горизонталь во всю ширину в верхней части находки.
+    header_y = None
+    for s in sorted(lines.horizontal, key=centre_y):
+        y = centre_y(s)
+        if margin <= y <= HEADER_MAX_SHARE * height:
+            same_level = [t for t in lines.horizontal if abs(centre_y(t) - y) <= tolerance]
+            if _cover(same_level, True, width) >= FRAME_SIDE_SPAN:
+                header_y = y
+                break
+    has_header = top and header_y is not None
+    # Разделитель: внутренние вертикали, сгруппированные по x; тело — от отбивки шапки до низа.
+    body_top = header_y if header_y is not None else 0
+    inner = [s for s in lines.vertical if margin <= centre_x(s) <= width - margin]
+    best_span, best_x = 0.0, None
+    for anchor in inner:
+        covered = np.zeros(height, bool)
+        for s in inner:
+            if abs(centre_x(s) - centre_x(anchor)) <= tolerance:
+                covered[max(0, s.box.y0) : min(height, s.box.y1)] = True
+        span = float(covered[body_top:].mean()) if height > body_top else 0.0
+        if span > best_span:
+            best_span, best_x = span, centre_x(anchor)
+    return top and bottom and left and right, has_header, best_span, best_x
+
+
+def _text_lines(mask: np.ndarray, dpi: int) -> int:
+    """Число строк текста: полосы строк кадра, где глифы занимают заметную долю ширины.
+
+    Args:
+        mask: Маска глифов вырезки.
+        dpi: Разрешение.
+
+    Returns:
+        Число полос высотой не меньше ``TEXT_LINE_MIN_MM``.
+    """
+    if mask.size == 0:
+        return 0
+    rows = (mask > 0).sum(axis=1) >= TEXT_ROW_SHARE * mask.shape[1]
+    minimum = mm_to_px(TEXT_LINE_MIN_MM, dpi)
+    count, run = 0, 0
+    for filled in list(rows) + [False]:
+        if filled:
+            run += 1
+            continue
+        if run >= minimum:
+            count += 1
+        run = 0
+    return count
+
+
+def _both_sides_text(mask: np.ndarray, divider_x: "int | None") -> bool:
+    """Есть ли глифы по обе стороны разделителя (хотя бы ``CELL_INK_SHARE`` площади каждой стороны)."""
+    if divider_x is None or mask.size == 0:
+        return False
+    left, right = mask[:, :divider_x], mask[:, divider_x:]
+    return all(side.size and np.count_nonzero(side) >= CELL_INK_SHARE * side.size for side in (left, right))
+
+
 def features(gray: np.ndarray, lines: Lines, dpi: int) -> Features:
     """Все признаки одной находки. ``gray`` — вырезка находки, ``lines`` — её линейки."""
     mask = glyph_mask(gray, dpi)
@@ -355,7 +512,13 @@ def features(gray: np.ndarray, lines: Lines, dpi: int) -> Features:
     vertical, horizontal = _inner_counts(lines, gray.shape[:2], dpi)
     gutters, gutter_share = _gutters(mask, dpi)
     cells, filled = _filled_cells(mask, lines, dpi)
+    closed_frame, has_header, divider_span, divider_x = _frame_and_divider(lines, gray.shape[:2], dpi)
     return Features(
+        closed_frame=closed_frame,
+        has_header=has_header,
+        divider_span=divider_span,
+        text_lines=_text_lines(mask, dpi),
+        both_sides_text=_both_sides_text(mask, divider_x),
         inner_vertical=vertical,
         inner_horizontal=horizontal,
         gutters=gutters,

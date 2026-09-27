@@ -68,6 +68,56 @@ class Box:
         return Box(round(self.x0 * factor), round(self.y0 * factor), round(self.x1 * factor), round(self.y1 * factor))
 
 
+@dataclass(frozen=True)
+class HintBox(Box):
+    """Рамка-подсказка детектору: та же :class:`Box`, но с меткой источника и его уверенностью.
+
+    Детекторы, принимающие подсказки списком ``list[Box]``, берут и голую :class:`Box` — тогда
+    источник считается безымянным (:data:`HINT_SOURCE`), — и эту: метка вида ``"surya:Figure"``
+    или ``"tables:схема"`` доезжает до ``info`` найденной области, а уверенность — до её сверки.
+    Арифметика рамки (``scaled``, ``padded`` …) отдаёт голую :class:`Box`, поэтому подсказки
+    собирают уже в пикселях той копии, которую получит детектор.
+
+    Attributes:
+        source: Кто подсказал — «семейство:вид» (``"surya:Figure"``); семейство — часть до «:».
+        confidence: Уверенность источника в подсказке (у surya — уверенность блока) или ``None``.
+        likely: Вероятные классы объекта по мнению источника (``ObjectClass``): блок surya
+            ``Equation`` — формула, ``Figure`` — схема или рисунок; пусто — источник не знает.
+    """
+
+    source: str = "hint"
+    confidence: float | None = None
+    likely: tuple = ()
+
+
+# Метка источника у подсказки без метки (голая :class:`Box`).
+HINT_SOURCE = "hint"
+
+
+def hint_likely(box: Box) -> tuple:
+    """Вероятные классы подсказки: у :class:`HintBox` — свои, у голой :class:`Box` — пусто.
+
+    Args:
+        box: Рамка-подсказка любого из двух типов.
+
+    Returns:
+        Кортеж ``ObjectClass``.
+    """
+    return box.likely if isinstance(box, HintBox) else ()
+
+
+def hint_source(box: Box) -> str:
+    """Метка источника подсказки: у :class:`HintBox` — своя, у голой :class:`Box` — :data:`HINT_SOURCE`.
+
+    Args:
+        box: Рамка-подсказка любого из двух типов.
+
+    Returns:
+        Строка метки источника.
+    """
+    return box.source if isinstance(box, HintBox) else HINT_SOURCE
+
+
 def union(boxes: Sequence[Box]) -> Box | None:
     """Объемлющая рамка; None для пустой последовательности."""
     if not boxes:
@@ -136,6 +186,49 @@ class TableBox:
     @property
     def is_table(self) -> bool:
         return self.kind == KIND_TABLE
+
+
+@dataclass(frozen=True)
+class LooseRule:
+    """Линейка, не вошедшая ни в таблицу, ни в схему, ни в рисунок: ось ломаной, возможно изогнутой.
+
+    Такие линейки — отбивки между статьями, линейки под заголовками, межколонные вертикали,
+    подчёркивания бланков. Детектор текстовых блоков не сращивает через них строки и блоки.
+    ``points`` — точки оси ``(x, y)`` в пикселях той картинки, по которой шёл поиск, по порядку
+    вдоль линейки; концов не меньше двух. ``thickness_px`` — толщина штриха в тех же пикселях.
+    """
+
+    points: tuple[tuple[float, float], ...]
+    horizontal: bool
+    thickness_px: float = 1.0
+
+    def scaled(self, factor: float) -> "LooseRule":
+        """Та же линейка в пикселях картинки, крупнее в ``factor`` раз.
+
+        Args:
+            factor: Во сколько раз новая сетка крупнее текущей.
+
+        Returns:
+            Новая линейка с пересчитанными точками и толщиной.
+        """
+        return LooseRule(
+            tuple((x * factor, y * factor) for x, y in self.points), self.horizontal, self.thickness_px * factor
+        )
+
+    @property
+    def box(self) -> Box:
+        """Габарит ломаной (целые пиксели, правый и нижний края — не включительно)."""
+        xs = [x for x, _ in self.points]
+        ys = [y for _, y in self.points]
+        return Box(int(min(xs)), int(min(ys)), int(max(xs)) + 1, int(max(ys)) + 1)
+
+    def to_json(self) -> dict:
+        """Линейка в JSON: ось ломаной с точностью 0,1 px, ось направления и толщина."""
+        return {
+            "points": [[round(x, 1), round(y, 1)] for x, y in self.points],
+            "horizontal": self.horizontal,
+            "thickness_px": round(self.thickness_px, 2),
+        }
 
 
 @dataclass(frozen=True)
