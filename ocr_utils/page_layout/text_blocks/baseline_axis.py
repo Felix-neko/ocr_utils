@@ -49,6 +49,11 @@ RAISED_XH = 0.30
 # её не сдвигает и половина выносных, а крайний глиф строки («р», запятая) иначе стягивал к себе
 # конец кривой и сам же проходил отсев (ошибка конца оси до 4 px на синтетике).
 LOCAL_WINDOW_XH = 3.0
+# Опора первого отсева — столько ближайших строчных без выносных (:func:`_local_kept`).
+REFERENCE_LETTERS = 8
+# Допуск «голос выше базы» для голосов по ВЕРХУ глифа: верх строчных гуляет меньше, чем низ, а верх
+# прописной или цифры выше линии строчных на 0.35–0.45 строчной (у «СССР» 17 px при строчных 12).
+TOP_RAISED_XH = 0.2
 # Голос за базовую линию по верху глифа — только у глифа не ниже этой доли строчной; низ такого
 # мелкого глифа голосует с весом ``SMALL_GLYPH_WEIGHT``.
 TOP_VOTE_MIN_XH = 0.75
@@ -228,6 +233,11 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     # Вес голоса: мелкий глиф (индекс, тире, точка) голосует низом слабо — у конца строки из «б»,
     # «м²» и точки нормальных строчных нет, и равные голоса индексов перетягивали базу вверх.
     weights = np.concatenate([np.where(tall, 1.0, SMALL_GLYPH_WEIGHT), np.ones(int(tall.sum()))])
+    # Какие голоса — по верху глифа (у них допуск «выше базы» строже).
+    tops = np.concatenate([np.zeros(centres.size, dtype=bool), np.ones(int(tall.sum()), dtype=bool)])
+    # Опора первого отсева — строчные без выносных: у них оба голоса согласны.
+    x_class = np.abs(heights[usable] - x_h) <= X_CLASS_TOLERANCE * x_h
+    reference = (centres[x_class], glyphs[usable, 3][x_class].astype(np.float64))
     if centres.size < MIN_SAMPLES:
         return None
     step = mm_to_px(GRID_STEP_MM, axis.dpi)
@@ -238,13 +248,16 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     # Начальная кривая — первая ось, опущенная на полвысоты строчной к базовой линии.
     anchor = np.interp(grid, axis.points[:, 0], axis.points[:, 1]) + x_h / 2.0
     stiffness = (SMOOTH_XH * x_h / step) ** 4 / max(xs.size / grid.size, 1e-3) * 1e-2
-    kept = _local_kept(xs, bottoms, weights, x_h)
+    kept = _local_kept(xs, bottoms, weights, x_h, reference, tops)
     if kept.sum() < MIN_SAMPLES:
         return None
     base = _solve(grid, xs, bottoms, kept * weights, stiffness, anchor=anchor)
+    # Итерации только СУЖАЮТ набор, прошедший первый отсев: кривая, вставшая посередине между верными
+    # и ложными голосами (низы и верхи серии прописных), иначе принимала обратно и те, и другие.
+    local_kept = kept
     for _ in range(ITERATIONS):
         residual = bottoms - np.interp(xs, grid, base)
-        kept = (residual <= DESCENDER_XH * x_h) & (residual >= -RAISED_XH * x_h)
+        kept = local_kept & (residual <= DESCENDER_XH * x_h) & (residual >= -_raised(tops, x_h))
         if kept.sum() < MIN_SAMPLES:
             return None
         base = _solve(grid, xs, bottoms, kept * weights, stiffness, anchor=anchor)
@@ -258,24 +271,65 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     return float(values[order][np.searchsorted(cumulative, 0.5 * cumulative[-1])])
 
 
-def _local_kept(xs: np.ndarray, bottoms: np.ndarray, weights: np.ndarray, x_height: float) -> np.ndarray:
-    """Первый отсев голосов: сверка с местной взвешенной медианой соседей (окно ±``LOCAL_WINDOW_XH``).
+def _local_kept(
+    xs: np.ndarray,
+    bottoms: np.ndarray,
+    weights: np.ndarray,
+    x_height: float,
+    reference: tuple[np.ndarray, np.ndarray],
+    tops: np.ndarray,
+) -> np.ndarray:
+    """Первый отсев голосов: сверка с местной опорой.
+
+    Опора — медиана низов ``REFERENCE_LETTERS`` ближайших строчных без выносных, где бы они ни стояли:
+    у строчной без выносных и низ, и верх лежат на своих линиях, и её голос однозначен. Голоса
+    всех глифов подряд такой опорой не годятся: у серии прописных («СССР» в начале строки,
+    1967/10 IMG_0018_1L) врут верхи, у серии выносных («…руд») — низы, и на краю строки, где соседи
+    только с одной стороны, ложных голосов оказывалось не меньше верных — прописные принимались за
+    выносные, и ось уходила вверх. Строчных без выносных меньше ``MIN_SAMPLES`` — опорой служит
+    местная взвешенная медиана НИЗОВ в окне ±``LOCAL_WINDOW_XH``, а голоса по верху отбрасываются.
 
     Args:
         xs: Абсциссы голосов.
         bottoms: Голоса за базовую линию.
         weights: Веса голосов (мелкие глифы — слабее).
         x_height: Высота строчной строки.
+        reference: Абсциссы и низы строчных без выносных.
+        tops: Какие голоса — по верху глифа (допуск «выше базы» у них строже).
 
     Returns:
         Маска принятых голосов.
     """
-    window = LOCAL_WINDOW_XH * x_height
-    near = np.abs(xs[:, None] - xs[None, :]) <= window
-    # Медиана по окну — построчно: у большинства соседей база одна, выносные и индексы в меньшинстве.
-    local = np.array([_weighted_median(bottoms[row], weights[row]) for row in near])
+    ref_x, ref_bottom = reference
+    if ref_x.size >= MIN_SAMPLES:
+        count = min(REFERENCE_LETTERS, ref_x.size)
+        nearest = np.argsort(np.abs(xs[:, None] - ref_x[None, :]), axis=1)[:, :count]
+        # Опора — прямая по ближайшим строчным, продлённая до голоса: строка наклонена, и медиана
+        # строчных в полусотне пикселей правее «СССР» лежала на 1–2 px выше его базы.
+        local = np.array([_line_at(ref_x[row], ref_bottom[row], x) for row, x in zip(nearest, xs)])
+    else:
+        # Строчных без выносных почти нет (короткий заголовок «50 лет», строка из прописных): голоса по
+        # верху тут опереть не на что — у цифр и прописных они врут, — и остаются одни низы.
+        window = LOCAL_WINDOW_XH * x_height
+        near = (np.abs(xs[:, None] - xs[None, :]) <= window) & ~tops[None, :]
+        local = np.array([_weighted_median(bottoms[row], weights[row]) for row in near])
+        residual = bottoms - local
+        return ~tops & (residual <= DESCENDER_XH * x_height) & (residual >= -RAISED_XH * x_height)
     residual = bottoms - local
-    return (residual <= DESCENDER_XH * x_height) & (residual >= -RAISED_XH * x_height)
+    return (residual <= DESCENDER_XH * x_height) & (residual >= -_raised(tops, x_height))
+
+
+def _raised(tops: np.ndarray, x_height: float) -> np.ndarray:
+    """Допуск «голос выше базы» в пикселях: у голосов по верху глифа — строже (``TOP_RAISED_XH``)."""
+    return np.where(tops, TOP_RAISED_XH, RAISED_XH) * x_height
+
+
+def _line_at(xs: np.ndarray, ys: np.ndarray, x: float) -> float:
+    """Значение в точке ``x`` прямой МНК по точкам ``(xs, ys)``; при одной абсциссе — медиана."""
+    if np.ptp(xs) < 1e-6:
+        return float(np.median(ys))
+    slope, intercept = np.polyfit(xs, ys, 1)
+    return float(slope * x + intercept)
 
 
 def _own_density(fit: BaselineFit) -> np.ndarray:
