@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.signal import savgol_filter
@@ -54,6 +54,14 @@ class LineAxis:
     # Отрезки по x, занятые точками и запятыми: там ось провисает к базовой линии, и в меры
     # формы строки эти участки не входят (см. ``_shape_stats``).
     mark_spans: tuple[tuple[float, float], ...] = ()
+    # Боксы глифов строки ``(n, 4)`` — ``x0, y0, x1, y1`` (пиксели рабочей копии); ``None`` — движок
+    # глифов не отдаёт.
+    glyphs: np.ndarray | None = None
+    # Вторая ось — по базовой линии глифов (:mod:`baseline_axis`), ``(M, 2)``; ``None`` — не
+    # считалась или не из чего.
+    body_points: np.ndarray | None = None
+    # Прежняя ось по краске, если основной стала вторая (:func:`baseline_axis.use_body`).
+    centre_points: np.ndarray | None = None
 
     @property
     def x0(self) -> float:
@@ -206,6 +214,7 @@ def axis_of(line: EngineLine, dpi: float = WORK_DPI, smooth_heights: float = SMO
         bend_mm=bend,
         resid_parabola_mm=resid,
         mark_spans=tuple(line.mark_spans),
+        glyphs=None if line.glyphs is None else np.asarray(line.glyphs, dtype=np.float64),
     )
 
 
@@ -217,18 +226,7 @@ def axes_of(lines: list[EngineLine], dpi: float = WORK_DPI, smooth_heights: floa
 
 def with_column(axis: LineAxis, column: int, cross: bool | None = None) -> LineAxis:
     """Та же ось с проставленным номером колонки и, если задан, признаком разрезанной строки."""
-    return LineAxis(
-        points=axis.points,
-        height=axis.height,
-        column=column,
-        dpi=axis.dpi,
-        cross=axis.cross if cross is None else cross,
-        sagitta_mm=axis.sagitta_mm,
-        slope_deg=axis.slope_deg,
-        bend_mm=axis.bend_mm,
-        resid_parabola_mm=axis.resid_parabola_mm,
-        mark_spans=axis.mark_spans,
-    )
+    return replace(axis, column=column, cross=axis.cross if cross is None else cross)
 
 
 __all__ = ["LineAxis", "axes_of", "axis_of", "resample", "smooth_axis", "with_column"]

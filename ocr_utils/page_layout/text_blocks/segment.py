@@ -295,6 +295,9 @@ class Segment:
     # центр масс краски в их столбцах лежит на полвысоты строчной ниже оси строки: ось там
     # провисает. Участки помечаются, чтобы не сбивать меры наклона и формы строки.
     mark_spans: tuple[tuple[float, float], ...] = ()
+    # Боксы глифов строки ``(n, 4)`` — ``x0, y0, x1, y1`` (пиксели рабочей копии), слева направо:
+    # по их низам строится вторая ось (:mod:`baseline_axis`).
+    glyphs: np.ndarray | None = None
 
     @property
     def cy(self) -> float:
@@ -623,6 +626,34 @@ def _glyph_boxes(
     return boxes[np.argsort(boxes[:, 0])]
 
 
+def _glyph_rects(
+    mask: np.ndarray, labels: np.ndarray, span: list[int], x0: int, y0: int, x1: int, y1: int
+) -> np.ndarray:
+    """Боксы букв сегмента с ординатами ``(n, 4)`` — ``x0, y0, x1, y1`` в пикселях рабочей копии.
+
+    То же, что :func:`_glyph_boxes`, но с верхом и низом буквы: по низам строится вторая ось
+    строки (:mod:`baseline_axis`). ``y1`` — край ПОД последней строкой пикселей буквы.
+
+    Args:
+        mask: Маска глифов рабочей копии.
+        labels: Карта компонент после смыкания RLSA.
+        span: Индексы сгустков сегмента.
+        x0, y0, x1, y1: Бокс сегмента на рабочей копии.
+
+    Returns:
+        Боксы слева направо; пустой массив, если букв не нашлось.
+    """
+    own = np.isin(labels[y0:y1, x0:x1], span)
+    glyphs = ((mask[y0:y1, x0:x1] > 0) & own).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(glyphs, 8)
+    if count <= 1:
+        return np.zeros((0, 4), dtype=np.float64)
+    lefts = stats[1:, cv2.CC_STAT_LEFT].astype(np.float64) + x0
+    tops = stats[1:, cv2.CC_STAT_TOP].astype(np.float64) + y0
+    rects = np.column_stack([lefts, tops, lefts + stats[1:, cv2.CC_STAT_WIDTH], tops + stats[1:, cv2.CC_STAT_HEIGHT]])
+    return rects[np.argsort(rects[:, 0])]
+
+
 def _mark_spans(boxes: np.ndarray) -> tuple[tuple[float, float], ...]:
     """Отрезки по x, занятые низкими метками сегмента — точками и запятыми.
 
@@ -720,6 +751,7 @@ def _segment_of(
         weights=weights,
         scale=scale.name,
         mark_spans=marks,
+        glyphs=_glyph_rects(mask, labels, span, x0, y0, x1, y1),
     )
 
 
@@ -1304,6 +1336,7 @@ def extend_with_leaders(
                 weights=np.concatenate([segment.weights, np.full(grid.shape, float(np.min(segment.weights)))]),
                 scale=segment.scale,
                 mark_spans=segment.mark_spans,
+                glyphs=segment.glyphs,
             )
         )
     return out

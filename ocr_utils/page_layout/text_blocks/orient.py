@@ -70,6 +70,23 @@ def back_points(points: np.ndarray, size: tuple[int, int], rotate_cw: int) -> np
     return np.column_stack([(width - 1) - ys, xs])  # 270
 
 
+def _back_curve(curve: np.ndarray | None, size: tuple[int, int], zone: OrientedZone) -> np.ndarray | None:
+    """Кривая из выпрямленного кадра в координаты страницы: обратный поворот, сортировка по x, сдвиг.
+
+    Args:
+        curve: Точки ``(n, 2)`` в выпрямленном кадре или ``None``.
+        size: Размер выпрямленного кадра.
+        zone: Область с её поворотом и рамкой.
+
+    Returns:
+        Точки на странице или ``None``.
+    """
+    if curve is None:
+        return None
+    moved = back_points(np.asarray(curve, dtype=np.float64), size, zone.rotate_cw)
+    return moved[np.argsort(moved[:, 0])] + np.array([zone.box[0], zone.box[1]], dtype=np.float64)
+
+
 def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
     """Ось строки из выпрямленного кадра в координаты страницы.
 
@@ -88,6 +105,10 @@ def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
     return replace(
         axis,
         points=points,
+        body_points=_back_curve(axis.body_points, size, zone),
+        centre_points=_back_curve(axis.centre_points, size, zone),
+        # Боксы глифов после поворота на 90° уже не боксы: вторая ось посчитана в выпрямленном кадре.
+        glyphs=None,
         sagitta_mm=sagitta,
         slope_deg=slope,
         bend_mm=bend,

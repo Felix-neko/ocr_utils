@@ -11,7 +11,7 @@ from ocr_utils.page_layout.text_blocks import LINKING_CHOICES, LINKING_DEFAULT, 
 from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS
 from ocr_utils.page_layout.text_blocks.segment import SCALES
-from ocr_utils.page_layout.text_blocks.page import Variant, analyse_gray, render_page
+from ocr_utils.page_layout.text_blocks.page import AxisKind, Variant, analyse_gray, render_page
 from ocr_utils.page_layout.text_blocks.report import markdown, write_csv, write_json
 from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, SidesMethod
 
@@ -135,6 +135,14 @@ def main() -> None:
     multiple=True,
     help="свой python движка каталога: ``имя=путь`` (по умолчанию — окружение в LINE_ENGINES_ROOT)",
 )
+@click.option(
+    "--axis",
+    "axis_kind",
+    type=click.Choice([kind.value for kind in AxisKind]),
+    default=AxisKind.CENTRE.value,
+    show_default=True,
+    help="основная ось строки для рядов и блоков: centre — по краске, body — по базовой линии глифов",
+)
 def analyze(
     geo_dir: Path,
     nogeo_dir: Path,
@@ -153,6 +161,7 @@ def analyze(
     text_layer_cache: Path | None,
     forbid_figures: bool,
     rule_barriers: bool,
+    axis_kind: str,
     **options,
 ) -> None:
     """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку."""
@@ -191,6 +200,7 @@ def analyze(
                     page=page,
                     variant=current,
                     hints=hints,
+                    axis=AxisKind(axis_kind),
                 )
                 write_json(analysis, out_dir / "pages")
                 overlay.write(
@@ -418,3 +428,38 @@ def sides(
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+@main.command("compare-axes")
+@click.option(
+    "--keys",
+    "keys_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="файл с ключами полос пака «год/выпуск/полоса» по строке (# — комментарий)",
+)
+@click.option(
+    "--sharpened-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path("/mnt/system/raw/mts/pack1_background_blurred_v2/sharpened"),
+    show_default=True,
+)
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
+@click.option("--jobs", default=8, show_default=True, type=int, help="воркеров пула (разбор полосы — CPU)")
+def compare_axes(keys_file: Path, sharpened_dir: Path, out_dir: Path, jobs: int) -> None:
+    """Стенд «было — стало» для осей строк: прежняя (по краске) против второй (по базовой линии)."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    from ocr_utils.page_layout.pack_analysis.stages import init_worker
+    from ocr_utils.page_layout.text_blocks.axis_compare import compare_page, summary, write_csv
+
+    keys = [line.strip() for line in keys_file.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    context = get_context("forkserver")
+    with ProcessPoolExecutor(jobs, mp_context=context, initializer=init_worker) as pool:
+        rows = list(pool.map(compare_page, keys, [sharpened_dir] * len(keys), [out_dir] * len(keys)))
+    write_csv(rows, out_dir / "measures.csv")
+    table = summary(rows)
+    (out_dir / "summary.md").write_text(table + "\n")
+    click.echo(table)
+    click.echo(f"готово: {out_dir}")

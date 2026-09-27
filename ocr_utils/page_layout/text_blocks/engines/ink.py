@@ -86,6 +86,7 @@ class InkEngine:
                 height=float(segment.height),
                 baseline=False,
                 mark_spans=segment.mark_spans,
+                glyphs=segment.glyphs,
             )
             for segment in segments
         ]

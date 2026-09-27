@@ -23,6 +23,9 @@ class EngineLine:
         mark_spans: Отрезки по x, занятые НИЗКИМИ МЕТКАМИ — точками и запятыми. Они стоят на
             базовой линии, ось в их столбцах провисает на полвысоты строчной, и эти участки
             исключаются из мер наклона и формы строки.
+        glyphs: Боксы глифов строки ``(n, 4)`` — ``x0, y0, x1, y1`` в пикселях рабочей копии, слева
+            направо; по их низам строится вторая ось (:mod:`baseline_axis`). ``None`` — движок
+            глифов не отдаёт (все чужие).
     """
 
     points: np.ndarray
@@ -31,6 +34,7 @@ class EngineLine:
     baseline: bool = False
     confidence: float = float("nan")
     mark_spans: tuple[tuple[float, float], ...] = ()
+    glyphs: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

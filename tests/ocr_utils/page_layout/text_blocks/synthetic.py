@@ -158,3 +158,65 @@ def single_line_page(shape: tuple[int, int] = PAGE_SHAPE, seed: int = 5) -> np.n
     page = paper(shape)
     _draw_line(page, random.Random(seed), MARGIN, shape[1] - MARGIN, MARGIN + 200, False)
     return page
+
+
+# Строчная «буква» синтетики с базовой линией (пиксели 300 dpi): высота строчной, прописной и
+# выносных, ширина буквы и пробелы.
+LETTER_X_H = 22
+LETTER_CAP_H = 32
+LETTER_TAIL = 10
+LETTER_W = 16
+LETTER_GAP = 4
+WORD_GAP = 22
+
+
+def glyph_line_page(
+    shape: tuple[int, int] = (1600, 1400), step: int = 58, seed: int = 3, amplitude: float = 18.0
+) -> tuple[np.ndarray, list[float]]:
+    """Страница из строк с КЛАССАМИ букв и известной осью: строчные, прописные и цифры, выносные вниз
+    («р», запятая) и вверх («б»), верхние индексы («м²»), точки; строки изогнуты дугой.
+
+    При ``step`` около 58 px выносной вниз одной строки и выносной вверх следующей почти касаются:
+    плотный набор, где ось по краске перескакивала бы или проседала.
+
+    Args:
+        shape: Размер страницы (пиксели 300 dpi).
+        step: Межстрочный шаг.
+        seed: Зерно генератора.
+        amplitude: Прогиб дуги (пиксели 300 dpi): середина строк ниже краёв.
+
+    Returns:
+        ``(картинка, верхи строчных по строкам до изгиба)``: истинная ось строки ``i`` в точке ``x`` —
+        ``верх_i + LETTER_X_H / 2 + bow_dy(x, ширина, amplitude)`` (пиксели 300 dpi).
+    """
+    image = paper(shape)
+    generator = random.Random(seed)
+    tops: list[float] = []
+    for top in range(MARGIN, shape[0] - MARGIN - LETTER_CAP_H, step):
+        base = top + LETTER_X_H
+        tops.append(float(top))
+        x = MARGIN
+        while x < shape[1] - MARGIN - 6 * LETTER_W:
+            for _ in range(generator.randint(3, 7)):
+                kind = generator.random()
+                if kind < 0.12:  # прописная или цифра: низ на базовой линии, верх выше строчной
+                    image[base - LETTER_CAP_H : base, x : x + LETTER_W] = INK
+                elif kind < 0.22:  # «р»: выносной вниз
+                    image[top : base + LETTER_TAIL, x : x + LETTER_W] = INK
+                elif kind < 0.32:  # «б»: выносной вверх
+                    image[base - LETTER_CAP_H - 4 : base, x : x + LETTER_W] = INK
+                elif kind < 0.36:  # верхний индекс: мелкий глиф высоко над базовой линией
+                    image[top - 6 : top + 6, x : x + 8] = INK
+                else:  # строчная без выносных
+                    image[top:base, x : x + LETTER_W] = INK
+                x += LETTER_W + LETTER_GAP
+            if generator.random() < 0.3:  # точка или запятая на конце слова
+                image[base - 5 : base + (6 if generator.random() < 0.5 else 0), x : x + 5] = INK
+                x += 5 + LETTER_GAP
+            x += WORD_GAP
+    return bowed(image, amplitude), tops
+
+
+def bow_dy(xs: np.ndarray, width: int, amplitude: float) -> np.ndarray:
+    """Сдвиг строк вниз дугой :func:`bowed` в точках ``xs`` (пиксели 300 dpi)."""
+    return amplitude * (1.0 - ((xs - width / 2.0) / (width / 2.0)) ** 2)

@@ -12,6 +12,7 @@ import numpy as np
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.alignment import Alignment, alignment_of
+from ocr_utils.page_layout.text_blocks.baseline_axis import body_axes, use_body
 from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
 from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
@@ -58,6 +59,13 @@ class PageAnalysis:
         return f"{self.name}_p{self.page:03d}_{self.variant}_{self.engine}"
 
 
+class AxisKind(Enum):
+    """Какая ось строки основная: прежняя по центру масс краски или вторая — по базовой линии глифов."""
+
+    CENTRE = "centre"
+    BODY = "body"
+
+
 def analyse_gray(
     gray300: np.ndarray,
     engine: Engine,
@@ -70,6 +78,7 @@ def analyse_gray(
     page: int = 1,
     variant: str = Variant.NOGEO.value,
     hints: LayoutHints | None = None,
+    axis: AxisKind = AxisKind.CENTRE,
 ) -> PageAnalysis:
     """Разбор страницы по серому рендеру ``RENDER_DPI``.
 
@@ -85,6 +94,9 @@ def analyse_gray(
         hints: Вспомогательная информация внешних детекторов (:class:`hints.LayoutHints`): маска
             разрешённого текста, области с ориентацией текста, рамки таблиц и блок-схем. ``None``
             — разбор как прежде, одной прямой областью на всю полосу.
+        axis: Какая ось строки основная — по ней строятся ряды и блоки: ``CENTRE`` — прежняя, по
+            центру масс краски; ``BODY`` — вторая, по базовой линии глифов (:mod:`baseline_axis`).
+            Вторая ось считается всегда (``LineAxis.body_points``), выбор влияет только на блоки.
 
     Returns:
         :class:`PageAnalysis` со всеми кривыми в пикселях рабочей копии.
@@ -113,9 +125,13 @@ def analyse_gray(
             started,
             width,
             height,
+            axis,
         )
     result = engine.segment(gray300, dpi)
-    axes = axes_of(result.lines, dpi, smooth_line)
+    # Вторая ось (по базовой линии глифов) считается у всех строк сразу: ей нужны соседи.
+    axes = body_axes(axes_of(result.lines, dpi, smooth_line))
+    if axis is AxisKind.BODY:
+        axes = use_body(axes)
     # Куски заголовка во всю ширину, набранные через межколонник, помечаются до сборки блоков.
     work = _work_copy(gray300, dpi)
     # Отточия считаются один раз на разбор: они нужны и колонкам (поле точек — не межколонник), и
@@ -124,7 +140,7 @@ def analyse_gray(
     gutters = result.gutters or gutters_of(work, dpi, page_leaders)
     ink = text_ink(gray300, dpi, work=work, leaders=page_leaders)
     cut = mark_cut_lines(axes, gutters, dpi, ink=gray300 < 128, k=RENDER_DPI / dpi)
-    axes = [with_column(axis, axis.column, cross=flag) for axis, flag in zip(axes, cut)]
+    axes = [with_column(line, line.column, cross=flag) for line, flag in zip(axes, cut)]
     # Межколонники — свойство страницы, а не движка: чужие сегментаторы их не отдают, и без них
     # три колонки заметки слипались в один блок (1975/05 с.97, pero). Считаем сами по рендеру.
     zones = zones_of(gutters, height, width, dpi)
@@ -180,6 +196,7 @@ def _analyse_areas(
     started: float,
     width: int,
     height: int,
+    axis: AxisKind = AxisKind.CENTRE,
 ) -> PageAnalysis:
     """Разбор по ОБЛАСТЯМ с разной ориентацией текста, со сведением результатов в один разбор.
 
@@ -230,8 +247,9 @@ def _analyse_areas(
             page=page,
             variant=variant,
             hints=area_hints,
+            axis=axis,
         )
-        axes.extend(back_axis(axis, size, area) for axis in inner.axes)
+        axes.extend(back_axis(line, size, area) for line in inner.axes)
         for block, alignment in zip(inner.blocks, inner.alignments):
             blocks.append(back_block(block, size, area))
             alignments.append(alignment)

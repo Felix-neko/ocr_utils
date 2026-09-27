@@ -30,7 +30,8 @@ PAD = 8
 # Ширина образца цвета в легенде и зазор от образца до подписи.
 SAMPLE_WIDTH = 30
 SAMPLE_GAP = 8
-# Ширина колонки легенды: по ней считается, сколько колонок влезает в ширину картинки.
+# Наименьшая ширина колонки легенды (шире — по самой длинной подписи): по ней считается, сколько
+# колонок влезает в ширину картинки.
 LEGEND_COLUMN_WIDTH = 360
 COLOUR_TEXT = (20, 20, 20)
 PAPER = (255, 255, 255)
@@ -129,7 +130,10 @@ def legend_strip(entries: list[LegendEntry], width: int, title: str | None = Non
     """
     if not entries and not title:
         return np.zeros((0, width, 3), dtype=np.uint8)
-    columns = max(1, width // LEGEND_COLUMN_WIDTH)
+    # Колонка не уже самой длинной подписи: иначе текст залезает на соседнюю колонку.
+    longest = max((_font(LEGEND_SIZE).getlength(entry.text) for entry in entries), default=0.0)
+    column_need = max(LEGEND_COLUMN_WIDTH, int(longest) + SAMPLE_WIDTH + SAMPLE_GAP + 2 * PAD)
+    columns = max(1, min(len(entries), (width - PAD) // column_need)) if entries else 1
     rows = (len(entries) + columns - 1) // columns
     top = LEGEND_ROW if title else 0
     picture = Image.new("RGB", (width, PAD + top + LEGEND_ROW * rows + PAD // 2), PAPER)
