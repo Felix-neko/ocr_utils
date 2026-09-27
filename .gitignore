@@ -129,3 +129,17 @@ reports/curved_layout/
 reports/curved_table_grid/оверлеи/
 reports/text_blocks_sides/
 reports/line_axis_models/
+reports/table_vs_diagram/
+reports/line_art_titles/
+reports/surya_equations/
+ocr_utils/page_layout/line_art/deepseek/vllm_env/.venv/
+
+# Данные в корне репо: сканы-примеры, выгрузки OCR, картинки обрезки полей — в git не тащим.
+/дополнительные примеры для детектора искривлённых строк/
+/03.md
+/12.md
+/1968_12.md
+/74_12.md
+/clip_examples/
+/finereader_landscape_not_ours/
+research/line_art_titles/vllm_env/sync.log

@@ -44,6 +44,7 @@
 | `FINAL_PDF_DIR` | `$PDF_ROOT/final_pdfs` | Финальные PDF, `{год}/{год}_{выпуск}.pdf`, по папке на год; та же раскладка у копии на Я.Диске (`…/МТС/PDF с текстовым слоем/пак-1 1966-1976`) | SYSTEM |
 | `FINAL_WORK_DIR` | `/mnt/system/raw/mts/pack1_final_pdfs_work` | Рабочий каталог сборщика: `pages/<pdf>/pNNNN.json` (анализ страницы: источник, зоны, вердикты, чтения), `analysis.csv`, `pages.csv`, `summary.csv`, `preview/` | SYSTEM |
 | — | `/mnt/system/raw/mts/pack1_geometry_regression/pack1_v12` | Прогон детектора порчи геометрии: `cache/<pdf>/pNNN.json`, `metrics.csv`; сборщик читает кэш и дописывает промахи | SYSTEM |
+| — | `/mnt/system/raw/mts/pack1_surya_equations` | Стенд `research/surya_equations`: `pages.csv` (боксы surya Equation и `$$` DeepSeek по всем полосам, слой выборки), `eval_blocks.csv`, `eval_boxes.csv`, `summary.json`; эталон — в git (`research/surya_equations/labels`), оверлеи — `reports/surya_equations/` | SYSTEM |
 | — | `/mnt/system/raw/mts/pack1_text_layer_fix/pack1_v1` | Исследование текстового слоя по выборке 1050 стр.: кэш, CSV, оверлеи, исправленные копии | SYSTEM |
 | `FINEREADER_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_brightened_bg` | Текстовый слой FineReader как прокси-эталон для внешнего OCR (страница i = i-я полоса по сортировке имён) | SYSTEM |
 | `RECOGNIZED_PDF_DIR` | `$PDF_ROOT/full_pdfs_binary_no_bg_brightening` | Распознанные PDF для привязки DOCX → скан | SYSTEM |
