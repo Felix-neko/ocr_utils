@@ -486,9 +486,11 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
         exclude_boxes: Прямоугольники, которые заведомо не штрих (растровые области из
             базы разметки, блоки ``Picture`` от Surya). Кандидат, перекрытый ими больше
             чем наполовину, выбрасывается.
-        extra_boxes: Пары ``(рамка, метка)`` — предложения разметки страницы (таблицы,
-            формулы). Связная статистика их не видит: у таблицы без линеек и у формулы
-            длинных связных штрихов нет. Пиксельные проверки к ним применяются те же.
+        extra_boxes: Пары ``(рамка, метка источника)`` — предложения разметки страницы
+            (таблицы, блоки surya, любые подсказки); метка с пространством имён
+            («surya:Figure», «tables:схема») становится ``source`` кандидата как есть.
+            Связная статистика их не видит: у таблицы без линеек и у формулы длинных
+            связных штрихов нет. Пиксельные проверки к ним применяются те же.
 
     Returns:
         Находки страницы вместе со счётчиком причин отбраковки.
@@ -555,10 +557,8 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
         if any(_overlaps_any(box, [c.box], 0.8) for c in candidates):
             continue  # эту область уже нашли пиксели, второй раз не считаем
         mask = ink[box[1] : box[3], box[0] : box[2]]
-        # Метка без пространства имён — блок surya (стенд line_art_detection подаёт их так);
-        # единый детектор подаёт затравки уже с именем источника («tables:схема»).
-        source = label if ":" in label else f"surya:{label}"
-        candidate, reason = classify(mask, box, int(np.count_nonzero(mask)), params, False, source)
+        # Метка идёт в источник кандидата как есть («surya:Figure», «tables:схема», «hint»).
+        candidate, reason = classify(mask, box, int(np.count_nonzero(mask)), params, False, label)
         if candidate is None:
             dropped[reason] = dropped.get(reason, 0) + 1
         else:

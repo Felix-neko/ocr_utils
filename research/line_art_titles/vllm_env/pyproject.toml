@@ -1,0 +1,11 @@
+[project]
+name = "line-art-titles-vllm"
+version = "0.1.0"
+description = "Отдельное окружение: DeepSeek-OCR-2 батчем через upstream vLLM (стенд research/line_art_titles)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Upstream vLLM знает DeepseekOCR2ForCausalLM; колёса PyPI собраны под CUDA 12.8+ и знают
+    # Blackwell (sm_120). Скрипты из репозитория модели пришиты к vLLM 0.8.5 под CUDA 11.8 — не годятся.
+    "vllm>=0.11.1",
+    "pillow>=10",
+]

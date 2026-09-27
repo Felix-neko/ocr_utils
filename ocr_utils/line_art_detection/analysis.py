@@ -129,7 +129,8 @@ def analyse_pdf(
             extra = []
             if surya and index in surya:
                 proposals, surya_excludes = surya[index]
-                extra = proposals
+                # Метка источника — с пространством имён, как у единого детектора page_layout.
+                extra = [(box, f"surya:{label}") for box, label in proposals]
                 exclude.extend(surya_excludes)
 
             findings = analyse_gray(gray, params, exclude_boxes=exclude, extra_boxes=extra)
