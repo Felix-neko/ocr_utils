@@ -16,7 +16,7 @@ from ocr_utils.page_layout.text_blocks.page import PageAnalysis
 # Цвета BGR: огибающая — синяя, крупная огибающая — фиолетовая, оси строк — зелёные,
 # найденные края рядов — оранжевые кружки, границы колонок — серые пунктиры.
 COLOUR_ENVELOPE = (220, 90, 20)
-# Справочная кромка по краске: тот же синий, но приглушённый — главная здесь полоса вокруг оси.
+# Справочная кромка по краске: на оверлеях страниц больше не рисуется, цвет нужен отчёту об огибающей.
 COLOUR_ENVELOPE_INK = (150, 170, 120)
 # Границы блоков рисуются полупрозрачно: под ними должны читаться буквы.
 ENVELOPE_ALPHA = 0.55
@@ -99,8 +99,6 @@ def draw(
     # Границы блоков — в отдельный слой: его подмешают полупрозрачно, чтобы буквы читались.
     layer = canvas.copy()
     for block in analysis.blocks:
-        if block.envelope_ink is not None:
-            _polyline(layer, block.envelope_ink.polygon, COLOUR_ENVELOPE_INK, 2, scale, closed=True)
         _polyline(layer, block.envelope.polygon, COLOUR_ENVELOPE, 2, scale, closed=True)
     cv2.addWeighted(layer, ENVELOPE_ALPHA, canvas, 1.0 - ENVELOPE_ALPHA, 0, canvas)
     for gutter in analysis.gutters:
@@ -190,9 +188,14 @@ def _axis_line(canvas: np.ndarray, axis, scale: float) -> None:
 
     Такой участок провисает к базовой линии (знак стоит на ней, а не на оси строки), поэтому он
     и выделяется: в меры наклона и формы строки он не входит, и принимать его за дефект не надо.
+    Провисает только ПЕРВАЯ ось (центр масс краски). Если основной стала вторая ось, по базовой линии
+    глифов (``baseline_axis.use_body``: прежняя ось тогда лежит в ``centre_points``), над знаками она
+    не провисает, и линия рисуется одним цветом.
     """
     points = np.asarray(axis.points, dtype=np.float64)
     spans = list(getattr(axis, "mark_spans", ()) or ())
+    if getattr(axis, "centre_points", None) is not None:
+        spans = []
     if not spans or points.shape[0] < 2:
         _polyline(canvas, points, COLOUR_AXIS, 2, scale)
         return
@@ -259,7 +262,7 @@ def _caption(canvas: np.ndarray, block, alignment: Alignment, scale: float) -> N
         cv2.putText(canvas, text, (x, y + i * 12), cv2.FONT_HERSHEY_COMPLEX, 0.33, COLOUR_TEXT, 1, cv2.LINE_AA)
 
 
-def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None) -> list[LegendEntry]:
+def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None, body_axis: bool = False) -> list[LegendEntry]:
     """Строки легенды разбора текстовых блоков: что означает каждый цвет.
 
     Легенда печатается ВСЕГДА и в ПОЛЕ картинки (:mod:`ocr_utils.page_layout.overlay_frame`), а не
@@ -270,6 +273,8 @@ def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None) -> list[Leg
     Args:
         dilate_extra: Доли размера символа, на которые дополнительно раздута граница блока.
         hints: Подсказки внешних детекторов (``hints.LayoutHints``), если они нарисованы.
+        body_axis: Основная ось строки — вторая, по базовой линии глифов (``AxisKind.BODY``): у неё
+            своя подпись и нет участков над точками и запятыми.
 
     Returns:
         Строки легенды в порядке значимости.
@@ -277,10 +282,12 @@ def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None) -> list[Leg
     box = SampleStyle.BOX
     entries = [
         LegendEntry("граница блока: полоса вокруг оси", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
-        LegendEntry("граница блока по краске, справочно", COLOUR_ENVELOPE_INK, ENVELOPE_ALPHA),
         LegendEntry("крупная огибающая", COLOUR_COARSE),
-        LegendEntry("ось строки", COLOUR_AXIS),
-        LegendEntry("ось над точкой, запятой", COLOUR_MARK),
+        LegendEntry("ось строки (вторая, по базовой линии глифов)" if body_axis else "ось строки", COLOUR_AXIS),
+    ]
+    if not body_axis:
+        entries.append(LegendEntry("ось над точкой, запятой", COLOUR_MARK))
+    entries += [
         LegendEntry("хвост последней строки и отсечка", COLOUR_TAIL),
         LegendEntry("края рядов", COLOUR_POINT),
         LegendEntry("межколонник", COLOUR_COLUMN),

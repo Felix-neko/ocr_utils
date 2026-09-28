@@ -144,3 +144,6 @@ ocr_utils/page_layout/line_art/deepseek/vllm_env/.venv/
 /finereader_landscape_not_ours/
 research/line_art_titles/vllm_env/sync.log
 reports/text_blocks_axis_body/
+reports/text_block_envelope/
+reports/text_block_specks/
+reports/text_blocks_gutter_crossing/

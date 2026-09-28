@@ -266,7 +266,7 @@ def draw_alignment(
             alignments[side] = alignment
             line = filled_side(sides, alignment, block)
             if line is not None:
-                _draw_filled_line(layer, line, scale, UNDERLAY_THICKNESS)
+                draw_filled_line(layer, line, scale, UNDERLAY_THICKNESS)
         prepared.append((block, sides, alignments))
     cv2.addWeighted(layer, FILLED_ALPHA, canvas, 1.0 - FILLED_ALPHA, 0, canvas)
     for block, sides, alignments in prepared:
@@ -316,7 +316,9 @@ def draw_alignment(
     )
 
 
-def _draw_filled_line(layer: np.ndarray, line, scale: float, thickness: int) -> None:
+def draw_filled_line(
+    layer: np.ndarray, line, scale: float, thickness: int, colour=COLOUR_FILLED, patch_colour=None
+) -> None:
     """Дополнительная линия стороны в слой: сплошная по самой стороне, пунктир на заплатках.
 
     Args:
@@ -324,6 +326,8 @@ def _draw_filled_line(layer: np.ndarray, line, scale: float, thickness: int) -> 
         line: Линия стороны (``sides.FilledSide``).
         scale: Масштаб «рабочая копия → холст».
         thickness: Толщина линии, пиксели холста.
+        colour: Цвет линии (BGR); по умолчанию — синий вертикальной стороны стенда сторон.
+        patch_colour: Цвет пунктира заплаток; ``None`` — тот же, что у линии.
     """
     points = _scaled(line.points, scale)
     # Серии «настоящая сторона / заплатка»; заплатка берёт крайние точки соседей, чтобы линия не рвалась.
@@ -332,9 +336,9 @@ def _draw_filled_line(layer: np.ndarray, line, scale: float, thickness: int) -> 
         if len(run) < 2:
             continue
         if line.filled[start]:
-            _dashed_run(layer, run, COLOUR_FILLED, thickness)
+            _dashed_run(layer, run, colour if patch_colour is None else patch_colour, thickness)
         else:
-            cv2.polylines(layer, [run], False, COLOUR_FILLED, thickness, cv2.LINE_AA)
+            cv2.polylines(layer, [run], False, colour, thickness, cv2.LINE_AA)
 
 
 def draw_filled(
@@ -380,7 +384,7 @@ def draw_filled(
             line = filled_side(sides, alignment, block)
             if line is None:
                 continue
-            _draw_filled_line(layer, line, scale, FILLED_THICKNESS)
+            draw_filled_line(layer, line, scale, FILLED_THICKNESS)
             # Шрифт Hershey не знает «→» и «°» — стрелка и градусы пишутся ASCII и словом.
             texts.append(
                 f"{'L' if side is SideKind.LEFT else 'R'} наклон {line.raw_tilt_deg:+.2f} -> {line.tilt_deg:+.2f} гр., "
@@ -510,4 +514,4 @@ def write_all(
     )
 
 
-__all__ = ["draw_alignment", "draw_filled", "draw_sides", "side_by_side", "write_all"]
+__all__ = ["draw_alignment", "draw_filled", "draw_filled_line", "draw_sides", "side_by_side", "write_all"]

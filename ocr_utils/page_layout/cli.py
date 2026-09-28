@@ -225,6 +225,35 @@ def analyze_command(
     is_flag=True,
     help="Пересчитать итоговую стадию (текстовые блоки, JSON и оверлеи) у ВСЕХ полос; прочие стадии — из work/.",
 )
+@click.option(
+    "--raster-db",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="База разметки после ревью: растр (цветной, серый, цветной текст) берётся из неё, детектор растра не запускается.",
+)
+@click.option("--pack-name", default="пак-1", show_default=True, help="Имя пака в базе (--raster-db).")
+@click.option(
+    "--reuse-from",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Корень прошлого прогона: полосы с тем же растром (точно) берутся из него вместе с выводом DeepSeek.",
+)
+@click.option(
+    "--axis",
+    "axis_name",
+    default="centre",
+    show_default=True,
+    type=click.Choice(["centre", "body"]),
+    help="Ось строки для рядов и блоков: centre — по центру масс краски, body — вторая, по базовой линии глифов.",
+)
+@click.option(
+    "--gutter-mode",
+    default="short",
+    show_default=True,
+    type=click.Choice(["legacy", "segmented", "short"]),
+    help="Межколонники как запреты сцепки строк: legacy — прежний ход (наклонный межколонник выпадал), "
+    "segmented — запрет по отрезкам ломаной, short — плюс короткие межколонники за заголовком.",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def analyze_pack_command(
     sharpened_dir: Path,
@@ -235,10 +264,17 @@ def analyze_pack_command(
     limit: int | None,
     orientation: bool,
     redo_final: bool,
+    raster_db: Path | None,
+    pack_name: str,
+    reuse_from: Path | None,
+    axis_name: str,
+    gutter_mode: str,
     log_level: str,
 ) -> None:
     """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
     from ocr_utils.page_layout.pack_analysis.run import run
+    from ocr_utils.page_layout.text_blocks.columns import GutterMode
+    from ocr_utils.page_layout.text_blocks.page import AxisKind
 
     _set_log_level(log_level)
     run(
@@ -250,7 +286,51 @@ def analyze_pack_command(
         limit,
         detect_orientation=orientation,
         redo_final=redo_final,
+        raster_db=raster_db,
+        pack_name=pack_name,
+        reuse_from=reuse_from,
+        axis=AxisKind(axis_name),
+        gutter_mode=GutterMode(gutter_mode),
     )
+
+
+@main.command("reblock-pack")
+@click.option("--sharpened-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--from",
+    "source",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Корень готового разбора пака: объекты, надписи и ориентация берутся из его pages/*.json.",
+)
+@click.option("--out-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--jobs", default=16, show_default=True, type=int, help="Воркеров CPU-пула.")
+@click.option("--pages", "pages_file", default=None, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--limit", default=None, type=int, help="Только первые N полос.")
+@click.option("--axis", "axis_name", default="body", show_default=True, type=click.Choice(["centre", "body"]))
+@click.option("--gutter-mode", default="short", show_default=True, type=click.Choice(["legacy", "segmented", "short"]))
+@click.option("--redo", is_flag=True, help="Пересчитать и полосы, у которых итог в --out-dir уже есть.")
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def reblock_pack_command(
+    sharpened_dir: Path,
+    source: Path,
+    out_dir: Path,
+    jobs: int,
+    pages_file: Path | None,
+    limit: int | None,
+    axis_name: str,
+    gutter_mode: str,
+    redo: bool,
+    log_level: str,
+) -> None:
+    """Пересчитать только текстовые блоки по готовому разбору пака (объекты и DeepSeek — как были) в новую папку."""
+    from ocr_utils.page_layout.pack_analysis.run import list_tasks, stage_reblock
+    from ocr_utils.page_layout.text_blocks.columns import GutterMode
+    from ocr_utils.page_layout.text_blocks.page import AxisKind
+
+    _set_log_level(log_level)
+    tasks = list_tasks(sharpened_dir, pages_file, limit)
+    stage_reblock(tasks, source, out_dir, jobs, AxisKind(axis_name), GutterMode(gutter_mode), redo)
 
 
 @main.command("prefill-surya")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from enum import Enum
 from pathlib import Path
@@ -17,9 +18,20 @@ from ocr_utils.page_layout.pack_analysis.stages import PageTask, decide_candidat
 from ocr_utils.page_layout.regions import RegionKind
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks import overlay as blocks_overlay
+from ocr_utils.page_layout.text_blocks.columns import GutterMode
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
 from ocr_utils.page_layout.text_blocks.from_layout import build
-from ocr_utils.page_layout.text_blocks.page import analyse_gray
+from ocr_utils.page_layout.text_blocks.page import AxisKind, analyse_gray
+from ocr_utils.page_layout.text_blocks.report import filled_json
+from ocr_utils.page_layout.text_blocks.sides import (
+    AlignMethod,
+    FilledSide,
+    SideKind,
+    filled_side,
+    side_alignment,
+    sides_of,
+)
+from ocr_utils.page_layout.text_blocks.sides_overlay import FILLED_ALPHA, draw_filled_line
 
 
 class PageClass(str, Enum):
@@ -74,6 +86,19 @@ RULE_COLOR = (60, 90, 210)  # линейки-сироты (text_blocks.overlay.C
 FILL_ALPHA = 0.18
 OVERLAY_WIDTH = 1600
 
+# Дополнительные линии левой и правой стороны блока (:func:`sides.filled_side`): невыровненные концы
+# выброшены, невыровненные куски в середине заменены гладкой интерполяцией PCHIP (заплатка — пунктиром).
+# Главная граница блока синяя, поэтому стороны — своими цветами, не занятыми на этом оверлее: левая —
+# золотистая, правая — голубая. Толсто и полупрозрачно, как на стенде сторон (``sides_overlay``).
+SIDE_COLOR = {SideKind.LEFT: (0, 190, 230), SideKind.RIGHT: (230, 210, 0)}
+# Заплатка (место выброса, замененное интерполяцией) — пунктиром своего красно-оранжевого цвета у обеих
+# сторон: пунктир цвета стороны на синей границе блока не различался (промежутки сливались с ней).
+PATCH_COLOR = (0, 60, 255)
+SIDE_THICKNESS = 4
+# Метод выравнивания, по которому размечены выровненные участки стороны: robust — устойчивая подгонка к
+# концам строк в системе координат блока (выбран на стенде сторон 2026-09-25).
+SIDE_ALIGN_METHOD = AlignMethod.ROBUST
+
 
 def assemble(record: dict, decisions: list) -> dict:
     """Объекты полосы по классам из разбора и решений по кандидатам line art.
@@ -120,7 +145,14 @@ def assemble(record: dict, decisions: list) -> dict:
     return {"objects": objects, "titles": titles}
 
 
-def text_blocks(image, record: dict, objects: list[dict]):
+def text_blocks(
+    image,
+    record: dict,
+    objects: list[dict],
+    axis: AxisKind = AxisKind.CENTRE,
+    gutter_mode: GutterMode = GutterMode.SHORT,
+    join_leaders: bool = True,
+):
     """Текстовые блоки полосы с запретами: растр, печати, таблицы, line art, формулы; барьеры — рамки и линейки.
 
     «Неясно» и надписи в запрет не идут (решение пользователя: «неясно» — отдельный класс для
@@ -130,9 +162,13 @@ def text_blocks(image, record: dict, objects: list[dict]):
         image: Страница.
         record: JSON полосы.
         objects: Объекты :func:`assemble`.
+        axis: По какой оси строки собирать ряды и блоки: ``CENTRE`` — первая, по центру масс краски;
+            ``BODY`` — вторая, по базовой линии глифов (:mod:`text_blocks.baseline_axis`).
+        gutter_mode: Как межколонники превращаются в запреты сцепки (``columns.GutterMode``).
+        join_leaders: Сращивать ли строки, сошедшиеся на общей точке отточия (``text_blocks.leader_join``).
 
     Returns:
-        ``PageAnalysis`` детектора текстовых блоков (пиксели рабочей копии 150 dpi).
+        Пара: ``PageAnalysis`` детектора текстовых блоков (пиксели рабочей копии 150 dpi) и подсказки.
     """
     gray300 = image.gray_at(RENDER_DPI)
     scale = WORK_DPI / image.dpi
@@ -150,9 +186,41 @@ def text_blocks(image, record: dict, objects: list[dict]):
     rules = [tuple((x * scale, y * scale) for x, y in rule["points"]) for rule in record["loose_rules"]]
     hints = build(forbidden, barriers, sideways, width, height, WORK_DPI, rules)
     return (
-        analyse_gray(gray300, InkEngine(hints=hints), hints=hints, name=page_key(record["page"]), variant="sharpened"),
+        analyse_gray(
+            gray300,
+            InkEngine(hints=hints, gutter_mode=gutter_mode, join_leaders=join_leaders),
+            hints=hints,
+            name=page_key(record["page"]),
+            variant="sharpened",
+            axis=axis,
+        ),
         hints,
     )
+
+
+def side_lines(analysis) -> list[dict[SideKind, FilledSide | None]]:
+    """Дополнительные линии левой и правой стороны каждого блока.
+
+    Стороны размечаются методом по умолчанию (``sides_of``), выровненные участки — методом
+    ``SIDE_ALIGN_METHOD``; по ним :func:`sides.filled_side` строит линию без невыровненных концов и с
+    PCHIP-заплатками на невыровненных кусках в середине.
+
+    Args:
+        analysis: Разбор текстовых блоков.
+
+    Returns:
+        По блоку (в порядке ``analysis.blocks``) словарь «сторона → линия»; ``None`` — у стороны линия не
+        построилась (мало звеньев или выровненных точек).
+    """
+    out = []
+    for block in analysis.blocks:
+        sides = sides_of(block)
+        lines: dict[SideKind, FilledSide | None] = {}
+        for side in (SideKind.LEFT, SideKind.RIGHT):
+            alignment = side_alignment(block, side, SIDE_ALIGN_METHOD)
+            lines[side] = None if alignment is None else filled_side(sides, alignment, block)
+        out.append(lines)
+    return out
 
 
 def folder_of(objects: list[dict]) -> Path:
@@ -163,8 +231,18 @@ def folder_of(objects: list[dict]) -> Path:
     return Path(NOT_ONLY_TEXT) / (classes.pop() if len(classes) == 1 else SEVERAL)
 
 
-def draw(image, analysis, hints, record: dict, objects: list[dict], titles: list, orientation: dict) -> np.ndarray:
-    """Оверлей полосы: текстовые блоки (огибающие, оси), объекты по классам полупрозрачно, линейки, легенда.
+def draw(
+    image,
+    analysis,
+    hints,
+    record: dict,
+    objects: list[dict],
+    titles: list,
+    orientation: dict,
+    lines: list[dict] | None = None,
+    body_axis: bool = False,
+) -> np.ndarray:
+    """Оверлей полосы: текстовые блоки (огибающие, оси), стороны блоков, объекты по классам, линейки, легенда.
 
     Args:
         image: Страница.
@@ -174,6 +252,8 @@ def draw(image, analysis, hints, record: dict, objects: list[dict], titles: list
         objects: Объекты полосы.
         titles: Рамки надписей, снятых с line art.
         orientation: Вердикт ориентации полосы.
+        lines: Дополнительные линии сторон блоков (:func:`side_lines`); ``None`` — не рисовать.
+        body_axis: Ряды и блоки собраны по второй оси строки (подпись в легенде).
 
     Returns:
         Картинка BGR.
@@ -182,6 +262,14 @@ def draw(image, analysis, hints, record: dict, objects: list[dict], titles: list
     canvas_scale = OVERLAY_WIDTH / analysis.width
     small = cv2.resize(gray, (OVERLAY_WIDTH, int(round(analysis.height * canvas_scale))), interpolation=cv2.INTER_AREA)
     canvas = blocks_overlay.draw(analysis, small, scale=canvas_scale)
+    if lines:
+        # Линии сторон — толстые, поэтому в слой и полупрозрачно: под ними читаются буквы и граница блока.
+        layer = canvas.copy()
+        for block_lines in lines:
+            for side, line in block_lines.items():
+                if line is not None:
+                    draw_filled_line(layer, line, canvas_scale, SIDE_THICKNESS, SIDE_COLOR[side], PATCH_COLOR)
+        cv2.addWeighted(layer, FILLED_ALPHA, canvas, 1 - FILLED_ALPHA, 0, canvas)
     k = OVERLAY_WIDTH / image.width
 
     def rect(box) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -202,10 +290,18 @@ def draw(image, analysis, hints, record: dict, objects: list[dict], titles: list
     for rule in record["loose_rules"]:
         points = np.array([[int(x * k), int(y * k)] for x, y in rule["points"]], np.int32)
         cv2.polylines(canvas, [points], False, RULE_COLOR, 2)
-    return _frame(canvas, record, objects, orientation, analysis)
+    return _frame(canvas, record, objects, orientation, analysis, bool(lines), body_axis)
 
 
-def _frame(canvas: np.ndarray, record: dict, objects: list[dict], orientation: dict, analysis) -> np.ndarray:
+def _frame(
+    canvas: np.ndarray,
+    record: dict,
+    objects: list[dict],
+    orientation: dict,
+    analysis,
+    with_sides: bool = False,
+    body_axis: bool = False,
+) -> np.ndarray:
     """Шапка (полоса, поворот, счёт объектов и блоков) и легенды классов и текстовых блоков — в полях.
 
     Обе легенды печатаются ПОД страницей, а не поверх неё (:mod:`ocr_utils.page_layout.overlay_frame`):
@@ -217,6 +313,8 @@ def _frame(canvas: np.ndarray, record: dict, objects: list[dict], orientation: d
         objects: Объекты полосы.
         orientation: Вердикт ориентации.
         analysis: Разбор текстовых блоков (счёт блоков и осей).
+        with_sides: Нарисованы ли дополнительные линии сторон (их строки в легенде).
+        body_axis: Основная ось строки — вторая (подпись оси в легенде).
 
     Returns:
         Картинка BGR: шапка, страница, легенда объектов, легенда текстовых блоков.
@@ -239,17 +337,32 @@ def _frame(canvas: np.ndarray, record: dict, objects: list[dict], orientation: d
         LegendEntry("надпись (снята с line art)", TITLE_COLOR),
         LegendEntry("линейка-сирота", RULE_COLOR),
     ]
+    blocks = blocks_overlay.legend_entries(body_axis=body_axis)
+    if with_sides:
+        blocks += [
+            LegendEntry("левая сторона блока (доп. линия)", SIDE_COLOR[SideKind.LEFT], FILLED_ALPHA),
+            LegendEntry("правая сторона блока (доп. линия)", SIDE_COLOR[SideKind.RIGHT], FILLED_ALPHA),
+            LegendEntry("сторона: заплатка PCHIP на месте выброса", PATCH_COLOR, FILLED_ALPHA, SampleStyle.DASHED),
+        ]
     return np.vstack(
         [
             header_strip(header, width),
             canvas,
             legend_strip(classes, width, "объекты"),
-            legend_strip(blocks_overlay.legend_entries(), width, "текстовые блоки"),
+            legend_strip(blocks, width, "текстовые блоки"),
         ]
     )
 
 
-def final_page(task: PageTask, orientation: dict, deepseek: dict, work: Path, out: Path) -> dict:
+def final_page(
+    task: PageTask,
+    orientation: dict,
+    deepseek: dict,
+    work: Path,
+    out: Path,
+    axis: AxisKind = AxisKind.CENTRE,
+    gutter_mode: GutterMode = GutterMode.SHORT,
+) -> dict:
     """Стадия 6: итог полосы — объекты, текстовые блоки, JSON и оверлей в папку по классам.
 
     Args:
@@ -258,18 +371,112 @@ def final_page(task: PageTask, orientation: dict, deepseek: dict, work: Path, ou
         deepseek: Вывод DeepSeek по кандидатам полосы (см. :func:`stages.decide_candidates`).
         work: Рабочая папка.
         out: Корень выхода (``pages/``, ``overlays/``).
+        axis: По какой оси строки собирать ряды и блоки (см. :func:`text_blocks`).
+        gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
     """
     started = time.time()
-    record = __import__("json").loads((work / "pages" / f"{page_key(task.name)}.json").read_text())
+    record = json.loads((work / "pages" / f"{page_key(task.name)}.json").read_text())
     image = load_image(task, record["rotate_cw"])
     decisions = decide_candidates(record, image, deepseek, work)
     assembled = assemble(record, decisions)
-    analysis, hints = text_blocks(image, record, assembled["objects"])
-    folder = folder_of(assembled["objects"])
-    picture = draw(image, analysis, hints, record, assembled["objects"], assembled["titles"], orientation)
+    candidates = [{"id": c["id"], "box": c["crop"]["box"], **d.to_json()} for c, d in decisions]
+    return finish_page(
+        task, image, record, assembled["objects"], assembled["titles"], candidates, orientation, out, axis,
+        gutter_mode, started,
+    )  # fmt: skip
+
+
+def page_record(final: dict) -> dict:
+    """Запись стадии кандидатов, собранная из итогового JSON полосы: всё, что нужно текстовым блокам.
+
+    Текстовым блокам и оверлею из записи кандидатов нужны только ``page``, ``size``, ``dpi``,
+    ``loose_rules`` и ``rotate_cw`` — всё это есть в итоговом JSON (поворот — из вердикта ориентации,
+    если он применён). Так текстовые блоки пересчитываются по готовому разбору, даже когда его
+    рабочая папка (``work/``) почищена.
+
+    Args:
+        final: Итоговый JSON полосы (:func:`finish_page`).
+
+    Returns:
+        Словарь в форме записи ``work/pages/<полоса>.json``.
+    """
+    orientation = final.get("orientation") or {}
+    return {
+        "page": final["page"],
+        "size": final["size"],
+        "dpi": final["dpi"],
+        "loose_rules": final.get("loose_rules", []),
+        "rotate_cw": orientation.get("rotate_cw", 0) if orientation.get("apply") else 0,
+    }
+
+
+def reblock_page(
+    task: PageTask, source: Path, out: Path, axis: AxisKind = AxisKind.BODY, gutter_mode: GutterMode = GutterMode.SHORT
+) -> dict:
+    """Пересчитать только текстовые блоки полосы по готовому разбору пака; объекты, надписи и кандидаты — как были.
+
+    Нужна после правки детектора текстовых блоков, когда остальные стадии (растр, line art с
+    DeepSeek) пересчитывать незачем, а их рабочие файлы могут быть уже почищены: всё берётся из
+    итогового JSON прошлого разбора ``<source>/pages/<полоса>.json``.
+
+    Args:
+        task: Полоса.
+        source: Корень прошлого разбора.
+        out: Корень выхода (``pages/``, ``overlays/``).
+        axis: Ось строки для рядов и блоков.
+        gutter_mode: Как межколонники становятся запретами сцепки.
+
+    Returns:
+        Строка описи, как у :func:`final_page`.
+    """
+    started = time.time()
+    final = json.loads((source / "pages" / f"{page_key(task.name)}.json").read_text())
+    record = page_record(final)
+    image = load_image(task, record["rotate_cw"])
+    return finish_page(
+        task, image, record, final["objects"], final["titles"], final["candidates"], final["orientation"], out,
+        axis, gutter_mode, started,
+    )  # fmt: skip
+
+
+def finish_page(
+    task: PageTask,
+    image,
+    record: dict,
+    objects: list[dict],
+    titles: list,
+    candidates: list[dict],
+    orientation: dict,
+    out: Path,
+    axis: AxisKind,
+    gutter_mode: GutterMode,
+    started: float,
+) -> dict:
+    """Текстовые блоки полосы, оверлей в папку по классам и итоговый JSON — общий хвост :func:`final_page` и :func:`reblock_page`.
+
+    Args:
+        task: Полоса.
+        image: Страница (``PageImage``).
+        record: Запись стадии кандидатов (или :func:`page_record`).
+        objects: Объекты полосы (:func:`assemble`).
+        titles: Рамки надписей, снятых с line art.
+        candidates: Кандидаты line art с решениями DeepSeek (в JSON как есть).
+        orientation: Вердикт ориентации.
+        out: Корень выхода.
+        axis: Ось строки для рядов и блоков.
+        gutter_mode: Как межколонники становятся запретами сцепки.
+        started: Время начала обработки полосы (``time.time()``) — для поля ``seconds``.
+
+    Returns:
+        Строка описи: полоса, папка, классы, число блоков, время.
+    """
+    analysis, hints = text_blocks(image, record, objects, axis, gutter_mode)
+    lines = side_lines(analysis)
+    folder = folder_of(objects)
+    picture = draw(image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY)
     target = out / "overlays" / folder / f"{page_key(task.name)}.jpg"
     target.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(target), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -282,15 +489,24 @@ def final_page(task: PageTask, orientation: dict, deepseek: dict, work: Path, ou
         "size": record["size"],
         "dpi": record["dpi"],
         "orientation": orientation,
-        "objects": assembled["objects"],
-        "titles": assembled["titles"],
-        "candidates": [{"id": c["id"], "box": c["crop"]["box"], **d.to_json()} for c, d in decisions],
+        "objects": objects,
+        "titles": titles,
+        "candidates": candidates,
         "loose_rules": record["loose_rules"],
         "text_blocks": {
             "dpi": WORK_DPI,
+            "axis": axis.value,
+            "gutter_mode": gutter_mode.value,
             "count": len(analysis.blocks),
             "axes": len(analysis.axes),
-            "blocks": [{"polygon": np.asarray(b.envelope.polygon).round(1).tolist()} for b in analysis.blocks],
+            "blocks": [
+                {
+                    "polygon": np.asarray(b.envelope.polygon).round(1).tolist(),
+                    # Дополнительные линии сторон (метод выравнивания — ``SIDE_ALIGN_METHOD``).
+                    "sides": {side.value: filled_json(line) for side, line in own.items()},
+                }
+                for b, own in zip(analysis.blocks, lines)
+            ],
         },
         "folder": str(folder),
         "seconds": round(time.time() - started, 2),
@@ -299,11 +515,21 @@ def final_page(task: PageTask, orientation: dict, deepseek: dict, work: Path, ou
     return {
         "page": task.name,
         "folder": str(folder),
-        "classes": ",".join(sorted({o["class"] for o in assembled["objects"]})),
+        "classes": ",".join(sorted({o["class"] for o in objects})),
         "blocks": len(analysis.blocks),
         "rotate_cw": record["rotate_cw"],
         "seconds": result["seconds"],
     }
 
 
-__all__ = ["PageClass", "assemble", "final_page", "folder_of", "text_blocks"]
+__all__ = [
+    "PageClass",
+    "assemble",
+    "final_page",
+    "finish_page",
+    "folder_of",
+    "page_record",
+    "reblock_page",
+    "side_lines",
+    "text_blocks",
+]

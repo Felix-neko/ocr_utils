@@ -119,13 +119,17 @@ def binarize(gray: np.ndarray) -> np.ndarray:
     return binary
 
 
-def _axis_mask(binary: np.ndarray, length_px: int, horizontal: bool) -> np.ndarray:
+def _axis_mask(binary: np.ndarray, length_px: int, horizontal: bool, close_px: int | None = None) -> np.ndarray:
     """Что тянется вдоль оси не меньше ``length_px`` подряд.
 
     Args:
         binary: Бинарная картинка (краска 255, бумага 0).
         length_px: Длина ядра и порог длины линейки, px.
         horizontal: ``True`` — искать горизонтали, ``False`` — вертикали.
+        close_px: Длина ядра закрытия (сшивка разрывов уже найденных пробегов); ``None`` — та же,
+            что ``length_px`` (прежнее поведение). Ядро закрытия всегда нечётное: у чётного OpenCV
+            ставит якорь не в середину, и концы пробегов сдвигаются на пиксель (замер 2026-09-28:
+            сдвиг на пиксель менял сетку у 26 таблиц пака-1 из 914).
 
     Returns:
         Маска линеек того же размера, что ``binary``.
@@ -150,6 +154,9 @@ def _axis_mask(binary: np.ndarray, length_px: int, horizontal: bool) -> np.ndarr
     # белое, и тогда сжатие после расширения у самого края не отрабатывает: линейка,
     # начинающаяся в 30 px от края, расползается ДО края и тянет за собой рамку таблицы.
     # На синтетическом тесте это давало рамку во весь кадр вместо рамки по линейкам.
+    if close_px is not None:
+        close_px = max(1, int(close_px)) | 1
+        kernel = np.ones((1, close_px) if horizontal else (close_px, 1), np.uint8)
     closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
     height, width = binary.shape[:2]
     return np.ascontiguousarray(closed[pad_y : pad_y + height, pad_x : pad_x + width])

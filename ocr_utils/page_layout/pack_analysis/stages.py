@@ -33,7 +33,8 @@ from ocr_utils.page_layout.line_art.deepseek.decide import Decision, decide, nee
 from ocr_utils.page_layout.line_art.deepseek.pass2 import fill_words
 from ocr_utils.page_layout.line_art.deepseek.rules import Crop, crop_region
 from ocr_utils.page_layout.orientation.analysis import combine
-from ocr_utils.page_layout.regions import RegionKind
+from ocr_utils.page_layout.pack_analysis.raster_db import DB_SOURCE
+from ocr_utils.page_layout.regions import Region, RegionKind
 from ocr_utils.page_layout.surya.cache import SuryaCache
 from ocr_utils.page_layout.surya.source import SuryaSource
 from ocr_utils.scan_markup.rotation import rotate_cw
@@ -132,7 +133,7 @@ def _region_json(region) -> dict:
     }
 
 
-def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path) -> dict:
+def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path, raster: list[dict] | None = None) -> dict:
     """Стадия 2: растр, таблицы, кандидаты line art, формулы surya, повёрнутый текст; вырезки кандидатов.
 
     Args:
@@ -140,6 +141,10 @@ def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path) -
         rotate: Применённый поворот (из стадии 1), градусы.
         cache_root: Корень кэша surya.
         work: Рабочая папка прогона.
+        raster: Готовые растровые области полосы (из базы разметки, :func:`raster_db.load_raster`), в
+            пикселях кадра полосы. ``None`` — растр ищет детектор; список (в том числе пустой) —
+            детектор растра не запускается, области идут в разбор известными исключениями: line art
+            и повёрнутый текст ищутся вне них, таблицы, накрытые ими, отбрасываются.
 
     Returns:
         Описание полосы (то же пишется в ``work/pages/<ключ>.json``), с ``candidates`` — кандидаты
@@ -147,8 +152,14 @@ def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path) -
     """
     image = load_image(task, rotate)
     surya = SuryaSource(SuryaCache(cache_root, readonly=True), None)
-    finds = {Find.RASTER, Find.TABLES, Find.LINE_ART, Find.ROTATED_TEXT}
-    layout = PageLayout(image, finds, LayoutOptions()).process(surya)
+    finds = {Find.TABLES, Find.LINE_ART, Find.ROTATED_TEXT}
+    known = None
+    if raster is None:
+        finds.add(Find.RASTER)
+    else:
+        # Выверенный растр — известное семейство: ``PageLayout`` берёт его в исключения, как на ``detect``.
+        known = {Find.RASTER: [Region(Box(*r["box"]), RegionKind(r["kind"]), None, DB_SOURCE) for r in raster]}
+    layout = PageLayout(image, finds, LayoutOptions(), known=known).process(surya)
     gray = image.gray
     crops_dir = work / "crops" / "pass1"
     crops_dir.mkdir(parents=True, exist_ok=True)
@@ -164,7 +175,7 @@ def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path) -
         "size": [image.width, image.height],
         "dpi": image.dpi,
         "surya_used": layout.surya_used,
-        "raster": [_region_json(r) for r in layout.raster_pics + layout.stamp_suspects],
+        "raster": raster if raster is not None else [_region_json(r) for r in layout.raster_pics + layout.stamp_suspects],
         "tables": [_region_json(r) for r in layout.tables],
         "formulas": [_region_json(r) for r in layout.formulas],
         "rotated_text": [_region_json(r) for r in layout.rotated_text_not_in_tables_regions],

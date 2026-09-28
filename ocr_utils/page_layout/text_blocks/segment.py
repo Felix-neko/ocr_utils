@@ -68,6 +68,19 @@ COVER_SAMPLES = 32
 # Скрещивание осей: разность ординат должна уйти за этот запас в обе стороны (пиксели рабочей
 # копии), как в ``metrics.crossings_of``, — иначе шум оси на общей строке читается как смена мест.
 CROSS_MARGIN_PX = 2.0
+# Межколонник не режет строку (:func:`_split_at_gutters`), у которой просвет на нём уже стольких
+# медианных высот её букв: это пробел заголовка, стоящий над межколонником (1968/04 IMG_0050_1L —
+# «Сборник статей | о снабжении»), а не межколонник. У строк корпуса, сшитых через межколонник,
+# просвет 3–5 мм при высоте букв ~2.5 мм. Запрет СЦЕПКИ (:func:`_crosses`) такого исключения не
+# имеет: с ним на полосе по формату с растянутыми пробелами строки колонок сцеплялись через
+# межколонник (1972/04 IMG_0047_1L).
+SPLIT_MIN_GAP_GLYPH = 0.8
+# ...и не режет строку, если просвет на нём не шире медианы ОСТАЛЬНЫХ пробелов строки в столько раз:
+# у заголовка все пробелы одинаковы (1968/04 IMG_0050_1L: 22 px на межколоннике против 19 и 19), у
+# строк корпуса, сшитых через межколонник, он вдвое-вчетверо шире пробелов. Пробелом считается
+# просвет между буквами шире ``SPLIT_SPACE_MIN_GLYPH`` их медианной высоты.
+SPLIT_SPACE_RATIO = 1.5
+SPLIT_SPACE_MIN_GLYPH = 0.25
 # Краска корпусных строк основного кегля скрывается от крупного масштаба: компонента его маски
 # глифов, лежащая в полосах корпусных строк на эту долю площади и больше, выбрасывается. Без этого
 # на корпусе крупный масштаб видит одни высокие буквы («р», «д», «б», прописные, цифры): кусок в
@@ -755,6 +768,26 @@ def _segment_of(
     )
 
 
+def _spaces(lefts: np.ndarray, rights: np.ndarray, min_width: float, skip_from: float) -> np.ndarray:
+    """Пробелы строки: просветы между соседними по x буквами шире ``min_width``.
+
+    Args:
+        lefts, rights: Левые и правые края букв строки.
+        min_width: Уже этого — просвет между буквами слова, а не пробел.
+        skip_from: Просвет, начинающийся здесь (на межколоннике), не считается.
+
+    Returns:
+        Ширины пробелов.
+    """
+    order = np.argsort(lefts)
+    # Правый край «уже пройденной» краски: буквы могут накрывать друг друга по x.
+    reach = np.maximum.accumulate(rights[order])
+    gaps = lefts[order][1:] - reach[:-1]
+    starts = reach[:-1]
+    keep = (gaps > min_width) & (starts != skip_from)
+    return gaps[keep].astype(float)
+
+
 def _split_at_gutters(
     span: list[int], stats: np.ndarray, separators: list[tuple[int, int, int, int]], ink300: np.ndarray, k: float
 ) -> list[list[int]]:
@@ -772,11 +805,26 @@ def _split_at_gutters(
     centres = members[:, cv2.CC_STAT_LEFT] + members[:, cv2.CC_STAT_WIDTH] / 2.0
     cuts: list[float] = []
     cy = (y0 + y1) / 2.0
+    lefts = members[:, cv2.CC_STAT_LEFT]
+    rights = lefts + members[:, cv2.CC_STAT_WIDTH]
+    glyph = float(np.median(members[:, cv2.CC_STAT_HEIGHT]))
     for gx0, gx1, gy0, gy1 in separators:
         if gx0 <= 0 or not (centres.min() < gx0 and centres.max() > gx1):
             continue
         if not gy0 <= cy <= gy1:
             continue  # межколонник живёт ниже или выше этой строки — резать по нему нечего
+        # Просвет строки на межколоннике: от последней буквы слева до первой справа. Уже высоты букв —
+        # это пробел заголовка над межколонником, а не межколонник (``SPLIT_MIN_GAP_GLYPH``).
+        middle = (gx0 + gx1) / 2.0
+        before, after = rights[centres < middle], lefts[centres >= middle]
+        if before.size and after.size:
+            gap = float(after.min() - before.max())
+            if gap < SPLIT_MIN_GAP_GLYPH * glyph:
+                continue
+            # Остальные пробелы строки: просвет между соседними по x буквами, кроме самого межколонника.
+            spaces = _spaces(lefts, rights, SPLIT_SPACE_MIN_GLYPH * glyph, float(before.max()))
+            if spaces.size and gap < SPLIT_SPACE_RATIO * float(np.median(spaces)):
+                continue
         # Та же мера, что и при сцепке: доля СТОЛБЦОВ межколонника с краской на высоте строки.
         # По площади мера была слишком чувствительной — одна точка давала «краска есть».
         if gutter_filled(ink300, gx0, gx1, cy, (y1 - y0) / 2.0, k) >= DOT_FILL_SHARE:
@@ -1349,6 +1397,7 @@ def segments_of(
     leaders: list | None = None,
     linking: str = LINKING_DEFAULT,
     barriers: "BarrierLines | None" = None,
+    join_leaders: bool = True,
 ) -> tuple[list[Segment], list[Rule]]:
     """Строки страницы с центр-линиями по краске, в обоих масштабах, и сплошные черты.
 
@@ -1360,6 +1409,8 @@ def segments_of(
         linking: Способ сцепки кусков: ``zones`` (по зонам поиска) или ``greedy`` (прежний ход).
         barriers: Линейки-барьеры (:class:`barriers.BarrierLines`) в пикселях рабочей копии: через
             них не смыкается RLSA и не сцепляются куски строки. ``None`` — нет.
+        join_leaders: Сращивать ли строки, сошедшиеся после продления на общей точке отточия
+            (:mod:`leader_join`): «подпись . . . . число» таблицы — одна строка.
 
     Returns:
         Строки сверху вниз (сначала корпус, затем крупные строки, не накрытые корпусными) и
@@ -1383,6 +1434,14 @@ def segments_of(
         dpi,
         barrier_separators,
     )
+    if join_leaders:
+        # Подпись, продлённая по отточию, и число, к которому прилипли последние точки того же
+        # отточия, проходят над одними и теми же точками — это одна строка ряда таблицы.
+        from ocr_utils.page_layout.text_blocks.leader_join import join_on_leaders
+
+        body = join_on_leaders(
+            body, leaders, dpi, SCALES[0], separators, rules, barriers, ink300, RENDER_DPI / dpi, _crosses
+        )
     # Крупный масштаб не видит строк абзацев основного кегля, уже собранных корпусом: иначе по их
     # высоким буквам он сцепляет соседние ряды (см. ``CLAIMED_SHARE``).
     rows = _text_rows(body)

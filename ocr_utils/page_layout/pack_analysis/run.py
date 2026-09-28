@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -21,7 +22,8 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
-from ocr_utils.page_layout.pack_analysis.final import final_page
+from ocr_utils.page_layout.pack_analysis.final import final_page, reblock_page
+from ocr_utils.page_layout.pack_analysis.raster_db import load_raster, same_raster
 from ocr_utils.page_layout.pack_analysis.stages import (
     PageTask,
     candidates_page,
@@ -33,6 +35,8 @@ from ocr_utils.page_layout.pack_analysis.stages import (
     read_jsonl_map,
     rotated_name,
 )
+from ocr_utils.page_layout.text_blocks.columns import GutterMode
+from ocr_utils.page_layout.text_blocks.page import AxisKind
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +123,98 @@ def stage_rotated_surya(tasks: list[PageTask], orientation: dict[str, dict], cac
         model.close()
 
 
-def stage_candidates(tasks, orientation, cache_root: Path, work: Path, jobs: int) -> None:
-    """Стадия 2: растр, таблицы, кандидаты line art и их вырезки → ``work/pages``, ``work/jobs_pass1.jsonl``."""
+# Промпты DeepSeek по проходам: какие файлы ``deepseek/pass{1,2}/<промпт>.jsonl`` пишет воркер.
+PASS_PROMPTS = {"pass1": ("markdown", "ocr"), "pass2": ("markdown",)}
+
+
+def stage_reuse(tasks: list[PageTask], previous: Path, work: Path, raster: dict[str, list[dict]]) -> None:
+    """Стадия 1.5: полосы, чей растр не изменился против прошлого прогона, берутся из него целиком.
+
+    Растр — запретная зона line art, таблиц и повёрнутого текста; если он тот же (:func:`same_raster`),
+    стадия кандидатов дала бы то же самое, и DeepSeek по тем же вырезкам — тот же ответ. Такой полосе
+    копируются запись стадии кандидатов, PNG-вырезки её кандидатов обоих проходов и строки вывода
+    DeepSeek (воркер vLLM пропускает готовые id, так что по ним он не пойдёт). Остальные полосы
+    остаются стадии кандидатов, их список — в ``work/raster_changed.txt``.
+
+    Идемпотентна: полосы, у которых запись уже есть, не трогаются; строки DeepSeek не дублируются.
+
+    Args:
+        tasks: Полосы.
+        previous: Корень прошлого прогона (его ``work/``).
+        work: Рабочая папка нового прогона.
+        raster: Растр полос из базы (:func:`raster_db.load_raster`).
+    """
+    old_work = previous / "work"
+    reused_ids: set[str] = set()
+    changed: list[str] = []
+    reused = 0
+    for task in tasks:
+        key = page_key(task.name)
+        target = work / "pages" / f"{key}.json"
+        source = old_work / "pages" / f"{key}.json"
+        if not source.is_file():
+            changed.append(task.name)
+            continue
+        record = json.loads(source.read_text())
+        if not same_raster(record["raster"], raster.get(task.name, [])):
+            changed.append(task.name)
+            continue
+        ids = [c["id"] for c in record["candidates"]]
+        reused_ids.update(ids)
+        if target.is_file():
+            reused += 1
+            continue
+        # Вырезки — до записи полосы: запись полосы означает «полоса готова», и прерванное копирование
+        # не должно оставить полосу без вырезок.
+        for crops in ("pass1", "pass2"):
+            for candidate_id in ids:
+                crop = old_work / "crops" / crops / f"{candidate_id}.png"
+                if crop.is_file():
+                    (work / "crops" / crops).mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(crop, work / "crops" / crops / f"{candidate_id}.png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        reused += 1
+    for stage, prompts in PASS_PROMPTS.items():
+        for prompt in prompts:
+            _copy_jsonl(
+                old_work / "deepseek" / stage / f"{prompt}.jsonl",
+                work / "deepseek" / stage / f"{prompt}.jsonl",
+                reused_ids,
+            )
+    (work / "raster_changed.txt").write_text("".join(f"{name}\n" for name in changed))
+    logger.info("Растр из базы: полос взято из прошлого прогона %d, пересчитывается %d", reused, len(changed))
+
+
+def _copy_jsonl(source: Path, target: Path, ids: set[str]) -> None:
+    """Дописать в ``target`` строки ``source`` с id из ``ids``, которых в ``target`` ещё нет."""
+    if not source.is_file():
+        return
+    present = set(read_jsonl_map(target))
+    lines = [
+        line
+        for line in source.read_text().splitlines()
+        if line.strip() and (record_id := json.loads(line)["id"]) in ids and record_id not in present
+    ]
+    if lines:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+
+def stage_candidates(
+    tasks, orientation, cache_root: Path, work: Path, jobs: int, raster: dict[str, list[dict]] | None = None
+) -> None:
+    """Стадия 2: растр, таблицы, кандидаты line art и их вырезки → ``work/pages``, ``work/jobs_pass1.jsonl``.
+
+    ``raster`` — растр полос из базы (:func:`raster_db.load_raster`); задан — детектор растра не
+    запускается, полоса без записи в словаре считается полосой без растра.
+    """
     todo = [t for t in tasks if not (work / "pages" / f"{page_key(t.name)}.json").is_file()]
     logger.info("Кандидаты: полос %d, к обработке %d", len(tasks), len(todo))
     if todo:
         rotations = [orientation[t.name]["rotate_cw"] if orientation[t.name]["apply"] else 0 for t in todo]
+        page_raster = [None if raster is None else raster.get(t.name, []) for t in todo]
         with _pool(jobs) as pool:
             for result in pool.map(
                 _safe,
@@ -133,6 +223,7 @@ def stage_candidates(tasks, orientation, cache_root: Path, work: Path, jobs: int
                 rotations,
                 [cache_root] * len(todo),
                 [work] * len(todo),
+                page_raster,
                 chunksize=2,
             ):
                 if "error" in result:
@@ -200,7 +291,16 @@ def stage_pass2(work: Path, jobs: int) -> None:
     logger.info("Второй проход: %d из %d кандидатов", len(chosen), len(candidates))
 
 
-def stage_final(tasks, orientation, work: Path, out: Path, jobs: int, redo: bool = False) -> None:
+def stage_final(
+    tasks,
+    orientation,
+    work: Path,
+    out: Path,
+    jobs: int,
+    redo: bool = False,
+    axis: AxisKind = AxisKind.CENTRE,
+    gutter_mode: GutterMode = GutterMode.SHORT,
+) -> None:
     """Стадия 6: итог полос, оверлеи по папкам, ``index.csv``.
 
     Args:
@@ -211,6 +311,8 @@ def stage_final(tasks, orientation, work: Path, out: Path, jobs: int, redo: bool
         jobs: Воркеров пула.
         redo: Пересчитать все полосы, а не только те, у которых итога ещё нет (после правки
             детектора текстовых блоков или оверлея — остальные стадии при этом не трогаются).
+        axis: По какой оси строки собирать ряды и блоки (см. :func:`final.text_blocks`).
+        gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
     """
     pass1 = read_jsonl_map(work / "deepseek" / "pass1" / "markdown.jsonl")
     pass2 = read_jsonl_map(work / "deepseek" / "pass2" / "markdown.jsonl")
@@ -235,7 +337,8 @@ def stage_final(tasks, orientation, work: Path, out: Path, jobs: int, redo: bool
             for done, result in enumerate(
                 pool.map(
                     _safe, [final_page] * len(todo), todo, [orientation[t.name] for t in todo], payloads,
-                    [work] * len(todo), [out] * len(todo), chunksize=2,
+                    [work] * len(todo), [out] * len(todo), [axis] * len(todo), [gutter_mode] * len(todo),
+                    chunksize=2,
                 ),
                 1,
             ):  # fmt: skip
@@ -243,8 +346,58 @@ def stage_final(tasks, orientation, work: Path, out: Path, jobs: int, redo: bool
                     logger.error("итог: %s", result)
                 if done % 500 == 0:
                     logger.info("итог: %d/%d", done, len(todo))
+    write_index(ready, out)
+
+
+def stage_reblock(
+    tasks: list[PageTask],
+    source: Path,
+    out: Path,
+    jobs: int,
+    axis: AxisKind = AxisKind.BODY,
+    gutter_mode: GutterMode = GutterMode.SHORT,
+    redo: bool = False,
+) -> None:
+    """Пересчитать только текстовые блоки по готовому разбору пака: ``<out>/pages``, ``overlays``, ``index.csv``.
+
+    Объекты, надписи, кандидаты и ориентация берутся из итоговых JSON ``<source>/pages``
+    (:func:`final.reblock_page`); рабочая папка прошлого разбора не нужна. Идемпотентна: полосы с
+    готовым итогом в ``out`` пропускаются, если не ``redo``.
+
+    Args:
+        tasks: Полосы.
+        source: Корень прошлого разбора.
+        out: Корень выхода (не тот же, что ``source``).
+        jobs: Воркеров пула.
+        axis: Ось строки для рядов и блоков.
+        gutter_mode: Как межколонники становятся запретами сцепки.
+        redo: Пересчитать и готовые полосы.
+    """
+    if out.resolve() == source.resolve():
+        raise ValueError("пересчёт текстовых блоков пишется в новую папку, а не поверх прошлого разбора")
+    ready = [t for t in tasks if (source / "pages" / f"{page_key(t.name)}.json").is_file()]
+    todo = ready if redo else [t for t in ready if not (out / "pages" / f"{page_key(t.name)}.json").is_file()]
+    logger.info("Текстовые блоки по %s: полос %d, к обработке %d", source, len(ready), len(todo))
+    if todo:
+        with _pool(jobs) as pool:
+            for done, result in enumerate(
+                pool.map(
+                    _safe, [reblock_page] * len(todo), todo, [source] * len(todo), [out] * len(todo),
+                    [axis] * len(todo), [gutter_mode] * len(todo), chunksize=4,
+                ),
+                1,
+            ):  # fmt: skip
+                if "error" in result:
+                    logger.error("блоки: %s", result)
+                if done % 500 == 0:
+                    logger.info("блоки: %d/%d", done, len(todo))
+    write_index(ready, out)
+
+
+def write_index(tasks: list[PageTask], out: Path) -> None:
+    """Опись ``<out>/index.csv`` по итоговым JSON полос: папка, классы, число блоков, ориентация."""
     rows = []
-    for task in ready:
+    for task in tasks:
         path = out / "pages" / f"{page_key(task.name)}.json"
         if path.is_file():
             result = json.loads(path.read_text())
@@ -283,6 +436,11 @@ def run(
     limit: int | None,
     detect_orientation: bool = True,
     redo_final: bool = False,
+    raster_db: Path | None = None,
+    pack_name: str = "пак-1",
+    reuse_from: Path | None = None,
+    axis: AxisKind = AxisKind.CENTRE,
+    gutter_mode: GutterMode = GutterMode.SHORT,
 ) -> None:
     """Весь разбор по стадиям.
 
@@ -296,6 +454,12 @@ def run(
         detect_orientation: Определять ли ориентацию; ``False`` — все полосы считаются прямыми
             (заострённые копии пака-1 экспортированы уже повёрнутыми, стадия там ничего не даёт).
         redo_final: Пересчитать итоговую стадию у всех полос (см. :func:`stage_final`).
+        raster_db: База разметки после ревью: растр берётся из неё, детектор растра не запускается.
+        pack_name: Имя пака в базе.
+        reuse_from: Корень прошлого прогона: полосы с тем же растром берутся из него (:func:`stage_reuse`);
+            только вместе с ``raster_db``.
+        axis: Ось строки, по которой детектор текстовых блоков собирает ряды и блоки.
+        gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
     """
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -306,11 +470,19 @@ def run(
     else:
         logger.info("Ориентация не определяется: все %d полос считаются прямыми", len(tasks))
         orientation = upright(tasks)
-    stage_candidates(tasks, orientation, cache_root, work, jobs)
+    raster = None
+    if raster_db is not None:
+        raster = load_raster(raster_db, pack_name)
+        logger.info("Растр из базы %s: полос с растром %d", raster_db, len(raster))
+        if reuse_from is not None:
+            stage_reuse(tasks, reuse_from, work, raster)
+    elif reuse_from is not None:
+        raise ValueError("--reuse-from имеет смысл только с растром из базы (--raster-db)")
+    stage_candidates(tasks, orientation, cache_root, work, jobs, raster)
     stage_deepseek(work / "jobs_pass1.jsonl", work / "deepseek" / "pass1", "markdown,ocr")
     stage_pass2(work, jobs)
     stage_deepseek(work / "jobs_pass2.jsonl", work / "deepseek" / "pass2", "markdown")
-    stage_final(tasks, orientation, work, out, jobs, redo=redo_final)
+    stage_final(tasks, orientation, work, out, jobs, redo=redo_final, axis=axis, gutter_mode=gutter_mode)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -320,4 +492,4 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-__all__ = ["list_tasks", "run"]
+__all__ = ["list_tasks", "run", "stage_reblock", "stage_reuse", "write_index"]

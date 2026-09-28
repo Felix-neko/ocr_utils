@@ -31,6 +31,14 @@
 | `run_toc.sh` | `scan_markup toc` | `PACK_DIR`/`SHARPENED_DIR`, `LAYOUT_CACHE_DIR`, `TOC_LABELS` | `DB`, `TOC_DIR/{toc_pack1.csv,sheets,found}` | Отдельно от шага 1 ради калибровки: меряется только окно выпуска (~2 200 полос), минуты. Пороги через `--thr`. Выпуск без «Содержания» в выводе — красный флаг. |
 | `run_toc_pages.sh` | `scan_markup toc-pages` | `DB` | `TOC_LISTS_DIR/<год>/<выпуск>/toc_pages.txt` | Списки уходят во внешний OCR как `--skip-pages` и как `--pages`. |
 
+### Разбор страниц (`run_scripts/page_layout/`) — после шагов 3 и 7
+
+| Скрипт | Команда | Читает | Пишет | Замечания |
+|---|---|---|---|---|
+| `run_pack1_analysis.sh` | `page_layout analyze-pack` | `SHARPENED_DIR`, `LAYOUT_CACHE_DIR` | `pack1_page_analysis[_v2]` | Все детекторы, включая растр; DeepSeek-OCR-2 через vLLM (GPU) |
+| `run_pack1_analysis_v3.sh` | `analyze-pack --raster-db --reuse-from --axis body` | то же + `DB_REVIEWED`, `pack1_page_analysis_v2/work` | `pack1_page_analysis_v3` | Растр — из базы после ревью (без печатей); line art и DeepSeek — только на полосах, где растр отличается от v2; блоки по второй оси; на оверлее доп. линии сторон блоков |
+| `run_pack1_analysis_v4.sh` | `page_layout reblock-pack --from v3 --axis body --gutter-mode short` | `SHARPENED_DIR`, `pack1_page_analysis_v3/pages` | `pack1_page_analysis_v4` | Только текстовые блоки заново (межколонники `short`); объекты, надписи, DeepSeek и ориентация — из итоговых JSON v3, `work/` не нужен и не создаётся |
+
 ### Ориентация полос — на `SHARPENED_DIR`, `DB_REVIEWED` только на чтение
 
 | Скрипт | Команда | Читает | Пишет | Замечания |

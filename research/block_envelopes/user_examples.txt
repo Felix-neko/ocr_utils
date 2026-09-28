@@ -1,0 +1,15 @@
+# Примеры пользователя от 2026-09-28 (оверлеи pack1_page_analysis_v3/только_текст), тег — вид сбоя
+1966/01/IMG_0036_2R,split
+1966/02/IMG_0076_1L,split
+1966/02/IMG_0098_2R,split
+1966/02/IMG_0073_1L,split hmerge
+1966/02/IMG_0099_2R,split
+1966/03/IMG_0120_2R,split
+1966/02/IMG_0065_2R,bulge
+1966/02/IMG_0068_2R,bulge
+1966/02/IMG_0072_1L,bulge
+1966/02/IMG_0072_2R,bulge
+1966/02/IMG_0073_2R,bulge
+1966/02/IMG_0077_1L,saw lost
+1966/02/IMG_0086_1L,bulge
+1966/02/IMG_0086_2R,saw

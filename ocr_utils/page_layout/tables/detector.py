@@ -607,7 +607,9 @@ def detect_all(
 
     Непристроенная линейка — линейка полосы (без теней у края кадра), центр которой не лежит ни в
     одной находке. Её форма берётся из трассы ``traces.trace_rules`` (сплайн — изогнутая линейка
-    остаётся изогнутой); нет трассы — прямой отрезок по габариту и наклону.
+    остаётся изогнутой); нет трассы — прямой отрезок по габариту и наклону. Наружу отдаются только
+    линейки на чистой бумаге (:func:`rules.loose_rule_is_clean`): «линейка», вдоль которой вплотную
+    стоят буквы заголовка, — это сами буквы, а не отбивка.
 
     Args:
         gray: Серая полоса в рабочем разрешении.
@@ -630,7 +632,11 @@ def detect_all(
     from ocr_utils.page_layout.tables.traces import trace_rules
 
     traced = trace_rules(gray, dpi)
-    return TableDetection(found, [_loose_rule(segment, traced.all, dpi) for segment in loose])
+    # Наружу — только линейки на чистой бумаге: буквы жирного заголовка и стволы соседних строк,
+    # сшитые в «линейку», иначе стали бы барьерами и резали строки текстовых блоков.
+    binary = binarize(gray)
+    shaped = [_loose_rule(segment, traced.all, dpi) for segment in loose]
+    return TableDetection(found, [rule for rule in shaped if rules.loose_rule_is_clean(binary, rule, dpi)])
 
 
 def _loose_rule(segment: Segment, traced: list, dpi: int) -> LooseRule:

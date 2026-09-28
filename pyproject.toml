@@ -72,6 +72,7 @@ skip-magic-trailing-comma = true
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-xdist>=3.8.0",
 ]
 experimental = [
     "mawo-pymorphy3>=1.0.4",

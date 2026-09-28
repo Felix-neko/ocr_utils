@@ -42,12 +42,20 @@ from ocr_utils.page_layout.tables.ruling import (
     binarize,
     mm_to_px,
 )
-from ocr_utils.page_layout.geometry import Box
+from ocr_utils.page_layout.geometry import Box, LooseRule
 
 # Ядро поиска фрагмента: 3 мм. Короче — и тире, перекладины «Т» и «Г» становятся фрагментами
 # сотнями; длиннее — и загнутый конец линейки снова теряется. Одиночный фрагмент в линейку не
 # превращается: цепочка обязана набрать ``MIN_RULE_MM``.
 FRAGMENT_MM = 3.0
+
+# Разрывы до этой длины между найденными пробегами зашиваются ещё при поиске кусков, без проверок; всё,
+# что длиннее, сшивает цепочка (``continues``) — с проверкой соосности и правилом коротких кусков. Раньше
+# зашивалось ядром самого куска (3 мм), и два ствола букв соседних строк («р» над «р», разрыв 2,7 мм)
+# склеивались в «линейку» мимо этого правила (1966/03 IMG_0143_1L). Замер по паку-1 (2026-09-28, 914
+# таблиц): при 2 мм сетка ячеек не изменилась у 913; линеек-сирот исчезло 770 вертикалей и 259
+# горизонталей, в просмотренной выборке — стволы и буквы заголовков.
+FRAGMENT_CLOSE_MM = 2.0
 
 # Два фрагмента одной оси сшиваются, если зазор вдоль оси не больше этого: 8 мм. Столько же
 # сшивало закрытие в ``ruling._axis_mask`` (ядро равно порогу длины линейки), и меньший зазор
@@ -183,7 +191,7 @@ def fragment_layers(binary: np.ndarray, dpi: int, min_mm: float = FRAGMENT_MM) -
     thickness = mm_to_px(MAX_RULE_THICKNESS_MM, dpi)
     result: list[FragmentLayer] = []
     for horizontal in (True, False):
-        mask = _axis_mask(binary, length, horizontal)
+        mask = _axis_mask(binary, length, horizontal, mm_to_px(FRAGMENT_CLOSE_MM, dpi))
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         found: list[Fragment] = []
         label_ids: list[int] = []
@@ -350,6 +358,74 @@ def chain(items: list[Fragment], dpi: int, min_mm: float = MIN_RULE_MM, gap_mm: 
     return [rule.segment for rule in chain_groups(items, dpi, min_mm, gap_mm)]
 
 
+# Линейка-сирота (не вошедшая ни в таблицу, ни в схему) должна стоять на ЧИСТОЙ бумаге с обеих сторон.
+# Ложная «линейка» — это низы, верхи или перекладины букв жирного заголовка, сшитые через узкие
+# промежутки между буквами, или стволы букв соседних строк («р» над «р»): с одной стороны вплотную
+# стоят сами буквы. Мера — доля краски в полосе ``LOOSE_SIDE_BAND_MM`` по БОЛЬШЕЙ из сторон, вдоль
+# оси ломаной. Замер на паке-1 (2026-09-28, случайные выборки по 80 горизонталей и вертикалей, размечены
+# глазами; ``ai_slop/rule_side_probe.py``): у ложных горизонталей 0.27–0.82, у отбивок 0.00–0.02, у дробных
+# черт и подчёркиваний до 0.38; у ложных вертикалей 0.19–0.56, у межколонных линеек с текстом вплотную
+# до 0.21. Длинные линейки (колонтитул с текстом над ним, пунктир, орнамент дают до 0.41) не трогаются.
+LOOSE_SIDE_BAND_MM = 1.0
+LOOSE_MAX_SIDE_INK_HORIZONTAL = 0.4
+LOOSE_MAX_SIDE_INK_VERTICAL = 0.25
+LOOSE_KEEP_MM = 60.0
+
+
+def side_ink(binary: np.ndarray, rule: LooseRule, dpi: int) -> tuple[float, float]:
+    """Доля краски в полосах ``LOOSE_SIDE_BAND_MM`` по обе стороны линейки, вдоль оси её ломаной.
+
+    Args:
+        binary: Краска белым на чёрном (``ruling.binarize``) в пикселях линейки.
+        rule: Линейка (ось ломаной и толщина).
+        dpi: Разрешение картинки.
+
+    Returns:
+        ``(сверху, снизу)`` для горизонтали, ``(слева, справа)`` для вертикали; 0, если полоса вне кадра.
+    """
+    points = np.asarray(rule.points, dtype=np.float64)
+    if not rule.horizontal:
+        # Вертикаль сводится к горизонтали транспонированием: вдоль оси — y, поперёк — x.
+        binary, points = binary.T, points[:, ::-1]
+    points = points[np.argsort(points[:, 0])]
+    height, width = binary.shape[:2]
+    xs = np.arange(int(points[0, 0]), int(points[-1, 0]) + 1)
+    xs = xs[(xs >= 0) & (xs < width)]
+    if xs.size == 0:
+        return 0.0, 0.0
+    ys = np.interp(xs, points[:, 0], points[:, 1])
+    band = mm_to_px(LOOSE_SIDE_BAND_MM, dpi)
+    # Полоса начинается сразу за штрихом линейки: полтолщины и пиксель запаса на размытие края.
+    gap = rule.thickness_px / 2.0 + 1.0
+    first, second = [], []
+    for x, y in zip(xs, ys):
+        first.append(binary[max(0, int(round(y - gap - band))) : max(0, int(round(y - gap))), x] > 0)
+        second.append(binary[min(height, int(round(y + gap))) : min(height, int(round(y + gap + band))), x] > 0)
+    shares = []
+    for side in (np.concatenate(first), np.concatenate(second)):
+        shares.append(float(side.mean()) if side.size else 0.0)
+    return shares[0], shares[1]
+
+
+def loose_rule_is_clean(binary: np.ndarray, rule: LooseRule, dpi: int) -> bool:
+    """Линейка-сирота стоит на чистой бумаге (или длинная): годится в барьеры, а не буквы строки.
+
+    Args:
+        binary: Краска белым на чёрном в пикселях линейки.
+        rule: Линейка-сирота.
+        dpi: Разрешение картинки.
+
+    Returns:
+        ``True`` — линейку оставить; ``False`` — это буквы заголовка или стволы соседних строк.
+    """
+    points = np.asarray(rule.points, dtype=np.float64)
+    along = points[:, 0] if rule.horizontal else points[:, 1]
+    if float(along.max() - along.min()) >= mm_to_px(LOOSE_KEEP_MM, dpi):
+        return True
+    limit = LOOSE_MAX_SIDE_INK_HORIZONTAL if rule.horizontal else LOOSE_MAX_SIDE_INK_VERTICAL
+    return max(side_ink(binary, rule, dpi)) <= limit
+
+
 def isolation(ink_without_rules: np.ndarray, segment: Segment, dpi: int) -> float:
     """Доля краски в полосах 1 мм по обе стороны отрезка: у линейки ноль, у ядра кляксы — много.
 
@@ -392,8 +468,9 @@ def find_rules(
     height, width = binary.shape[:2]
     h_mask = np.zeros((height, width), np.uint8)
     v_mask = np.zeros((height, width), np.uint8)
-    fragment_h = _axis_mask(binary, mm_to_px(FRAGMENT_MM, dpi), True)
-    fragment_v = _axis_mask(binary, mm_to_px(FRAGMENT_MM, dpi), False)
+    close = mm_to_px(FRAGMENT_CLOSE_MM, dpi)
+    fragment_h = _axis_mask(binary, mm_to_px(FRAGMENT_MM, dpi), True, close)
+    fragment_v = _axis_mask(binary, mm_to_px(FRAGMENT_MM, dpi), False, close)
     for segment in horizontal:
         h_mask[segment.box.slice] = fragment_h[segment.box.slice]
     for segment in vertical:

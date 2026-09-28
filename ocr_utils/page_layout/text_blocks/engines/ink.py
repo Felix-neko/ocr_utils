@@ -8,7 +8,12 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, RENDER_DPI, WORK_DPI
-from ocr_utils.page_layout.text_blocks.columns import gutters_of, rule_separators, separators_for_segmentation
+from ocr_utils.page_layout.text_blocks.columns import (
+    GutterMode,
+    gutters_of,
+    rule_separators,
+    separators_for_segmentation,
+)
 from ocr_utils.page_layout.text_blocks.engines.base import EngineLine, EngineResult
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, barrier_rules, barrier_separators, masked_ink
 from ocr_utils.page_layout.text_blocks.leaders import leaders_of
@@ -25,14 +30,24 @@ class InkEngine:
 
     name = "ink"
 
-    def __init__(self, linking: str = LINKING_DEFAULT, hints: LayoutHints | None = None) -> None:
+    def __init__(
+        self,
+        linking: str = LINKING_DEFAULT,
+        hints: LayoutHints | None = None,
+        gutter_mode: GutterMode = GutterMode.SHORT,
+        join_leaders: bool = True,
+    ) -> None:
         """Args:
         linking: Способ сцепки кусков в строки — ``zones`` или ``greedy`` (см. пакет ``text_blocks``).
         hints: Вспомогательная информация внешних детекторов (``hints.LayoutHints``): маска
             разрешённого текста и рамки таблиц и блок-схем. ``None`` — разбор как прежде.
+        gutter_mode: Как межколонники превращаются в запреты сцепки (``columns.GutterMode``).
+        join_leaders: Сращивать ли строки, сошедшиеся на общей точке отточия (:mod:`leader_join`).
         """
         self.linking = linking
         self.hints = hints or LayoutHints()
+        self.gutter_mode = gutter_mode
+        self.join_leaders = join_leaders
 
     def with_hints(self, hints: LayoutHints) -> "InkEngine":
         """Тот же движок с другими подсказками — для прохода по области в её собственных координатах.
@@ -41,9 +56,9 @@ class InkEngine:
             hints: Подсказки в пикселях выпрямленной вырезки области.
 
         Returns:
-            Новый движок с тем же способом сцепки.
+            Новый движок с тем же способом сцепки и режимом межколонников.
         """
-        return InkEngine(self.linking, hints)
+        return InkEngine(self.linking, hints, self.gutter_mode, self.join_leaders)
 
     def segment(self, gray300: np.ndarray, dpi: float = WORK_DPI) -> EngineResult:
         """Строки страницы в пикселях рабочей копии ``dpi``.
@@ -64,7 +79,7 @@ class InkEngine:
         # Отточия ищутся до межколонников: поле точек иначе принимается за межколонник и режет
         # таблицу на колонки (1971/10 с.93).
         leaders, _ = leaders_of(work, dpi)
-        gutters = gutters_of(work, dpi, leaders)
+        gutters = gutters_of(work, dpi, leaders, self.gutter_mode)
         # Границей строки служат и пустые межколонники, и вертикальные линейки таблицы.
         # Рёбра рамок таблиц и блок-схем — такие же запреты: вертикальные ложатся к
         # межколонникам, горизонтальные к чертам, по которым делится блок.
@@ -72,12 +87,14 @@ class InkEngine:
         # смыкание RLSA и сцепку кусков строки (см. :mod:`barriers`).
         barrier_lines = self.hints.barrier_lines
         separators = (
-            separators_for_segmentation(gutters)
+            separators_for_segmentation(gutters, self.gutter_mode)
             + rule_separators(work, dpi)
             + barrier_separators(self.hints.barriers)
             + barrier_lines.separators()
         )
-        segments, rules = segments_of(gray300, separators, dpi, leaders, self.linking, barrier_lines)
+        segments, rules = segments_of(
+            gray300, separators, dpi, leaders, self.linking, barrier_lines, join_leaders=self.join_leaders
+        )
         rules = list(rules) + barrier_rules(self.hints.barriers)
         lines = [
             EngineLine(

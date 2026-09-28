@@ -363,7 +363,7 @@ def sides_json(analysis: PageAnalysis) -> dict:
                         }
                         for end in result.ends
                     ],
-                    "filled": _filled_json(filled_side(default_sides, result, block)),
+                    "filled": filled_json(filled_side(default_sides, result, block)),
                 }
             align[method.value] = own
         edges = {}
@@ -392,7 +392,7 @@ def sides_json(analysis: PageAnalysis) -> dict:
     }
 
 
-def _filled_json(line) -> dict | None:
+def filled_json(line) -> dict | None:
     """Дополнительная линия стороны (``sides.FilledSide``) для JSON: точки, флаги заплатки и меры.
 
     Args:
@@ -526,6 +526,7 @@ def sides_markdown(analyses: list[PageAnalysis]) -> str:
 __all__ = [
     "CSV_FIELDS",
     "engines_summary",
+    "filled_json",
     "markdown",
     "page_json",
     "rows_for_csv",

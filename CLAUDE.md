@@ -52,6 +52,7 @@
 | `research/geometry_regression` | Стенд детектора порчи геометрии (ядро — в `ocr_utils/geometry_regression`): прогон по паку, сводки и пороги, картинки «было \| стало», регрессия на эталоне, пробник VLM | `python -m research.geometry_regression run\|report\|regress` |
 | `research/table_traces` | Стенд трасс линеек (сплайны) и сетки ячеек по кривым (ядро — `page_layout/tables/traces.py`, `curved_grid.py`): самые перекошенные таблицы пака, сравнение с сеткой по осям, оверлеи | `python -m research.table_traces select\|run` |
 | `research/surya_equations` | Стенд оценки формул surya `Equation`: эталон глазами по слоям «бокс surya × `$$` DeepSeek» (`labels/`), полнота, точность, качество рамки с пересчётом на пак, оверлеи по трём папкам | `python -m research.surya_equations collect\|evaluate\|overlays` |
+| `research/gutter_crossing` | Стенд «строки через межколонник» (ядро — `page_layout/text_blocks/columns.py`, `GutterMode`): пересчёт текстовых блоков пака по ключам в режимах `legacy`/`segmented`/`short`, мера `metrics.gutter_crossings_of`, выбор проблемных и нормальных полос, склейки «было \| стало» | `python -m research.gutter_crossing run\|measure\|select\|compare` |
 | `research/legacy/table_processing` | Стенд исследования таблиц; живой код переехал в `scan_markup` | заморожено |
 | `scripts/` | Разовые утилиты; `gen_module_map.py` — генератор карты, `search_sessions.py` — поиск по прошлым сессиям Claude | — |
 | `run_scripts/<пакет>/` | Готовые прогоны с числами в шапке, `source common.sh` | — |

@@ -23,6 +23,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ocr_utils.page_layout import mm_to_px, px_to_mm
+
 # Оси короче этого (пиксели рабочей копии) в мерах не участвуют: у обрывка в две буквы ни хорды,
 # ни порядка по вертикали толком нет.
 MIN_AXIS_PX = 100.0
@@ -54,6 +56,39 @@ STEP_REACH_PITCHES = 4.0
 STEP_PITCH_SHARE = 0.75
 # Наклоны сторон расходятся больше чем на столько градусов — изгиб, а не ступенька.
 STEP_BEND_DEG = 10.0
+# Ось через межколонник (:func:`gutter_crossings_of`). Пустота под осью уже этого (мм) — пробел
+# между словами, а не межколонник: межколонник в наборе журнала 3–6 мм, пробел корпуса — 1–2 мм.
+CROSSING_GAP_MM = 2.5
+# ...и уже стольких высот строки: у заголовка пробел между словами шире 2.5 мм, но уже его
+# собственной высоты.
+CROSSING_GAP_HEIGHTS = 1.2
+# Полуокно пробы краски под осью по вертикали — в высотах строки (не меньше MIN_PROBE_PX).
+CROSSING_PROBE_HEIGHTS = 0.6
+CROSSING_MIN_PROBE_PX = 3.0
+# По обе стороны пустоты вдоль оси должно быть не меньше стольких мм краски строки.
+CROSSING_SIDE_MM = 5.0
+# Пустой столбец продлевается вверх и вниз не дальше этого (мм) и считается перегороженным, если
+# краска занимает больше этой доли его ширины (как ``columns.BLOCK_INK_SHARE``).
+CROSSING_REACH_MM = 40.0
+CROSSING_BLOCK_SHARE = 0.3
+# Столбец сужается с краёв на эту долю: буква соседней колонки, заходящая в межколонник на
+# пиксель, не должна его перегораживать.
+CROSSING_SHRINK_SHARE = 0.2
+# Пустота под осью должна быть шире медианы ОСТАЛЬНЫХ пробелов той же строки во столько раз: в строке,
+# сшитой через межколонник, он 4–5 мм против пробелов 1–2 мм, а в строке с «рекой» пробелов по формату
+# все пробелы растянуты одинаково (выборка по паку 2026-09-28: пояса «1–3 оси на полосу» — сплошь реки).
+CROSSING_SPACE_RATIO = 1.8
+# Пробелом между словами считается пустота под осью от этой ширины (мм): уже — просвет между буквами.
+CROSSING_SPACE_MIN_MM = 0.5
+# Ширина пустоты, общей для ВСЕХ строк пикселей столбца (мм): у межколонника края колонок стоят
+# на месте, а «река» пробелов по формату гуляет от строки к строке, и общей пустоты почти не остаётся.
+CROSSING_COMMON_MM = 2.0
+# Строк (осей), подходящих к пустому столбцу с каждой стороны на его высоте, включая саму ось. У «реки»
+# пробелов по формату — 3–4, у настоящего межколонника — от 5 (выборка по паку 2026-09-28: 24 полосы
+# поясов «1–9 осей», 8 настоящих). Цена: сращённый фрагмент короче 5 строк мера не видит.
+CROSSING_NEIGHBOURS = 5
+# На каком расстоянии от края пустоты (мм) проверяется, что ось соседней строки подходит к ней.
+CROSSING_NEIGHBOUR_REACH_MM = 2.0
 
 
 @dataclass(frozen=True)
@@ -462,7 +497,229 @@ def table(pages: list[PageMetrics], against: list[PageMetrics] | None = None, br
     return "\n".join([header, left.row().replace("ИТОГО", "было"), right.row().replace("ИТОГО", "стало")])
 
 
+@dataclass(frozen=True)
+class GutterCrossing:
+    """Ось строки, идущая через межколонник: пустая вертикальная полоса под ней и по соседям."""
+
+    axis: int  # номер оси в ``axes`` страницы
+    x0: float  # пустота под осью по x, пиксели рабочей копии
+    x1: float
+    y: float  # ордината оси посередине пустоты
+    top: float  # насколько пустой столбец тянется вверх и вниз
+    bottom: float
+    left: int  # сколько осей подходит к столбцу слева и справа на его высоте (с самой осью)
+    right: int
+    gap_mm: float  # ширина пустоты под осью
+
+    def to_json(self) -> dict:
+        """Словарь для JSON и CSV стенда."""
+        return {key: (round(value, 1) if isinstance(value, float) else value) for key, value in self.__dict__.items()}
+
+
+def _y_at(points: np.ndarray, x: float) -> float | None:
+    """Ордината оси на абсциссе ``x``; ``None`` — ``x`` за концами оси."""
+    if points.shape[0] < 2 or not points[0, 0] <= x <= points[-1, 0]:
+        return None
+    return float(np.interp(x, points[:, 0], points[:, 1]))
+
+
+def _column_clear(glyphs: np.ndarray, x0: float, x1: float, y: int) -> bool:
+    """Пуста ли полоса ``[x0, x1)`` маски глифов в строке пикселей ``y`` (краски не больше доли)."""
+    a, b = int(max(0, np.floor(x0))), int(min(glyphs.shape[1], np.ceil(x1)))
+    if b <= a or not 0 <= y < glyphs.shape[0]:
+        return False
+    return bool(glyphs[y, a:b].mean() <= CROSSING_BLOCK_SHARE)
+
+
+def _empty_extent(glyphs: np.ndarray, x0: float, x1: float, y: float, slope: float, reach: int) -> tuple[int, int]:
+    """Докуда вверх и вниз от ``y`` тянется пустой столбец ``[x0, x1]``.
+
+    Межколонник перпендикулярен строкам, поэтому на наклонной полосе столбец идёт с наклоном
+    ``-slope`` (сдвиг по x на пиксель высоты).
+
+    Args:
+        glyphs: Маска глифов рабочей копии.
+        x0, x1: Границы столбца на высоте ``y``.
+        y: Откуда идти.
+        slope: Наклон строки dy/dx.
+        reach: Дальше этого (пиксели) не ходить.
+
+    Returns:
+        Пара ``(top, bottom)`` — крайние пустые строки пикселей.
+    """
+    start = int(round(y))
+    top = start
+    while start - top < reach and _column_clear(
+        glyphs, x0 + (top - 1 - y) * -slope, x1 + (top - 1 - y) * -slope, top - 1
+    ):
+        top -= 1
+    bottom = start
+    while bottom - start < reach and _column_clear(
+        glyphs, x0 + (bottom + 1 - y) * -slope, x1 + (bottom + 1 - y) * -slope, bottom + 1
+    ):
+        bottom += 1
+    return top, bottom
+
+
+def _common_width(
+    glyphs: np.ndarray, x0: float, x1: float, y: float, slope: float, top: int, bottom: int, reach: float
+) -> float:
+    """Ширина пустоты вокруг середины ``[x0, x1]``, общей для всех строк пикселей от ``top`` до ``bottom``.
+
+    Args:
+        glyphs: Маска глифов рабочей копии.
+        x0, x1: Пустота под осью на высоте ``y``.
+        y: Ордината оси.
+        slope: Наклон строки dy/dx (столбец идёт с наклоном ``-slope``).
+        top, bottom: Высота пустого столбца.
+        reach: Насколько шире пустоты под осью смотреть в стороны (пиксели).
+
+    Returns:
+        Ширина в пикселях рабочей копии; 0 — середина перегорожена хоть в одной строке.
+    """
+    left = int(np.floor(x0 - reach))
+    width = int(np.ceil(x1 + reach)) - left
+    free = np.ones(width, dtype=bool)
+    for row in range(max(0, top), min(glyphs.shape[0], bottom + 1)):
+        shift = int(round((row - y) * -slope))
+        a = left + shift
+        # Окно строки, обрезанное краями маски; вне маски — пусто.
+        lo, hi = max(0, a), min(glyphs.shape[1], a + width)
+        if hi <= lo:
+            continue
+        line = np.zeros(width, dtype=bool)
+        line[lo - a : hi - a] = glyphs[row, lo:hi]
+        free &= ~line
+    centre = int(round((x0 + x1) / 2.0)) - left
+    if not 0 <= centre < width or not free[centre]:
+        return 0.0
+    start = centre
+    while start > 0 and free[start - 1]:
+        start -= 1
+    end = centre
+    while end < width - 1 and free[end + 1]:
+        end += 1
+    return float(end - start + 1)
+
+
+def _neighbours(curves: list[np.ndarray], x: float, top: float, bottom: float) -> int:
+    """Сколько осей проходит через абсциссу ``x`` на высоте между ``top`` и ``bottom``."""
+    count = 0
+    for curve in curves:
+        y = _y_at(curve, x)
+        if y is not None and top <= y <= bottom:
+            count += 1
+    return count
+
+
+def gutter_crossings_of(axes: list[dict], glyphs: np.ndarray, dpi: float) -> list[GutterCrossing]:
+    """Оси, идущие через межколонник: под осью пустота шире пробела, и по соседним строкам она продолжается.
+
+    Признак сращивания колонок (1966/02 IMG_0076_1L): ось левой колонки уходит в правую через
+    пустую полосу. Ось помечается, если одновременно:
+
+    1. под ней (в окне ± ``CROSSING_PROBE_HEIGHTS`` высоты) есть пустота по x шире
+       ``CROSSING_GAP_MM`` и ``CROSSING_GAP_HEIGHTS`` высот строки, а по обе стороны пустоты вдоль
+       оси не меньше ``CROSSING_SIDE_MM`` краски;
+    2. пустота продолжается пустым столбцом вверх и вниз, и на высоте этого столбца к нему с каждой
+       стороны подходит не меньше ``CROSSING_NEIGHBOURS`` осей (с самой осью): пробелы заголовков и
+       случайные совпадения пробелов в паре строк так отсекаются;
+    3. по всей высоте столбца остаётся ОБЩАЯ пустота не уже ``CROSSING_COMMON_MM``: «река» пробелов
+       в наборе по формату гуляет от строки к строке, а края колонок у межколонника стоят;
+    4. пустота шире остальных пробелов той же строки в ``CROSSING_SPACE_RATIO`` раз: у реки пробелы
+       строки растянуты одинаково.
+
+    Отточия через межколонник пустоты под осью не дают (точки — краска), заголовок, набранный
+    через межколонник, — тоже.
+
+    Args:
+        axes: Оси страницы из JSON разбора (``points``, ``height``), пиксели рабочей копии.
+        glyphs: Маска глифов рабочей копии (ненулевое — краска глифа), того же размера, что разбор.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Находки по одной на ось (самая широкая пустота), в порядке осей.
+    """
+    glyphs = np.asarray(glyphs) > 0
+    curves = [np.asarray(axis.get("points") or [], dtype=np.float64).reshape(-1, 2) for axis in axes]
+    min_gap_mm = mm_to_px(CROSSING_GAP_MM, dpi)
+    side = mm_to_px(CROSSING_SIDE_MM, dpi)
+    reach = mm_to_px(CROSSING_REACH_MM, dpi)
+    near = mm_to_px(CROSSING_NEIGHBOUR_REACH_MM, dpi)
+    common = mm_to_px(CROSSING_COMMON_MM, dpi)
+    space_min = mm_to_px(CROSSING_SPACE_MIN_MM, dpi)
+    out: list[GutterCrossing] = []
+    for index, (axis, curve) in enumerate(zip(axes, curves)):
+        if curve.shape[0] < 2 or curve[-1, 0] - curve[0, 0] < 2 * side + min_gap_mm:
+            continue
+        height = float(axis.get("height") or 0.0)
+        half = max(CROSSING_MIN_PROBE_PX, CROSSING_PROBE_HEIGHTS * height)
+        # Краска под осью по столбцам: окно ± half вокруг ординаты оси.
+        xs = np.arange(int(np.ceil(curve[0, 0])), int(np.floor(curve[-1, 0])) + 1)
+        xs = xs[(xs >= 0) & (xs < glyphs.shape[1])]
+        if xs.size == 0:
+            continue
+        ys = np.interp(xs, curve[:, 0], curve[:, 1])
+        lo = np.clip(np.round(ys - half).astype(int), 0, glyphs.shape[0])
+        hi = np.clip(np.round(ys + half).astype(int) + 1, 0, glyphs.shape[0])
+        inked = np.array([glyphs[a:b, x].any() for x, a, b in zip(xs, lo, hi)])
+        # Пустоты внутри оси: от первой краски до последней.
+        filled = np.nonzero(inked)[0]
+        if filled.size == 0:
+            continue
+        empty = ~inked
+        empty[: filled[0]] = False
+        empty[filled[-1] + 1 :] = False
+        edges = np.diff(np.r_[0, empty.astype(np.int8), 0])
+        starts, ends = np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]
+        min_gap = max(min_gap_mm, CROSSING_GAP_HEIGHTS * height)
+        widths = ends - starts
+        spaces = widths[widths >= space_min]
+        best: GutterCrossing | None = None
+        for start, end in zip(starts, ends):
+            if end - start < min_gap:
+                continue
+            # Остальные пробелы строки: пустота должна быть заметно шире их медианы.
+            others = spaces[spaces != end - start] if spaces.size > 1 else spaces[:0]
+            if others.size and end - start < CROSSING_SPACE_RATIO * float(np.median(others)):
+                continue
+            if inked[:start].sum() < side or inked[end:].sum() < side:
+                continue
+            gx0, gx1 = float(xs[start]), float(xs[end - 1] + 1)
+            shrink = CROSSING_SHRINK_SHARE * (gx1 - gx0)
+            y = float(np.interp((gx0 + gx1) / 2.0, curve[:, 0], curve[:, 1]))
+            # Наклон строки у пустоты — по участку оси шириной в две пустоты.
+            around = (curve[:, 0] >= gx0 - (gx1 - gx0)) & (curve[:, 0] <= gx1 + (gx1 - gx0))
+            slope = float(np.polyfit(curve[around, 0], curve[around, 1], 1)[0]) if around.sum() >= 2 else 0.0
+            top, bottom = _empty_extent(glyphs, gx0 + shrink, gx1 - shrink, y, slope, reach)
+            if _common_width(glyphs, gx0, gx1, y, slope, top, bottom, gx1 - gx0) < common:
+                continue
+            # Соседей считаем на ПРОДОЛЖЕНИИ столбца: у самого его края слева и справа.
+            left = _neighbours(curves, gx0 - near, top, bottom)
+            right = _neighbours(curves, gx1 + near, top, bottom)
+            if min(left, right) < CROSSING_NEIGHBOURS:
+                continue
+            found = GutterCrossing(
+                axis=index,
+                x0=gx0,
+                x1=gx1,
+                y=y,
+                top=float(top),
+                bottom=float(bottom),
+                left=left,
+                right=right,
+                gap_mm=round(px_to_mm(gx1 - gx0, dpi), 2),
+            )
+            if best is None or found.x1 - found.x0 > best.x1 - best.x0:
+                best = found
+        if best is not None:
+            out.append(best)
+    return out
+
+
 __all__ = [
+    "GutterCrossing",
+    "gutter_crossings_of",
     "PageMetrics",
     "blocks_over_cells",
     "converging_of",

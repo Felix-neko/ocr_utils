@@ -153,6 +153,51 @@ def leader_page(
     return page
 
 
+def stuck_leader_page(
+    rows: int = 12,
+    number_w: int = 100,
+    shift: int = 0,
+    shape: tuple[int, int] = PAGE_SHAPE,
+    dot_step: int = 36,
+    dot_px: int = 6,
+    stuck_gap: int = 14,
+    seed: int = 3,
+) -> np.ndarray:
+    """Таблица с отточием, чьи две последние точки прилипли к числу: «слова . . . . ..число».
+
+    Так на 1966/03 IMG_0131_2R: последние точки отточия стоят теснее обычного шага и при смыкании RLSA
+    сливаются с числом, и ряд распадается на две строки над одними и теми же точками.
+
+    Args:
+        rows: Сколько строк таблицы.
+        number_w: Ширина числа (цифры по 30 px с шагом 36): 100 — три цифры, 60 — две.
+        shift: На сколько пикселей ниже ряда стоят число и прилипшие к нему точки (0 — на своём ряду).
+        shape: Размер страницы (пиксели 300 dpi).
+        dot_step: Шаг точек отточия.
+        dot_px: Размер точки.
+        stuck_gap: Шаг двух последних точек и зазор до числа.
+        seed: Зерно генератора слов.
+
+    Returns:
+        Серую страницу.
+    """
+    page = paper(shape)
+    generator = random.Random(seed)
+    x_dots, x_number = MARGIN + 700, shape[1] - MARGIN - 300
+    for index in range(rows):
+        y = MARGIN + index * LINE_STEP * 2
+        _draw_line(page, generator, MARGIN, MARGIN + 520, y, False)
+        # Отточие обычным шагом, затем две точки вплотную к числу — на высоте числа.
+        for x in range(x_dots, x_number - 2 * stuck_gap - dot_step, dot_step):
+            page[y + GLYPH_H - dot_px : y + GLYPH_H, x : x + dot_px] = INK
+        y_number = y + shift
+        for x in (x_number - 2 * stuck_gap, x_number - stuck_gap):
+            page[y_number + GLYPH_H - dot_px : y_number + GLYPH_H, x : x + dot_px] = INK
+        for x in range(x_number, x_number + number_w, 36):
+            page[y_number : y_number + GLYPH_H, x : x + 30] = INK
+    return page
+
+
 def single_line_page(shape: tuple[int, int] = PAGE_SHAPE, seed: int = 5) -> np.ndarray:
     """Страница с одной-единственной строкой: для проверки контура однострочного блока."""
     page = paper(shape)
