@@ -52,6 +52,14 @@ DESCENDER_MIN_LETTERS = 4
 # задиралась на конце («путей.», «этой», «дней;»), ступенька на стыке со строкой выше пряталась, и
 # сцепка уводила строку вверх (1974/08 IMG_0089_2R). Такому знаку базовая линия берётся с прямой.
 HIGH_MARK_MIN_XH = 0.5
+# Глиф над другим глифом куска считается верхним знаком до такой высоты (в иксах): кружок «%» — со
+# строчную, прописная над строкой не стоит.
+STACKED_MAX_XH = 1.0
+# ...и глиф под ним не шире его во столько раз.
+STACKED_BELOW_WIDTH_RATIO = 2.5
+# ...и отстоит от него по высоте не больше чем на столько иксов (боксы по середине масс — с запасом).
+STACKED_GAP_XH = 0.25
+STACKED_BELOW_MAX_XH = 1.8
 # Парабола строится от стольких букв; меньше — прямая (по трём точкам парабола ловит форму буквы,
 # а не ход строки).
 AXIS_PARABOLA_LETTERS = 5
@@ -231,8 +239,31 @@ def baselines_of(boxes: np.ndarray, x_h: float) -> np.ndarray:
     bottoms = boxes[:, 1] + boxes[:, 3] / 2.0
     if bottoms.size < DESCENDER_MIN_LETTERS:
         return bottoms
-    # Кандидаты в верхние знаки — мелкие глифы: в прямую по низам они не входят.
-    small = boxes[:, 3] <= MARK_MAX_HEIGHT_XH * x_h
+    # Кандидаты в верхние знаки: мелкие глифы и глифы не выше строчной, стоящие НАД другим глифом
+    # куска (перекрытие по x, середина выше больше чем на ``HIGH_MARK_MIN_XH`` икса) — верхний кружок
+    # «%» размером со строчную (1969/12 IMG_0118_2R: его низ на 6 px выше строки тянул ось вверх). В
+    # прямую по низам они не входят.
+    lefts, rights = xs - boxes[:, 2] / 2.0, xs + boxes[:, 2] / 2.0
+    overlap = (lefts[:, None] < rights[None, :]) & (rights[:, None] > lefts[None, :])
+    np.fill_diagonal(overlap, False)
+    lower = boxes[None, :, 1] - boxes[:, None, 1] > HIGH_MARK_MIN_XH * x_h
+    # Глиф под знаком — узкий (черта «%», буква под краткой), а не подчёркивание или слитое слово:
+    # иначе буквы над карандашной чертой объявлялись знаками и выпадали из прямой строки (1966/05
+    # 0400_2R, 1972/10 IMG_0007_2R).
+    narrow = boxes[None, :, 2] <= STACKED_BELOW_WIDTH_RATIO * boxes[:, None, 2]
+    # ...и вплотную к нему: кратка касается «и», кружок «%» заходит на черту по высоте. Буква строки
+    # выше над буквой строки ниже (кусок, слитый из двух строк мостом) отстоит на межстрочный
+    # просвет — её знаком не считаем (1969/05 IMG_0100_1L).
+    gap = (boxes[None, :, 1] - boxes[None, :, 3] / 2.0) - (boxes[:, None, 1] + boxes[:, None, 3] / 2.0)
+    close = gap <= STACKED_GAP_XH * x_h
+    # Глиф под знаком — не выше ``STACKED_BELOW_MAX_XH`` иксов: черта «%» — 1.5 икса, а черта, слитая с
+    # буквой строки ниже, — 2.2 (1972/10 IMG_0007_2R), и под ней знака нет — есть мост между строками.
+    close &= boxes[None, :, 3] <= STACKED_BELOW_MAX_XH * x_h
+    # Глиф под знаком выше самого знака (буква под краткой, черта под кружком «%»): стержень «?» и «!»
+    # над своей точкой — не знак над буквой (1969/04 IMG_0005_2R).
+    close &= boxes[None, :, 3] > boxes[:, None, 3]
+    stacked = (boxes[:, 3] <= STACKED_MAX_XH * x_h) & (overlap & lower & narrow & close).any(axis=1)
+    small = (boxes[:, 3] <= MARK_MAX_HEIGHT_XH * x_h) | stacked
     body = ~small if int((~small).sum()) >= 2 else np.ones(bottoms.size, dtype=bool)
     limit = DESCENDER_MIN_XH * x_h
     line = _line_at(xs[body], bottoms[body], xs)
@@ -240,14 +271,12 @@ def baselines_of(boxes: np.ndarray, x_h: float) -> np.ndarray:
     if hangs.any() and int((body & ~hangs).sum()) >= 2:
         line = _line_at(xs[body & ~hangs], bottoms[body & ~hangs], xs)
     raised = small & (line - bottoms > HIGH_MARK_MIN_XH * x_h)
-    # Знак над буквой (кратка, точки) стоит НАД ней — перекрывает по x букву тела. Дефис, тире и
-    # верхний индекс стоят сбоку: их не трогаем (1971/04 IMG_0005_2R — дефис «услу-», 1973/02
-    # IMG_0095_1L — сноска «²»: опущенные на базовую линию, они уводили сцепку на соседний ряд).
+    # Знак над буквой (кратка, точки, кружок «%») стоит НАД ней — перекрывает по x другой глиф.
+    # Дефис, тире и верхний индекс стоят сбоку: их не трогаем (1971/04 IMG_0005_2R — дефис «услу-»,
+    # 1973/02 IMG_0095_1L — сноска «²»: опущенные на базовую линию, они уводили сцепку на соседний ряд).
     if raised.any():
-        lefts, rights = xs - boxes[:, 2] / 2.0, xs + boxes[:, 2] / 2.0
         for index in np.nonzero(raised)[0]:
-            below = body & (lefts < rights[index]) & (rights > lefts[index])
-            below[index] = False
+            below = overlap[index] & (~small | stacked)
             raised[index] = bool(below.any())
     return np.where(hangs | raised, line, bottoms)
 

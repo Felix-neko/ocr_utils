@@ -80,6 +80,8 @@ CROSS_MARGIN_PX = 2.0
 # reports/text_blocks_row_jumps.md).
 SPLIT_ROWS_DEFAULT = True
 SPLIT_MIN_HEIGHT_RATIO = 1.6
+# Проходов резки не больше стольких (сгусток на N строк режется за N − 1 проход).
+SPLIT_MAX_PASSES = 4
 SPLIT_MIN_LETTERS = 3
 SPLIT_LEVEL_HEIGHTS = 1.1
 # Буквы ниже этой доли медианы (точки, запятые) в делении на уровни не голосуют — только примыкают.
@@ -598,7 +600,13 @@ def _smeared(
         smeared[barriers.mask(smeared.shape[:2])] = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(smeared, 8)
     if split_rows:
-        count, labels, stats = _split_two_rows(mask, labels, stats, scale)
+        # Резка повторяется, пока режется: карандашная кривая сливает и три строки (1967/05
+        # IMG_0084_1L — «формулировка», «возможно», «окончания»), а один проход делит на два уровня.
+        for _ in range(SPLIT_MAX_PASSES):
+            before = count
+            count, labels, stats = _split_two_rows(mask, labels, stats, scale)
+            if count == before:
+                break
     return count, labels, stats
 
 

@@ -89,3 +89,31 @@ def test_split_leaves_single_row_alone():
     split = _smeared(mask, SCALES[0], None, split_rows=True)
     assert plain[0] == split[0]
     assert np.array_equal(plain[1], split[1])
+
+
+def test_split_three_rows_bridged_by_one_stroke():
+    """Карандашная кривая через три строки: резка повторяется, и каждая строка — свой сгусток."""
+    mask = np.zeros((110, 300), dtype=np.uint8)
+    tops = (15, 15 + ROW_STEP, 15 + 2 * ROW_STEP)
+    for top in tops:
+        _row(mask, top, 10, 290)
+    # Пробелы под кривую и сама кривая — от первой строки до третьей.
+    for top in tops:
+        mask[top : top + LETTER_H, 140:160] = 0
+    cv2.line(mask, (157, tops[0] + 2), (143, tops[2] + LETTER_H - 2), 255, 2)
+    _, labels, stats = _smeared(mask, SCALES[0], None, split_rows=True)
+    rows = [set(np.unique(labels[top : top + LETTER_H, 20:120])) - {0} for top in tops]
+    assert all(rows) and not (rows[0] & rows[1]) and not (rows[1] & rows[2])
+    assert all(stats[i, cv2.CC_STAT_HEIGHT] <= 1.5 * LETTER_H for row in rows for i in row)
+
+
+def test_percent_upper_ring_sits_on_baseline():
+    """Верхний кружок «%» (глиф со строчную над чертой) — знак над буквой: базовая линия с прямой строки."""
+    from ocr_utils.page_layout.text_blocks.pieces import baselines_of
+
+    x_h = 12.0
+    letters = [[10 + 12 * i, 100 - x_h / 2, 9, x_h] for i in range(6)]  # cx, cy, w, h: низ на 100
+    ring = [86, 87, 6, 12]  # низ на 93 — на 7 px выше строки (больше полувысоты строчной)
+    slash = [88, 98, 10, 14]  # черта с нижним кружком: центр масс внизу (кружок тяжелее черты), низ на 105
+    base = baselines_of(np.array(letters + [ring, slash], dtype=np.float64), x_h)
+    assert abs(base[6] - 100.0) < 1.5

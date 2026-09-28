@@ -35,6 +35,10 @@ COLOUR_JUMP = (60, 60, 220)
 COLOUR_NEIGHBOUR = (0, 165, 255)
 # Вырезка у находки: поле вокруг оси по высоте (px рабочей копии) и ширина склейки.
 ZOOM_PAD_PX = 60
+# Обводка места перескока: эллипс вокруг участка, где расстояние до соседа меняется быстрее всего.
+COLOUR_SPOT = (0, 0, 255)
+SPOT_HALF_WIDTH_PITCHES = 3.0
+SPOT_HALF_HEIGHT_PITCHES = 1.6
 ZOOM_WIDTH = 1400
 
 
@@ -49,6 +53,7 @@ class Variant(str, Enum):
     PLAIN = "plain"
     SPLIT = "split"
     MARKS = "marks"
+    STACKED = "stacked"  # + кружок «%» как знак над буквой и многопроходная резка (сгусток на 3+ строк)
 
 
 def jumps_of(payload: dict) -> list[dict]:
@@ -68,6 +73,25 @@ def _measure_file(path: Path) -> dict:
     """Мера одной сохранённой полосы: ключ, шаг, находки."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     return {"key": payload["key"], "folder": "", "jumps": len(jumps_of(payload))}
+
+
+def jump_spot(axis: np.ndarray, neighbour: np.ndarray) -> tuple[float, float]:
+    """Место перескока: точка оси, где её расстояние до соседа меняется быстрее всего.
+
+    Args:
+        axis: Ось-перескок ``(n, 2)``.
+        neighbour: Сосед, по которому мерили.
+
+    Returns:
+        ``(x, y)`` в пикселях рабочей копии.
+    """
+    left, right = max(axis[0, 0], neighbour[0, 0]), min(axis[-1, 0], neighbour[-1, 0])
+    xs = np.linspace(left, right, 200)
+    gap = np.interp(xs, axis[:, 0], axis[:, 1]) - np.interp(xs, neighbour[:, 0], neighbour[:, 1])
+    # Скорость изменения расстояния, сглаженная по 9 точкам: одиночный зубец оси не в счёт.
+    speed = np.abs(np.convolve(np.gradient(gap), np.ones(9) / 9.0, mode="same"))
+    x = float(xs[int(np.argmax(speed))])
+    return x, float(np.interp(x, axis[:, 0], axis[:, 1]))
 
 
 def draw_page(analysis, gray300: np.ndarray, jumps: list[dict], axes: list[dict], title: list[str]) -> np.ndarray:
@@ -90,8 +114,21 @@ def draw_page(analysis, gray300: np.ndarray, jumps: list[dict], axes: list[dict]
         for index, colour, width in ((jump["neighbour"], COLOUR_NEIGHBOUR, 2), (jump["axis"], COLOUR_JUMP, 4)):
             points = np.round(np.asarray(axes[index]["points"], dtype=np.float64) * scale).astype(np.int32)
             cv2.polylines(canvas, [points], False, colour, width)
+    # Обводка места перескока — эллипсом в шаг строк страницы.
+    pitch = pitch_of(page_json(analysis)["blocks"]) or 20.0
+    for jump in jumps:
+        x, y = jump_spot(
+            np.asarray(axes[jump["axis"]]["points"], dtype=np.float64),
+            np.asarray(axes[jump["neighbour"]]["points"], dtype=np.float64),
+        )
+        size = (int(SPOT_HALF_WIDTH_PITCHES * pitch * scale), int(SPOT_HALF_HEIGHT_PITCHES * pitch * scale))
+        cv2.ellipse(canvas, (int(x * scale), int(y * scale)), size, 0, 0, 360, COLOUR_SPOT, 3)
     width = canvas.shape[1]
-    entries = [LegendEntry("ось-перескок", COLOUR_JUMP), LegendEntry("сосед, по которому мерили", COLOUR_NEIGHBOUR)]
+    entries = [
+        LegendEntry("ось-перескок", COLOUR_JUMP),
+        LegendEntry("сосед, по которому мерили", COLOUR_NEIGHBOUR),
+        LegendEntry("место перескока", COLOUR_SPOT),
+    ]
     return np.vstack(
         [
             header_strip(title, width),
