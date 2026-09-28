@@ -46,6 +46,12 @@ DESCENDER_MIN_XH = 0.2
 # Поправка на выносные делается от стольких букв: на двух-трёх буквах отличить выносной элемент
 # от наклона строки нечем.
 DESCENDER_MIN_LETTERS = 4
+# Знак над буквой: кратка «й», точки «ё» — мелкий глиф (не выше ``MARK_MAX_HEIGHT_XH`` икса) над буквой
+# тела, низ которого стоит ВЫШЕ базовой линии больше чем на столько иксов. Его
+# «базовая линия» — не линия строки: якорь поднимался на высоту строчной, парабола оси куска
+# задиралась на конце («путей.», «этой», «дней;»), ступенька на стыке со строкой выше пряталась, и
+# сцепка уводила строку вверх (1974/08 IMG_0089_2R). Такому знаку базовая линия берётся с прямой.
+HIGH_MARK_MIN_XH = 0.5
 # Парабола строится от стольких букв; меньше — прямая (по трём точкам парабола ловит форму буквы,
 # а не ход строки).
 AXIS_PARABOLA_LETTERS = 5
@@ -202,13 +208,17 @@ def _line_at(xs: np.ndarray, ys: np.ndarray, at: np.ndarray) -> np.ndarray:
 
 
 def baselines_of(boxes: np.ndarray, x_h: float) -> np.ndarray:
-    """Базовая линия каждой буквы — низ её бокса с поправкой на выносные элементы вниз.
+    """Базовая линия каждой буквы — низ её бокса с поправкой на выносные элементы вниз и верхние знаки.
 
     Низ буквы и есть базовая линия у строчных без выноса, у прописных, у цифр и у точки. Ниже
-    базовой линии свисают только «р», «у», «ф», «ц», «щ» и запятая; вверх не уходит никто.
-    Поэтому отсев односторонний: по всем низам проводится прямая, буквы, ушедшие ниже неё больше
-    чем на ``DESCENDER_MIN_XH`` икса, объявляются выносными, прямая пересчитывается без них, и их
-    базовая линия берётся с прямой.
+    базовой линии свисают только «р», «у», «ф», «ц», «щ» и запятая. Поэтому по всем низам проводится
+    прямая, буквы, ушедшие ниже неё больше чем на ``DESCENDER_MIN_XH`` икса, объявляются выносными,
+    прямая пересчитывается без них, и их базовая линия берётся с прямой.
+
+    Вверх уходят мелкие знаки над буквой — кратка «й», точки «ё»: их низ выше прямой больше чем на
+    ``HIGH_MARK_MIN_XH`` икса при высоте не больше ``MARK_MAX_HEIGHT_XH`` икса, и они перекрывают по x
+    букву под собой. Их базовая линия тоже берётся с прямой, построенной без них. Дефис и верхний
+    индекс стоят сбоку и остаются как были; прописная — не мелкая, её низ на базовой линии.
 
     Args:
         boxes: Буквы куска ``(n, 4)`` — ``cx, cy, ширина, высота``.
@@ -221,12 +231,25 @@ def baselines_of(boxes: np.ndarray, x_h: float) -> np.ndarray:
     bottoms = boxes[:, 1] + boxes[:, 3] / 2.0
     if bottoms.size < DESCENDER_MIN_LETTERS:
         return bottoms
+    # Кандидаты в верхние знаки — мелкие глифы: в прямую по низам они не входят.
+    small = boxes[:, 3] <= MARK_MAX_HEIGHT_XH * x_h
+    body = ~small if int((~small).sum()) >= 2 else np.ones(bottoms.size, dtype=bool)
     limit = DESCENDER_MIN_XH * x_h
-    hangs = bottoms - _line_at(xs, bottoms, xs) > limit
-    if not hangs.any() or int((~hangs).sum()) < 2:
-        return bottoms
-    fitted = _line_at(xs[~hangs], bottoms[~hangs], xs)
-    return np.where(bottoms - fitted > limit, fitted, bottoms)
+    line = _line_at(xs[body], bottoms[body], xs)
+    hangs = (bottoms - line > limit) & body
+    if hangs.any() and int((body & ~hangs).sum()) >= 2:
+        line = _line_at(xs[body & ~hangs], bottoms[body & ~hangs], xs)
+    raised = small & (line - bottoms > HIGH_MARK_MIN_XH * x_h)
+    # Знак над буквой (кратка, точки) стоит НАД ней — перекрывает по x букву тела. Дефис, тире и
+    # верхний индекс стоят сбоку: их не трогаем (1971/04 IMG_0005_2R — дефис «услу-», 1973/02
+    # IMG_0095_1L — сноска «²»: опущенные на базовую линию, они уводили сцепку на соседний ряд).
+    if raised.any():
+        lefts, rights = xs - boxes[:, 2] / 2.0, xs + boxes[:, 2] / 2.0
+        for index in np.nonzero(raised)[0]:
+            below = body & (lefts < rights[index]) & (rights > lefts[index])
+            below[index] = False
+            raised[index] = bool(below.any())
+    return np.where(hangs | raised, line, bottoms)
 
 
 def anchors_of(boxes: np.ndarray, x_h: float, lift: float | None = None) -> tuple[np.ndarray, np.ndarray]:

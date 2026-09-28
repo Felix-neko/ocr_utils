@@ -68,6 +68,22 @@ COVER_SAMPLES = 32
 # Скрещивание осей: разность ординат должна уйти за этот запас в обе стороны (пиксели рабочей
 # копии), как в ``metrics.crossings_of``, — иначе шум оси на общей строке читается как смена мест.
 CROSS_MARGIN_PX = 2.0
+# Сгусток RLSA на ДВА ряда (:func:`_split_two_rows`). Пометка карандашом, соринка или слипшийся
+# выносной элемент перекидывают смыкание на строку ниже, и кусок строки уходит с ряда на ряд ещё до
+# сцепки — запреты сцепки его не видят (1966/01 IMG_0011_2R: «ярмарка» + «/» + «реализовано»;
+# 1967/06 IMG_0150_1L: «ходу;» + «Авторы»). Сгусток проверяется, если он выше медианы букв страницы
+# в ``SPLIT_MIN_HEIGHT_RATIO`` раз и букв в нём не меньше двух групп по ``SPLIT_MIN_LETTERS``;
+# режется, если середины букв делятся на два уровня, разошедшихся больше чем на
+# ``SPLIT_LEVEL_HEIGHTS`` медианной высоты буквы (строки одного ряда: прописные и выносные сдвигают
+# середину на 0.3 высоты; соседние ряды — на шаг, 1.8–1.9 высоты).
+# Включено по умолчанию с 2026-09-28 (решение пользователя; проверка на 352 + 352 полосах —
+# reports/text_blocks_row_jumps.md).
+SPLIT_ROWS_DEFAULT = True
+SPLIT_MIN_HEIGHT_RATIO = 1.6
+SPLIT_MIN_LETTERS = 3
+SPLIT_LEVEL_HEIGHTS = 1.1
+# Буквы ниже этой доли медианы (точки, запятые) в делении на уровни не голосуют — только примыкают.
+SPLIT_MARK_SHARE = 0.5
 # Межколонник не режет строку (:func:`_split_at_gutters`), у которой просвет на нём уже стольких
 # медианных высот её букв: это пробел заголовка, стоящий над межколонником (1968/04 IMG_0050_1L —
 # «Сборник статей | о снабжении»), а не межколонник. У строк корпуса, сшитых через межколонник,
@@ -465,13 +481,15 @@ def _segments_at_scale(
     linking: str = LINKING_DEFAULT,
     barriers: "BarrierLines | None" = None,
     claimed: np.ndarray | None = None,
+    split_rows: bool = SPLIT_ROWS_DEFAULT,
 ) -> list[Segment]:
     """Строки одного масштаба; ``leaders`` — отточия страницы (по ним выравнивается ось),
     ``rules`` — сплошные черты (через ребро ячейки строка не сшивается), ``linking`` — способ
     сцепки кусков (``zones`` — по зонам поиска, ``greedy`` — прежняя жадная цепочка),
     ``barriers`` — линейки-барьеры (через них не смыкается RLSA и не сцепляются куски),
     ``claimed`` — маска краски, уже забранной строками другого масштаба (``_claimed_mask``):
-    компоненты, лежащие в ней, этот масштаб не видит; ``None`` — видит всё."""
+    компоненты, лежащие в ней, этот масштаб не видит; ``None`` — видит всё; ``split_rows`` — резать
+    сгустки RLSA, собравшие буквы двух рядов (:func:`_split_two_rows`)."""
     mask = component_mask(work, scale)
     # Порог второго круга сцепки (вторичные зоны) по числу длинных кусков: на полосе-схеме подписи
     # разбросаны, и сцеплять их вторичными зонами нельзя. Если краска абзацев скрыта, порог
@@ -482,7 +500,7 @@ def _segments_at_scale(
     if claimed is not None:
         min_long = _second_round_gate(mask, scale, dpi, leaders, barriers)
         mask = _without_claimed(mask, claimed)
-    count, labels, stats = _smeared(mask, scale, barriers)
+    count, labels, stats = _smeared(mask, scale, barriers, split_rows)
     if count <= 1:
         return []
     k = RENDER_DPI / dpi
@@ -559,13 +577,16 @@ def _segments_at_scale(
     return build(merge_by_field(guarded, stats, field, separators, scale, ink300, k, leaders, rules))
 
 
-def _smeared(mask: np.ndarray, scale: Scale, barriers: "BarrierLines | None") -> tuple[int, np.ndarray, np.ndarray]:
+def _smeared(
+    mask: np.ndarray, scale: Scale, barriers: "BarrierLines | None", split_rows: bool = SPLIT_ROWS_DEFAULT
+) -> tuple[int, np.ndarray, np.ndarray]:
     """Смыкание RLSA маски глифов и сгустки после него.
 
     Args:
         mask: Маска глифов масштаба (``uint8``).
         scale: Масштаб (ширина ядра смыкания ``gap``).
         barriers: Линейки-барьеры: по ним сгусток режется; ``None`` — нет.
+        split_rows: Резать ли сгустки, собравшие буквы двух рядов (:func:`_split_two_rows`).
 
     Returns:
         ``(число меток, карта меток, статистика компонент)`` — как у ``connectedComponentsWithStats``.
@@ -576,7 +597,122 @@ def _smeared(mask: np.ndarray, scale: Scale, barriers: "BarrierLines | None") ->
         # режется, и дальше по обе стороны — разные куски.
         smeared[barriers.mask(smeared.shape[:2])] = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(smeared, 8)
+    if split_rows:
+        count, labels, stats = _split_two_rows(mask, labels, stats, scale)
     return count, labels, stats
+
+
+def _two_levels(centres: np.ndarray, voters: np.ndarray, glyph: float) -> tuple[np.ndarray, float, float] | None:
+    """Деление букв сгустка на два уровня по ординатам середин (две средних, как k-means при k = 2).
+
+    Args:
+        centres: Ординаты середин букв.
+        voters: Какие буквы голосуют за уровни (не точки и не запятые).
+        glyph: Медианная высота буквы страницы.
+
+    Returns:
+        ``(буква нижнего уровня — булев вектор, ордината верхнего уровня, нижнего)`` или ``None``,
+        если двух уровней нет.
+    """
+    ys = centres[voters]
+    if ys.size < 2 * SPLIT_MIN_LETTERS:
+        return None
+    upper, lower = float(ys.min()), float(ys.max())
+    for _ in range(10):
+        low = np.abs(ys - lower) < np.abs(ys - upper)
+        if low.all() or not low.any():
+            return None
+        upper, lower = float(np.median(ys[~low])), float(np.median(ys[low]))
+    if lower - upper < SPLIT_LEVEL_HEIGHTS * glyph:
+        return None
+    if int(low.sum()) < SPLIT_MIN_LETTERS or int((~low).sum()) < SPLIT_MIN_LETTERS:
+        return None
+    # Всех букв, включая не голосовавшие, — к ближнему уровню.
+    return np.abs(centres - lower) < np.abs(centres - upper), upper, lower
+
+
+def _split_two_rows(
+    mask: np.ndarray, labels: np.ndarray, stats: np.ndarray, scale: Scale
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Разрезать сгустки RLSA, собравшие буквы двух соседних рядов (см. ``SPLIT_LEVEL_HEIGHTS``).
+
+    Буквы такого сгустка делятся на верхний и нижний уровень (:func:`_two_levels`); глиф-мост,
+    накрывающий середины обоих рядов, выпадает (он не буква ни одного ряда). Каждая группа
+    смыкается тем же ядром ОТДЕЛЬНО, и её связные части получают свои метки: первая — метку
+    прежнего сгустка, остальные — новые в конце. Смыкание подмножества букв лежит внутри смыкания
+    всех, поэтому новые сгустки не выходят за прежний. Карта и статистика прочих сгустков не меняются.
+
+    Args:
+        mask: Маска глифов масштаба (буквы до смыкания).
+        labels: Карта сгустков после смыкания.
+        stats: Статистика сгустков (``connectedComponentsWithStats``).
+        scale: Масштаб (ядро смыкания).
+
+    Returns:
+        ``(число меток, карта меток, статистика)`` после разрезания.
+    """
+    letters, components, letter_stats, centroids = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    if letters <= 1:
+        return stats.shape[0], labels, stats
+    # Сгусток каждой буквы — по любому её пикселю (как ``pieces.letters_of``).
+    owners = np.zeros(letters, dtype=np.int64)
+    ink = components > 0
+    found = labels[ink] > 0
+    owners[components[ink][found]] = labels[ink][found]
+    heights = letter_stats[1:, cv2.CC_STAT_HEIGHT].astype(np.float64)
+    glyph = float(np.median(heights[heights >= scale.min_height])) if (heights >= scale.min_height).any() else 0.0
+    if glyph <= 0:
+        return stats.shape[0], labels, stats
+    tall = np.nonzero(stats[:, cv2.CC_STAT_HEIGHT] >= SPLIT_MIN_HEIGHT_RATIO * glyph)[0]
+    tall = tall[tall > 0]
+    if tall.size == 0:
+        return stats.shape[0], labels, stats
+    labels = labels.copy()
+    rows = [stats]
+    count = stats.shape[0]
+    kernel = np.ones((1, scale.gap), np.uint8)
+    for blob in tall:
+        own = np.nonzero(owners == blob)[0]
+        own = own[own > 0]
+        if own.size < 2 * SPLIT_MIN_LETTERS:
+            continue
+        centres = centroids[own, 1]
+        voters = letter_stats[own, cv2.CC_STAT_HEIGHT] >= SPLIT_MARK_SHARE * glyph
+        levels = _two_levels(centres, voters, glyph)
+        if levels is None:
+            continue
+        lower, upper_y, lower_y = levels
+        # Мост — глиф, накрывающий середины ОБОИХ рядов (карандашная черта, слитый выносной): он не
+        # буква ни одного ряда, и в группе растянул бы её сгусток обратно на два ряда. Он выпадает.
+        tops = letter_stats[own, cv2.CC_STAT_TOP]
+        bottoms = tops + letter_stats[own, cv2.CC_STAT_HEIGHT]
+        bridge = (tops <= upper_y) & (bottoms >= lower_y)
+        x0, y0 = int(stats[blob, cv2.CC_STAT_LEFT]), int(stats[blob, cv2.CC_STAT_TOP])
+        x1, y1 = x0 + int(stats[blob, cv2.CC_STAT_WIDTH]), y0 + int(stats[blob, cv2.CC_STAT_HEIGHT])
+        window = components[y0:y1, x0:x1]
+        inside = labels[y0:y1, x0:x1] == blob
+        labels[y0:y1, x0:x1][inside] = 0
+        reuse = True
+        for group in (own[~lower & ~bridge], own[lower & ~bridge]):
+            closed = cv2.morphologyEx(np.isin(window, group).astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+            closed &= inside.astype(np.uint8)
+            parts, part_map, part_stats, _ = cv2.connectedComponentsWithStats(closed, 8)
+            for part in range(1, parts):
+                if reuse:
+                    target, reuse = int(blob), False
+                else:
+                    target = count
+                    count += 1
+                    rows.append(np.zeros((1, stats.shape[1]), dtype=stats.dtype))
+                labels[y0:y1, x0:x1][part_map == part] = target
+                row = part_stats[part].copy()
+                row[cv2.CC_STAT_LEFT] += x0
+                row[cv2.CC_STAT_TOP] += y0
+                if target == blob:
+                    stats[blob] = row
+                else:
+                    rows[-1][0] = row
+    return count, labels, np.vstack(rows) if len(rows) > 1 else stats
 
 
 def _second_round_gate(
@@ -1398,6 +1534,7 @@ def segments_of(
     linking: str = LINKING_DEFAULT,
     barriers: "BarrierLines | None" = None,
     join_leaders: bool = True,
+    split_rows: bool = SPLIT_ROWS_DEFAULT,
 ) -> tuple[list[Segment], list[Rule]]:
     """Строки страницы с центр-линиями по краске, в обоих масштабах, и сплошные черты.
 
@@ -1411,6 +1548,7 @@ def segments_of(
             них не смыкается RLSA и не сцепляются куски строки. ``None`` — нет.
         join_leaders: Сращивать ли строки, сошедшиеся после продления на общей точке отточия
             (:mod:`leader_join`): «подпись . . . . число» таблицы — одна строка.
+        split_rows: Резать ли сгустки RLSA, собравшие буквы двух рядов (:func:`_split_two_rows`).
 
     Returns:
         Строки сверху вниз (сначала корпус, затем крупные строки, не накрытые корпусными) и
@@ -1429,7 +1567,9 @@ def segments_of(
     # Продление по отточиям не заходит за линейку-барьер (её вертикальные куски — полосы запрета).
     barrier_separators = barriers.separators() if barriers is not None and not barriers.empty else None
     body = extend_with_leaders(
-        _segments_at_scale(gray300, work, ink300, separators, SCALES[0], dpi, leaders, rules, linking, barriers),
+        _segments_at_scale(
+            gray300, work, ink300, separators, SCALES[0], dpi, leaders, rules, linking, barriers, None, split_rows
+        ),
         leaders,
         dpi,
         barrier_separators,
@@ -1447,7 +1587,7 @@ def segments_of(
     rows = _text_rows(body)
     claimed = _claimed_mask(rows, work.shape[:2])
     large_all = _segments_at_scale(
-        gray300, work, ink300, separators, SCALES[1], dpi, None, rules, linking, barriers, claimed
+        gray300, work, ink300, separators, SCALES[1], dpi, None, rules, linking, barriers, claimed, split_rows
     )
     # Вторая линия обороны: крупная строка, чья ось скрещивает корпусную, — перескок через ряд.
     # Сверка — только со строками абзацев: корпусные обрывки самого заголовка стоят на чуть разной

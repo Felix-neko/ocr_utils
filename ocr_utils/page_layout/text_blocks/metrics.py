@@ -56,6 +56,21 @@ STEP_REACH_PITCHES = 4.0
 STEP_PITCH_SHARE = 0.75
 # Наклоны сторон расходятся больше чем на столько градусов — изгиб, а не ступенька.
 STEP_BEND_DEG = 10.0
+# Перескок на соседнюю строку, в том числе косой (:func:`row_jumps_of`): расстояние от оси до соседней
+# оси вдоль их общего участка меняется больше этой доли межстрочного шага. У изогнутой или наклонной
+# полосы соседи изогнуты так же, и расстояние почти постоянно; у перескока оно меняется на шаг.
+# Ступенька (:func:`steps_of`) косой переход через ряд не ловит: 1966/01 IMG_0011_2R — ось с «ярмарка»
+# уходит по карандашной черте на строку ниже, ступенька 14.6 px при пороге 17.6.
+ROW_JUMP_PITCH_SHARE = 0.6
+# Соседа берём, если он перекрывает ось по x на эту долю её длины (почти целиком: остаток строки, с
+# которой ось ушла, накрывает только её часть и перескока не видит — 1966/01 IMG_0011_2R, ось 48) и в
+# среднем ближе стольких шагов. Строки одной колонки одной длины, абзацный отступ — ~3 % длины.
+ROW_JUMP_OVERLAP = 0.9
+ROW_JUMP_REACH_PITCHES = 2.5
+# Разброс расстояния — между этими квантилями (концы осей и точки над запятыми не дёргают меру).
+ROW_JUMP_QUANTILES = (5.0, 95.0)
+# Оси короче стольких шагов в мере не участвуют: у обрывка разброс — шум.
+ROW_JUMP_MIN_PITCHES = 3.0
 # Ось через межколонник (:func:`gutter_crossings_of`). Пустота под осью уже этого (мм) — пробел
 # между словами, а не межколонник: межколонник в наборе журнала 3–6 мм, пробел корпуса — 1–2 мм.
 CROSSING_GAP_MM = 2.5
@@ -498,6 +513,78 @@ def table(pages: list[PageMetrics], against: list[PageMetrics] | None = None, br
 
 
 @dataclass(frozen=True)
+class RowJump:
+    """Ось, перескочившая на соседнюю строку: расстояние до соседа вдоль общего участка меняется на шаг."""
+
+    axis: int  # номер оси в ``axes`` страницы
+    neighbour: int  # номер соседней оси, по которой мерили
+    drift: float  # разброс расстояния до соседа (p95 − p5), пиксели рабочей копии
+    x0: float  # общий участок по x
+    x1: float
+    y: float  # ордината оси посередине общего участка
+
+    def to_json(self) -> dict:
+        """Словарь для JSON и CSV стенда."""
+        return {key: (round(value, 1) if isinstance(value, float) else value) for key, value in self.__dict__.items()}
+
+
+def row_jumps_of(axes: list[np.ndarray], pitch: float) -> list[RowJump]:
+    """Оси, перескочившие на соседнюю строку — в том числе КОСО, через ряд (что ступенька не ловит).
+
+    Для каждой оси берутся соседние оси, перекрывающие её по x не меньше ``ROW_JUMP_OVERLAP`` её
+    длины и лежащие в среднем ближе ``ROW_JUMP_REACH_PITCHES`` шагов. Вдоль общего участка считается
+    расстояние по вертикали до каждого соседа и его разброс (p95 − p5). Изгиб и наклон полосы соседи
+    повторяют — разброс мал; ось, ушедшая на строку ниже или выше, меняет расстояние на шаг. Мерой
+    оси берётся НАИМЕНЬШИЙ разброс по соседям: так кривой сосед (сам перескочивший) её не выдаёт.
+
+    Args:
+        axes: Оси страницы, каждая ``(n, 2)`` слева направо (пиксели рабочей копии).
+        pitch: Межстрочный шаг страницы.
+
+    Returns:
+        Находки по одной на ось, у которой наименьший разброс больше ``ROW_JUMP_PITCH_SHARE`` шага.
+    """
+    if pitch <= 0:
+        return []
+    usable = [
+        index
+        for index, axis in enumerate(axes)
+        if axis.shape[0] >= 2 and axis[-1, 0] - axis[0, 0] >= ROW_JUMP_MIN_PITCHES * pitch
+    ]
+    out: list[RowJump] = []
+    low, high = ROW_JUMP_QUANTILES
+    for index in usable:
+        axis = axes[index]
+        length = axis[-1, 0] - axis[0, 0]
+        best: RowJump | None = None
+        for other in usable:
+            if other == index:
+                continue
+            neighbour = axes[other]
+            left, right = max(axis[0, 0], neighbour[0, 0]), min(axis[-1, 0], neighbour[-1, 0])
+            if right - left < ROW_JUMP_OVERLAP * length:
+                continue
+            grid = np.linspace(left, right, CROSS_SAMPLES)
+            gap = np.interp(grid, axis[:, 0], axis[:, 1]) - np.interp(grid, neighbour[:, 0], neighbour[:, 1])
+            if abs(float(np.median(gap))) > ROW_JUMP_REACH_PITCHES * pitch:
+                continue
+            drift = float(np.percentile(gap, high) - np.percentile(gap, low))
+            if best is None or drift < best.drift:
+                middle = (left + right) / 2.0
+                best = RowJump(
+                    axis=index,
+                    neighbour=other,
+                    drift=drift,
+                    x0=float(left),
+                    x1=float(right),
+                    y=float(np.interp(middle, axis[:, 0], axis[:, 1])),
+                )
+        if best is not None and best.drift > ROW_JUMP_PITCH_SHARE * pitch:
+            out.append(best)
+    return out
+
+
+@dataclass(frozen=True)
 class GutterCrossing:
     """Ось строки, идущая через межколонник: пустая вертикальная полоса под ней и по соседям."""
 
@@ -718,6 +805,8 @@ def gutter_crossings_of(axes: list[dict], glyphs: np.ndarray, dpi: float) -> lis
 
 
 __all__ = [
+    "RowJump",
+    "row_jumps_of",
     "GutterCrossing",
     "gutter_crossings_of",
     "PageMetrics",

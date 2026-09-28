@@ -74,6 +74,14 @@ def page_json(analysis: PageAnalysis) -> dict:
                     "top": _curve(block.envelope.top),
                     "bottom": _curve(block.envelope.bottom),
                     "polygon": _curve(block.envelope.polygon),
+                    # Недостоверные участки сторон гладкой границы (``BlocksMode.SMOOTH``): отрезки по высоте,
+                    # где сторона — ступенька по выносу за колонку (пометка на полях, строка шире колонки).
+                    "unreliable_left": [
+                        list(map(float, span)) for span in getattr(block.envelope, "unreliable_left", ())
+                    ],
+                    "unreliable_right": [
+                        list(map(float, span)) for span in getattr(block.envelope, "unreliable_right", ())
+                    ],
                 },
                 # Справочная граница по краске: она одна обещает охват всех букв рядов, тогда как
                 # главная — полоса вокруг оси — нарочно идёт мимо выносных элементов.

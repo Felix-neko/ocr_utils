@@ -11,6 +11,7 @@ import pytest
 from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.page_layout.text_blocks.alignment import AlignKind
 from ocr_utils.page_layout.text_blocks.blocks import (
+    BlocksMode,
     EXTEND_SLOPE_LIMIT_DEG,
     BODY_QUANTILE,
     CapKind,
@@ -134,8 +135,12 @@ def test_dilated_outline_contains_envelope():
 
 
 def test_dilated_outline_is_smoother():
-    """Дилатация делает границу ровнее: разброс правой кромки по y падает."""
-    analysis = analyse_gray(column_page(columns=1), ENGINE)
+    """Дилатация делает границу ровнее: разброс правой кромки по y падает (прежняя граница, ``BlocksMode.LEGACY``).
+
+    У гладкой границы (``SMOOTH``) сторона выровненной колонки — прямая, разброс уже нулевой, и дилатации
+    выравнивать нечего.
+    """
+    analysis = analyse_gray(column_page(columns=1), ENGINE, blocks_mode=BlocksMode.LEGACY)
     block = analysis.blocks[0]
     outline = block.envelope.polygon_dilated
     assert outline is not None
@@ -773,12 +778,14 @@ def test_top_edge_follows_the_baseline_not_a_capital_word():
 
     Слово синтетики — сплошной прямоугольник; «прописное» слово — тот же прямоугольник, выше на 40 %
     при той же базовой линии. Ось (середина краски) над ним поднимается, линия середины строчной и
-    отмеренный от неё верх блока остаются на месте (1975/05 с.97, «В УМТС Башкирского»).
+    отмеренный от неё верх блока остаются на месте (1975/05 с.97, «В УМТС Башкирского»). Свойство
+    прежней кромки-полосы (``BlocksMode.LEGACY``): гладкая граница берёт верх по постоянному отступу от
+    сглаженной оси.
     """
     from tests.ocr_utils.page_layout.orientation.synthetic import GLYPH_H, INK
 
     plain = column_page(columns=1, justify="both")
-    before = max(analyse_gray(plain, ENGINE).blocks, key=lambda block: len(block.rows))
+    before = max(analyse_gray(plain, ENGINE, blocks_mode=BlocksMode.LEGACY).blocks, key=lambda block: len(block.rows))
     row = before.rows[0]
     y = int(round(row.y * 2))
     band = (plain[y - GLYPH_H : y + GLYPH_H] < 128).astype(np.uint8)
@@ -792,7 +799,7 @@ def test_top_edge_follows_the_baseline_not_a_capital_word():
     for left, top, width, _, _ in chosen:
         top += y - GLYPH_H
         capital[top - raise_px : top, left : left + width] = INK
-    after = max(analyse_gray(capital, ENGINE).blocks, key=lambda block: len(block.rows))
+    after = max(analyse_gray(capital, ENGINE, blocks_mode=BlocksMode.LEGACY).blocks, key=lambda block: len(block.rows))
     x0 = chosen[0][0] / 2.0 + 4
     x1 = (chosen[-1][0] + chosen[-1][2]) / 2.0 - 4
     xs = np.linspace(x0, x1, 12)

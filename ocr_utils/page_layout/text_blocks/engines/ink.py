@@ -17,7 +17,7 @@ from ocr_utils.page_layout.text_blocks.columns import (
 from ocr_utils.page_layout.text_blocks.engines.base import EngineLine, EngineResult
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, barrier_rules, barrier_separators, masked_ink
 from ocr_utils.page_layout.text_blocks.leaders import leaders_of
-from ocr_utils.page_layout.text_blocks.segment import segments_of
+from ocr_utils.page_layout.text_blocks.segment import SPLIT_ROWS_DEFAULT, segments_of
 
 
 class InkEngine:
@@ -36,6 +36,7 @@ class InkEngine:
         hints: LayoutHints | None = None,
         gutter_mode: GutterMode = GutterMode.SHORT,
         join_leaders: bool = True,
+        split_rows: bool = SPLIT_ROWS_DEFAULT,
     ) -> None:
         """Args:
         linking: Способ сцепки кусков в строки — ``zones`` или ``greedy`` (см. пакет ``text_blocks``).
@@ -43,11 +44,13 @@ class InkEngine:
             разрешённого текста и рамки таблиц и блок-схем. ``None`` — разбор как прежде.
         gutter_mode: Как межколонники превращаются в запреты сцепки (``columns.GutterMode``).
         join_leaders: Сращивать ли строки, сошедшиеся на общей точке отточия (:mod:`leader_join`).
+        split_rows: Резать ли сгустки RLSA, собравшие буквы двух рядов (``segment._split_two_rows``).
         """
         self.linking = linking
         self.hints = hints or LayoutHints()
         self.gutter_mode = gutter_mode
         self.join_leaders = join_leaders
+        self.split_rows = split_rows
 
     def with_hints(self, hints: LayoutHints) -> "InkEngine":
         """Тот же движок с другими подсказками — для прохода по области в её собственных координатах.
@@ -58,7 +61,7 @@ class InkEngine:
         Returns:
             Новый движок с тем же способом сцепки и режимом межколонников.
         """
-        return InkEngine(self.linking, hints, self.gutter_mode, self.join_leaders)
+        return InkEngine(self.linking, hints, self.gutter_mode, self.join_leaders, self.split_rows)
 
     def segment(self, gray300: np.ndarray, dpi: float = WORK_DPI) -> EngineResult:
         """Строки страницы в пикселях рабочей копии ``dpi``.
@@ -93,7 +96,14 @@ class InkEngine:
             + barrier_lines.separators()
         )
         segments, rules = segments_of(
-            gray300, separators, dpi, leaders, self.linking, barrier_lines, join_leaders=self.join_leaders
+            gray300,
+            separators,
+            dpi,
+            leaders,
+            self.linking,
+            barrier_lines,
+            join_leaders=self.join_leaders,
+            split_rows=self.split_rows,
         )
         rules = list(rules) + barrier_rules(self.hints.barriers)
         lines = [

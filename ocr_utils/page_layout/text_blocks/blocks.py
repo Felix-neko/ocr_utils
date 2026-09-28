@@ -387,6 +387,28 @@ class TextBlock:
         return len(self.rows)
 
 
+class BlocksMode(str, Enum):
+    """Способ группировки строк в блоки и построения их границы (переключатель ``blocks_of``).
+
+    * ``LEGACY`` — прежний ход: потоки и деление колонки по разрыву, кеглю, жирности, чертам;
+      граница — полоса вокруг оси с трендом сторон (:func:`envelope_of`), рядом справочная кромка по
+      краске (``envelope_ink``);
+    * ``SMOOTH`` — прежние куски колонок плюс доработки группировки (:mod:`regroup`: штрихи текста не
+      барьеры, куски одной строки в один ряд, «дотягивание», склейка ложных разрезов, развод общих
+      рядов) и гладкие боковые стороны (:mod:`smooth_envelope`): одна кривая x(y) на сторону, ступенька
+      только на настоящей разнице длин строк и на выносе за колонку (недостоверный участок). Оси-выбросы
+      крупного набора до этого заменяются (:mod:`axes_fix`, в ``page.analyse_gray``). Сравнение на паке-1 —
+      ``reports/block_envelopes.md``.
+    """
+
+    LEGACY = "legacy"
+    SMOOTH = "smooth"
+
+
+# Способ по умолчанию (решение пользователя 2026-09-28: новый способ — основной, прежний — переключаемый).
+DEFAULT_BLOCKS_MODE = BlocksMode.SMOOTH
+
+
 class CapKind(str, Enum):
     """Чем идут верхняя и нижняя кромки блока."""
 
@@ -2394,6 +2416,7 @@ def blocks_of(
     dilate: float = DILATE_GLYPHS,
     leaders: list | None = None,
     barriers=None,
+    mode: "BlocksMode | None" = None,
 ) -> list[TextBlock]:
     """Блоки страницы: колонки зон вёрстки, склеенные по вертикали и разделённые разрывами.
 
@@ -2414,9 +2437,96 @@ def blocks_of(
         coarse_factor: Во сколько раз шире окно крупной огибающей.
         barriers: Линейки-барьеры (:class:`barriers.BarrierLines`): через них не сращиваются ряды
             и блоки. ``None`` — нет.
+        mode: Способ группировки и границы (:class:`BlocksMode`); ``None`` — ``DEFAULT_BLOCKS_MODE``.
 
     Returns:
         Блоки, слева направо и сверху вниз.
+    """
+    mode = DEFAULT_BLOCKS_MODE if mode is None else BlocksMode(mode)
+    if mode is BlocksMode.SMOOTH:
+        # Импорт здесь: ``regroup`` сам строится на функциях этого модуля.
+        from ocr_utils.page_layout.text_blocks.regroup import smooth_blocks
+
+        return smooth_blocks(
+            axes, zones, gutters, width, ink, rules, dpi, smooth_pitches, coarse_factor, dilate, leaders, barriers
+        )
+    pieces, body_height = column_pieces(axes, zones, gutters, width, ink, dpi, leaders, barriers)
+    blocks: list[TextBlock] = []
+    for column, span, rows in pieces:
+        # Блоки бок о бок в одной колонке (подпись автора и заголовок) делятся каждый в своём
+        # потоке; без рядов бок о бок поток один — вся колонка, и шаг прежний.
+        column_pitch = pitch_of(rows)
+        streams = _streams(rows, column_pitch, dpi)
+        if len(streams) == 1:
+            groups = split_blocks(rows, column_pitch, rules, span, body_height, barriers)
+        else:
+            # Шаг — колонки, а не потока: у таблицы с отточиями полу-ряды стоят на соседних
+            # ординатах, шаг потока выходит в пару пикселей, и таблица рассыпалась (1968/01, IMG_0026_2R).
+            groups = [
+                group
+                for stream in streams
+                for group in split_blocks(stream, column_pitch, rules, span, body_height, barriers)
+            ]
+            groups.sort(key=lambda group: group[0].y)
+        for number, group in enumerate(groups):
+            if len(group) < MIN_BLOCK_ROWS:
+                continue
+            pitch = pitch_of(group)
+            widths = [row.glyph_w for row in group if row.glyph_w > 0]
+            heights = [row.glyph_h for row in group if row.glyph_h > 0]
+            if widths:
+                glyph = (float(np.median(widths)), float(np.median(heights)))
+            else:
+                own_height = float(np.median([row.height for row in group]))
+                glyph = (own_height * FALLBACK_ASPECT, own_height * FALLBACK_HEIGHT)
+            # Короткая последняя строка достраивается до линии отсечки по изгибу предпоследней,
+            # чтобы низ блока правее её конца повторял изгиб бумаги (1976/09 с.92).
+            group = _with_tail(group, pitch, glyph[0], dpi, ink)
+            blocks.append(
+                TextBlock(
+                    column=column,
+                    index=number,
+                    span=span,
+                    rows=tuple(group),
+                    pitch_px=pitch,
+                    dpi=float(dpi),
+                    envelope=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate, CapKind.BODY),
+                    envelope_coarse=envelope_of(group, pitch, dpi, smooth_pitches * coarse_factor),
+                    envelope_ink=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate, CapKind.INK),
+                )
+            )
+    return blocks
+
+
+def column_pieces(
+    axes: list[LineAxis],
+    zones: list,
+    gutters: list,
+    width: int,
+    ink: np.ndarray,
+    dpi: float = WORK_DPI,
+    leaders: list | None = None,
+    barriers=None,
+) -> tuple[list[tuple[int, tuple[int, int], list[Row]]], float]:
+    """Куски колонок страницы до деления на блоки — общая часть обоих способов :class:`BlocksMode`.
+
+    Оси зон раскладываются по колонкам, в колонке собираются ряды; бесхозные оси — в кусок во всю
+    ширину; возврат продолжения вводки, склейка кусков одной колонки из соседних зон, развод
+    «проливов», выброс широких обрывков из слипшихся строк.
+
+    Args:
+        axes: Оси всех строк страницы.
+        zones: Зоны вёрстки (``columns.Zone``).
+        gutters: Локальные межколонники-ломаные.
+        width: Ширина рабочей копии.
+        ink: Краска текста рендера ``RENDER_DPI``.
+        dpi: Разрешение рабочей копии.
+        leaders: Отточия страницы.
+        barriers: Линейки-барьеры или ``None``.
+
+    Returns:
+        Пара: куски ``(номер колонки, границы колонки, ряды сверху вниз)`` и медианная высота ряда
+        страницы (кегль корпуса).
     """
     pad = mm_to_px(COLUMN_PAD_MM, dpi)
     pieces: list[tuple[tuple[int, int], list[Row]]] = []
@@ -2467,7 +2577,6 @@ def blocks_of(
     # (заголовки, логотипы) отличается от корпуса.
     all_heights = [row.height for _, rows in merged for row in rows]
     body_height = float(np.median(all_heights)) if all_heights else 0.0
-    blocks: list[TextBlock] = []
     # Ряд, вылезающий за колонку своего куска, в неё не идёт: иначе широкий заголовок таблицы
     # попадает СРАЗУ В ДВА блока соседних колонок и их контуры пересекаются (1971/10 с.93). Такие
     # ряды собираются в отдельный кусок во всю ширину — терять их нельзя.
@@ -2484,6 +2593,7 @@ def blocks_of(
         else:
             span, rows = merged[full]
             merged[full] = (span, sorted([*rows, *spilled], key=lambda row: row.y))
+    out: list[tuple[int, tuple[int, int], list[Row]]] = []
     for column, (span, rows) in enumerate(merged):
         if len(rows) < MIN_BLOCK_ROWS:
             continue
@@ -2494,49 +2604,8 @@ def blocks_of(
         wide = typical and span[1] - span[0] > WIDE_BLOCK_RATIO * typical and len(rows) < WIDE_BLOCK_ROWS
         if wide and np.mean([len(row.axes) > 1 for row in rows]) >= GLUED_ROWS_SHARE:
             continue
-        # Блоки бок о бок в одной колонке (подпись автора и заголовок) делятся каждый в своём
-        # потоке; без рядов бок о бок поток один — вся колонка, и шаг прежний.
-        column_pitch = pitch_of(rows)
-        streams = _streams(rows, column_pitch, dpi)
-        if len(streams) == 1:
-            groups = split_blocks(rows, column_pitch, rules, span, body_height, barriers)
-        else:
-            # Шаг — колонки, а не потока: у таблицы с отточиями полу-ряды стоят на соседних
-            # ординатах, шаг потока выходит в пару пикселей, и таблица рассыпалась (1968/01, IMG_0026_2R).
-            groups = [
-                group
-                for stream in streams
-                for group in split_blocks(stream, column_pitch, rules, span, body_height, barriers)
-            ]
-            groups.sort(key=lambda group: group[0].y)
-        for number, group in enumerate(groups):
-            if len(group) < MIN_BLOCK_ROWS:
-                continue
-            pitch = pitch_of(group)
-            widths = [row.glyph_w for row in group if row.glyph_w > 0]
-            heights = [row.glyph_h for row in group if row.glyph_h > 0]
-            if widths:
-                glyph = (float(np.median(widths)), float(np.median(heights)))
-            else:
-                own_height = float(np.median([row.height for row in group]))
-                glyph = (own_height * FALLBACK_ASPECT, own_height * FALLBACK_HEIGHT)
-            # Короткая последняя строка достраивается до линии отсечки по изгибу предпоследней,
-            # чтобы низ блока правее её конца повторял изгиб бумаги (1976/09 с.92).
-            group = _with_tail(group, pitch, glyph[0], dpi, ink)
-            blocks.append(
-                TextBlock(
-                    column=column,
-                    index=number,
-                    span=span,
-                    rows=tuple(group),
-                    pitch_px=pitch,
-                    dpi=float(dpi),
-                    envelope=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate, CapKind.BODY),
-                    envelope_coarse=envelope_of(group, pitch, dpi, smooth_pitches * coarse_factor),
-                    envelope_ink=envelope_of(group, pitch, dpi, smooth_pitches, glyph, dilate, CapKind.INK),
-                )
-            )
-    return blocks
+        out.append((column, span, rows))
+    return out, body_height
 
 
 def _absorb_continuation(
@@ -2799,7 +2868,10 @@ __all__ = [
     "BlockEnvelope",
     "Row",
     "TextBlock",
+    "BlocksMode",
+    "DEFAULT_BLOCKS_MODE",
     "blocks_of",
+    "column_pieces",
     "envelope_of",
     "ink_edge",
     "pitch_of",

@@ -20,7 +20,8 @@ from research.block_envelopes.capture import cache_path, capture_page, save
 from research.block_envelopes.capture import load as load_input
 from research.block_envelopes.engines import EngineKind, run_engine
 from research.block_envelopes.overlay import page_picture
-from research.block_envelopes.boundary import Boundary, block_of
+from research.block_envelopes.axes_fix import fixed_input, slope_of
+from research.block_envelopes.boundary import Boundary, SmoothEnvelope, block_of
 from research.block_envelopes.grouping import Grouping, groups_of
 from research.block_envelopes.measures import page_measures, shapes_from_blocks, shapes_from_json
 
@@ -302,8 +303,11 @@ def run_algo_page(
     started = time.monotonic()
     blocks = [block_of(group, boundary, inp) for group in groups_of(grouping, inp)]
     seconds = time.monotonic() - started
-    shapes, axes_mid, lost = shapes_from_blocks(blocks, inp.axes)
-    measures = page_measures(shapes, axes_mid, inp.dpi, lost)
+    # Оси, по которым на самом деле строились ряды: у REACH_AXES выбросы заменены.
+    axes = fixed_input(inp)[0].axes if grouping is Grouping.REACH_AXES else inp.axes
+    shapes, axes_mid, lost = shapes_from_blocks(blocks, axes)
+    tilts = [(slope_of(axis.points), axis.x1 - axis.x0, axis.height) for axis in axes]
+    measures = page_measures(shapes, axes_mid, inp.dpi, lost, tilts)
     name = page_key(key)
     payload = {
         "key": key,
@@ -312,6 +316,19 @@ def run_algo_page(
             {
                 "polygon": np.round(block.envelope.polygon, 1).tolist(),
                 "rows": [[round(r.y, 1), round(r.x0, 1), round(r.x1, 1), round(r.height, 1)] for r in block.rows],
+                # Стороны гладкой границы и их недостоверные участки (ступеньки по выносам за колонку).
+                **(
+                    {
+                        "sides": {
+                            "left": np.round(block.envelope.left, 1).tolist(),
+                            "right": np.round(block.envelope.right, 1).tolist(),
+                            "unreliable_left": [list(span) for span in block.envelope.unreliable_left],
+                            "unreliable_right": [list(span) for span in block.envelope.unreliable_right],
+                        }
+                    }
+                    if isinstance(block.envelope, SmoothEnvelope)
+                    else {}
+                ),
             }
             for block in blocks
         ],
@@ -325,9 +342,12 @@ def run_algo_page(
                 f"{key}   алгоритм: {algo_name(grouping, boundary)}",
                 f"блоков {measures.blocks}; выход за краску {measures.overshoot_mm} мм, пила {measures.saw_mm}, "
                 f"клин {measures.wedge_share}, пар-разрезов {measures.split_pairs}, слитых {measures.hmerge_blocks}, "
-                f"потеряно осей {measures.lost_axes}",
+                f"потеряно осей {measures.lost_axes}; крышка сверху {measures.cap_top_mm} мм, снизу "
+                f"{measures.cap_bottom_mm} мм, налезающих пар {measures.overlap_pairs}, осей-выбросов {measures.tilt_axes}; "
+                f"ступенек сторон {measures.side_steps}, шершавость {measures.side_rough_mm} мм",
             ],
-            axes=[np.asarray(axis.points) for axis in inp.axes],
+            axes=[np.asarray(axis.points) for axis in axes],
+            unreliable=[_unreliable_segments(block) for block in blocks],
             reference=(
                 [block.envelope.polygon for block in inp.legacy]
                 if grouping is not Grouping.LEGACY or boundary is not Boundary.LEGACY
@@ -336,6 +356,20 @@ def run_algo_page(
         )
         cv2.imwrite(str(target / "overlays" / f"{name}.jpg"), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return {"key": key, **asdict(measures), "seconds": round(seconds, 3)}
+
+
+def _unreliable_segments(block) -> list[np.ndarray]:
+    """Куски сторон гладкой границы на недостоверных участках (для пунктира на оверлее)."""
+    envelope = block.envelope
+    if not isinstance(envelope, SmoothEnvelope):
+        return []
+    out = []
+    for curve, spans in ((envelope.left, envelope.unreliable_left), (envelope.right, envelope.unreliable_right)):
+        for y0, y1 in spans:
+            part = curve[(curve[:, 1] >= y0) & (curve[:, 1] <= y1)]
+            if len(part) >= 2:
+                out.append(part)
+    return out
 
 
 def _run_algo_one(args: tuple) -> dict | None:
@@ -394,6 +428,12 @@ REPORT_FLAGS = {
     "пар-разрезов ≥ 1": ("split_pairs", 1),
     "слитых ≥ 1": ("hmerge_blocks", 1),
     "потеряно осей ≥ 1": ("lost_axes", 1),
+    "крышка сверху > 1.5 мм": ("cap_top_mm", 1.5),
+    "крышка снизу > 1.5 мм": ("cap_bottom_mm", 1.5),
+    "налезающих пар ≥ 1": ("overlap_pairs", 1),
+    "осей-выбросов ≥ 1": ("tilt_axes", 1),
+    "ступенек сторон ≥ 1": ("side_steps", 1),
+    "шершавость > 0.05 мм": ("side_rough_mm", 0.05),
 }
 
 
@@ -419,7 +459,10 @@ def report(out_dir: Path, sets_dir: Path) -> None:
                 continue
             line = {"алгоритм": folder.name, "множество": set_name, "полос": len(own)}
             for label, (field, threshold) in REPORT_FLAGS.items():
-                line[label] = sum(1 for row in own if float(row[field]) >= threshold)
+                # Мер нет в сводках прогонов до их появления — там столбец пустой.
+                line[label] = sum(
+                    1 for row in own if row.get(field) not in (None, "") and float(row[field]) >= threshold
+                )
             # Изменение числа блоков против боевого: сколько полос стали дробнее и сколько — крупнее.
             changed = [
                 (int(row["blocks"]) - int(legacy_rows[row["key"]]["blocks"]))

@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from ocr_utils.page_layout.text_blocks.barriers import BarrierLines
 from ocr_utils.page_layout.text_blocks.blocks import Row
 from ocr_utils.page_layout.text_blocks.lines import LineAxis
-from research.block_envelopes.boundary import _local_side, stepped_polygon
-from research.block_envelopes.grouping import merge_same_line, reach_components, underline_free
+from research.block_envelopes.axes_fix import fixed_axes, slope_of
+from research.block_envelopes.boundary import (
+    _axis_points,
+    _guided_at,
+    _guides,
+    _local_side,
+    _smooth_axis,
+    stepped_polygon,
+)
+from research.block_envelopes.grouping import (
+    merge_overlapping_pieces,
+    merge_same_line,
+    reach_components,
+    resolve_shared_rows,
+    underline_free,
+)
+from research.block_envelopes.smooth_sides import side_curve
 from research.block_envelopes.measures import BlockShape, RowBox, overshoot_px, saw_px, wedge_share
 
 DPI = 150.0
@@ -95,3 +112,115 @@ def test_letter_strokes_inside_heading_are_not_barriers() -> None:
     bar = [(388, 277), (479, 277)]
     stem = [(340, 280), (340, 308)]
     assert underline_free(BarrierLines.of([bar, stem]), axes).empty
+
+
+def test_overlapping_pieces_of_one_line_merge_despite_style() -> None:
+    """Жирное начало и обычный хвост одной строки, налезающие по x, — один ряд (1972/03 IMG_0108_2R)."""
+    bold = row(64, 558, 1254, 14, weight=3.5)
+    plain = row(414, 826, 1254, 14, weight=2.0)
+    merged = merge_overlapping_pieces([bold, plain, row(64, 826, 1277, 14)])
+    assert len(merged) == 2
+    assert merged[0].x0 == 64 and merged[0].x1 == 826
+
+
+def test_side_by_side_signature_far_away_is_not_merged() -> None:
+    """Подпись справа через промежуток в три высоты строки остаётся отдельным рядом."""
+    assert len(merge_overlapping_pieces([row(60, 300, 500, 20), row(360, 500, 500, 14, weight=3.5)])) == 2
+
+
+def test_shared_row_moves_to_block_of_longer_piece() -> None:
+    """Короткий кусок строки, попавший в чужой блок, уходит к блоку длинного куска той же высоты."""
+    upper = [row(64, 826, 1230), row(414, 826, 1254)]
+    lower = [row(64, 558, 1254), row(64, 826, 1277)]
+    groups = resolve_shared_rows([upper, lower])
+    assert sorted(len(group) for group in groups) == [1, 3]
+
+
+def test_tilted_heading_axis_is_replaced() -> None:
+    """Ось крупной строки с наклоном 5° при горизонтальном корпусе заменяется прямой по глифам с наклоном ≤ 1°."""
+    body = [axis(50, 800, 100 + 20 * i, 14) for i in range(6)]
+    xs = np.linspace(290, 680, 20)
+    tilted = LineAxis(
+        points=np.column_stack([xs, 880 + 0.087 * (xs - 290)]),
+        height=57.0,
+        column=0,
+        dpi=DPI,
+        cross=False,
+        sagitta_mm=0.0,
+        slope_deg=0.0,
+        bend_mm=0.0,
+        resid_parabola_mm=0.0,
+        glyphs=np.array([[x, 870, x + 30, 910] for x in range(290, 680, 35)], dtype=float),
+    )
+    fixed, log = fixed_axes([*body, tilted], DPI)
+    assert len(log) == 1 and log[0].source == "glyphs"
+    assert abs(slope_of(fixed[-1].points)) <= 1.0 + 1e-6
+    assert fixed[-1].height < 57.0
+
+
+def test_short_single_line_extends_along_body_slope() -> None:
+    """Короткая строка без длинного соседа добивается до стороны по наклону корпуса, а не по своему."""
+    short = Row(y=100, height=12, x0=50, x1=120, axes=(axis(50, 120, 100, 12),), weight=2.0, glyph_h=8.0)
+    steep = replace(short, axes=(replace(short.axes[0], points=np.array([[50, 98.0], [120, 102.0]])),))
+    guides = _guides([steep], [(50.0, 700.0)], DPI, reference_deg=0.0)
+    ys = _guided_at(_smooth_axis(_axis_points(steep), DPI), np.array([700.0]), guides[0])
+    assert abs(ys[0] - 102.0) < 1.0
+
+
+def _side(edges: np.ndarray, pitch: float = 24.0, height: float = 14.0):
+    """Правая сторона по краям строк с шагом ``pitch``: ``SideCurve`` и ординаты строк."""
+    ys = 100.0 + pitch * np.arange(edges.size)
+    return side_curve(ys, edges, ys - height / 2, ys + height / 2, pitch, DPI), ys
+
+
+def test_trapezoid_side_is_smooth_line() -> None:
+    """Трапеция: края по наклонной с шумом ±2 px — сторона без скачков, шершавость около нуля, все края внутри."""
+    rng = np.random.default_rng(0)
+    edges = 800.0 + 0.08 * 24.0 * np.arange(20) + rng.uniform(-2, 2, 20)
+    curve, ys = _side(edges)
+    assert not curve.unreliable
+    grid = curve.us[:: int(round(DPI / 25.4))]  # узлы через 1 мм
+    assert np.abs(np.diff(grid)).max() < 0.5 * DPI / 25.4
+    assert np.all(np.interp(ys, curve.ys, curve.us) >= edges - 1e-6)
+
+
+def test_hanging_hyphen_is_bump_not_step() -> None:
+    """Дефис на 1 мм наружу — гладкий горб: край строки внутри, скачков больше 0.5 мм нет, участок не помечен."""
+    edges = np.full(12, 800.0)
+    edges[6] += 6.0
+    curve, ys = _side(edges)
+    assert not curve.unreliable
+    assert np.interp(ys[6], curve.ys, curve.us) >= edges[6] - 1e-6
+    assert np.abs(np.diff(curve.us)).max() < 0.5 * DPI / 25.4
+
+
+def test_margin_note_is_step_and_unreliable() -> None:
+    """Вынос на 5 мм (пометка на полях) — ступенька по краю строки и недостоверный участок."""
+    edges = np.full(12, 800.0)
+    edges[5] += 30.0
+    curve, ys = _side(edges)
+    assert len(curve.unreliable) == 1
+    assert np.interp(ys[5], curve.ys, curve.us) >= edges[5] - 1e-6
+
+
+def test_ragged_edge_keeps_steps() -> None:
+    """Рваный край со строками разной длины (разница 10 мм) — ступеньки сохраняются."""
+    edges = np.array([800, 740, 790, 700, 760, 720, 800, 690], dtype=float)
+    curve, ys = _side(edges)
+    assert np.allclose(np.interp(ys, curve.ys, curve.us), edges, atol=1.0)
+
+
+def test_short_last_line_filled_to_side() -> None:
+    """Короткая последняя строка на выровненной стороне добивается до стороны."""
+    edges = np.full(10, 800.0)
+    edges[-1] = 500.0
+    curve, ys = _side(edges)
+    assert np.interp(ys[-1], curve.ys, curve.us) >= 799.0
+
+
+def test_two_indented_rows_inside_aligned_side_are_filled() -> None:
+    """Конец абзаца и отступ следующего — две строки внутрь подряд между выровненными: сторона не проваливается."""
+    edges = np.full(14, 800.0)
+    edges[6], edges[7] = 740.0, 760.0
+    curve, ys = _side(edges)
+    assert np.interp(ys[6], curve.ys, curve.us) >= 799.0 and np.interp(ys[7], curve.ys, curve.us) >= 799.0

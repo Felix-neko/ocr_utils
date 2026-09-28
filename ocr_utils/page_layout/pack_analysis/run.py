@@ -35,6 +35,7 @@ from ocr_utils.page_layout.pack_analysis.stages import (
     read_jsonl_map,
     rotated_name,
 )
+from ocr_utils.page_layout.text_blocks.blocks import DEFAULT_BLOCKS_MODE, BlocksMode
 from ocr_utils.page_layout.text_blocks.columns import GutterMode
 from ocr_utils.page_layout.text_blocks.page import AxisKind
 
@@ -300,6 +301,7 @@ def stage_final(
     redo: bool = False,
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ) -> None:
     """Стадия 6: итог полос, оверлеи по папкам, ``index.csv``.
 
@@ -313,6 +315,7 @@ def stage_final(
             детектора текстовых блоков или оверлея — остальные стадии при этом не трогаются).
         axis: По какой оси строки собирать ряды и блоки (см. :func:`final.text_blocks`).
         gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
+        blocks_mode: Способ группировки строк в блоки и их границы (``text_blocks.blocks.BlocksMode``).
     """
     pass1 = read_jsonl_map(work / "deepseek" / "pass1" / "markdown.jsonl")
     pass2 = read_jsonl_map(work / "deepseek" / "pass2" / "markdown.jsonl")
@@ -338,7 +341,7 @@ def stage_final(
                 pool.map(
                     _safe, [final_page] * len(todo), todo, [orientation[t.name] for t in todo], payloads,
                     [work] * len(todo), [out] * len(todo), [axis] * len(todo), [gutter_mode] * len(todo),
-                    chunksize=2,
+                    [blocks_mode] * len(todo), chunksize=2,
                 ),
                 1,
             ):  # fmt: skip
@@ -357,6 +360,7 @@ def stage_reblock(
     axis: AxisKind = AxisKind.BODY,
     gutter_mode: GutterMode = GutterMode.SHORT,
     redo: bool = False,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ) -> None:
     """Пересчитать только текстовые блоки по готовому разбору пака: ``<out>/pages``, ``overlays``, ``index.csv``.
 
@@ -372,6 +376,7 @@ def stage_reblock(
         axis: Ось строки для рядов и блоков.
         gutter_mode: Как межколонники становятся запретами сцепки.
         redo: Пересчитать и готовые полосы.
+        blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
     """
     if out.resolve() == source.resolve():
         raise ValueError("пересчёт текстовых блоков пишется в новую папку, а не поверх прошлого разбора")
@@ -383,7 +388,7 @@ def stage_reblock(
             for done, result in enumerate(
                 pool.map(
                     _safe, [reblock_page] * len(todo), todo, [source] * len(todo), [out] * len(todo),
-                    [axis] * len(todo), [gutter_mode] * len(todo), chunksize=4,
+                    [axis] * len(todo), [gutter_mode] * len(todo), [blocks_mode] * len(todo), chunksize=4,
                 ),
                 1,
             ):  # fmt: skip
@@ -441,6 +446,7 @@ def run(
     reuse_from: Path | None = None,
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ) -> None:
     """Весь разбор по стадиям.
 
@@ -460,6 +466,7 @@ def run(
             только вместе с ``raster_db``.
         axis: Ось строки, по которой детектор текстовых блоков собирает ряды и блоки.
         gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
+        blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
     """
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -482,7 +489,17 @@ def run(
     stage_deepseek(work / "jobs_pass1.jsonl", work / "deepseek" / "pass1", "markdown,ocr")
     stage_pass2(work, jobs)
     stage_deepseek(work / "jobs_pass2.jsonl", work / "deepseek" / "pass2", "markdown")
-    stage_final(tasks, orientation, work, out, jobs, redo=redo_final, axis=axis, gutter_mode=gutter_mode)
+    stage_final(
+        tasks,
+        orientation,
+        work,
+        out,
+        jobs,
+        redo=redo_final,
+        axis=axis,
+        gutter_mode=gutter_mode,
+        blocks_mode=blocks_mode,
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict]:

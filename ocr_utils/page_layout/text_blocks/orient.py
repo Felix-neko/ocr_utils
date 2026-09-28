@@ -146,6 +146,7 @@ def back_block(block, size: tuple[int, int], zone: OrientedZone):
             core_left=curve(item.core_left),
             core_right=curve(item.core_right),
             polygon_dilated=curve(item.polygon_dilated),
+            **_back_unreliable(item, zone),
         )
 
     rows = tuple(_back_row(row, size, zone) for row in block.rows)
@@ -159,6 +160,31 @@ def back_block(block, size: tuple[int, int], zone: OrientedZone):
         envelope_coarse=envelope(block.envelope_coarse),
         envelope_ink=envelope(block.envelope_ink),
     )
+
+
+def _back_unreliable(item, zone: OrientedZone) -> dict:
+    """Недостоверные участки сторон гладкой границы (``smooth_envelope.SmoothEnvelope``) в координатах страницы.
+
+    Участок — отрезок по высоте стороны. В области без поворота он сдвигается на верх области; в
+    повёрнутой области сторона блока ложится поперёк строк страницы, и отрезок по высоте смысла не
+    имеет — участки снимаются (меры сторон у боковых блоков не считаются, как и выключка).
+
+    Args:
+        item: Огибающая блока.
+        zone: Область разбора.
+
+    Returns:
+        Поля ``unreliable_left``/``unreliable_right`` для ``replace`` или пустой словарь у прежней огибающей.
+    """
+    if not hasattr(item, "unreliable_left"):
+        return {}
+    if zone.rotate_cw != 0:
+        return {"unreliable_left": (), "unreliable_right": ()}
+    top = float(zone.box[1])
+    return {
+        name: tuple((y0 + top, y1 + top) for y0, y1 in getattr(item, name))
+        for name in ("unreliable_left", "unreliable_right")
+    }
 
 
 def _back_row(row, size: tuple[int, int], zone: OrientedZone):

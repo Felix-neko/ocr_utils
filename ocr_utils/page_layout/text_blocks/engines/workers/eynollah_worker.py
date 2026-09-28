@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +32,24 @@ def child(node, tag: str):
     return None
 
 
+def cuda_env() -> dict[str, str]:
+    """Окружение для CLI eynollah с библиотеками CUDA из pip-колёс ``nvidia-*`` на ``LD_LIBRARY_PATH``.
+
+    onnxruntime-gpu грузит cuDNN через ``dlopen`` и в ``site-packages/nvidia/*/lib`` сам не смотрит:
+    без этого каждая полоса падала на первой свёртке («cuDNN is unavailable … libcudnn.so»,
+    снаружи видно только «predictor page failed»), 2026-09-28.
+
+    Returns:
+        Копия ``os.environ`` с каталогами ``lib`` колёс NVIDIA в начале ``LD_LIBRARY_PATH``.
+    """
+    # Колёса лежат в site-packages того же окружения, что и интерпретатор воркера.
+    nvidia = Path(sys.executable).parent.parent / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    libs = sorted(str(path) for path in (nvidia / "site-packages" / "nvidia").glob("*/lib") if path.is_dir())
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(libs + [env.get("LD_LIBRARY_PATH", "")]).rstrip(os.pathsep)
+    return env
+
+
 def main() -> None:
     png, out_path, models = sys.argv[1], sys.argv[2], sys.argv[3]
     with tempfile.TemporaryDirectory(prefix="eynollah_") as folder:
@@ -50,7 +69,7 @@ def main() -> None:
             "-fl",
             "-O",
         ]
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(command, capture_output=True, text=True, env=cuda_env())
         xmls = sorted(Path(folder).glob("*.xml"))
         if not xmls:
             tail = (result.stderr or result.stdout or "").strip().splitlines()[-8:]

@@ -20,6 +20,9 @@ OUTLINE_ALPHA = 0.8
 COLOUR_AXIS = (40, 170, 40)
 # Прежняя граница (боевой алгоритм) для сравнения — тонкий приглушённый серый.
 COLOUR_REFERENCE = (120, 120, 120)
+# Недостоверный участок стороны (ступенька по выносу за колонку) — красный пунктир поверх границы.
+COLOUR_UNRELIABLE = (40, 40, 220)
+DASH_PX = 8
 # Номер блока — чёрным на белой подложке.
 COLOUR_TEXT = (20, 20, 20)
 
@@ -35,6 +38,7 @@ def draw_blocks(
     axes: list[np.ndarray] | None = None,
     reference: list[np.ndarray] | None = None,
     labels: list[str] | None = None,
+    unreliable: list[list[np.ndarray]] | None = None,
 ) -> tuple[np.ndarray, float]:
     """Холст полосы: блоки, оси строк и прежние границы.
 
@@ -44,6 +48,7 @@ def draw_blocks(
         axes: Ломаные осей строк или ``None``.
         reference: Контуры прежних блоков для сравнения или ``None``.
         labels: Подписи блоков (по одной на контур) или ``None`` — тогда номера по порядку.
+        unreliable: По блоку — куски сторон на недостоверных участках (рисуются пунктиром) или ``None``.
 
     Returns:
         Пара ``(холст BGR, масштаб «рабочая копия → холст»)``.
@@ -74,6 +79,10 @@ def draw_blocks(
         colour = BLOCK_COLOURS[index % len(BLOCK_COLOURS)]
         cv2.polylines(outline, [_points(polygon, scale)], True, colour, 3, cv2.LINE_AA)
     cv2.addWeighted(outline, OUTLINE_ALPHA, canvas, 1.0 - OUTLINE_ALPHA, 0, canvas)
+    # Недостоверные участки сторон — пунктиром по длине ломаной.
+    for parts in unreliable or []:
+        for part in parts:
+            _dashed(canvas, _points(part, scale))
     # Номера блоков у левого верхнего угла контура, на белой подложке.
     for index, polygon in enumerate(polygons):
         if polygon is None or len(polygon) < 3:
@@ -85,6 +94,18 @@ def draw_blocks(
         cv2.rectangle(canvas, (x - 1, y - h - 2), (x + w + 1, y + 3), (255, 255, 255), -1)
         cv2.putText(canvas, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, BLOCK_COLOURS[index % 6], 1, cv2.LINE_AA)
     return canvas, scale
+
+
+def _dashed(canvas: np.ndarray, points: np.ndarray) -> None:
+    """Пунктир по ломаной: чередование отрезков длиной ``DASH_PX`` по длине пути."""
+    lengths = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(points.astype(np.float64), axis=0).T))])
+    for start in np.arange(0.0, lengths[-1], 2 * DASH_PX):
+        ts = np.linspace(start, min(start + DASH_PX, lengths[-1]), 4)
+        xs = np.interp(ts, lengths, points[:, 0])
+        ys = np.interp(ts, lengths, points[:, 1])
+        cv2.polylines(
+            canvas, [np.round(np.column_stack([xs, ys])).astype(np.int32)], False, COLOUR_UNRELIABLE, 3, cv2.LINE_AA
+        )
 
 
 def legend(with_reference: bool, block_word: str = "блок") -> list[LegendEntry]:
@@ -109,6 +130,9 @@ def legend(with_reference: bool, block_word: str = "блок") -> list[LegendEnt
     ]
     if with_reference:
         entries.append(LegendEntry("граница блока боевого алгоритма (для сравнения)", COLOUR_REFERENCE))
+    entries.append(
+        LegendEntry("недостоверный участок стороны (вынос за колонку)", COLOUR_UNRELIABLE, style=SampleStyle.DASHED)
+    )
     return entries
 
 
@@ -120,6 +144,7 @@ def page_picture(
     reference: list[np.ndarray] | None = None,
     labels: list[str] | None = None,
     block_word: str = "блок",
+    unreliable: list[list[np.ndarray]] | None = None,
 ) -> np.ndarray:
     """Готовая картинка полосы: холст :func:`draw_blocks`, шапка сверху и легенда снизу — в полях.
 
@@ -131,11 +156,12 @@ def page_picture(
         reference: Прежние границы.
         labels: Подписи блоков.
         block_word: Как называть области в легенде.
+        unreliable: Недостоверные участки сторон по блокам.
 
     Returns:
         Картинка BGR.
     """
-    canvas, _ = draw_blocks(gray, polygons, axes, reference, labels)
+    canvas, _ = draw_blocks(gray, polygons, axes, reference, labels, unreliable)
     return framed(canvas, header, legend(reference is not None, block_word))
 
 

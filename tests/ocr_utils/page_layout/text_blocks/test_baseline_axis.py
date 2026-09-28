@@ -73,3 +73,13 @@ def test_body_axis_reaches_the_hyphen_at_the_line_end():
     assert first.body_points is not None
     assert first.body_points[-1, 0] >= (last + 17) / K - 1.5
     assert first.body_points[0, 0] <= first.points[0, 0] + 0.5
+
+
+def test_x_height_ignores_specks_in_capitals_line():
+    """Строка из прописных с соринками (1966/03 IMG_0120_2R): высота строчной — по буквам, не по пыли."""
+    from ocr_utils.page_layout.text_blocks.baseline_axis import line_x_height
+
+    capitals = [[10 + 30 * i, 100, 30 + 30 * i, 133] for i in range(10)]
+    specks = [[15, 128, 17, 131], [140, 110, 143, 113], [200, 131, 205, 137], [260, 120, 262, 122]]
+    glyphs = np.array(capitals + specks, dtype=np.float64)
+    assert 30 <= line_x_height(glyphs) <= 34

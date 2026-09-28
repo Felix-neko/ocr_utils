@@ -133,7 +133,9 @@ def _region_json(region) -> dict:
     }
 
 
-def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path, raster: list[dict] | None = None) -> dict:
+def candidates_page(
+    task: PageTask, rotate: int, cache_root: Path, work: Path, raster: list[dict] | None = None
+) -> dict:
     """Стадия 2: растр, таблицы, кандидаты line art, формулы surya, повёрнутый текст; вырезки кандидатов.
 
     Args:
@@ -175,7 +177,9 @@ def candidates_page(task: PageTask, rotate: int, cache_root: Path, work: Path, r
         "size": [image.width, image.height],
         "dpi": image.dpi,
         "surya_used": layout.surya_used,
-        "raster": raster if raster is not None else [_region_json(r) for r in layout.raster_pics + layout.stamp_suspects],
+        "raster": (
+            raster if raster is not None else [_region_json(r) for r in layout.raster_pics + layout.stamp_suspects]
+        ),
         "tables": [_region_json(r) for r in layout.tables],
         "formulas": [_region_json(r) for r in layout.formulas],
         "rotated_text": [_region_json(r) for r in layout.rotated_text_not_in_tables_regions],

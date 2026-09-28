@@ -13,7 +13,16 @@ import numpy as np
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.alignment import Alignment, alignment_of
 from ocr_utils.page_layout.text_blocks.baseline_axis import body_axes, extend_to_ink, use_body
-from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES, TextBlock, blocks_of
+from ocr_utils.page_layout.text_blocks.axes_fix import fixed_axes
+from ocr_utils.page_layout.text_blocks.blocks import (
+    COARSE_FACTOR,
+    DEFAULT_BLOCKS_MODE,
+    DILATE_GLYPHS,
+    SMOOTH_PITCHES,
+    BlocksMode,
+    TextBlock,
+    blocks_of,
+)
 from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
@@ -79,6 +88,7 @@ def analyse_gray(
     variant: str = Variant.NOGEO.value,
     hints: LayoutHints | None = None,
     axis: AxisKind = AxisKind.CENTRE,
+    blocks_mode: BlocksMode | None = None,
 ) -> PageAnalysis:
     """Разбор страницы по серому рендеру ``RENDER_DPI``.
 
@@ -97,6 +107,9 @@ def analyse_gray(
         axis: Какая ось строки основная — по ней строятся ряды и блоки: ``CENTRE`` — прежняя, по
             центру масс краски; ``BODY`` — вторая, по базовой линии глифов (:mod:`baseline_axis`).
             Вторая ось считается всегда (``LineAxis.body_points``), выбор влияет только на блоки.
+        blocks_mode: Способ группировки строк в блоки и их границы (``blocks.BlocksMode``); ``None`` —
+            ``blocks.DEFAULT_BLOCKS_MODE``. У ``SMOOTH`` перед сборкой блоков оси-выбросы крупного
+            набора заменяются (:func:`axes_fix.fixed_axes`), и в разборе остаются уже заменённые оси.
 
     Returns:
         :class:`PageAnalysis` со всеми кривыми в пикселях рабочей копии.
@@ -126,6 +139,7 @@ def analyse_gray(
             width,
             height,
             axis,
+            blocks_mode,
         )
     result = engine.segment(gray300, dpi)
     # Вторая ось (по базовой линии глифов) считается у всех строк сразу: ей нужны соседи.
@@ -146,6 +160,11 @@ def analyse_gray(
     # Межколонники — свойство страницы, а не движка: чужие сегментаторы их не отдают, и без них
     # три колонки заметки слипались в один блок (1975/05 с.97, pero). Считаем сами по рендеру.
     zones = zones_of(gutters, height, width, dpi)
+    mode = DEFAULT_BLOCKS_MODE if blocks_mode is None else BlocksMode(blocks_mode)
+    if mode is BlocksMode.SMOOTH:
+        # Оси крупного набора, ушедшие наискось от корпуса (крупный курсив — 1971/08 IMG_0072_1L),
+        # заменяются до сборки рядов: полосы строк заголовка иначе налезают друг на друга.
+        axes, _ = fixed_axes(axes, dpi)
     blocks = blocks_of(
         axes,
         zones,
@@ -159,6 +178,7 @@ def analyse_gray(
         dilate,
         page_leaders,
         hints.barrier_lines,
+        mode,
     )
     alignments = [alignment_of(block) for block in blocks]
     share = ink_share(axes, ink, dpi)
@@ -199,6 +219,7 @@ def _analyse_areas(
     width: int,
     height: int,
     axis: AxisKind = AxisKind.CENTRE,
+    blocks_mode: BlocksMode | None = None,
 ) -> PageAnalysis:
     """Разбор по ОБЛАСТЯМ с разной ориентацией текста, со сведением результатов в один разбор.
 
@@ -250,6 +271,7 @@ def _analyse_areas(
             variant=variant,
             hints=area_hints,
             axis=axis,
+            blocks_mode=blocks_mode,
         )
         axes.extend(back_axis(line, size, area) for line in inner.axes)
         for block, alignment in zip(inner.blocks, inner.alignments):

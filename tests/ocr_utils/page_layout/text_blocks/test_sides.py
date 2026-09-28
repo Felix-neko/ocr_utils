@@ -245,3 +245,28 @@ def test_filled_side_on_a_justified_column_matches_the_side(pages, method):
         assert line.raw_tilt_deg == pytest.approx(measures[side].tilt_deg, abs=1e-9)
         assert line.raw_bend_mm == pytest.approx(measures[side].bend_mm, abs=1e-9)
         assert abs(line.tilt_deg - line.raw_tilt_deg) < 0.2
+
+
+def test_robust_side_follows_changing_slope():
+    """Колонка по формату, край которой меняет наклон по высоте (S-образно): стороны выровнены.
+
+    Одна прямая или парабола на весь блок такой край не описывает; местная кривая
+    (``sides._fit_local``) — да.
+    """
+    import cv2
+
+    from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
+    from ocr_utils.page_layout.text_blocks.page import analyse_gray
+    from ocr_utils.page_layout.text_blocks.sides import AlignMethod, SideKind, side_alignment
+    from tests.ocr_utils.page_layout.text_blocks.synthetic import column_page
+    from tests.ocr_utils.scan_markup.synthetic import PAPER
+
+    page = column_page(columns=1)
+    height, width = page.shape
+    ys, xs = np.mgrid[0:height, 0:width].astype(np.float32)
+    shift = (40.0 * np.sin(2 * np.pi * ys / height)).astype(np.float32)
+    page = cv2.remap(page, xs - shift, ys, cv2.INTER_LINEAR, borderValue=int(PAPER))
+    analysis = analyse_gray(page, InkEngine())
+    block = max(analysis.blocks, key=lambda item: item.lines)
+    for side in (SideKind.LEFT, SideKind.RIGHT):
+        assert side_alignment(block, side, AlignMethod.ROBUST).aligned_share >= 0.9, side

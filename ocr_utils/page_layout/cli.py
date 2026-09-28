@@ -254,6 +254,14 @@ def analyze_command(
     help="Межколонники как запреты сцепки строк: legacy — прежний ход (наклонный межколонник выпадал), "
     "segmented — запрет по отрезкам ломаной, short — плюс короткие межколонники за заголовком.",
 )
+@click.option(
+    "--blocks-mode",
+    default="smooth",
+    show_default=True,
+    type=click.Choice(["smooth", "legacy"]),
+    help="Способ группировки строк в блоки и их границы: smooth — гладкие стороны и доработанная группировка "
+    "(по умолчанию), legacy — прежний ход (reports/block_envelopes.md).",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def analyze_pack_command(
     sharpened_dir: Path,
@@ -269,10 +277,12 @@ def analyze_pack_command(
     reuse_from: Path | None,
     axis_name: str,
     gutter_mode: str,
+    blocks_mode: str,
     log_level: str,
 ) -> None:
     """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
     from ocr_utils.page_layout.pack_analysis.run import run
+    from ocr_utils.page_layout.text_blocks.blocks import BlocksMode
     from ocr_utils.page_layout.text_blocks.columns import GutterMode
     from ocr_utils.page_layout.text_blocks.page import AxisKind
 
@@ -291,6 +301,7 @@ def analyze_pack_command(
         reuse_from=reuse_from,
         axis=AxisKind(axis_name),
         gutter_mode=GutterMode(gutter_mode),
+        blocks_mode=BlocksMode(blocks_mode),
     )
 
 
@@ -310,6 +321,14 @@ def analyze_pack_command(
 @click.option("--axis", "axis_name", default="body", show_default=True, type=click.Choice(["centre", "body"]))
 @click.option("--gutter-mode", default="short", show_default=True, type=click.Choice(["legacy", "segmented", "short"]))
 @click.option("--redo", is_flag=True, help="Пересчитать и полосы, у которых итог в --out-dir уже есть.")
+@click.option(
+    "--blocks-mode",
+    default="smooth",
+    show_default=True,
+    type=click.Choice(["smooth", "legacy"]),
+    help="Способ группировки строк в блоки и их границы: smooth — гладкие стороны и доработанная группировка "
+    "(по умолчанию), legacy — прежний ход (reports/block_envelopes.md).",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def reblock_pack_command(
     sharpened_dir: Path,
@@ -321,16 +340,20 @@ def reblock_pack_command(
     axis_name: str,
     gutter_mode: str,
     redo: bool,
+    blocks_mode: str,
     log_level: str,
 ) -> None:
     """Пересчитать только текстовые блоки по готовому разбору пака (объекты и DeepSeek — как были) в новую папку."""
     from ocr_utils.page_layout.pack_analysis.run import list_tasks, stage_reblock
+    from ocr_utils.page_layout.text_blocks.blocks import BlocksMode
     from ocr_utils.page_layout.text_blocks.columns import GutterMode
     from ocr_utils.page_layout.text_blocks.page import AxisKind
 
     _set_log_level(log_level)
     tasks = list_tasks(sharpened_dir, pages_file, limit)
-    stage_reblock(tasks, source, out_dir, jobs, AxisKind(axis_name), GutterMode(gutter_mode), redo)
+    stage_reblock(
+        tasks, source, out_dir, jobs, AxisKind(axis_name), GutterMode(gutter_mode), redo, BlocksMode(blocks_mode)
+    )
 
 
 @main.command("prefill-surya")

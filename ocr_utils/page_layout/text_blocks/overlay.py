@@ -16,6 +16,8 @@ from ocr_utils.page_layout.text_blocks.page import PageAnalysis
 # Цвета BGR: огибающая — синяя, крупная огибающая — фиолетовая, оси строк — зелёные,
 # найденные края рядов — оранжевые кружки, границы колонок — серые пунктиры.
 COLOUR_ENVELOPE = (220, 90, 20)
+# Недостоверный участок стороны гладкой границы (ступенька по выносу за колонку) — красный пунктир.
+COLOUR_UNRELIABLE = (40, 40, 220)
 # Справочная кромка по краске: на оверлеях страниц больше не рисуется, цвет нужен отчёту об огибающей.
 COLOUR_ENVELOPE_INK = (150, 170, 120)
 # Границы блоков рисуются полупрозрачно: под ними должны читаться буквы.
@@ -101,6 +103,8 @@ def draw(
     for block in analysis.blocks:
         _polyline(layer, block.envelope.polygon, COLOUR_ENVELOPE, 2, scale, closed=True)
     cv2.addWeighted(layer, ENVELOPE_ALPHA, canvas, 1.0 - ENVELOPE_ALPHA, 0, canvas)
+    for block in analysis.blocks:
+        _unreliable(canvas, block.envelope, scale)
     for gutter in analysis.gutters:
         # Межколонник — ломаная: на трапеции он уезжает вбок вместе с колонками.
         for side in (1, 2):
@@ -125,6 +129,20 @@ def draw(
         _caption(canvas, block, alignment, scale)
         draw_verdict(canvas, block.envelope.polygon * scale, alignment.kind)
     return canvas
+
+
+def _unreliable(canvas: np.ndarray, envelope, scale: float) -> None:
+    """Недостоверные участки сторон гладкой границы — пунктиром поверх стороны (у прежней огибающей их нет)."""
+    from ocr_utils.page_layout.text_blocks.sides_overlay import _dashed_run
+
+    for curve, spans in (
+        (envelope.left, getattr(envelope, "unreliable_left", ())),
+        (envelope.right, getattr(envelope, "unreliable_right", ())),
+    ):
+        for y0, y1 in spans:
+            part = curve[(curve[:, 1] >= y0) & (curve[:, 1] <= y1)]
+            if len(part) >= 2:
+                _dashed_run(canvas, np.asarray(part, dtype=np.float64) * scale, COLOUR_UNRELIABLE, 3)
 
 
 def _hints(canvas: np.ndarray, hints, scale: float) -> None:
@@ -281,7 +299,8 @@ def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None, body_axis: 
     """
     box = SampleStyle.BOX
     entries = [
-        LegendEntry("граница блока: полоса вокруг оси", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
+        LegendEntry("граница блока", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
+        LegendEntry("недостоверный участок стороны (вынос за колонку)", COLOUR_UNRELIABLE, style=SampleStyle.DASHED),
         LegendEntry("крупная огибающая", COLOUR_COARSE),
         LegendEntry("ось строки (вторая, по базовой линии глифов)" if body_axis else "ось строки", COLOUR_AXIS),
     ]

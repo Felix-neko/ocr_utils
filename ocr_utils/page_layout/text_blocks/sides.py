@@ -62,6 +62,21 @@ RANSAC_SEED = 0
 # Парабола берётся вместо прямой, только если вписывает хотя бы на столько рядов больше: на
 # коротком блоке лишняя степень свободы иначе подгоняется под шум.
 PARABOLA_GAIN_ROWS = 2
+# Местная кривая стороны (:func:`_fit_local`): у каждого конца строки своя прямая Тейла–Сена по
+# ±``LOCAL_FIT_ROWS`` соседним концам (концы, ушедшие внутрь блока, отсеиваются). Нужна краю, у которого наклон меняется по высоте (бумага
+# изогнута: край по формату идёт под одним углом вверху, под другим внизу, или S-образно) — одна прямая
+# или парабола на весь блок такой край не описывает, и половина выровненных строк объявлялась
+# невыровненной (синтетика: S-образный край ±40 px — доля выровненных 0.60 вместо 1.00). Берётся,
+# только если вписывает хотя бы на ``PARABOLA_GAIN_ROWS`` концов больше, чем общая кривая.
+LOCAL_FIT_ROWS = 5
+# Наклон местной прямой не дальше этого от наклона общей (градусы). Изгиб края бумаги пологий
+# (S-образный край ±40 px на высоту полосы — до 5°), а зигзаг по серии абзацных отступов списка — от
+# 30° (1966/05 0260_2R: без ограничения кривая заходила в отступы, и они считались выровненными;
+# 1971/01 IMG_0032_1L — в края рисунка внутри блока).
+LOCAL_MAX_TURN_DEG = 6.0
+# Раундов одностороннего отсева местной кривой (концы, ушедшие внутрь, выбрасываются и кривая
+# строится заново).
+LOCAL_FIT_ROUNDS = 3
 # Продление короткой крайней строки (:func:`edge_axis`): опора ищется среди стольких рядов от края
 # блока; межстрочный интервал до опоры должен лежать в этих пределах, в шагах строк блока (подпись
 # автора стоит через пустую строку — два шага; дальше — уже не соседняя строка).
@@ -1147,11 +1162,53 @@ def _fit_robust(v: np.ndarray, u: np.ndarray, tol: float) -> tuple[np.ndarray, n
     return best, np.polyval(best, v)
 
 
+def _fit_local(v: np.ndarray, u: np.ndarray, inward: float, start: np.ndarray, tol: float) -> np.ndarray:
+    """Местная устойчивая кривая ``u(v)``: у каждого конца — прямая Тейла–Сена по ±``LOCAL_FIT_ROWS`` соседям.
+
+    Отсев односторонний и повторяется ``LOCAL_FIT_ROUNDS`` раз: концы, ушедшие от текущей кривой
+    ВНУТРЬ блока дальше допуска (абзацный отступ, серия отступов списка, края рисунка внутри блока),
+    в прямые не берутся, а изгиб края бумаги сдвигает концы в обе стороны и остаётся. Соседи —
+    ближайшие по ``v`` оставшиеся концы (по порядку, не по расстоянию). Наклон каждой прямой зажат в
+    ±``LOCAL_MAX_TURN_DEG`` от наклона общей прямой.
+
+    Args:
+        v: Координата поперёк строк.
+        u: Координата вдоль строк (концы).
+        inward: +1, если внутрь блока — большие ``u`` (левая сторона), −1 — правая.
+        start: Общая кривая в ``v`` — с неё начинается отсев.
+        tol: Допуск «на кривой».
+
+    Returns:
+        Значения кривой в ``v``.
+    """
+    turn = math.tan(math.radians(LOCAL_MAX_TURN_DEG))
+    base_slope = _theil_sen(v, u)
+    fitted = start.astype(np.float64)
+    for _ in range(LOCAL_FIT_ROUNDS):
+        keep = np.nonzero(inward * (u - fitted) <= tol)[0]
+        if keep.size < 3:
+            return fitted
+        order = keep[np.argsort(v[keep])]
+        kept_v = v[order]
+        new = np.empty(len(v))
+        for index in range(len(v)):
+            # Место конца среди оставшихся и окно вокруг него.
+            rank = int(np.searchsorted(kept_v, v[index]))
+            window = order[max(0, rank - LOCAL_FIT_ROWS) : rank + LOCAL_FIT_ROWS + 1]
+            if window.size < 3:
+                window = order
+            slope = float(np.clip(_theil_sen(v[window], u[window]), base_slope - turn, base_slope + turn))
+            intercept = float(np.median(u[window] - slope * v[window]))
+            new[index] = slope * v[index] + intercept
+        fitted = new
+    return fitted
+
+
 def _resid_robust(block: TextBlock, side: SideKind, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Отклонения от устойчивой кривой по самим концам строк в системе координат блока.
 
     Концы поворачиваются на медианный наклон строк: ``u`` — вдоль строк, ``v`` — поперёк. Кривая
-    ``u(v)`` — :func:`_fit_robust`; «внутрь — плюс»: у левой стороны внутрь — большие ``u``.
+    ``u(v)`` — :func:`_fit_robust` или местная :func:`_fit_local`, если та вписывает больше концов; «внутрь — плюс»: у левой стороны внутрь — большие ``u``.
 
     Returns:
         ``(resid, curve)``: отклонения (пиксели) и кривая в кадре для оверлея.
@@ -1162,11 +1219,19 @@ def _resid_robust(block: TextBlock, side: SideKind, points: np.ndarray) -> tuple
     shifted = points - centre
     u = shifted[:, 0] * cos + shifted[:, 1] * sin
     v = -shifted[:, 0] * sin + shifted[:, 1] * cos
-    coef, fitted = _fit_robust(v, u, mm_to_px(ALIGN_TOL_MM, block.dpi))
-    resid = (u - fitted) if side is SideKind.LEFT else (fitted - u)
-    # Кривая для оверлея: та же u(v) на сетке, повёрнутая обратно в кадр.
+    tol = mm_to_px(ALIGN_TOL_MM, block.dpi)
+    coef, fitted = _fit_robust(v, u, tol)
     grid = np.linspace(v.min(), v.max(), 50)
     gu = np.polyval(coef, grid)
+    # Местная кривая — если край меняет наклон по высоте и общая кривая его не описывает.
+    if len(v) >= 2 * LOCAL_FIT_ROWS:
+        local = _fit_local(v, u, 1.0 if side is SideKind.LEFT else -1.0, fitted, tol)
+        if int((np.abs(u - local) <= tol).sum()) >= int((np.abs(u - fitted) <= tol).sum()) + PARABOLA_GAIN_ROWS:
+            fitted = local
+            order = np.argsort(v)
+            gu = np.interp(grid, v[order], local[order])
+    resid = (u - fitted) if side is SideKind.LEFT else (fitted - u)
+    # Кривая для оверлея: та же u(v) на сетке, повёрнутая обратно в кадр.
     curve = np.column_stack([gu * cos - grid * sin, gu * sin + grid * cos]) + centre
     return resid, curve
 

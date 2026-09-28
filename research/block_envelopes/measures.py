@@ -24,6 +24,20 @@ SPLIT_HEIGHT_RATIO = 1.3
 HMERGE_GAP_MM = 3.5
 # Строка потеряна, если середина её оси дальше этого от всех границ блоков.
 LOST_TOL_MM = 1.0
+# Налезающие блоки: пересечение контуров больше стольких мм² или ряды одной высоты, перекрытые по x
+# больше этой доли высоты строки.
+OVERLAP_AREA_MM2 = 1.0
+OVERLAP_ROW_HEIGHTS = 0.3
+# Плавность сторон: сторона снимается по сетке с таким шагом (мм); скачок между соседними узлами больше
+# ``SIDE_STEP_MM`` — ступенька; шершавость — средний модуль второй разности, мм.
+SIDE_GRID_MM = 1.0
+# 0.3 мм ≈ 2 px рабочей копии: наклонная прямая на растре даёт скачки по 1 px, лесенка строк — 2–4 px.
+SIDE_STEP_MM = 0.3
+# Меры сторон — только у блоков от стольких строк (у заголовка в строку-две стороны нет).
+SIDE_MIN_ROWS = 3
+# Ось-выброс: наклон отличается от медианы наклона корпуса больше стольких градусов, длина больше стольких мм.
+TILT_DEG = 1.5
+TILT_MIN_MM = 30.0
 
 
 @dataclass(frozen=True)
@@ -59,6 +73,12 @@ class PageMeasures:
         split_pairs: Пар соседних блоков, похожих на один разрезанный.
         hmerge_blocks: Блоков с рядами бок о бок через пустоту.
         lost_axes: Осей строк вне всех блоков.
+        cap_top_mm: Наибольший подъём верхней крышки над верхом полосы верхнего ряда на его ширине, мм.
+        cap_bottom_mm: Наибольшее опускание нижней крышки под низ полосы нижнего ряда на его ширине, мм.
+        overlap_pairs: Пар блоков, налезающих друг на друга (контурами или рядами одной высоты).
+        tilt_axes: Осей строк, наклон которых расходится с корпусом полосы (:func:`tilt_outliers`).
+        side_steps: Скачков боковых сторон больше ``SIDE_STEP_MM`` между узлами сетки 1 мм (все блоки).
+        side_rough_mm: Наибольшая по блокам шершавость стороны — средний модуль второй разности, мм.
     """
 
     blocks: int
@@ -69,6 +89,12 @@ class PageMeasures:
     split_pairs: int
     hmerge_blocks: int
     lost_axes: int
+    cap_top_mm: float = 0.0
+    cap_bottom_mm: float = 0.0
+    overlap_pairs: int = 0
+    tilt_axes: int = 0
+    side_steps: int = 0
+    side_rough_mm: float = 0.0
 
 
 def _mask(polygon: np.ndarray, origin: np.ndarray, size: tuple[int, int]) -> np.ndarray:
@@ -289,8 +315,159 @@ def lost_axes(blocks: list[BlockShape], axes_mid: list[tuple[float, float]], dpi
     return lost
 
 
+def cap_bulges_px(block: BlockShape) -> tuple[float, float]:
+    """Выступ верхней и нижней крышки за полосу крайнего ряда — только на ширине этого ряда.
+
+    Полоса ряда — середина ± полвысоты. Точки контура над верхним рядом (по x в его пределах)
+    выше верха полосы — подъём крышки; под нижним — опускание. Законная добивка короткой строки до
+    стороны сюда не попадает: она идёт на высоте самой строки.
+
+    Args:
+        block: Блок.
+
+    Returns:
+        ``(подъём сверху, опускание снизу)`` в пикселях, неотрицательные.
+    """
+    if block.polygon is None or len(block.polygon) < 3 or not block.rows:
+        return 0.0, 0.0
+    points = np.asarray(block.polygon, dtype=np.float64)
+    rows = sorted(block.rows, key=lambda row: row.y)
+    top_row, bottom_row = rows[0], rows[-1]
+    over_top = points[(points[:, 0] >= top_row.x0) & (points[:, 0] <= top_row.x1)]
+    under_bottom = points[(points[:, 0] >= bottom_row.x0) & (points[:, 0] <= bottom_row.x1)]
+    top = (top_row.y - top_row.height / 2.0) - over_top[:, 1].min() if len(over_top) else 0.0
+    bottom = under_bottom[:, 1].max() - (bottom_row.y + bottom_row.height / 2.0) if len(under_bottom) else 0.0
+    return max(0.0, float(top)), max(0.0, float(bottom))
+
+
+def overlap_pairs(blocks: list[BlockShape], dpi: float) -> int:
+    """Пары блоков, налезающих друг на друга: пересечение контуров больше ``OVERLAP_AREA_MM2`` или ряды одной высоты, перекрытые по x.
+
+    Args:
+        blocks: Блоки полосы.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Число пар.
+    """
+    import shapely
+
+    area_px = OVERLAP_AREA_MM2 * mm_to_px(1.0, dpi) ** 2
+    shapes = []
+    for block in blocks:
+        try:
+            shape = (
+                shapely.Polygon(block.polygon).buffer(0)
+                if block.polygon is not None and len(block.polygon) >= 3
+                else None
+            )
+        except (ValueError, shapely.errors.GEOSException):
+            shape = None
+        shapes.append(shape)
+    count = 0
+    for i in range(len(blocks)):
+        for j in range(i + 1, len(blocks)):
+            a, b = shapes[i], shapes[j]
+            if a is not None and b is not None and a.intersection(b).area > area_px:
+                count += 1
+                continue
+            if _rows_interleave(blocks[i], blocks[j]):
+                count += 1
+    return count
+
+
+def _rows_interleave(first: BlockShape, second: BlockShape) -> bool:
+    """Есть ли у двух блоков ряды одной высоты, перекрытые по x больше ``OVERLAP_ROW_HEIGHTS`` высоты строки."""
+    for a in first.rows:
+        for b in second.rows:
+            if abs(a.y - b.y) >= 0.5 * min(a.height, b.height):
+                continue
+            if min(a.x1, b.x1) - max(a.x0, b.x0) > OVERLAP_ROW_HEIGHTS * max(a.height, b.height):
+                return True
+    return False
+
+
+def tilt_outliers(axes: list[tuple[float, float, float]], dpi: float) -> int:
+    """Оси, наклон которых расходится с медианой наклона корпуса больше ``TILT_DEG`` при длине больше ``TILT_MIN_MM``.
+
+    Корпус — оси не выше медианной высоты строки полосы.
+
+    Args:
+        axes: Тройки ``(наклон, °; длина, px; высота, px)``.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Число осей-выбросов.
+    """
+    if not axes:
+        return 0
+    heights = np.array([height for _, _, height in axes])
+    body = [slope for slope, _, height in axes if height <= np.median(heights)]
+    reference = float(np.median(body)) if body else 0.0
+    min_length = mm_to_px(TILT_MIN_MM, dpi)
+    return sum(1 for slope, length, _ in axes if length > min_length and abs(slope - reference) > TILT_DEG)
+
+
+def side_profiles(block: BlockShape, dpi: float) -> tuple[np.ndarray, np.ndarray]:
+    """Левая и правая сторона блока по растру контура: крайние столбцы на каждом узле сетки ``SIDE_GRID_MM``.
+
+    Узлы — от середины первой строки до середины последней (там стороны переходят в крышки); у блока
+    меньше ``SIDE_MIN_ROWS`` строк сторон нет.
+
+    Args:
+        block: Блок.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``(левая, правая)`` — абсциссы на узлах, пиксели; пустые, если блок ниже двух узлов.
+    """
+    if block.polygon is None or len(block.polygon) < 3 or len(block.rows) < SIDE_MIN_ROWS:
+        return np.empty(0), np.empty(0)
+    points = np.asarray(block.polygon, dtype=np.float64)
+    origin = np.floor(points.min(axis=0)) - 1
+    size = tuple((np.ceil(points.max(axis=0) - origin) + 2).astype(int)[::-1])
+    mask = _mask(points, origin, size)
+    step = mm_to_px(SIDE_GRID_MM, dpi)
+    # От середины первой строки до середины последней: выше и ниже стороны переходят в крышки.
+    first = min(row.y for row in block.rows) - origin[1]
+    last = max(row.y for row in block.rows) - origin[1]
+    ys = np.arange(first, last, step)
+    ys = ys[(ys >= 0) & (ys < mask.shape[0])]
+    left, right = [], []
+    for y in ys.astype(int):
+        cols = np.flatnonzero(mask[y])
+        if cols.size:
+            left.append(cols[0])
+            right.append(cols[-1])
+    return np.asarray(left, dtype=np.float64), np.asarray(right, dtype=np.float64)
+
+
+def side_smoothness(block: BlockShape, dpi: float) -> tuple[int, float]:
+    """Ступеньки и шершавость боковых сторон блока (:func:`side_profiles`).
+
+    Args:
+        block: Блок.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``(число скачков больше SIDE_STEP_MM, наибольшая шершавость сторон в мм)``.
+    """
+    steps, rough = 0, 0.0
+    limit = mm_to_px(SIDE_STEP_MM, dpi)
+    for profile in side_profiles(block, dpi):
+        if profile.size < 3:
+            continue
+        steps += int((np.abs(np.diff(profile)) > limit).sum())
+        rough = max(rough, float(np.mean(np.abs(np.diff(profile, 2)))))
+    return steps, px_to_mm(rough, dpi)
+
+
 def page_measures(
-    blocks: list[BlockShape], axes_mid: list[tuple[float, float]], dpi: float, lost: int | None = None
+    blocks: list[BlockShape],
+    axes_mid: list[tuple[float, float]],
+    dpi: float,
+    lost: int | None = None,
+    axes_tilt: list[tuple[float, float, float]] | None = None,
 ) -> PageMeasures:
     """Все меры полосы.
 
@@ -302,12 +479,15 @@ def page_measures(
             ``None`` — считать геометрически: ось вне всех границ (JSON без связи осей с рядами).
             Геометрия врёт в пользу раздутых границ: выступ боевой огибающей случайно накрывает
             ось, не вошедшую ни в один блок.
+        axes_tilt: Тройки ``(наклон, длина, высота)`` осей для :func:`tilt_outliers`; ``None`` — 0.
 
     Returns:
         :class:`PageMeasures`.
     """
     tol = mm_to_px(OVERSHOOT_TOL_MM, dpi)
     overs = [overshoot_px(block, dpi) for block in blocks]
+    bulges = [cap_bulges_px(block) for block in blocks]
+    smoothness = [side_smoothness(block, dpi) for block in blocks]
     return PageMeasures(
         blocks=len(blocks),
         overshoot_mm=round(px_to_mm(max([0.0, *[max(0.0, o - tol) for o in overs]]), dpi), 2),
@@ -317,6 +497,12 @@ def page_measures(
         split_pairs=split_pairs(blocks),
         hmerge_blocks=sum(1 for block in blocks if hmerged(block, dpi)),
         lost_axes=lost if lost is not None else lost_axes(blocks, axes_mid, dpi),
+        cap_top_mm=round(px_to_mm(max([0.0, *[caps[0] for caps in bulges]]), dpi), 2),
+        cap_bottom_mm=round(px_to_mm(max([0.0, *[caps[1] for caps in bulges]]), dpi), 2),
+        overlap_pairs=overlap_pairs(blocks, dpi),
+        tilt_axes=tilt_outliers(axes_tilt or [], dpi),
+        side_steps=sum(smooth[0] for smooth in smoothness),
+        side_rough_mm=round(max([0.0, *[smooth[1] for smooth in smoothness]]), 3),
     )
 
 
@@ -348,6 +534,13 @@ def shapes_from_json(payload: dict) -> tuple[list[BlockShape], list[tuple[float,
     return blocks, axes_mid
 
 
+def _row_ends(row) -> tuple[float, float]:
+    """Края ряда для мер: краска текста, расширенная до концов его осей."""
+    starts = [float(np.asarray(axis.points)[0, 0]) for axis in row.axes]
+    ends = [float(np.asarray(axis.points)[-1, 0]) for axis in row.axes]
+    return min([row.x0, *starts]), max([row.x1, *ends])
+
+
 def _axis_key(axis) -> tuple[int, int, int]:
     """Ключ оси для сравнения копий: округлённые середина по высоте и концы (как ``blocks._axis_key``)."""
     return (round(axis.cy), round(axis.x0), round(axis.x1))
@@ -366,7 +559,9 @@ def shapes_from_blocks(blocks: list, axes: list) -> tuple[list[BlockShape], list
     shapes = [
         BlockShape(
             polygon=np.asarray(block.envelope.polygon, dtype=np.float64),
-            rows=tuple(RowBox(row.y, row.x0, row.x1, row.height) for row in block.rows),
+            # Края ряда — не уже концов его осей: у крупного заголовка краски текста нет (маска глифов
+            # отбрасывает буквы выше 42 px), и без этого слово целиком считалось «выходом за краску».
+            rows=tuple(RowBox(row.y, *_row_ends(row), row.height) for row in block.rows),
             pitch=float(block.pitch_px),
         )
         for block in blocks

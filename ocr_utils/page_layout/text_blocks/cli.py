@@ -11,6 +11,7 @@ from ocr_utils.page_layout.text_blocks import LINKING_CHOICES, LINKING_DEFAULT, 
 from ocr_utils.page_layout.text_blocks.blocks import COARSE_FACTOR, DILATE_GLYPHS, SMOOTH_PITCHES
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS
 from ocr_utils.page_layout.text_blocks.segment import SCALES
+from ocr_utils.page_layout.text_blocks.blocks import DEFAULT_BLOCKS_MODE, BlocksMode
 from ocr_utils.page_layout.text_blocks.page import AxisKind, Variant, analyse_gray, render_page
 from ocr_utils.page_layout.text_blocks.report import markdown, write_csv, write_json
 from ocr_utils.page_layout.text_blocks.sides import DEFAULT_SIDES_METHOD, SidesMethod
@@ -143,6 +144,13 @@ def main() -> None:
     show_default=True,
     help="основная ось строки для рядов и блоков: centre — по краске, body — по базовой линии глифов",
 )
+@click.option(
+    "--blocks-mode",
+    type=click.Choice([mode.value for mode in BlocksMode]),
+    default=DEFAULT_BLOCKS_MODE.value,
+    show_default=True,
+    help="способ группировки строк в блоки и их границы: smooth — гладкие стороны, legacy — прежний ход",
+)
 def analyze(
     geo_dir: Path,
     nogeo_dir: Path,
@@ -162,6 +170,7 @@ def analyze(
     forbid_figures: bool,
     rule_barriers: bool,
     axis_kind: str,
+    blocks_mode: str,
     **options,
 ) -> None:
     """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку."""
@@ -201,6 +210,7 @@ def analyze(
                     variant=current,
                     hints=hints,
                     axis=AxisKind(axis_kind),
+                    blocks_mode=BlocksMode(blocks_mode),
                 )
                 write_json(analysis, out_dir / "pages")
                 overlay.write(

@@ -28,6 +28,19 @@ from ocr_utils.page_layout.text_blocks.blocks import (
 )
 from ocr_utils.page_layout.text_blocks.columns import inside_gutter
 from ocr_utils.page_layout.text_blocks.lines import with_column
+from ocr_utils.page_layout.text_blocks.regroup import (  # noqa: F401 — стенд и тесты берут их отсюда
+    SAME_LINE_OVERLAP,
+    _divided,
+    _extent,
+    _joined,
+    merge_overlapping_pieces,
+    merge_same_line,
+    reach_components,
+    rejoin,
+    resolve_shared_rows,
+    underline_free,
+)
+from research.block_envelopes.axes_fix import fixed_input
 from research.block_envelopes.capture import BlockInput
 
 
@@ -37,6 +50,8 @@ class Grouping(str, Enum):
     LEGACY = "legacy"  # боевой ход: потоки + ``split_blocks`` (разрыв, кегль, жирность, перекрытие, черты)
     REACH = "reach"  # боевой ход + склейка ложных разрезов и разрез по «дотягиванию» строк
     GRAPH = "graph"  # с нуля: ряды — вершины, рёбра между соседями в столбик, компоненты — блоки
+    REACH_ROWS = "reach_rows"  # REACH + куски одной строки слиты ДО деления + страховка от общих рядов
+    REACH_AXES = "reach_axes"  # REACH_ROWS + оси-выбросы крупного набора заменены (``axes_fix``)
 
 
 class SplitReason(str, Enum):
@@ -232,25 +247,6 @@ def split_reasons(
 
 # --- Доработка боевого хода (REACH) и граф рядов (GRAPH) ---------------------------------------------
 
-# Штрих текста, а не разделитель: линейка целиком в полосе строки — от стольких высот над осью (верх
-# крупных букв) до стольких под ней (подчёркивание).
-INSIDE_HEIGHTS = 0.6
-UNDERLINE_HEIGHTS = 0.75
-# «Дотягивание»: ряд ищет перекрытого по x соседа выше не дальше стольких высот строки.
-REACH_HEIGHTS = 2.5
-# Склейка ложного разреза: разрыв между блоками не больше стольких шагов — обычный межстрочный шаг с
-# запасом; подпись автора под письмом отбита на 1.7 шага (1966/02 IMG_0099_2R) и не склеивается...
-REJOIN_GAP_PITCHES = 1.35
-# ...края совпадают (левый, правый или центр) с таким допуском...
-REJOIN_EDGE_MM = 3.0
-# ...блоки перекрыты по x на такую долю более узкого...
-REJOIN_OVERLAP = 0.6
-# ...и набор на стыке один (балл :func:`style_distance` меньше).
-REJOIN_STYLE = SAME_STYLE_DISTANCE
-# Куски одной строки (заголовок, разорванный при сборке рядов): перекрыты по высоте на такую долю
-# меньшей высоты и разнесены по x не дальше стольких высот строки.
-SAME_LINE_OVERLAP = 0.5
-SAME_LINE_GAP_HEIGHTS = 1.5
 # Граф: ребро вниз — к ближайшему ряду, перекрытому по x на эту долю более короткого...
 GRAPH_OVERLAP = 0.35
 # ...не дальше стольких шагов (корпус) или высот ряда (крупный набор)...
@@ -261,251 +257,14 @@ GRAPH_STYLE = 0.75
 GRAPH_STYLE_STRICT = 0.35
 
 
-def underline_free(barriers, axes: list) -> object:
-    """Линейки-барьеры без штрихов текста: подчёркиваний и черт самих букв крупного набора.
-
-    Линейка — не разделитель, если ВСЕ её точки лежат в полосе какой-нибудь строки: от
-    ``INSIDE_HEIGHTS`` высоты над осью до ``UNDERLINE_HEIGHTS`` высоты под ней. Так выглядят:
-
-    * подчёркивание — черта под словом «организаций.» (1966/01 IMG_0036_2R, x 56–186, на 8 px ниже
-      оси) резала абзац пополам;
-    * перекладины и ножки букв заголовка — верх букв «МЕЛКООПТОВОЙ ТОРГОВЛИ» (1968/04 IMG_0043_1L) и
-      ножка «В» в «В ДЕЛО» (1971/10 IMG_0010_1L) отрывали вторую строку заголовка от первой.
-
-    Разделитель (сноски, заметки) стоит в промежутке между строками, вне их полос.
-
-    Args:
-        barriers: Линейки-барьеры (``barriers.BarrierLines``) или ``None``.
-        axes: Оси строк страницы.
-
-    Returns:
-        Новый набор линеек (или тот же объект, если убирать нечего).
-    """
-    if barriers is None or barriers.empty:
-        return barriers
-    kept = [line for line in barriers.lines if not any(_inside_band(line, axis) for axis in axes)]
-    if len(kept) == len(barriers.lines):
-        return barriers
-    return type(barriers).of(kept)
-
-
-def _inside_band(line: np.ndarray, axis) -> bool:
-    """Лежит ли ломаная линейки целиком в полосе строки (по x — в пределах оси с допуском в полвысоты)."""
-    pad = 0.5 * axis.height
-    xs, ys = line[:, 0], line[:, 1]
-    if xs.min() < axis.x0 - pad or xs.max() > axis.x1 + pad:
-        return False
-    dy = ys - np.interp(xs, axis.points[:, 0], axis.points[:, 1])
-    return bool((dy >= -INSIDE_HEIGHTS * axis.height).all() and (dy <= UNDERLINE_HEIGHTS * axis.height).all())
-
-
-def merge_same_line(rows: list[Row], dpi: float, barriers=None, gutters: list | None = None) -> list[Row]:
-    """Слить куски одной строки в один ряд: перекрыты по высоте, близко по x, одного набора.
-
-    Крупный заголовок при сборке рядов рвётся на куски по буквам (1966/03 IMG_0120_2R, 1966/02
-    IMG_0099_2R — «ПОТРЕБЛЕНИЯ» двумя рядами на одной высоте), и каждый кусок уходил в свой блок.
-
-    Куски через линейку-барьер или межколонник не сливаются: «СОВЕТА МИНИСТРОВ» в левой графе
-    обложки и строка оглавления справа от вертикальной линейки стоят на одной высоте в двух десятках
-    пикселей друг от друга (1972/08 IMG_0054_2R).
-
-    Args:
-        rows: Ряды (любой порядок).
-        dpi: Разрешение рабочей копии.
-        barriers: Линейки-барьеры (``barriers.BarrierLines``) или ``None``.
-        gutters: Локальные межколонники (``columns.Gutter``) или ``None``.
-
-    Returns:
-        Ряды сверху вниз; слитые куски — одним рядом с общими краями и осями.
-    """
-    out = sorted(rows, key=lambda row: row.x0)
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(out)):
-            for j in range(i + 1, len(out)):
-                a, b = out[i], out[j]
-                overlap = min(a.y + a.height / 2, b.y + b.height / 2) - max(a.y - a.height / 2, b.y - b.height / 2)
-                if overlap < SAME_LINE_OVERLAP * min(a.height, b.height):
-                    continue
-                gap = max(a.x0, b.x0) - min(a.x1, b.x1)
-                if gap > SAME_LINE_GAP_HEIGHTS * max(a.height, b.height):
-                    continue
-                if style_distance(a, b) >= SAME_STYLE_DISTANCE:
-                    continue
-                if _divided(a, b, barriers, gutters):
-                    continue
-                out[i] = _joined(a, b)
-                del out[j]
-                changed = True
-                break
-            if changed:
-                break
-    return sorted(out, key=lambda row: row.y)
-
-
-def _divided(a: Row, b: Row, barriers, gutters: list | None) -> bool:
-    """Разделяет ли два куска на одной высоте линейка-барьер или межколонник (по отрезку между их краями)."""
-    left, right = (a, b) if a.x0 <= b.x0 else (b, a)
-    x0, x1 = left.x1, right.x0
-    y = (a.y + b.y) / 2.0
-    if barriers is not None and not barriers.empty and barriers.crosses((x0 - 1.0, y), (x1 + 1.0, y)):
-        return True
-    if gutters and x1 > x0:
-        middle = (x0 + x1) / 2.0
-        if inside_gutter(gutters, middle - 1.0, middle + 1.0, y):
-            return True
-    return False
-
-
-def _joined(a: Row, b: Row) -> Row:
-    """Один ряд из двух кусков строки: края — крайние, оси и профили — вместе, высота — большая."""
-    edges = {}
-    for name in ("top_edge", "bottom_edge", "body"):
-        parts = [item for item in (getattr(a, name), getattr(b, name)) if item is not None and len(item)]
-        edges[name] = np.vstack(parts)[np.argsort(np.vstack(parts)[:, 0])] if parts else None
-    return replace(
-        a,
-        y=(a.y * (a.x1 - a.x0) + b.y * (b.x1 - b.x0)) / max(1.0, (a.x1 - a.x0) + (b.x1 - b.x0)),
-        height=max(a.height, b.height),
-        x0=min(a.x0, b.x0),
-        x1=max(a.x1, b.x1),
-        axes=tuple(sorted([*a.axes, *b.axes], key=lambda axis: axis.x0)),
-        tail=None,
-        cut=None,
-        **edges,
-    )
-
-
-def reach_components(rows: list[Row]) -> list[list[Row]]:
-    """Разбить группу на части, связанные «дотягиванием»: ряд связан с ближайшим выше, с которым перекрыт по x.
-
-    Правило пользователя: слияние по горизонтали допустимо, только если строки одной части хоть в
-    одной строке дотягиваются до другой. Хвост абзаца «ленности.» и «* * *» правее него (1966/02
-    IMG_0073_1L) по x не перекрываются — и в один блок не идут.
-
-    Args:
-        rows: Ряды группы сверху вниз.
-
-    Returns:
-        Части сверху вниз (одна — если группа связна).
-    """
-    if len(rows) < 2:
-        return [rows]
-    parent = list(range(len(rows)))
-    for index, row in enumerate(rows):
-        for above in range(index - 1, -1, -1):
-            other = rows[above]
-            # Дотягиваться можно только до соседей по вертикали: полная строка через одну выше —
-            # не сосед «* * *» под хвостом абзаца.
-            if row.y - other.y > REACH_HEIGHTS * max(row.height, other.height):
-                break
-            if min(other.x1, row.x1) - max(other.x0, row.x0) > 0:
-                parent[legacy._root(parent, index)] = legacy._root(parent, above)
-                break
-    parts: dict[int, list[Row]] = {}
-    for index, row in enumerate(rows):
-        parts.setdefault(legacy._root(parent, index), []).append(row)
-    return sorted(parts.values(), key=lambda part: part[0].y)
-
-
-def _extent(rows: list[Row]) -> tuple[float, float]:
-    """Крайние края рядов по x."""
-    return min(row.x0 for row in rows), max(row.x1 for row in rows)
-
-
-def _rejoinable(upper: list[Row], lower: list[Row], inp: BlockInput, barriers, body_height: float) -> bool:
-    """Можно ли склеить два блока в один: один под другим вплотную, края сходятся, набор один, черты между ними нет.
-
-    Args:
-        upper: Ряды верхнего блока.
-        lower: Ряды нижнего блока.
-        inp: Вход блоковой стадии (черты, разрешение).
-        barriers: Линейки-барьеры (уже без подчёркиваний).
-        body_height: Медианная высота ряда страницы (кегль корпуса): крупный набор меряется в своих высотах.
-
-    Returns:
-        ``True`` — это один блок, разрезанный ложно.
-    """
-    last, first = upper[-1], lower[0]
-    pitch = max(pitch_of(upper) if len(upper) > 1 else 0.0, pitch_of(lower) if len(lower) > 1 else 0.0)
-    pitch = pitch or 1.6 * max(last.height, first.height)
-    gap = row_gap(last, first)
-    # Крупный набор (заголовок) меряется в своих высотах: у него разрежённый интервал.
-    large = body_height > 0 and min(last.height, first.height) > LARGE_TYPE_RATIO * body_height
-    limit = GAP_HEIGHTS_REJOIN * min(last.height, first.height) if large else REJOIN_GAP_PITCHES * pitch
-    if not 0 < gap <= limit:
-        return False
-    if style_distance(last, first) >= REJOIN_STYLE:
-        return False
-    (ux0, ux1), (lx0, lx1) = _extent(upper), _extent(lower)
-    overlap = min(ux1, lx1) - max(ux0, lx0)
-    if overlap < REJOIN_OVERLAP * min(ux1 - ux0, lx1 - lx0):
-        return False
-    tol = mm_to_px(REJOIN_EDGE_MM, inp.dpi)
-    same_left = abs(ux0 - lx0) <= tol
-    same_right = abs(ux1 - lx1) <= tol
-    same_centre = abs((ux0 + ux1) - (lx0 + lx1)) / 2.0 <= tol
-    # Конец абзаца (короткий последний ряд верхнего) и абзацный отступ (первый ряд нижнего) сдвигают
-    # только одну сторону; строки заголовка по центру — центр.
-    if not (same_left or same_right or same_centre):
-        return False
-    span = (int(min(ux0, lx0)), int(max(ux1, lx1)))
-    if legacy._rule_between(last, first, inp.rules, span):
-        return False
-    if legacy._barrier_between_rows(last, first, barriers, span):
-        return False
-    return True
-
-
-# Предел разрыва для склейки крупного набора — в высотах строки (как ``GAP_HEIGHTS`` боевого кода).
-GAP_HEIGHTS_REJOIN = 2.4
-
-
-def rejoin(groups: list[list[Row]], inp: BlockInput, barriers, body_height: float) -> list[list[Row]]:
-    """Склеивать соседние по вертикали группы страницы, пока находятся ложные разрезы (:func:`_rejoinable`).
-
-    Работает поверх кусков разных колонок и зон: ложный разрез 1966/02 IMG_0098_2R — это восемь
-    строк правой колонки, ушедших в кусок во всю ширину.
-
-    Args:
-        groups: Группы рядов сверху вниз каждая.
-        inp: Вход блоковой стадии.
-        barriers: Линейки-барьеры.
-        body_height: Медианная высота ряда страницы.
-
-    Returns:
-        Группы после склеек.
-    """
-    out = [list(group) for group in groups if group]
-    changed = True
-    while changed:
-        changed = False
-        for i, upper in enumerate(out):
-            # Ближайшая снизу группа, перекрытая по x, — кандидат на склейку.
-            below = [
-                (lower[0].y - upper[-1].y, j)
-                for j, lower in enumerate(out)
-                if j != i
-                and lower[0].y > upper[-1].y
-                and min(_extent(upper)[1], _extent(lower)[1]) > max(_extent(upper)[0], _extent(lower)[0])
-            ]
-            if not below:
-                continue
-            _, j = min(below)
-            if _rejoinable(upper, out[j], inp, barriers, body_height):
-                out[i] = upper + out[j]
-                del out[j]
-                changed = True
-                break
-    return out
-
-
-def reach_groups(inp: BlockInput) -> list[Group]:
+def reach_groups(inp: BlockInput, rows_fix: bool = False) -> list[Group]:
     """Доработанный боевой ход: без подчёркиваний-барьеров, куски строк слиты, части без «дотягивания» врозь, ложные разрезы склеены.
 
     Args:
         inp: Вход блоковой стадии.
+        rows_fix: Сливать ли налезающие куски одной строки ДО деления куска колонки на блоки
+            (:func:`merge_overlapping_pieces`) и разводить ли после группировки ряды одной высоты,
+            попавшие в разные блоки (:func:`resolve_shared_rows`).
 
     Returns:
         Группы-блоки.
@@ -513,12 +272,19 @@ def reach_groups(inp: BlockInput) -> list[Group]:
     barriers = underline_free(inp.barriers, inp.axes)
     local = replace_input(inp, barriers)
     pieces, context = pieces_of(local)
+    if rows_fix:
+        pieces = [
+            Piece(piece.column, piece.span, merge_overlapping_pieces(piece.rows, barriers, inp.gutters))
+            for piece in pieces
+        ]
     groups: list[tuple[Piece, list[Row]]] = []
     for piece in pieces:
         for group in legacy_groups(piece, local, context):
             for part in reach_components(merge_same_line(group, inp.dpi, barriers, inp.gutters)):
                 groups.append((piece, part))
-    joined = rejoin([rows for _, rows in groups], local, barriers, context.body_height)
+    joined = rejoin([rows for _, rows in groups], local.rules, local.dpi, barriers, context.body_height)
+    if rows_fix:
+        joined = resolve_shared_rows(joined)
     return _numbered(joined, inp)
 
 
@@ -636,6 +402,11 @@ def groups_of(kind: Grouping, inp: BlockInput) -> list[Group]:
         return legacy_all(inp)
     if kind is Grouping.REACH:
         return reach_groups(inp)
+    if kind is Grouping.REACH_ROWS:
+        return reach_groups(inp, rows_fix=True)
+    if kind is Grouping.REACH_AXES:
+        # Оси-выбросы заменяются на входе: и ряды, и полосы строятся уже по исправленным осям.
+        return reach_groups(fixed_input(inp)[0], rows_fix=True)
     return graph_groups(inp)
 
 

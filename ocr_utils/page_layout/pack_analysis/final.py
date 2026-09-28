@@ -18,11 +18,14 @@ from ocr_utils.page_layout.pack_analysis.stages import PageTask, decide_candidat
 from ocr_utils.page_layout.regions import RegionKind
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks import overlay as blocks_overlay
+from ocr_utils.page_layout.text_blocks.blocks import DEFAULT_BLOCKS_MODE, BlocksMode
 from ocr_utils.page_layout.text_blocks.columns import GutterMode
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
 from ocr_utils.page_layout.text_blocks.from_layout import build
 from ocr_utils.page_layout.text_blocks.page import AxisKind, analyse_gray
-from ocr_utils.page_layout.text_blocks.report import filled_json
+from ocr_utils.page_layout.text_blocks.metrics import _axis_points, pitch_of, row_jumps_of
+from ocr_utils.page_layout.text_blocks.report import filled_json, page_json
+from ocr_utils.page_layout.text_blocks.segment import SPLIT_ROWS_DEFAULT
 from ocr_utils.page_layout.text_blocks.sides import (
     AlignMethod,
     FilledSide,
@@ -152,6 +155,8 @@ def text_blocks(
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
     join_leaders: bool = True,
+    split_rows: bool = SPLIT_ROWS_DEFAULT,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ):
     """Текстовые блоки полосы с запретами: растр, печати, таблицы, line art, формулы; барьеры — рамки и линейки.
 
@@ -166,6 +171,8 @@ def text_blocks(
             ``BODY`` — вторая, по базовой линии глифов (:mod:`text_blocks.baseline_axis`).
         gutter_mode: Как межколонники превращаются в запреты сцепки (``columns.GutterMode``).
         join_leaders: Сращивать ли строки, сошедшиеся на общей точке отточия (``text_blocks.leader_join``).
+        split_rows: Резать ли сгустки RLSA, собравшие буквы двух рядов (``segment._split_two_rows``).
+        blocks_mode: Способ группировки строк в блоки и их границы (``text_blocks.blocks.BlocksMode``).
 
     Returns:
         Пара: ``PageAnalysis`` детектора текстовых блоков (пиксели рабочей копии 150 dpi) и подсказки.
@@ -188,11 +195,12 @@ def text_blocks(
     return (
         analyse_gray(
             gray300,
-            InkEngine(hints=hints, gutter_mode=gutter_mode, join_leaders=join_leaders),
+            InkEngine(hints=hints, gutter_mode=gutter_mode, join_leaders=join_leaders, split_rows=split_rows),
             hints=hints,
             name=page_key(record["page"]),
             variant="sharpened",
             axis=axis,
+            blocks_mode=blocks_mode,
         ),
         hints,
     )
@@ -362,6 +370,7 @@ def final_page(
     out: Path,
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ) -> dict:
     """Стадия 6: итог полосы — объекты, текстовые блоки, JSON и оверлей в папку по классам.
 
@@ -373,6 +382,7 @@ def final_page(
         out: Корень выхода (``pages/``, ``overlays/``).
         axis: По какой оси строки собирать ряды и блоки (см. :func:`text_blocks`).
         gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
+        blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
@@ -385,8 +395,15 @@ def final_page(
     candidates = [{"id": c["id"], "box": c["crop"]["box"], **d.to_json()} for c, d in decisions]
     return finish_page(
         task, image, record, assembled["objects"], assembled["titles"], candidates, orientation, out, axis,
-        gutter_mode, started,
+        gutter_mode, started, blocks_mode,
     )  # fmt: skip
+
+
+def _row_jumps(analysis) -> int:
+    """Число осей, перескочивших на соседнюю строку (``metrics.row_jumps_of``), по разбору полосы."""
+    payload = page_json(analysis)
+    axes = [_axis_points(axis) for axis in payload["axes"]]
+    return len(row_jumps_of(axes, pitch_of(payload["blocks"])))
 
 
 def page_record(final: dict) -> dict:
@@ -414,7 +431,12 @@ def page_record(final: dict) -> dict:
 
 
 def reblock_page(
-    task: PageTask, source: Path, out: Path, axis: AxisKind = AxisKind.BODY, gutter_mode: GutterMode = GutterMode.SHORT
+    task: PageTask,
+    source: Path,
+    out: Path,
+    axis: AxisKind = AxisKind.BODY,
+    gutter_mode: GutterMode = GutterMode.SHORT,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ) -> dict:
     """Пересчитать только текстовые блоки полосы по готовому разбору пака; объекты, надписи и кандидаты — как были.
 
@@ -428,6 +450,7 @@ def reblock_page(
         out: Корень выхода (``pages/``, ``overlays/``).
         axis: Ось строки для рядов и блоков.
         gutter_mode: Как межколонники становятся запретами сцепки.
+        blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
 
     Returns:
         Строка описи, как у :func:`final_page`.
@@ -438,7 +461,7 @@ def reblock_page(
     image = load_image(task, record["rotate_cw"])
     return finish_page(
         task, image, record, final["objects"], final["titles"], final["candidates"], final["orientation"], out,
-        axis, gutter_mode, started,
+        axis, gutter_mode, started, blocks_mode,
     )  # fmt: skip
 
 
@@ -454,6 +477,7 @@ def finish_page(
     axis: AxisKind,
     gutter_mode: GutterMode,
     started: float,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
 ) -> dict:
     """Текстовые блоки полосы, оверлей в папку по классам и итоговый JSON — общий хвост :func:`final_page` и :func:`reblock_page`.
 
@@ -469,11 +493,12 @@ def finish_page(
         axis: Ось строки для рядов и блоков.
         gutter_mode: Как межколонники становятся запретами сцепки.
         started: Время начала обработки полосы (``time.time()``) — для поля ``seconds``.
+        blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
     """
-    analysis, hints = text_blocks(image, record, objects, axis, gutter_mode)
+    analysis, hints = text_blocks(image, record, objects, axis, gutter_mode, blocks_mode=blocks_mode)
     lines = side_lines(analysis)
     folder = folder_of(objects)
     picture = draw(image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY)
@@ -497,6 +522,9 @@ def finish_page(
             "dpi": WORK_DPI,
             "axis": axis.value,
             "gutter_mode": gutter_mode.value,
+            "blocks_mode": BlocksMode(blocks_mode).value,
+            # Перескоков оси на соседнюю строку (``metrics.row_jumps_of``) — мера качества полосы.
+            "row_jumps": _row_jumps(analysis),
             "count": len(analysis.blocks),
             "axes": len(analysis.axes),
             "blocks": [
