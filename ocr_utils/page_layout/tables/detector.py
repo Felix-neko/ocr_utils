@@ -425,7 +425,9 @@ def _find(
 
     def signs_of(box: Box):
         crop = gray[box.slice]
-        return verification.features(crop, find_lines(crop, dpi), dpi)
+        # Признаки — по ячейкам, куда помещается буква: параллельные штрихи ближе 2 мм склеены в связки
+        # (``verify.table_features``). Ими решаются и вид находки, и вердикт «таблица ли это».
+        return verification.table_features(crop, find_lines(crop, dpi), dpi)
 
     # Первый проход: вид и проверка. Растить можно только то, что признано чем-то.
     accepted: list[tuple[TableBox, Box, str, object, dict, "Box | None"]] = []

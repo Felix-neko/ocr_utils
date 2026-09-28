@@ -22,7 +22,9 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.page_layout.tables.ruling import Lines, binarize, mm_to_px
+from ocr_utils.page_layout.geometry import Box
+from ocr_utils.page_layout.tables.grid import MIN_CELL_MM
+from ocr_utils.page_layout.tables.ruling import Lines, Segment, binarize, mm_to_px
 
 # Линейка считается ВНУТРЕННЕЙ, если её середина отстоит от края находки не меньше чем на
 # столько: 4 мм. Ближе — это сама рамка, и у рамки объявления других линеек нет.
@@ -509,6 +511,104 @@ def _both_sides_text(mask: np.ndarray, divider_x: "int | None") -> bool:
         return False
     left, right = mask[:, :divider_x], mask[:, divider_x:]
     return all(side.size and np.count_nonzero(side) >= CELL_INK_SHARE * side.size for side in (left, right))
+
+
+def _bundle(segments: list[Segment], horizontal: bool, tolerance: int) -> list[Segment]:
+    """Отрезки одной оси, стоящие ближе ``tolerance`` поперёк и перекрывающиеся вдоль, — одна связка.
+
+    Группировка цепочкой: отрезок идёт в группу, если рядом (поперёк) и внахлёст (вдоль) хотя бы с одним её
+    отрезком. Куски ОДНОЙ линейки друг за другом (без нахлёста) остаются отдельными — счёт линеек у настоящей
+    таблицы не меняется. Рамка связки — объединение рамок, наклон — медиана.
+
+    Args:
+        segments: Отрезки одной оси.
+        horizontal: Ось.
+        tolerance: Наибольшее расстояние между серединами поперёк, пиксели.
+
+    Returns:
+        Связки.
+    """
+    def across(segment: Segment) -> float:
+        box = segment.box
+        return (box.y0 + box.y1) / 2 if horizontal else (box.x0 + box.x1) / 2
+
+    def along(segment: Segment) -> tuple[int, int]:
+        box = segment.box
+        return (box.x0, box.x1) if horizontal else (box.y0, box.y1)
+
+    groups: list[list[Segment]] = []
+    for segment in sorted(segments, key=across):
+        home = next(
+            (
+                group
+                for group in groups
+                if any(
+                    abs(across(other) - across(segment)) <= tolerance
+                    and min(along(other)[1], along(segment)[1]) > max(along(other)[0], along(segment)[0])
+                    for other in group
+                )
+            ),
+            None,
+        )
+        if home is None:
+            groups.append([segment])
+        else:
+            home.append(segment)
+    bundles = []
+    for group in groups:
+        box = Box(
+            min(s.box.x0 for s in group),
+            min(s.box.y0 for s in group),
+            max(s.box.x1 for s in group),
+            max(s.box.y1 for s in group),
+        )
+        bundles.append(Segment(box, horizontal, float(np.median([s.angle_deg for s in group]))))
+    return bundles
+
+
+def bundle_lines(lines: Lines, dpi: int) -> Lines:
+    """Линейки, где параллельные штрихи ближе ``grid.MIN_CELL_MM`` склеены в связки.
+
+    Промежуток уже 2 мм — не ячейка: букве там не поместиться. Сдвоенная и строенная линия, перечёркнутая
+    другой, иначе выглядит решёткой узких «ячеек»: три штриха монограммы «З» логотипа «Зарубежный опыт»
+    (1973/07 IMG_0048_1L, через 1,5 мм поперёк подчёркивания) давали две внутренние вертикали и полную
+    решётку, и логотип проходил проверкой как таблица. Маски не меняются — меняется только счёт.
+
+    Args:
+        lines: Линейки вырезки находки.
+        dpi: Разрешение.
+
+    Returns:
+        Те же маски, отрезки — связками.
+    """
+    tolerance = mm_to_px(MIN_CELL_MM, dpi)
+    return Lines(
+        _bundle(lines.horizontal, True, tolerance),
+        _bundle(lines.vertical, False, tolerance),
+        lines.horizontal_mask,
+        lines.vertical_mask,
+    )
+
+
+def table_features(gray: np.ndarray, lines: Lines, dpi: int) -> Features:
+    """Признаки находки для детектора: считаются только ячейки от ``grid.MIN_CELL_MM`` (см. :func:`bundle_lines`).
+
+    Ими решаются и вид находки (``kind.classify``: схема или рисунок), и вердикт «таблица ли это».
+
+    Замер (2026-09-28): эталон ``labels/detector.csv`` — 60 из 61 верно и так, и так. Пак-1, 12 135 полос —
+    изменились 8 находок: логотип 1973/07 IMG_0048_1L (был таблицей — не находка), обложка с оглавлением в рамке
+    1970/12 IMG_0104_2R (была таблицей — схема) и шесть чертежей, сменивших вид «рисунок ↔ схема»; все
+    изменения просмотрены, пользователь признал их лучшими (``pack1_rule_gap_probe/min_cell_review``).
+
+    Args:
+        gray: Вырезка находки.
+        lines: Её линейки.
+        dpi: Разрешение.
+
+    Returns:
+        Признаки по связкам.
+    """
+    return features(gray, bundle_lines(lines, dpi), dpi)
 
 
 def features(gray: np.ndarray, lines: Lines, dpi: int) -> Features:
