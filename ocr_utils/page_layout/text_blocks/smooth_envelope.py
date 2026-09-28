@@ -434,9 +434,10 @@ def smooth_envelope(rows: list[Row], dpi: float, reference_deg: float | None) ->
     rows_span = (grid >= ys[0]) & (grid <= ys[-1])
     core_left = np.column_stack([-left.core[rows_span] + margin, grid[rows_span]]) if left.core is not None else None
     core_right = np.column_stack([right.core[rows_span] - margin, grid[rows_span]]) if right.core is not None else None
+    trapezoid = is_trapezoid(rows, core_left, core_right)
     return SmoothEnvelope(
-        core_left=core_left if core_left is not None and len(core_left) >= 2 else None,
-        core_right=core_right if core_right is not None and len(core_right) >= 2 else None,
+        core_left=core_left if not trapezoid and _usable(core_left) else robust_core(rows, True, reference_deg),
+        core_right=core_right if not trapezoid and _usable(core_right) else robust_core(rows, False, reference_deg),
         left=left_side,
         right=right_side,
         top=top,
@@ -470,7 +471,86 @@ def _stepped_envelope(rows: list[Row], dpi: float, reference_deg: float | None) 
     ys = np.array([row.y for row in rows], dtype=np.float64)
     left = np.column_stack([[x0 for x0, _ in extents], ys])
     right = np.column_stack([[x1 for _, x1 in extents], ys])
-    return BlockEnvelope(left=left, right=right, top=top, bottom=bottom, polygon=polygon, smooth_pitches=0.0)
+    return BlockEnvelope(
+        left=left,
+        right=right,
+        top=top,
+        bottom=bottom,
+        polygon=polygon,
+        smooth_pitches=0.0,
+        core_left=robust_core(rows, left=True, reference_deg=reference_deg),
+        core_right=robust_core(rows, left=False, reference_deg=reference_deg),
+    )
+
+
+# Стороны, расходящиеся «трапецией», — не выключка: так выглядят центрированный заголовок (строки всё
+# короче, стороны под 15–20° в разные стороны — 1976/07 IMG_0050_2R, «О проведении в 1976 году…») и
+# рваный набор, где края случайно легли на расходящиеся прямые. При повороте скана обе стороны
+# наклонены одинаково, при трапециевидном искажении сходятся на несколько градусов. Поэтому меряется
+# РАЗНОСТЬ наклонов сторон; больше порога — тренды сторон берутся по медиане краёв (:func:`robust_core`),
+# а центр это или рваный набор, решает проверка по серединам строк (``alignment.is_centered``).
+TRAPEZOID_DEG = 12.0
+
+
+def _usable(core: np.ndarray | None) -> bool:
+    """Есть ли у стороны тренд для мер выключки: не пустой и не короче двух точек по высоте."""
+    return core is not None and len(core) >= 2 and np.ptp(core[:, 1]) > 0
+
+
+def _tilt_deg(points: np.ndarray) -> float:
+    """Наклон стороны x(y) от вертикали, градусы (плюс — вниз вправо)."""
+    return float(np.degrees(np.arctan(np.polyfit(points[:, 1], points[:, 0], 1)[0])))
+
+
+def is_trapezoid(rows: list[Row], core_left: np.ndarray | None, core_right: np.ndarray | None) -> bool:
+    """Расходятся ли стороны блока «трапецией»: разность наклонов левой и правой стороны больше ``TRAPEZOID_DEG``.
+
+    Наклон стороны — по её тренду (сплайн гладкой стороны), а где его нет — по прямой через края строк.
+
+    Args:
+        rows: Ряды блока сверху вниз.
+        core_left, core_right: Тренды сторон ``(N, 2)`` или ``None``.
+
+    Returns:
+        ``True`` — стороны расходятся, выключкой они не считаются (центр или рваный набор решает
+        ``alignment.is_centered``).
+    """
+    if len(rows) < 3:
+        return False
+    ys = np.array([row.y for row in rows], dtype=np.float64)
+    tilts = []
+    for core, xs in (
+        (core_left, np.array([row.x0 for row in rows], dtype=np.float64)),
+        (core_right, np.array([row.x1 for row in rows], dtype=np.float64)),
+    ):
+        tilts.append(_tilt_deg(core) if _usable(core) else _tilt_deg(np.column_stack([xs, ys])))
+    return abs(tilts[0] - tilts[1]) > TRAPEZOID_DEG
+
+
+def robust_core(rows: list[Row], left: bool, reference_deg: float | None = None) -> np.ndarray:
+    """Тренд стороны по краям строк для мер выключки там, где гладкой стороны нет: прямая с наклоном корпуса через медиану краёв.
+
+    Мерить выключку от самой стороны нельзя — она идёт по краям тех же строк, отклонения нулевые, и
+    центрированная подпись автора получала «both» (1973/04 IMG_0023_1L). Наклон — не свой (по 5–7
+    строкам подписи устойчивая подгонка находила наклонную прямую через три случайных края и
+    признавала сторону выровненной), а корпуса полосы; сдвиг — медиана краёв. У стороны, где
+    выровнено больше половины строк, медиана и есть этот край.
+
+    Args:
+        rows: Ряды блока сверху вниз.
+        left: Левая сторона (иначе правая).
+        reference_deg: Наклон корпуса полосы, градусы; ``None`` — вертикаль.
+
+    Returns:
+        Кривая ``(N, 2)`` — ``(x, y)`` на ординатах рядов.
+    """
+    ys = np.array([row.y for row in rows], dtype=np.float64)
+    xs = np.array([row.x0 if left else row.x1 for row in rows], dtype=np.float64)
+    # Край строки сдвигается вдоль строки: x = x0 + tan(наклон) · y — наклон строк переходит в наклон стороны
+    # с обратным знаком (строки вниз вправо — сторона влево вниз).
+    slope = -np.tan(np.radians(reference_deg)) if reference_deg is not None else 0.0
+    shift = float(np.median(xs - slope * ys))
+    return np.column_stack([shift + slope * ys, ys])
 
 
 def envelope_smooth(rows: list[Row], dpi: float, reference_deg: float | None) -> BlockEnvelope:
