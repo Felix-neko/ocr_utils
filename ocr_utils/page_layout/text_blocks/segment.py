@@ -82,6 +82,15 @@ SPLIT_ROWS_DEFAULT = True
 SPLIT_MIN_HEIGHT_RATIO = 1.6
 # Проходов резки не больше стольких (сгусток на N строк режется за N − 1 проход).
 SPLIT_MAX_PASSES = 4
+# Глиф, сросшийся из букв двух рядов (:func:`_cut_tall_glyphs`): выше ``CUT_MIN_GLYPHS`` медианы
+# остальных букв своего сгустка RLSA и не шире ``CUT_MAX_WIDTH_GLYPHS`` медианной ширины букв (слипаться могут и соседние буквы ряда: «ку» + «Ш» — 28 px при ширине буквы 9); режется по самой узкой строке пикселей в средней
+# трети высоты, если там краски не больше ``CUT_WAIST_SHARE`` ширины глифа, а обе половинки не ниже
+# ``CUT_PART_GLYPHS`` медианы — это две буквы, а не одна высокая («Д», «ф», скобка, «|»).
+# 1969/02 IMG_0101_1L: «у» из «ку»» касается «Ш» из «ШС-60», глиф 28 × 30 px при букве ~12.
+CUT_MIN_GLYPHS = 1.9
+CUT_MAX_WIDTH_GLYPHS = 4.0
+CUT_WAIST_SHARE = 0.3
+CUT_PART_GLYPHS = 0.6
 SPLIT_MIN_LETTERS = 3
 # ...и по двум, если в сгустке есть глиф выше стольких букв сгустка (сросшиеся буквы двух рядов).
 SPLIT_BRIDGE_GLYPHS = 1.6
@@ -505,6 +514,11 @@ def _segments_at_scale(
     if claimed is not None:
         min_long = _second_round_gate(mask, scale, dpi, leaders, barriers)
         mask = _without_claimed(mask, claimed)
+    if split_rows:
+        # Буквы двух рядов, сросшиеся в один глиф (выносной «у» касается «Ш» строки ниже), режутся по
+        # перемычке ДО смыкания: иначе такой глиф держит оба ряда в одном сгустке, и резка по уровням
+        # его не видит. Разрезанная маска идёт дальше во всё — в куски, буквы и оси.
+        mask = _cut_tall_glyphs(mask, scale)
     count, labels, stats = _smeared(mask, scale, barriers, split_rows)
     if count <= 1:
         return []
@@ -611,6 +625,63 @@ def _smeared(
             if count == before:
                 break
     return count, labels, stats
+
+
+def _cut_tall_glyphs(mask: np.ndarray, scale: Scale) -> np.ndarray:
+    """Разрезать по перемычке глифы, сросшиеся из букв двух соседних рядов (см. ``CUT_MIN_GLYPHS``).
+
+    Args:
+        mask: Маска глифов масштаба (``uint8``).
+        scale: Масштаб (нижняя граница высоты буквы).
+
+    Returns:
+        Та же маска или её копия с обнулённой строкой перемычки у каждого такого глифа.
+    """
+    count, components, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    if count <= 1:
+        return mask
+    # Кегль — по буквам своего сгустка RLSA, а не страницы: буквы крупного заголовка высоки против
+    # корпуса, но в своём сгустке обычны, и резать их нельзя («РЕСУРСОВ», «ГЕОЛОГИЧЕСКИХ»).
+    _, blobs = cv2.connectedComponents(cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((1, scale.gap), np.uint8)), 8)
+    owners = np.zeros(count, dtype=np.int64)
+    ink = components > 0
+    owners[components[ink]] = blobs[ink]
+    heights = stats[:, cv2.CC_STAT_HEIGHT].astype(np.float64)
+    widths = stats[:, cv2.CC_STAT_WIDTH].astype(np.float64)
+    sized = heights >= scale.min_height
+    sized[0] = False
+    out = mask
+    for index in range(1, count):
+        own_blob = (owners == owners[index]) & sized
+        own_blob[index] = False
+        if own_blob.sum() < 3:
+            continue
+        glyph = float(np.median(heights[own_blob]))
+        width = float(np.median(widths[own_blob]))
+        if heights[index] < CUT_MIN_GLYPHS * glyph or widths[index] > CUT_MAX_WIDTH_GLYPHS * width:
+            continue
+        x0, y0 = stats[index, cv2.CC_STAT_LEFT], stats[index, cv2.CC_STAT_TOP]
+        w, h = stats[index, cv2.CC_STAT_WIDTH], stats[index, cv2.CC_STAT_HEIGHT]
+        own = components[y0 : y0 + h, x0 : x0 + w] == index
+        rows = own.sum(axis=1)
+        # Перемычка — самая узкая строка в средней трети высоты глифа.
+        lo, hi = h // 3, h - h // 3
+        if hi <= lo:
+            continue
+        waist = lo + int(np.argmin(rows[lo:hi]))
+        if rows[waist] > CUT_WAIST_SHARE * w:
+            continue
+        # Обе половинки — буквы, а не хвостик: высота краски выше и ниже перемычки.
+        above = np.nonzero(rows[:waist])[0]
+        below = np.nonzero(rows[waist + 1 :])[0]
+        if above.size == 0 or below.size == 0:
+            continue
+        if above[-1] - above[0] + 1 < CUT_PART_GLYPHS * glyph or below[-1] - below[0] + 1 < CUT_PART_GLYPHS * glyph:
+            continue
+        if out is mask:
+            out = mask.copy()
+        out[y0 + waist, x0 : x0 + w][own[waist]] = 0
+    return out
 
 
 def _two_levels(

@@ -147,9 +147,9 @@ def test_joint_step_blocks_link_to_next_line():
     left = _piece(100.0, 200.0, 6)
     same = _piece(185.0, 200.5, 5)
     below = _piece(185.0, 200.0 + PITCH, 5)
-    assert abs(joint_step(left, same)) < 2.0
+    assert abs(joint_step(left, same)[0]) < 2.0
     assert _guard(left, same, PITCH)
-    assert joint_step(left, below) > 0.5 * PITCH
+    assert joint_step(left, below)[0] > 0.5 * PITCH
     assert not _guard(left, below, PITCH)
 
 
@@ -161,3 +161,55 @@ def test_joint_step_follows_tilted_line():
     left = _piece(100.0, 200.0, 6, tilt)
     right = _piece(200.0, 200.0 + tilt * (200.0 - 104.5), 6, tilt)
     assert _guard(left, right, PITCH)
+
+
+def test_joint_step_short_piece_below_is_blocked():
+    """Кусок из двух знаков («* *») на полстроки ниже конца строки не сцепляется; тот же кусок на строке — сцепляется."""
+    from ocr_utils.page_layout.text_blocks.zones import _guard
+
+    left = _piece(100.0, 200.0, 8)
+    stars_low = _piece(210.0, 200.0 + 0.66 * PITCH, 2)
+    stars_same = _piece(210.0, 201.0, 2)
+    assert not _guard(left, stars_low, PITCH)
+    assert _guard(left, stars_same, PITCH)
+
+
+def test_joint_step_ignores_marks_only_piece():
+    """Кусок из одной точки или дефиса ступенькой не меряется (точка сидит на базовой линии, а не на оси)."""
+    from ocr_utils.page_layout.text_blocks.zones import joint_step
+
+    left = _piece(100.0, 200.0, 8)
+    dot = _piece(200.0, 206.0, 1)
+    dot = dot.__class__(**{**dot.__dict__, "marks": np.ones(1, dtype=bool)})
+    assert joint_step(left, dot) is None
+
+
+def _page_rows(tops: tuple[int, ...]) -> np.ndarray:
+    """Маска с рядами букв на высотах ``tops`` — фон для проверки резки глифов (нужна медиана букв страницы)."""
+    mask = np.zeros((140, 400), dtype=np.uint8)
+    for top in tops:
+        _row(mask, top, 10, 390)
+    return mask
+
+
+def test_cut_glyph_grown_from_two_rows():
+    """Выносной элемент буквы верхнего ряда касается буквы нижнего: глиф режется по перемычке."""
+    from ocr_utils.page_layout.text_blocks.segment import _cut_tall_glyphs
+
+    mask = _page_rows((20, 20 + ROW_STEP))
+    # «у» верхнего ряда (x 150..158) хвостом тонкой перемычкой достаёт до «Ш» нижнего.
+    mask[20 + LETTER_H : 20 + ROW_STEP, 153:155] = 255
+    before = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)[0]
+    cut = _cut_tall_glyphs(mask, SCALES[0])
+    after = cv2.connectedComponentsWithStats((cut > 0).astype(np.uint8), 8)[0]
+    assert after == before + 1
+
+
+def test_tall_single_glyph_is_not_cut():
+    """Одиночная высокая буква без перемычки (скобка во всю высоту строки с выносными) не режется."""
+    from ocr_utils.page_layout.text_blocks.segment import _cut_tall_glyphs
+
+    mask = _page_rows((20, 20 + ROW_STEP, 20 + 2 * ROW_STEP))
+    mask[40:70, 200:206] = 255  # толстая вертикаль в два ряда: перемычки нет
+    cut = _cut_tall_glyphs(mask, SCALES[0])
+    assert np.array_equal(cut, mask)

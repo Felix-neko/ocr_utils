@@ -107,8 +107,14 @@ AXIS_MAX_RESID_XH = 0.35
 # трёх букв): на 120 полосах N p99.9 = 0.33 шага, больше 0.5 — 2 из 32 270; на 53 полосах с
 # перескоками больше 0.5 — 36 из 10 824. Отложенная в 2026-09-27 «сверка по обращённым концам кусков».
 JOINT_STEP_PITCHES = 0.5
-# Ступенька считается только у кусков от стольких букв: у одной-двух касательная — шум формы буквы.
+# Касательная конца — только у кусков от стольких букв: у одной-двух это шум формы буквы, и такой кусок
+# меряется по медиане якорей своих НЕнизких букв.
 JOINT_STEP_MIN_LETTERS = 3
+# Порог ступеньки, если один из кусков короткий (одна-две буквы). Строчка «* * *» под концом абзаца
+# сцеплялась со строкой «ту магазина.» со ступенькой 0.66 шага (1969/02 IMG_0101_1L); замер по
+# слияниям «короткий + длинный»: на 120 полосах N из 8 690 больше 0.6 — 2 (обе — метки 4–5 px, их
+# теперь отсекает правило «по ненизким буквам»).
+JOINT_STEP_SHORT_PITCHES = 0.6
 # Касательные концов в подсчёте ожидаемого подъёма зажимаются в столько (dy/dx, ≈ 5°).
 JOINT_SLOPE_LIMIT = 0.09
 # Разный кегль у стыка: крайние буквы кусков различаются больше чем в столько раз. Тогда зазор
@@ -575,36 +581,50 @@ def _guard(left: Piece, right: Piece, pitch: float) -> bool:
     прогиб отбивал правильное слияние, остаток его пропускал.
     """
     step = joint_step(left, right)
-    if step is not None and pitch > 0 and abs(step) > JOINT_STEP_PITCHES * pitch:
-        return False
+    if step is not None and pitch > 0:
+        size, short = step
+        if abs(size) > (JOINT_STEP_SHORT_PITCHES if short else JOINT_STEP_PITCHES) * pitch:
+            return False
     candidate = merged(left, right)
     if candidate.letters < 3:
         return True
     return axis_residual(candidate) <= AXIS_MAX_RESID_XH * max(candidate.x_h, 1e-6)
 
 
-def joint_step(left: Piece, right: Piece) -> float | None:
+def joint_step(left: Piece, right: Piece) -> tuple[float, bool] | None:
     """Ступенька на стыке двух кусков строки: насколько начало правого выше или ниже продолжения левого.
 
-    Концы — по крайним буквам (:meth:`Piece.tangent`). Ожидаемый подъём на зазоре — по средней
-    касательной обоих концов, зажатой в ``JOINT_SLOPE_LIMIT``: изогнутая или наклонная строка
-    ступеньки не даёт, перескок даёт её в шаг строк.
+    Конец длинного куска (от ``JOINT_STEP_MIN_LETTERS`` букв) — по крайним буквам
+    (:meth:`Piece.tangent`), ожидаемый подъём на зазоре — по касательной длинных концов, зажатой в
+    ``JOINT_SLOPE_LIMIT``: изогнутая или наклонная строка ступеньки не даёт, перескок даёт её в шаг
+    строк. Короткий кусок (одна-две буквы) — по медиане якорей его НЕнизких букв: точка, запятая и
+    дефис сидят не на оси, и по ним ступенька врёт; кусок из одних меток ступеньки не имеет.
 
     Args:
         left: Кусок слева.
         right: Кусок справа.
 
     Returns:
-        Ступенька в пикселях (вниз — плюс) или ``None``, если у куска меньше
-        ``JOINT_STEP_MIN_LETTERS`` букв.
+        ``(ступенька в пикселях — вниз плюс, есть ли короткий кусок)`` или ``None``: оба куска
+        короткие или короткий состоит из одних меток.
     """
-    if left.letters < JOINT_STEP_MIN_LETTERS or right.letters < JOINT_STEP_MIN_LETTERS:
+    ends = []
+    for piece, at_start in ((left, False), (right, True)):
+        if piece.letters >= JOINT_STEP_MIN_LETTERS:
+            x, y, dx, dy = piece.tangent(at_start=at_start)
+            ends.append((x, y, dy / max(abs(dx), 1e-6)))
+            continue
+        # Короткий кусок: уровень по его настоящим буквам, наклона своего нет.
+        letters = ~piece.marks
+        if not letters.any():
+            return None
+        ends.append((piece.x0 if at_start else piece.x1, float(np.median(piece.anchors[letters, 1])), None))
+    (lx, ly, ls), (rx, ry, rs) = ends
+    slopes = [value for value in (ls, rs) if value is not None]
+    if not slopes:
         return None
-    lx, ly, ldx, ldy = left.tangent(at_start=False)
-    rx, ry, rdx, rdy = right.tangent(at_start=True)
-    slope = 0.5 * (ldy / max(abs(ldx), 1e-6) + rdy / max(abs(rdx), 1e-6))
-    slope = float(np.clip(slope, -JOINT_SLOPE_LIMIT, JOINT_SLOPE_LIMIT))
-    return float(ry - ly - slope * max(0.0, rx - lx))
+    slope = float(np.clip(np.mean(slopes), -JOINT_SLOPE_LIMIT, JOINT_SLOPE_LIMIT))
+    return float(ry - ly - slope * max(0.0, rx - lx)), len(slopes) < 2
 
 
 def _round(
