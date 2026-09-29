@@ -101,7 +101,14 @@ def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
     points = back_points(np.asarray(axis.points, dtype=np.float64), size, zone.rotate_cw)
     points = points[np.argsort(points[:, 0])]
     points = points + np.array([zone.box[0], zone.box[1]], dtype=np.float64)
-    sagitta, slope, bend, resid = _shape_stats(points, axis.dpi, axis.mark_spans if not zone.sideways else ())
+    # Участки перескока — по x выпрямленного кадра: у прямой области (поворот 0 или 180) переводятся
+    # теми же преобразованиями, что и точки; у боковой в x страницы они не ложатся и отбрасываются.
+    jumps: tuple[tuple[float, float], ...] = ()
+    if not zone.sideways:
+        for start, stop in axis.jump_spans:
+            ends = back_points(np.array([[start, 0.0], [stop, 0.0]]), size, zone.rotate_cw)[:, 0] + zone.box[0]
+            jumps += ((float(ends.min()), float(ends.max())),)
+    sagitta, slope, bend, resid = _shape_stats(points, axis.dpi, axis.mark_spans if not zone.sideways else (), jumps)
     return replace(
         axis,
         points=points,
@@ -114,6 +121,7 @@ def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
         bend_mm=bend,
         resid_parabola_mm=resid,
         mark_spans=axis.mark_spans if not zone.sideways else (),
+        jump_spans=jumps,
     )
 
 

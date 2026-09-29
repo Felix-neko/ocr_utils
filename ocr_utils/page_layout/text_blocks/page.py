@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
@@ -26,7 +26,8 @@ from ocr_utils.page_layout.text_blocks.blocks import (
 from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
-from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column
+from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column, with_jump_spans
+from ocr_utils.page_layout.text_blocks.metrics import pitch_of, points_without_marks, row_jumps_of
 from ocr_utils.page_layout.orientation.detectors.ink_axis import glyph_mask
 from ocr_utils.page_layout.text_blocks.columns import gutters_of, mark_cut_lines, zones_of
 from ocr_utils.page_layout.text_blocks.leaders import leaders_mask, leaders_of
@@ -180,6 +181,9 @@ def analyse_gray(
         hints.barrier_lines,
         mode,
     )
+    # Участки перескока на соседнюю строку — по готовым рядам (им нужен шаг строк); в осях и рядах
+    # блоков меры формы у таких осей пересчитываются без перескока.
+    axes, blocks = marked_jumps(axes, blocks)
     alignments = [alignment_of(block) for block in blocks]
     share = ink_share(axes, ink, dpi)
     return PageAnalysis(
@@ -200,6 +204,44 @@ def analyse_gray(
         ink_share=share,
         note=result.note,
     )
+
+
+def marked_jumps(axes: list[LineAxis], blocks: list[TextBlock]) -> tuple[list[LineAxis], list[TextBlock]]:
+    """Проставить осям участки перескока на соседнюю строку (``LineAxis.jump_spans``).
+
+    Перескоки ищет :func:`metrics.row_jumps_of` по точкам осей без столбцов точек и запятых, шаг
+    строк — :func:`metrics.pitch_of` по рядам блоков. Оси с перескоком заменяются и в списке осей, и в
+    рядах блоков (ряд держит те же объекты осей).
+
+    Args:
+        axes: Оси страницы.
+        blocks: Блоки, собранные из этих осей.
+
+    Returns:
+        ``(оси, блоки)`` — те же, где у осей с перескоком проставлены участки и пересчитаны меры формы.
+    """
+    pitch = pitch_of([{"rows": [{"y": row.y} for row in block.rows]} for block in blocks])
+    points = [points_without_marks(np.asarray(axis.points, dtype=np.float64), axis.mark_spans) for axis in axes]
+    jumps = row_jumps_of(points, pitch)
+    if not jumps:
+        return axes, blocks
+    # Одна находка на ось: участок перескока — от начала до конца перехода.
+    marked = {jump.axis: with_jump_spans(axes[jump.axis], ((jump.start, jump.stop),)) for jump in jumps}
+    swapped = {id(axes[index]): axis for index, axis in marked.items()}
+    new_axes = [marked.get(index, axis) for index, axis in enumerate(axes)]
+    new_blocks = []
+    for block in blocks:
+        # Ряды, где есть заменённая ось, пересобираются с новой; остальные — как были.
+        rows = tuple(
+            (
+                replace(row, axes=tuple(swapped.get(id(axis), axis) for axis in row.axes))
+                if any(id(axis) in swapped for axis in row.axes)
+                else row
+            )
+            for row in block.rows
+        )
+        new_blocks.append(replace(block, rows=rows))
+    return new_axes, new_blocks
 
 
 def _analyse_areas(

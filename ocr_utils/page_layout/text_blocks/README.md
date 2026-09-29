@@ -284,6 +284,12 @@ for axis in analysis.axes:
 * `resid_parabola_mm` — то же от ПАРАБОЛЫ: где и параболы не хватает, бумага смята, а не изогнута;
 * `mark_spans` — отрезки по x, занятые точками и запятыми: там ось провисает к базовой линии, и в
   меры формы строки эти участки не входят. При своих замерах их тоже стоит выбрасывать;
+* `jump_spans` — участки по x, где ось уходит на соседнюю строку (перескок: сращены куски двух строк,
+  `metrics.row_jumps_of` + `metrics.jump_span`). Меры формы выше (`slope_deg`, `sagitta_mm`, `bend_mm`,
+  `resid_parabola_mm`) у такой оси посчитаны по самому длинному её участку без перескока
+  (`lines.clean_run`); при своих замерах наклона и формы строки участки перескока надо выбрасывать —
+  или брать ту же `clean_run(axis.points, axis.jump_spans)`. На оверлее — полупрозрачной красной
+  полосой в высоту строки;
 * `cross` — строка на самом деле кусок широкой строки (заголовка), разрезанной межколонником.
 
 Строки блока лежат в `block.rows[i].axes` — их может быть несколько на ряд, если строка разорвана
@@ -337,7 +343,7 @@ for block in page["blocks"]:
     block["envelope_ink"]["polygon"]                  # справочная граница по краске
 for axis in page["axes"]:
     points = np.asarray(axis["points"], dtype=float).reshape(-1, 2)
-    axis["slope_deg"], axis["bend_mm"], axis["mark_spans"]
+    axis["slope_deg"], axis["bend_mm"], axis["mark_spans"], axis["jump_spans"]
 ```
 
 Готовые меры качества по такой выкладке считает `metrics.py`

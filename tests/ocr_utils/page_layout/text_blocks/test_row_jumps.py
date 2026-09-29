@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
@@ -304,3 +306,78 @@ def test_tall_single_glyph_is_not_cut():
     mask[40:70, 200:206] = 255  # толстая вертикаль в два ряда: перемычки нет
     cut = _cut_tall_glyphs(mask, SCALES[0])
     assert np.array_equal(cut, mask)
+
+
+def test_jump_span_marks_transition_only():
+    """Ось косо уходит на строку ниже на x 200..300 и дальше идёт по ней: участок перескока — сам переход."""
+    axes = _flat_axes()
+    xs = axes[3][:, 0]
+    drop = np.clip((xs - 200.0) / 100.0, 0.0, 1.0) * PITCH
+    axes[3] = np.column_stack([xs, axes[3][:, 1] + drop])
+    jump = row_jumps_of(axes, PITCH)[0]
+    assert 190.0 <= jump.start <= 230.0
+    assert 270.0 <= jump.stop <= 310.0
+
+
+def test_jump_span_marks_excursion():
+    """Ось уходит на строку ниже на x 400..600 и возвращается: участок — весь уход."""
+    axes = _flat_axes()
+    xs = axes[3][:, 0]
+    away = ((xs > 400.0) & (xs < 600.0)) * PITCH
+    axes[3] = np.column_stack([xs, axes[3][:, 1] + away])
+    jump = row_jumps_of(axes, PITCH)[0]
+    assert 390.0 <= jump.start <= 410.0
+    assert 590.0 <= jump.stop <= 610.0
+
+
+def test_shape_stats_use_clean_run():
+    """Наклон оси с перескоком — по самому длинному участку без перескока, а не по концам через две строки."""
+    from ocr_utils.page_layout.text_blocks.lines import _shape_stats, clean_run
+
+    xs = np.linspace(0.0, 600.0, 61)
+    ys = 100.0 + np.clip((xs - 400.0) / 50.0, 0.0, 1.0) * PITCH  # ровно до 400, переход 400..450, ниже на шаг
+    points = np.column_stack([xs, ys])
+    assert clean_run(points, ((400.0, 450.0),))[-1, 0] < 400.0
+    _, slope_all, _, _ = _shape_stats(points, 150.0)
+    _, slope_clean, _, _ = _shape_stats(points, 150.0, jump_spans=((400.0, 450.0),))
+    assert abs(slope_all) > 1.0
+    assert abs(slope_clean) < 0.05
+
+
+@dataclass(frozen=True)
+class _Block:
+    """Заглушка блока: ``page.marked_jumps`` берёт у него только ряды."""
+
+    rows: tuple
+
+
+def test_marked_jumps_updates_axes_and_rows():
+    """Разбор помечает ось с перескоком и в списке осей, и в рядах блока; меры формы — без перехода."""
+    from ocr_utils.page_layout.text_blocks import WORK_DPI
+    from ocr_utils.page_layout.text_blocks.blocks import Row
+    from ocr_utils.page_layout.text_blocks.lines import LineAxis
+    from ocr_utils.page_layout.text_blocks.page import marked_jumps
+
+    points = _flat_axes()
+    xs = points[3][:, 0]
+    points[3] = np.column_stack([xs, points[3][:, 1] + np.clip((xs - 200.0) / 100.0, 0.0, 1.0) * PITCH])
+    axes = [
+        LineAxis(
+            points=p,
+            height=12.0,
+            column=0,
+            dpi=WORK_DPI,
+            cross=False,
+            sagitta_mm=0.0,
+            slope_deg=0.0,
+            bend_mm=0.0,
+            resid_parabola_mm=0.0,
+        )
+        for p in points
+    ]
+    rows = tuple(Row(y=float(np.median(a.points[:, 1])), height=12.0, x0=a.x0, x1=a.x1, axes=(a,)) for a in axes)
+
+    new_axes, new_blocks = marked_jumps(axes, [_Block(rows)])
+    assert [bool(a.jump_spans) for a in new_axes] == [i == 3 for i in range(LINES)]
+    assert new_blocks[0].rows[3].axes[0] is new_axes[3]
+    assert abs(new_axes[3].slope_deg) < abs(np.degrees(np.arctan(PITCH / 800.0)))

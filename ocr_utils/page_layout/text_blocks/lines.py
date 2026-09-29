@@ -54,6 +54,10 @@ class LineAxis:
     # Отрезки по x, занятые точками и запятыми: там ось провисает к базовой линии, и в меры
     # формы строки эти участки не входят (см. ``_shape_stats``).
     mark_spans: tuple[tuple[float, float], ...] = ()
+    # Участки по x, где ось уходит на соседнюю строку (:func:`metrics.row_jumps_of`, участок —
+    # :func:`metrics.jump_span`): проставляются после сборки блоков (:func:`page.marked_jumps`). Меры
+    # формы строки считаются по самому длинному участку оси без перескока (см. ``_shape_stats``).
+    jump_spans: tuple[tuple[float, float], ...] = ()
     # Боксы глифов строки ``(n, 4)`` — ``x0, y0, x1, y1`` (пиксели рабочей копии); ``None`` — движок
     # глифов не отдаёт.
     glyphs: np.ndarray | None = None
@@ -140,7 +144,10 @@ def smooth_axis(points: np.ndarray, window_px: float) -> np.ndarray:
 
 
 def _shape_stats(
-    points: np.ndarray, dpi: float, mark_spans: tuple[tuple[float, float], ...] = ()
+    points: np.ndarray,
+    dpi: float,
+    mark_spans: tuple[tuple[float, float], ...] = (),
+    jump_spans: tuple[tuple[float, float], ...] = (),
 ) -> tuple[float, float, float, float]:
     """Сводки формы оси: сагитта, наклон, размах остатка от прямой и от параболы (мм, градусы).
 
@@ -148,7 +155,21 @@ def _shape_stats(
     провисает на полвысоты строчной, и без отсева строка выглядит круче и кривее, чем она есть
     («Энгельс Ф.» в конце сноски 1973/08 с.85 задирал размах остатка вдвое). Если после отсева
     точек осталось меньше четырёх, меры считаются по всем — лучше огрублённая мера, чем никакой.
+
+    У оси с перескоком на соседнюю строку меры берутся по самому длинному её участку без перескока:
+    наклон по концам, проведённый через две строки, — это не наклон строки.
+
+    Args:
+        points: Точки оси ``(n, 2)`` слева направо.
+        dpi: Разрешение рабочей копии.
+        mark_spans: Отрезки по x под точками и запятыми.
+        jump_spans: Участки перескока на соседнюю строку (``LineAxis.jump_spans``).
+
+    Returns:
+        ``(сагитта мм, наклон градусы, размах остатка от прямой мм, размах остатка от параболы мм)``.
     """
+    if jump_spans:
+        points = clean_run(points, jump_spans)
     if mark_spans:
         keep = ~inside_spans(points[:, 0], list(mark_spans))
         if int(keep.sum()) >= MIN_POINTS:
@@ -174,6 +195,50 @@ def _shape_stats(
         float(np.degrees(np.arctan(slope))),
         px_to_mm(bend, dpi),
         px_to_mm(resid_parabola, dpi),
+    )
+
+
+def clean_run(points: np.ndarray, spans: tuple[tuple[float, float], ...]) -> np.ndarray:
+    """Самый длинный по x отрезок подряд идущих точек оси вне заданных участков.
+
+    Args:
+        points: Точки оси ``(n, 2)`` слева направо.
+        spans: Участки по x, которые надо обойти (перескоки).
+
+    Returns:
+        Точки отрезка; если в нём меньше ``MIN_POINTS`` точек — все точки (лучше огрублённая мера,
+        чем никакой).
+    """
+    free = ~inside_spans(points[:, 0], list(spans))
+    best: tuple[float, int, int] | None = None
+    start = None
+    # Проход по точкам: отрезки подряд идущих свободных точек, запоминается самый длинный по x.
+    for index, flag in enumerate(list(free) + [False]):
+        if flag and start is None:
+            start = index
+        elif not flag and start is not None:
+            length = float(points[index - 1, 0] - points[start, 0])
+            if best is None or length > best[0]:
+                best = (length, start, index)
+            start = None
+    if best is None or best[2] - best[1] < MIN_POINTS:
+        return points
+    return points[best[1] : best[2]]
+
+
+def with_jump_spans(axis: LineAxis, spans: tuple[tuple[float, float], ...]) -> LineAxis:
+    """Та же ось с участками перескока и мерами формы, пересчитанными по участку без перескока.
+
+    Args:
+        axis: Ось строки.
+        spans: Участки перескока по x (пиксели рабочей копии).
+
+    Returns:
+        Новая :class:`LineAxis`.
+    """
+    sagitta, slope, bend, resid = _shape_stats(axis.points, axis.dpi, axis.mark_spans, spans)
+    return replace(
+        axis, jump_spans=tuple(spans), sagitta_mm=sagitta, slope_deg=slope, bend_mm=bend, resid_parabola_mm=resid
     )
 
 

@@ -46,6 +46,14 @@ COLOUR_MARK = (0, 165, 255)
 # своим цветом: розовый на оверлее больше ничем не занят (красный — у раздутой границы).
 COLOUR_TAIL = (180, 105, 255)
 COLOUR_TEXT = (20, 20, 20)
+# Участок перескока оси на соседнюю строку (``LineAxis.jump_spans``): полупрозрачная полоса в
+# высоту строки вдоль оси — ось поверх неё видна, буквы под ней читаются. Цвет — как у оси-перескока
+# на стенде ``research/row_jumps``; полоса шире линий вердикта и раздутой границы, с ними не спутать.
+COLOUR_JUMP = (60, 60, 220)
+JUMP_ALPHA = 0.45
+# Толщина полосы — такая доля высоты строки, но не тоньше ``JUMP_MIN_PX`` пикселей холста.
+JUMP_HEIGHT_SHARE = 0.8
+JUMP_MIN_PX = 6
 # Вердикт выравнивания крупной надписью на блоке: по формату — зелёный, по одному краю — синий,
 # по центру — фиолетовый, ни по одному — красный. ``ragged`` на картинке пишется как ``none`` (так просил пользователь; в
 # JSON и CSV значение прежнее).
@@ -110,6 +118,7 @@ def draw(
         for side in (1, 2):
             points = np.array([[point[side], point[0]] for point in gutter.points], dtype=np.float64)
             _polyline(canvas, points, COLOUR_COLUMN, 1, scale)
+    _jump_bands(canvas, analysis.axes, scale)
     for axis in analysis.axes:
         _axis_line(canvas, axis, scale)
     for block, alignment in zip(analysis.blocks, analysis.alignments):
@@ -199,6 +208,30 @@ def _matches(box, boxes) -> bool:
 def _at(x: float, y: float, scale: float) -> tuple[int, int]:
     """Точка рабочей копии в координатах холста."""
     return int(round(x * scale)), int(round(y * scale))
+
+
+def _jump_bands(canvas: np.ndarray, axes, scale: float) -> None:
+    """Участки перескока осей на соседнюю строку — полупрозрачной полосой в высоту строки вдоль оси.
+
+    Args:
+        canvas: Холст BGR, рисуем в нём.
+        axes: Оси строк (``LineAxis``); рисуются только участки ``jump_spans``.
+        scale: Пикселей холста на пиксель рабочей копии.
+    """
+    marked = [axis for axis in axes if getattr(axis, "jump_spans", ())]
+    if not marked:
+        return
+    layer = canvas.copy()
+    for axis in marked:
+        points = np.asarray(axis.points, dtype=np.float64)
+        width = max(JUMP_MIN_PX, int(round(JUMP_HEIGHT_SHARE * axis.height * scale)))
+        for start, stop in axis.jump_spans:
+            # Концы участка — на оси, между ними — её собственные точки.
+            inner = points[(points[:, 0] > start) & (points[:, 0] < stop), 0]
+            xs = np.concatenate([[start], inner, [stop]])
+            band = np.column_stack([xs, np.interp(xs, points[:, 0], points[:, 1])])
+            _polyline(layer, band, COLOUR_JUMP, width, scale)
+    cv2.addWeighted(layer, JUMP_ALPHA, canvas, 1.0 - JUMP_ALPHA, 0, canvas)
 
 
 def _axis_line(canvas: np.ndarray, axis, scale: float) -> None:
@@ -306,6 +339,7 @@ def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None, body_axis: 
     ]
     if not body_axis:
         entries.append(LegendEntry("ось над точкой, запятой", COLOUR_MARK))
+    entries.append(LegendEntry("перескок оси на соседнюю строку (в меры формы не входит)", COLOUR_JUMP, JUMP_ALPHA))
     entries += [
         LegendEntry("хвост последней строки и отсечка", COLOUR_TAIL),
         LegendEntry("края рядов", COLOUR_POINT),

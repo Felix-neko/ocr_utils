@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -71,6 +71,14 @@ ROW_JUMP_REACH_PITCHES = 2.5
 ROW_JUMP_QUANTILES = (5.0, 95.0)
 # Оси короче стольких шагов в мере не участвуют: у обрывка разброс — шум.
 ROW_JUMP_MIN_PITCHES = 3.0
+# Участок перескока — где расстояние до соседа отходит от своего уровня у концов оси больше чем на
+# такую долю шага (уровень конца — медиана по крайней доле ``ROW_JUMP_EDGE_SHARE`` точек, но не меньше
+# ``ROW_JUMP_EDGE_POINTS``). Уровни концов расходятся на ``ROW_JUMP_PITCH_SHARE`` шага и больше — ось
+# ушла на соседнюю строку и там осталась: участок — переход между уровнями; иначе ось ушла и
+# вернулась — участок — весь уход.
+ROW_JUMP_SPAN_TOL_PITCHES = 0.25
+ROW_JUMP_EDGE_SHARE = 0.1
+ROW_JUMP_EDGE_POINTS = 3
 # Ось через межколонник (:func:`gutter_crossings_of`). Пустота под осью уже этого (мм) — пробел
 # между словами, а не межколонник: межколонник в наборе журнала 3–6 мм, пробел корпуса — 1–2 мм.
 CROSSING_GAP_MM = 2.5
@@ -137,14 +145,25 @@ class PageMetrics:
 
 
 def _axis_points(axis: dict) -> np.ndarray:
-    """Точки оси из JSON в массив ``(n, 2)``, без столбцов точек и запятых.
+    """Точки оси из JSON в массив ``(n, 2)``, без столбцов точек и запятых (:func:`points_without_marks`)."""
+    points = np.asarray(axis.get("points") or [], dtype=np.float64).reshape(-1, 2)
+    return points_without_marks(points, axis.get("mark_spans") or [])
+
+
+def points_without_marks(points: np.ndarray, spans) -> np.ndarray:
+    """Точки оси без столбцов точек и запятых.
 
     Над точкой и запятой ось провисает к базовой линии: знак стоит на ней, а не на оси строки.
     Такие участки в мерах перескока не участвуют — иначе провисание в конце строки считалось бы
     сближением с соседней строкой.
+
+    Args:
+        points: Точки оси ``(n, 2)`` слева направо.
+        spans: Отрезки по x под точками и запятыми (``LineAxis.mark_spans``).
+
+    Returns:
+        Оставшиеся точки; если их меньше двух — все точки.
     """
-    points = np.asarray(axis.get("points") or [], dtype=np.float64).reshape(-1, 2)
-    spans = axis.get("mark_spans") or []
     if not spans or points.shape[0] == 0:
         return points
     keep = np.ones(points.shape[0], dtype=bool)
@@ -522,10 +541,57 @@ class RowJump:
     x0: float  # общий участок по x
     x1: float
     y: float  # ордината оси посередине общего участка
+    start: float = 0.0  # участок перескока по x (:func:`jump_span`), пиксели рабочей копии
+    stop: float = 0.0
 
     def to_json(self) -> dict:
         """Словарь для JSON и CSV стенда."""
         return {key: (round(value, 1) if isinstance(value, float) else value) for key, value in self.__dict__.items()}
+
+
+def jump_span(axis: np.ndarray, neighbour: np.ndarray, left: float, right: float, pitch: float) -> tuple[float, float]:
+    """Участок оси по x, на котором она уходит на соседнюю строку.
+
+    Вдоль общего с соседом участка берётся расстояние до соседа по точкам оси. Его уровень у левого и
+    у правого конца — медиана по крайним точкам. Уровни разошлись на ``ROW_JUMP_PITCH_SHARE`` шага и
+    больше — ось перешла на соседнюю строку: участок — от первой точки, отошедшей от левого уровня,
+    до последней, не дошедшей до правого (сам переход; справа и слева от него ось лежит на строке, хоть
+    и на разных). Иначе ось ушла и вернулась: участок — от первой до последней точки, отошедшей от
+    уровня концов.
+
+    Args:
+        axis: Ось ``(n, 2)`` слева направо.
+        neighbour: Ось соседа, по которому найден перескок.
+        left: Начало общего участка по x.
+        right: Его конец.
+        pitch: Межстрочный шаг страницы.
+
+    Returns:
+        ``(start, stop)`` по x; не нашлось отошедших точек — весь общий участок.
+    """
+    inside = (axis[:, 0] >= left) & (axis[:, 0] <= right)
+    xs = axis[inside, 0]
+    if xs.size < 2 * ROW_JUMP_EDGE_POINTS:
+        # Точек оси на общем участке мало — меряем по равномерной сетке.
+        xs = np.linspace(left, right, CROSS_SAMPLES)
+    gap = np.interp(xs, axis[:, 0], axis[:, 1]) - np.interp(xs, neighbour[:, 0], neighbour[:, 1])
+    edge = max(ROW_JUMP_EDGE_POINTS, int(round(ROW_JUMP_EDGE_SHARE * xs.size)))
+    first, last = float(np.median(gap[:edge])), float(np.median(gap[-edge:]))
+    tol = ROW_JUMP_SPAN_TOL_PITCHES * pitch
+    if abs(last - first) >= ROW_JUMP_PITCH_SHARE * pitch:
+        # Переход: от первого ухода с левого уровня до последней точки не на правом.
+        away = np.nonzero(np.abs(gap - first) > tol)[0]
+        short = np.nonzero(np.abs(gap - last) > tol)[0]
+        if away.size and short.size:
+            start, stop = float(xs[away[0]]), float(xs[short[-1]])
+            return (min(start, stop), max(start, stop))
+        return (float(left), float(right))
+    # Уход и возврат: все точки, отошедшие от уровня концов.
+    level = (first + last) / 2.0
+    away = np.nonzero(np.abs(gap - level) > tol)[0]
+    if not away.size:
+        return (float(left), float(right))
+    return (float(xs[away[0]]), float(xs[away[-1]]))
 
 
 def row_jumps_of(axes: list[np.ndarray], pitch: float) -> list[RowJump]:
@@ -542,7 +608,8 @@ def row_jumps_of(axes: list[np.ndarray], pitch: float) -> list[RowJump]:
         pitch: Межстрочный шаг страницы.
 
     Returns:
-        Находки по одной на ось, у которой наименьший разброс больше ``ROW_JUMP_PITCH_SHARE`` шага.
+        Находки по одной на ось, у которой наименьший разброс больше ``ROW_JUMP_PITCH_SHARE`` шага, с
+        участком перескока ``start``–``stop`` (:func:`jump_span`).
     """
     if pitch <= 0:
         return []
@@ -580,7 +647,9 @@ def row_jumps_of(axes: list[np.ndarray], pitch: float) -> list[RowJump]:
                     y=float(np.interp(middle, axis[:, 0], axis[:, 1])),
                 )
         if best is not None and best.drift > ROW_JUMP_PITCH_SHARE * pitch:
-            out.append(best)
+            # Участок перескока — только у найденных: по соседу, давшему наименьший разброс.
+            start, stop = jump_span(axis, axes[best.neighbour], best.x0, best.x1, pitch)
+            out.append(replace(best, start=start, stop=stop))
     return out
 
 
@@ -807,6 +876,8 @@ def gutter_crossings_of(axes: list[dict], glyphs: np.ndarray, dpi: float) -> lis
 __all__ = [
     "RowJump",
     "row_jumps_of",
+    "jump_span",
+    "points_without_marks",
     "GutterCrossing",
     "gutter_crossings_of",
     "PageMetrics",

@@ -23,8 +23,7 @@ from ocr_utils.page_layout.text_blocks.columns import GutterMode
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
 from ocr_utils.page_layout.text_blocks.from_layout import build
 from ocr_utils.page_layout.text_blocks.page import AxisKind, analyse_gray
-from ocr_utils.page_layout.text_blocks.metrics import _axis_points, pitch_of, row_jumps_of
-from ocr_utils.page_layout.text_blocks.report import filled_json, page_json
+from ocr_utils.page_layout.text_blocks.report import filled_json
 from ocr_utils.page_layout.text_blocks.segment import SPLIT_ROWS_DEFAULT
 from ocr_utils.page_layout.text_blocks.sides import (
     AlignMethod,
@@ -400,10 +399,33 @@ def final_page(
 
 
 def _row_jumps(analysis) -> int:
-    """Число осей, перескочивших на соседнюю строку (``metrics.row_jumps_of``), по разбору полосы."""
-    payload = page_json(analysis)
-    axes = [_axis_points(axis) for axis in payload["axes"]]
-    return len(row_jumps_of(axes, pitch_of(payload["blocks"])))
+    """Число осей, перескочивших на соседнюю строку: у них разбор проставил участки ``LineAxis.jump_spans``."""
+    return sum(1 for axis in analysis.axes if axis.jump_spans)
+
+
+def _row_jump_spans(analysis) -> list[dict]:
+    """Участки перескока осей полосы для JSON.
+
+    Args:
+        analysis: Разбор текстовых блоков полосы (``PageAnalysis``).
+
+    Returns:
+        Список ``{"axis", "x0", "x1", "y0", "y1"}`` в пикселях рабочей копии: номер оси, отрезок по x и
+        ордината оси на его концах.
+    """
+    out = []
+    for index, axis in enumerate(analysis.axes):
+        for start, stop in axis.jump_spans:
+            out.append(
+                {
+                    "axis": index,
+                    "x0": round(float(start), 1),
+                    "x1": round(float(stop), 1),
+                    "y0": round(axis.y_at(start), 1),
+                    "y1": round(axis.y_at(stop), 1),
+                }
+            )
+    return out
 
 
 def page_record(final: dict) -> dict:
@@ -525,6 +547,9 @@ def finish_page(
             "blocks_mode": BlocksMode(blocks_mode).value,
             # Перескоков оси на соседнюю строку (``metrics.row_jumps_of``) — мера качества полосы.
             "row_jumps": _row_jumps(analysis),
+            # Участки перескока (``LineAxis.jump_spans``): номер оси в разборе, отрезок по x и ордината
+            # оси на его концах — туда меры наклона и формы строки не смотрят.
+            "row_jump_spans": _row_jump_spans(analysis),
             "count": len(analysis.blocks),
             "axes": len(analysis.axes),
             "blocks": [

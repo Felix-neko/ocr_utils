@@ -144,6 +144,8 @@ def page_json(analysis: PageAnalysis) -> dict:
                 "resid_parabola_mm": round(axis.resid_parabola_mm, 2),
                 "points": _curve(axis.points),
                 "mark_spans": [[round(float(a), 1), round(float(b), 1)] for a, b in axis.mark_spans],
+                # Участки перескока на соседнюю строку: меры формы оси выше — по участку без них.
+                "jump_spans": [[round(float(a), 1), round(float(b), 1)] for a, b in axis.jump_spans],
             }
             for axis in analysis.axes
         ],
