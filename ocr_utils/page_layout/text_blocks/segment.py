@@ -83,6 +83,9 @@ SPLIT_MIN_HEIGHT_RATIO = 1.6
 # Проходов резки не больше стольких (сгусток на N строк режется за N − 1 проход).
 SPLIT_MAX_PASSES = 4
 SPLIT_MIN_LETTERS = 3
+# ...и по двум, если в сгустке есть глиф выше стольких букв сгустка (сросшиеся буквы двух рядов).
+SPLIT_BRIDGE_GLYPHS = 1.6
+SPLIT_MIN_LETTERS_BRIDGED = 2
 SPLIT_LEVEL_HEIGHTS = 1.1
 # Буквы ниже этой доли медианы (точки, запятые) в делении на уровни не голосуют — только примыкают.
 SPLIT_MARK_SHARE = 0.5
@@ -610,20 +613,23 @@ def _smeared(
     return count, labels, stats
 
 
-def _two_levels(centres: np.ndarray, voters: np.ndarray, glyph: float) -> tuple[np.ndarray, float, float] | None:
+def _two_levels(
+    centres: np.ndarray, voters: np.ndarray, glyph: float, min_letters: int = SPLIT_MIN_LETTERS
+) -> tuple[np.ndarray, float, float] | None:
     """Деление букв сгустка на два уровня по ординатам середин (две средних, как k-means при k = 2).
 
     Args:
         centres: Ординаты середин букв.
         voters: Какие буквы голосуют за уровни (не точки и не запятые).
-        glyph: Медианная высота буквы страницы.
+        glyph: Медианная высота буквы сгустка.
+        min_letters: Сколько голосующих букв нужно в каждом уровне.
 
     Returns:
         ``(буква нижнего уровня — булев вектор, ордината верхнего уровня, нижнего)`` или ``None``,
         если двух уровней нет.
     """
     ys = centres[voters]
-    if ys.size < 2 * SPLIT_MIN_LETTERS:
+    if ys.size < 2 * min_letters:
         return None
     upper, lower = float(ys.min()), float(ys.max())
     for _ in range(10):
@@ -633,7 +639,7 @@ def _two_levels(centres: np.ndarray, voters: np.ndarray, glyph: float) -> tuple[
         upper, lower = float(np.median(ys[~low])), float(np.median(ys[low]))
     if lower - upper < SPLIT_LEVEL_HEIGHTS * glyph:
         return None
-    if int(low.sum()) < SPLIT_MIN_LETTERS or int((~low).sum()) < SPLIT_MIN_LETTERS:
+    if int(low.sum()) < min_letters or int((~low).sum()) < min_letters:
         return None
     # Всех букв, включая не голосовавшие, — к ближнему уровню.
     return np.abs(centres - lower) < np.abs(centres - upper), upper, lower
@@ -667,26 +673,35 @@ def _split_two_rows(
     ink = components > 0
     found = labels[ink] > 0
     owners[components[ink][found]] = labels[ink][found]
-    heights = letter_stats[1:, cv2.CC_STAT_HEIGHT].astype(np.float64)
-    glyph = float(np.median(heights[heights >= scale.min_height])) if (heights >= scale.min_height).any() else 0.0
-    if glyph <= 0:
-        return stats.shape[0], labels, stats
-    tall = np.nonzero(stats[:, cv2.CC_STAT_HEIGHT] >= SPLIT_MIN_HEIGHT_RATIO * glyph)[0]
-    tall = tall[tall > 0]
-    if tall.size == 0:
-        return stats.shape[0], labels, stats
+    heights = letter_stats[:, cv2.CC_STAT_HEIGHT].astype(np.float64)
+    # Кегль — СВОЙ у каждого сгустка (медиана высот его букв), а не страничный: у сноски петитом два
+    # слитых ряда ниже 1.6 страничной буквы, и уровни их букв расходятся меньше 1.1 страничной буквы —
+    # такой сгусток не резался, и строки сноски сшивались (1974/09 IMG_0113_2R).
+    blobs = np.unique(owners[1:])
     labels = labels.copy()
     rows = [stats]
     count = stats.shape[0]
     kernel = np.ones((1, scale.gap), np.uint8)
-    for blob in tall:
+    for blob in blobs[blobs > 0]:
         own = np.nonzero(owners == blob)[0]
         own = own[own > 0]
         if own.size < 2 * SPLIT_MIN_LETTERS:
             continue
+        sized = heights[own][heights[own] >= scale.min_height]
+        if sized.size < 2 * SPLIT_MIN_LETTERS:
+            continue
+        glyph = float(np.median(sized))
+        if stats[blob, cv2.CC_STAT_HEIGHT] < SPLIT_MIN_HEIGHT_RATIO * glyph:
+            continue
         centres = centroids[own, 1]
         voters = letter_stats[own, cv2.CC_STAT_HEIGHT] >= SPLIT_MARK_SHARE * glyph
         levels = _two_levels(centres, voters, glyph)
+        # Глиф выше двух букв — сросшиеся буквы соседних рядов (в сноске петитом «д» верхней строки
+        # касается «М» нижней: 1974/09 IMG_0113_2R). Такой глиф — улика склейки, и уровни тогда
+        # признаются и по двум буквам: «год.» над «Машино-» — две голосующие буквы вверху.
+        if levels is None and (letter_stats[own, cv2.CC_STAT_HEIGHT] >= SPLIT_BRIDGE_GLYPHS * glyph).any():
+            tall = letter_stats[own, cv2.CC_STAT_HEIGHT] >= SPLIT_BRIDGE_GLYPHS * glyph
+            levels = _two_levels(centres, voters & ~tall, glyph, SPLIT_MIN_LETTERS_BRIDGED)
         if levels is None:
             continue
         lower, upper_y, lower_y = levels

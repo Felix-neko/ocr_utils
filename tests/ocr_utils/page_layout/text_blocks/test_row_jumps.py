@@ -117,3 +117,47 @@ def test_percent_upper_ring_sits_on_baseline():
     slash = [88, 98, 10, 14]  # черта с нижним кружком: центр масс внизу (кружок тяжелее черты), низ на 105
     base = baselines_of(np.array(letters + [ring, slash], dtype=np.float64), x_h)
     assert abs(base[6] - 100.0) < 1.5
+
+
+def _piece(x0: float, y: float, letters: int, slope: float = 0.0):
+    """Кусок строки из ``letters`` букв шириной 9 px с шагом 12 px, якоря на ``y`` (с наклоном ``slope``)."""
+    from ocr_utils.page_layout.text_blocks.pieces import Piece
+
+    xs = x0 + 12.0 * np.arange(letters) + 4.5
+    anchors = np.column_stack([xs, y + slope * (xs - xs[0])])
+    return Piece(
+        blobs=(int(x0),),
+        anchors=anchors,
+        sizes=np.tile([9.0, 12.0], (letters, 1)),
+        marks=np.zeros(letters, dtype=bool),
+        x0=float(x0),
+        y0=float(anchors[:, 1].min() - 6),
+        x1=float(xs[-1] + 4.5),
+        y1=float(anchors[:, 1].max() + 6),
+        x_h=12.0,
+        letter_w=9.0,
+        leader_dots=0,
+    )
+
+
+def test_joint_step_blocks_link_to_next_line():
+    """Конец абзаца и слово следующей строки (ступенька в шаг) не сливаются; соседние слова одной строки — сливаются."""
+    from ocr_utils.page_layout.text_blocks.zones import _guard, joint_step
+
+    left = _piece(100.0, 200.0, 6)
+    same = _piece(185.0, 200.5, 5)
+    below = _piece(185.0, 200.0 + PITCH, 5)
+    assert abs(joint_step(left, same)) < 2.0
+    assert _guard(left, same, PITCH)
+    assert joint_step(left, below) > 0.5 * PITCH
+    assert not _guard(left, below, PITCH)
+
+
+def test_joint_step_follows_tilted_line():
+    """Строка с наклоном 4°: продолжение по касательной ступенькой не считается."""
+    from ocr_utils.page_layout.text_blocks.zones import _guard
+
+    tilt = np.tan(np.radians(4.0))
+    left = _piece(100.0, 200.0, 6, tilt)
+    right = _piece(200.0, 200.0 + tilt * (200.0 - 104.5), 6, tilt)
+    assert _guard(left, right, PITCH)
