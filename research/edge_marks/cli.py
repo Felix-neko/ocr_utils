@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import random
+import time
 from pathlib import Path
 
 import click
@@ -172,3 +173,123 @@ def overlays(cand_dir: Path, results_dir: Path, out_dir: Path, names: tuple[str,
         count = judge_pages(cand_dir, results_dir, out_dir, judge_frame, candidates)
         click.echo(f"{judge_frame.name}: {count} полос")
     click.echo(f"листов: {sheets(cand_dir, out_dir, candidates, judges)}")
+
+
+@main.command("pero-layout")
+@click.option("--pages-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=OUT_DIR / "test_pages_bumps" / "pages")  # fmt: skip
+@click.option("--cand-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=OUT_DIR / "cand")
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), default=OUT_DIR / "test_pages_bumps_pero_native")
+@click.option("--pero-python", type=click.Path(path_type=Path), default=None, help="python окружения pero")
+@click.option("--pero-config", type=click.Path(path_type=Path), default=None, help="config.ini модели pero")
+def pero_layout(pages_dir: Path, cand_dir: Path, out_dir: Path, pero_python: Path | None, pero_config: Path | None) -> None:
+    """Собственный разбор вёрстки pero (регионы — блоки, строки): JSON и оверлеи по полосам ``--pages-dir``."""
+    from ocr_utils.page_layout.text_blocks.engines.pero import PeroEngine
+    from research.edge_marks.candidates import load
+    from research.edge_marks.pero_layout import run
+
+    count = run(pages_dir, load(cand_dir), out_dir, PeroEngine(python=pero_python, config=pero_config))
+    click.echo(f"полос {count} → {out_dir}")
+
+
+def guard_jobs(pages_set: str) -> list:
+    """Полосы набора для защиты сторон: ``bumps`` (55 с выступами от сора), ``clean`` (30 чистых тестового
+    множества), ``random200`` (200 случайных текстовых полос пака вне тестового множества, сид ``SEED``)."""
+    import json
+
+    from research.edge_marks.guard.guard import PageJob
+
+    if pages_set == "bumps":
+        rows = list(csv.DictReader((OUT_DIR / "test_pages_bumps" / "pages.csv").open()))
+        return [PageJob(r["полоса"], NOGEO_DIR / r["pdf"], int(r["страница pdf"])) for r in rows]
+    spec = json.loads((SETS_DIR / "pages.json").read_text())
+    if pages_set == "clean":
+        return [PageJob(p["key"], NOGEO_DIR / p["pdf"], int(p["page"])) for p in spec["clean"]]
+    taken = {p["key"] for p in spec["defect"] + spec["clean"]}
+    ends = pd.read_csv(SPECKS_DIR / "scan" / "ends.csv", usecols=["key", "pdf", "page"]).drop_duplicates("key")
+    ends = ends[~ends.key.isin(taken)].sort_values("key")
+    sample = ends.sample(200, random_state=SEED).sort_values("key")
+    return [PageJob(r.key, NOGEO_DIR / r.pdf, int(r.page)) for r in sample.itertuples()]
+
+
+# Воркеры карт детекторов второго прохода: интерпретатор окружения и скрипт.
+MAP_WORKERS = {
+    "craft": ["/home/felix/Projects/mts_markup/line_axis_engines/craft/bin/python", "research/edge_marks/workers/craft_maps.py", "--fp16"],
+    "pero": ["/mnt/system/raw/mts/curved_layout_engines/pero/bin/python", "research/edge_marks/workers/pero_maps.py"],
+    "doctr": ["/home/felix/Projects/mts_markup/line_axis_engines/doctr/bin/python", "research/edge_marks/workers/doctr_maps.py"],
+}
+
+
+def detector_maps(jobs: list, engines: set, maps_dir: Path, base: Path) -> None:
+    """Карты детекторов по полосам: по одному GPU-процессу на детектор (строго по очереди), кэш по ключу, замер ресурсов.
+
+    Args:
+        jobs: Полосы (``PageJob``).
+        engines: Детекторы (``glyph_vote.Engine``).
+        maps_dir: Корень карт ``<maps_dir>/<детектор>/<ключ>.png``.
+        base: Папка набора (вход воркеров, журналы, замеры).
+    """
+    import json
+
+    from ocr_utils.page_layout.text_blocks.page import render_page
+    from research.edge_marks.vram import run_measured
+
+    pngs_dir = base / "maps_input"
+    pngs_dir.mkdir(parents=True, exist_ok=True)
+    for engine in sorted(engines, key=lambda e: e.value):
+        todo = [job for job in jobs if not (maps_dir / engine.value / f"{job.key}.png").exists()]
+        if not todo:
+            continue
+        for job in todo:
+            target = pngs_dir / f"{job.key}.png"
+            if not target.exists():
+                cv2.imwrite(str(target), render_page(job.pdf, job.page))
+        spec = base / f"maps_{engine.value}.json"
+        spec.write_text(json.dumps([{"key": j.key, "png": str(pngs_dir / f"{j.key}.png")} for j in todo]))
+        worker = MAP_WORKERS[engine.value]
+        command = [worker[0], worker[1], "--jobs", str(spec), "--out-dir", str(maps_dir / engine.value), *worker[2:]]
+        with (base / f"maps_{engine.value}.log").open("w") as log:
+            usage = run_measured(command, cwd=str(PROJECT), log=log)
+        (base / f"maps_{engine.value}_usage.json").write_text(json.dumps(usage.__dict__))
+        click.echo(f"карты {engine.value}: {len(todo)} полос, код {usage.returncode}, {usage.seconds:.0f} с, "
+                   f"VRAM {usage.vram_mb:.0f} МБ")  # fmt: skip
+
+
+@main.command()
+@click.option("--pages-set", type=click.Choice(["bumps", "clean", "random200"]), default="bumps", show_default=True)
+@click.option("--second-pass", "passes", multiple=True, type=click.Choice(["craft", "craft_pero", "craft_pero_doctr"]),
+              default=("craft", "craft_pero", "craft_pero_doctr"), show_default=True,
+              help="варианты второго прохода на аномальных полосах (фильтр голосованием детекторов и повторный разбор); "
+                   "выступы, оставшиеся по итогу, помечаются всегда")  # fmt: skip
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), default=OUT_DIR / "guard")
+@click.option("--layout-cache", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=Path("/mnt/system/raw/mts/pack1_page_layout"))  # fmt: skip
+@click.option("--bump-mm", type=float, default=None, help="порог выступа, мм (по умолчанию anomaly.BUMP_MM)")
+@click.option("--jobs", type=int, default=16, show_default=True, help="процессов разбора (CPU)")
+def guard(pages_set: str, passes: tuple[str, ...], out_dir: Path, layout_cache: Path, bump_mm: float | None,
+          jobs: int) -> None:  # fmt: skip
+    """Защита выровненных сторон блоков: разбор без второго прохода по всем полосам (выступы помечаются
+    недостоверными), затем выбранные варианты второго прохода по аномальным полосам; склейки «без второго прохода |
+    варианты» в ``compare/`` и ``summary_<вариант>.json``."""
+    from research.edge_marks.guard.anomaly import BUMP_MM
+    from research.edge_marks.guard.guard import GuardPass, GuardSettings, compare, run_pass
+
+    base = out_dir / pages_set
+    maps_dir = out_dir / "maps"
+    settings = GuardSettings(layout_cache, BUMP_MM if bump_mm is None else bump_mm, maps_dir)
+    all_jobs = guard_jobs(pages_set)
+    started = time.monotonic()
+    plain = run_pass(GuardPass.PLAIN, all_jobs, jobs, settings, base)
+    anomalous = [job for job, item in zip(all_jobs, plain) if item["anomalous"]]
+    click.echo(f"без второго прохода: полос {len(all_jobs)}, аномальных {len(anomalous)}, "
+               f"{time.monotonic() - started:.0f} с")  # fmt: skip
+    variants = [GuardPass(name) for name in passes]
+    if anomalous and variants:
+        detector_maps(anomalous, {e for v in variants for e in v.engines}, maps_dir, base)
+    for variant in variants:
+        tick = time.monotonic()
+        run_pass(variant, anomalous, jobs, settings, base)
+        click.echo(f"{variant.title}: полос {len(anomalous)}, {time.monotonic() - tick:.0f} с")
+    shown = [GuardPass.PLAIN, *variants]
+    for job in anomalous:
+        compare(job.key, [base / v.value for v in shown], [v.title for v in shown], base / "compare" / f"{job.key}.jpg")
