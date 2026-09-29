@@ -416,8 +416,9 @@ class PageLayout:
             self.formulas = [_to_native(r, native, image) for r in detect_formulas(inputs)]
 
         if Find.TABLES in self.find or Find.LINE_ART in self.find:
-            # Непристроенные линейки: без тех, что лежат в line art или растре (в текст они не лезут).
-            taken = [r.box.scaled(1.0 / native) for r in self.line_arts] + raster_work
+            # Непристроенные линейки: без тех, что лежат в line art, растре или формуле (в текст они не лезут;
+            # в формуле «линейка» — черта дроби или скобка, стенд research/loose_rules: 535 таких на паке-1).
+            taken = [r.box.scaled(1.0 / native) for r in self.line_arts + self.formulas] + raster_work
             self.loose_rules = [
                 rule.scaled(native)
                 for rule in self._loose_work

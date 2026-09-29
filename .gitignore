@@ -148,3 +148,6 @@ reports/text_block_envelope/
 reports/text_block_specks/
 reports/text_blocks_gutter_crossing/
 reports/text_blocks_row_jumps/
+
+# стенд ложных линеек-сирот: листы и склейки (research/loose_rules)
+reports/loose_rules/

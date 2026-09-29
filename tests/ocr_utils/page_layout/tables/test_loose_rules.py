@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from ocr_utils.page_layout.geometry import KIND_TABLE, LooseRule
-from ocr_utils.page_layout.tables import detector, rules
-from ocr_utils.page_layout.tables.ruling import WORK_DPI
+from ocr_utils.page_layout.tables import detector, loose_filter, rules
+from ocr_utils.page_layout.tables.ruling import WORK_DPI, binarize
 from tests.ocr_utils.page_layout.tables import synthetic
 from tests.ocr_utils.page_layout.tables.synthetic import INK
 
@@ -153,3 +153,80 @@ def test_long_rule_torn_by_a_short_gap_stays_one_rule() -> None:
     found = rules.find_rules(gray, WORK_DPI)
     long_rules = [s for s in found.horizontal if s.box.x1 - s.box.x0 > 500]
     assert len(long_rules) == 1
+
+
+# --- Вторая ступень: признаки трассы (loose_filter) -------------------------------------------------
+
+
+def _drop(gray: np.ndarray, rule: LooseRule) -> loose_filter.LooseDrop | None:
+    """Причина отбраковки сироты на серой полосе 150 dpi (как в ``detect_all``)."""
+    binary = binarize(gray)
+    components = loose_filter.page_components(binary)
+    return loose_filter.drop_reason(gray, components, rules.side_ink(binary, rule, WORK_DPI), rule, WORK_DPI)
+
+
+def _paper(height: int = 400, width: int = 600) -> np.ndarray:
+    """Чистая серая полоса 150 dpi: бумага 240."""
+    return np.full((height, width), 240, np.uint8)
+
+
+def test_filter_keeps_clean_rule_and_underline_with_descenders() -> None:
+    """Отбивка на бумаге и подчёркивание с прилипшими хвостами букв — настоящие линейки."""
+    gray = _paper()
+    gray[100:102, 100:400] = 20
+    assert _drop(gray, _rule([(100.0, 100.5), (399.0, 100.5)])) is None
+    gray[300:302, 100:400] = 20
+    for x in range(110, 390, 30):
+        gray[285:302, x : x + 3] = 20
+    assert _drop(gray, _rule([(100.0, 300.5), (399.0, 300.5)])) is None
+
+
+def test_filter_drops_stems_stacked_across_rows() -> None:
+    """Стволы двух жирных «Н» через межстрочье (IMG_0061_1L в миниатюре): буквы вразрядку, по бокам бумага."""
+    gray = _paper()
+    for top in (200, 245):
+        gray[top : top + 30, 300:306] = 20
+        gray[top : top + 30, 318:324] = 20
+        gray[top + 13 : top + 17, 300:324] = 20
+    stem = _rule([(303.0, 200.0), (303.0, 274.0)], horizontal=False, thickness=6.0)
+    assert _drop(gray, stem) is loose_filter.LooseDrop.GLYPHS
+
+
+def test_filter_drops_serif_row() -> None:
+    """Низы жирных букв одной строки, сшитые через просветы, — буквы."""
+    gray = _paper()
+    for x in range(100, 380, 40):
+        gray[270:300, x : x + 30] = 20
+        gray[275:295, x + 8 : x + 22] = 240
+    assert _drop(gray, _rule([(100.0, 298.0), (369.0, 298.0)], thickness=3.0)) is loose_filter.LooseDrop.GLYPHS
+
+
+def test_filter_drops_dashes_chained_with_digits() -> None:
+    """Тире, сшитые через цифры («6—9—12»): каждое тире вытянуто, но длинного пробега «не букв» нет."""
+    gray = _paper()
+    x = 100
+    for _ in range(4):
+        gray[200:202, x : x + 18] = 20  # тире 3 мм
+        gray[190:212, x + 20 : x + 30] = 20  # «цифра», компактная, на уровне тире
+        x += 32
+    assert _drop(gray, _rule([(100.0, 200.5), (float(x - 3), 200.5)])) is loose_filter.LooseDrop.SHORT_RUN
+
+
+def test_filter_drops_fraction_bar() -> None:
+    """Черта дроби: числитель и знаменатель вплотную с обеих сторон."""
+    gray = _paper()
+    gray[200:202, 100:200] = 20
+    for x in range(105, 195, 12):
+        gray[190:198, x : x + 8] = 20
+        gray[204:212, x : x + 8] = 20
+    assert _drop(gray, _rule([(100.0, 200.5), (199.0, 200.5)])) is loose_filter.LooseDrop.FRACTION
+
+
+def test_filter_drops_gray_edge_shelf() -> None:
+    """Кромка листа: серая полка (140) шириной 6 px вместо чёрного ядра штриха."""
+    gray = _paper()
+    gray[50:350, 30:36] = 140
+    gray[50:350, :30] = 250
+    shelf = _rule([(33.0, 50.0), (33.0, 349.0)], horizontal=False, thickness=6.0)
+    # Порог Otsu на почти пустой полосе проводит полку в краску — как на сканах.
+    assert _drop(gray, shelf) is loose_filter.LooseDrop.EDGE
