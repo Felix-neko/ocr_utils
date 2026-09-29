@@ -15,6 +15,11 @@ from ocr_utils.page_layout.text_blocks.blocks import (
     DILATE_GLYPHS,
     LARGE_TYPE_RATIO,
     MIN_BLOCK_ROWS,
+    ROW_GLYPH_GAP_MM,
+    ROW_GLYPH_RATIO,
+    ROW_GLYPH_STRONG_GAP_MM,
+    ROW_GLYPH_STRONG_RATIO,
+    SAME_BASELINE_MAX_GAP_KEGL,
     SAME_STYLE_DISTANCE,
     SMOOTH_PITCHES,
     Row,
@@ -28,6 +33,7 @@ from ocr_utils.page_layout.text_blocks.blocks import (
 )
 from ocr_utils.page_layout.text_blocks.columns import inside_gutter
 from ocr_utils.page_layout.text_blocks.smooth_envelope import _glyph, envelope_smooth
+from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, axes_kegl, barrier_between, same_baseline
 
 
 # Штрих текста, а не разделитель: линейка целиком в полосе строки — от стольких высот над осью (верх
@@ -135,7 +141,22 @@ def merge_same_line(rows: list[Row], dpi: float, barriers=None, gutters: list | 
 
 
 def _divided(a: Row, b: Row, barriers, gutters: list | None) -> bool:
-    """Разделяет ли два куска на одной высоте линейка-барьер или межколонник (по отрезку между их краями)."""
+    """Разделяет ли два куска на одной высоте линейка-барьер, межколонник или разный кегль через пустоту.
+
+    Разный кегль (:func:`_different_type`) — подпись автора рядом с заголовком: ряды налезают по краске, и
+    ``merge_overlapping_pieces`` сливал их без сравнения набора (1966/01 IMG_0046_2R, 1971/02 IMG_0071_2R).
+    Линейка проверяется и по глифам нормальной высоты (:func:`typeset.barrier_between`): краска линейки
+    оглавления входит в строку, ось кончается на самой линейке, край ряда по краске уходит за неё в соседнюю
+    графу (1973/01 IMG_0004_2R: оси «1973» до 358, край по краске 392, линейка 354, оглавление с 376).
+
+    Args:
+        a, b: Ряды.
+        barriers: Линейки-барьеры (``barriers.BarrierLines``) или ``None``.
+        gutters: Межколонники или ``None``.
+
+    Returns:
+        ``True`` — ряды не сливать.
+    """
     left, right = (a, b) if a.x0 <= b.x0 else (b, a)
     x0, x1 = left.x1, right.x0
     y = (a.y + b.y) / 2.0
@@ -145,7 +166,36 @@ def _divided(a: Row, b: Row, barriers, gutters: list | None) -> bool:
         middle = (x0 + x1) / 2.0
         if inside_gutter(gutters, middle - 1.0, middle + 1.0, y):
             return True
-    return False
+    if barrier_between(left.axes, right.axes, y, y, barriers):
+        return True
+    return _different_type(left, right)
+
+
+def _different_type(left: Row, right: Row) -> bool:
+    """Разный ли набор у двух рядов бок о бок: кегль по боксам глифов, просвет — между ОСЯМИ рядов.
+
+    Пороги — как у ``blocks._split_by_glyph``: просвет шире ``ROW_GLYPH_GAP_MM`` при разнице кегля от
+    ``ROW_GLYPH_RATIO`` или шире ``ROW_GLYPH_STRONG_GAP_MM`` при разнице от ``ROW_GLYPH_STRONG_RATIO``; защита
+    «одна базовая линия» — до ``SAME_BASELINE_MAX_GAP_KEGL`` меньшего кегля. Кегль — по боксам глифов
+    (``typeset.axes_kegl``): у шапки журнала буквы выше 7 мм, и мера ряда ``glyph_h`` там молчит. Просвет —
+    по осям: края по краске у подписи рядом с заголовком налезают.
+
+    Args:
+        left: Левый ряд.
+        right: Правый ряд.
+
+    Returns:
+        ``True`` — ряды разного набора.
+    """
+    gap = min(axis.x0 for axis in right.axes) - max(axis.x1 for axis in left.axes)
+    low, high = sorted((axes_kegl(left.axes), axes_kegl(right.axes)))
+    if low <= 0:
+        return False
+    if gap <= SAME_BASELINE_MAX_GAP_KEGL * low and same_baseline(axes_glyphs(left.axes), axes_glyphs(right.axes), low):
+        return False
+    if high >= ROW_GLYPH_RATIO * low and gap > mm_to_px(ROW_GLYPH_GAP_MM, WORK_DPI):
+        return True
+    return high >= ROW_GLYPH_STRONG_RATIO * low and gap > mm_to_px(ROW_GLYPH_STRONG_GAP_MM, WORK_DPI)
 
 
 def _joined(a: Row, b: Row) -> Row:

@@ -24,6 +24,7 @@ from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, bounds_at,
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans, spans_at
 from ocr_utils.page_layout.text_blocks.lines import LineAxis, with_column
 from ocr_utils.page_layout.text_blocks.pieces import ANCHOR_ABOVE_BASELINE_XH, DESCENDER_MIN_XH, is_low_mark
+from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, axis_kegl, barrier_between, same_baseline
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.scan_markup.curved_lines.fitting import smooth_median
 
@@ -53,6 +54,10 @@ ROW_GLYPH_GAP_MM = 3.5
 # 10 px, 1969/05 IMG_0062_2R). Цифры и прописные корпуса крупнее строчных лишь в 1.3–1.45 раза.
 ROW_GLYPH_STRONG_RATIO = 1.8
 ROW_GLYPH_STRONG_GAP_MM = 1.0
+# Второй проход резки ряда (кегль по боксам глифов, :func:`_split_by_glyph`): разрез отменяется, если части
+# стоят на одной базовой линии при просвете до стольких меньших кеглей — логотип «50 лет» (1.4 кегля); месяц
+# и «Год издания» у шапки журнала отстоят от неё на 2 кегля и больше (1970/01 IMG_0004_2R).
+SAME_BASELINE_MAX_GAP_KEGL = 1.8
 # Балл разницы НАБОРА двух рядов (:func:`style_distance`) — сумма превышений отношений кегля и
 # жирности над единицей: (r_кегль − 1) + (r_жирность − 1). Одно отношение кегля не видело подписи
 # рядом с заголовком того же кегля, но вдвое жирнее («современную» / «АЛФЕРЬЕВ», 1966/01 IMG_0017_1L:
@@ -611,7 +616,11 @@ def _split_by_barrier(group: list[LineAxis], axis: LineAxis, barriers) -> bool:
     left, right = (nearest, axis) if nearest.x0 <= axis.x0 else (axis, nearest)
     start = (float(left.x1), float(_level_at(left, left.x1)))
     end = (float(right.x0), float(_level_at(right, right.x0)))
-    return barriers.crosses(start, end)
+    if barriers.crosses(start, end):
+        return True
+    # Краска линейки оглавления входит в строку, и ось кончается на самой линейке: отрезок между концами
+    # осей её не пересекает. Проверка — ещё и между глифами нормальной высоты (1973/01 IMG_0004_2R).
+    return barrier_between([left], [right], start[1], end[1], barriers)
 
 
 def axis_glyph_height(axis: LineAxis, ink: np.ndarray, k: float, dpi: float) -> float:
@@ -636,7 +645,9 @@ def axis_glyph_height(axis: LineAxis, ink: np.ndarray, k: float, dpi: float) -> 
     return glyph_metrics(band, k, dpi, min_glyphs=AXIS_MIN_GLYPHS)[1]
 
 
-def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float) -> list[list[LineAxis]]:
+def _split_by_measure(
+    group: list[LineAxis], ink: np.ndarray, k: float, dpi: float, by_boxes: bool
+) -> list[list[LineAxis]]:
     """Разрезать набранный ряд там, где через пустоту соседствуют оси разного кегля.
 
     ``_same_row`` сводит оси только по ординате, и подпись автора слева («доцент,», глиф 9 px)
@@ -652,6 +663,8 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
         ink: Краска рендера ``RENDER_DPI``.
         k: Во сколько раз рендер крупнее рабочей копии.
         dpi: Разрешение рабочей копии.
+        by_boxes: Мера кегля — по боксам глифов осей (``typeset.axis_kegl``), а не по краске
+            (:func:`axis_glyph_height`, молчит у букв выше ``GLYPH_MAX_MM``).
 
     Returns:
         Части ряда слева направо; без разрезов — ``[group]`` как есть (тот же объект).
@@ -678,7 +691,10 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
     # Кегль мерится по кускам между кандидатами целиком: у куска из нескольких осей глифов больше.
     bounds = [0, *cuts, len(ordered)]
     pieces = [ordered[start:end] for start, end in zip(bounds[:-1], bounds[1:])]
-    heights = [float(np.median([axis_glyph_height(axis, ink, k, dpi) for axis in piece])) for piece in pieces]
+    heights = [
+        float(np.median([axis_kegl(axis) if by_boxes else axis_glyph_height(axis, ink, k, dpi) for axis in piece]))
+        for piece in pieces
+    ]
     out: list[list[LineAxis]] = [list(pieces[0])]
     for previous, current, piece, is_wide in zip(heights[:-1], heights[1:], pieces[1:], wide):
         low, high = sorted((previous, current))
@@ -690,6 +706,47 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
             out[-1].extend(piece)
     if len(out) == 1:
         return [group]
+    return out
+
+
+def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float) -> list[list[LineAxis]]:
+    """Разрезать ряд по кеглю двумя мерами: по краске (прежние разрезы) и по боксам глифов (шапка журнала).
+
+    Мера по краске (:func:`axis_glyph_height`) молчит у букв выше ``GLYPH_MAX_MM``: шапка «СНАБЖЕНИЕ»
+    (54 px) оставалась в одном ряду с «Год издания». Второй проход меряет кегль по боксам глифов у ВСЕХ осей
+    ряда — две разные меры в одном ряду дали бы ложную разницу («АСУ МТС», 1972/12 IMG_0130_1L). Разрезы
+    первого прохода остаются все; новый разрез второго отменяется, если части стоят на одной базовой линии
+    при просвете до ``SAME_BASELINE_MAX_GAP_KEGL`` меньшего кегля: логотип «50 лет» (1967/10 IMG_0032_1L).
+
+    Args:
+        group: Оси одного ряда.
+        ink: Краска рендера ``RENDER_DPI``.
+        k: Во сколько раз рендер крупнее рабочей копии.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Части ряда слева направо; без разрезов — ``[group]``.
+    """
+    old = _split_by_measure(group, ink, k, dpi, by_boxes=False)
+    new = _split_by_measure(group, ink, k, dpi, by_boxes=True)
+    # Разрезы — по первой оси каждой части (части — отрезки одного и того же упорядоченного по x ряда).
+    starts = {id(part[0]) for part in old[1:]}
+    for previous, part in zip(new[:-1], new[1:]):
+        if id(part[0]) in starts:
+            continue
+        kegls = [value for value in (axis_kegl(axis) for axis in (*previous, *part)) if value > 0]
+        low = min(kegls) if kegls else 0.0
+        gap = min(axis.x0 for axis in part) - max(axis.x1 for axis in previous)
+        if gap <= SAME_BASELINE_MAX_GAP_KEGL * low and same_baseline(axes_glyphs(previous), axes_glyphs(part), low):
+            continue
+        starts.add(id(part[0]))
+    if not starts:
+        return [group]
+    out: list[list[LineAxis]] = []
+    for axis in sorted(group, key=lambda item: item.x0):
+        if not out or id(axis) in starts:
+            out.append([])
+        out[-1].append(axis)
     return out
 
 

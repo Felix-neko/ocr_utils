@@ -31,12 +31,20 @@ from scipy.spatial import cKDTree
 
 from ocr_utils.page_layout.text_blocks import WORK_DPI
 from ocr_utils.page_layout.text_blocks.capsules import Capsule, contact_of
+from ocr_utils.page_layout.text_blocks.typeset import (
+    BASELINE_SHIFT_KEGL,
+    STRONG_GAP_KEGL,
+    STRONG_RATIO,
+    STRONG_TALL_RATIO,
+)
 from ocr_utils.page_layout.text_blocks.pieces import (
     AXIS_MIN_LETTERS,
     Piece,
     axis_residual,
     chord_slope,
     end_kegl,
+    end_kegl_any,
+    end_tall,
     merged,
     page_x_height,
     pieces_of,
@@ -489,7 +497,40 @@ def _verdict_of(
     # левой графы таблицы сошьётся с числом правой через ряд точек (1971/10 с.93).
     if left.leader_dots >= LEADER_RUN_MIN and right.leader_dots == 0:
         return LinkVerdict.LEADER
+    if _mixed_sets(left, right):
+        return LinkVerdict.MIXED_GAP
     return LinkVerdict.ACCEPTED
+
+
+def _mixed_sets(left: Piece, right: Piece) -> bool:
+    """Разный ли набор у стыка кусков: сильная разница кегля и высоких букв через просвет, не на одной линии.
+
+    Правило ``MIXED_GAP`` выше молчит у куска из одной-двух букв (``end_kegl`` = None) и пропускает просвет
+    до пяти меньших иксов. Здесь кегль конца берётся и по одной-двум буквам (:func:`pieces.end_kegl_any`), а
+    разный набор — это кегль от 1.8 раза, самые высокие буквы от 1.6 (цифры корпуса в 1.8 раза выше
+    строчных, но не выше букв с выносными), просвет шире двух меньших кеглей и низы, разошедшиеся больше
+    чем на четверть меньшего кегля (логотип «50 лет» стоит на одной линии). Подпись к заголовку («…ЧУМАКОВ»
+    + «ДОПОЛНИТЕЛЬНЫЙ», 1971/10 IMG_0019_2R), шапка к «Год издания» (1966/02 IMG_0055_2R).
+
+    Args:
+        left: Левый кусок.
+        right: Правый кусок.
+
+    Returns:
+        ``True`` — сцеплять нельзя.
+    """
+    ends = (end_kegl_any(left, at_start=False), end_kegl_any(right, at_start=True))
+    tall = (end_tall(left, at_start=False), end_tall(right, at_start=True))
+    if None in ends or None in tall:
+        return False
+    low, high = sorted(ends)
+    short, long_ = sorted(tall)
+    return (
+        high >= STRONG_RATIO * low
+        and long_ >= STRONG_TALL_RATIO * short
+        and right.x0 - left.x1 > STRONG_GAP_KEGL * low
+        and abs(left.y1 - right.y1) > BASELINE_SHIFT_KEGL * low
+    )
 
 
 def _is_speck(piece: Piece, reference: float) -> bool:

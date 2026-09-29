@@ -35,6 +35,7 @@ from scipy.sparse.linalg import spsolve
 
 from ocr_utils.page_layout import mm_to_px
 from ocr_utils.page_layout.text_blocks.lines import LineAxis
+from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, glyphs_kegl, same_baseline
 
 # Шаг сетки кривой, мм бумаги (как у первой оси: ``lines.AXIS_STEP_MM``).
 GRID_STEP_MM = 1.0
@@ -80,6 +81,9 @@ MIN_SAMPLES = 3
 # строчных (дефис переноса стоит вплотную, точка — через пару пикселей) и всего не дальше стольких.
 EXTEND_GAP_XH = 0.5
 EXTEND_MAX_XH = 3.0
+# Полоса строки, в которой продление ищет чужие глифы, — столько строчных вверх и вниз от конца оси (как
+# полоса самого продления).
+EXTEND_BAND_XH = 0.6
 # Соседи: сколько строк сверху и снизу опрашивается, насколько далеко (в шагах строки), какое
 # перекрытие по x нужно и какой вес у члена соседей там, где своих данных нет совсем.
 NEIGHBOURS_EACH_SIDE = 2
@@ -510,6 +514,11 @@ def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineA
     конца оси вдоль полосы в высоту строчной идём по краске текста (``page.text_ink``: глифы, дефисы,
     отточия) без пустот шире ``EXTEND_GAP_XH`` строчной и продлеваем ось по касательной до края.
 
+    Продление, задевшее глиф оси на ДРУГОЙ базовой линии (:func:`_foreign_glyphs`, :func:`_hits_foreign`),
+    отменяется: у шапки журнала строчная ≈ 43 px, три строчных — 130 px, и ось «ТЕХНИЧЕСКОЕ» уходила в «июль», а
+    «СНАБЖЕНИЕ» — в «Год издания» (1969/07 IMG_0004_2R); налезающие оси ряд по кеглю уже не резал. Половинка
+    той же строки (заголовок, разобранный двумя налезающими осями, 1966/01 IMG_0039_1L) — не чужая.
+
     Args:
         axes: Оси страницы со вторыми осями.
         ink: Краска текста рендера ``RENDER_DPI`` (``bool``).
@@ -518,18 +527,20 @@ def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineA
     Returns:
         Оси с продлёнными ``body_points``.
     """
+    boxes = [axes_glyphs([axis]) for axis in axes]
     out: list[LineAxis] = []
-    for axis in axes:
+    for index, axis in enumerate(axes):
         points = axis.body_points
         if points is None or points.shape[0] < 2 or axis.glyphs is None:
             out.append(axis)
             continue
+        foreign = _foreign_glyphs(boxes, index)
         x_h = line_x_height(axis.glyphs)
         new = points
         for at_end in (False, True):
             index, neighbour = (-1, -2) if at_end else (0, 1)
             x, y = points[index]
-            half = 0.6 * x_h * k
+            half = EXTEND_BAND_XH * x_h * k
             top, bottom = max(0, int((y * k) - half)), min(ink.shape[0], int((y * k) + half) + 1)
             cols = ink[top:bottom].sum(axis=0) >= 2
             start = int(round(x * k))
@@ -539,7 +550,7 @@ def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineA
                 cols, start, 1 if at_end else -1, int(EXTEND_GAP_XH * x_h * k), int(EXTEND_MAX_XH * x_h * k)
             )
             edge = reach / k
-            if abs(edge - x) < 0.5:
+            if abs(edge - x) < 0.5 or _hits_foreign(foreign, x, edge, y, EXTEND_BAND_XH * x_h):
                 continue
             # Наклон конца — по двум крайним узлам (сетка равномерная, разность абсцисс ненулевая).
             run = points[index, 0] - points[neighbour, 0]
@@ -548,6 +559,50 @@ def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineA
             new = np.vstack([new, extra]) if at_end else np.vstack([extra, new])
         out.append(replace(axis, body_points=new))
     return out
+
+
+def _foreign_glyphs(boxes: list[np.ndarray], index: int) -> np.ndarray:
+    """Глифы осей на ДРУГОЙ базовой линии, чем ось ``index``: по ним продление оси не идёт.
+
+    Args:
+        boxes: Боксы глифов каждой оси страницы ``(n, 4)``.
+        index: Номер оси.
+
+    Returns:
+        Боксы чужих глифов ``(m, 4)``.
+    """
+    own = boxes[index]
+    kegl = glyphs_kegl(own)
+    foreign = [
+        other
+        for number, other in enumerate(boxes)
+        if number != index and len(other) and not same_baseline(own, other, min(kegl, glyphs_kegl(other)) or kegl)
+    ]
+    return np.concatenate(foreign) if foreign else np.zeros((0, 4))
+
+
+def _hits_foreign(foreign: np.ndarray, x: float, edge: float, y: float, band: float) -> bool:
+    """Задевает ли продление ``x → edge`` на высоте ``y`` чужой глиф, чья середина в полосе ``±band``.
+
+    Середина, а не касание: выносные соседних строк полосу задевают, а продление дефиса своей строки из-за них
+    отменяться не должно.
+
+    Args:
+        foreign: Чужие глифы ``(n, 4)``.
+        x: Конец оси.
+        edge: Конец продления.
+        y: Ордината конца оси.
+        band: Полувысота полосы строки.
+
+    Returns:
+        ``True`` — продление отменить.
+    """
+    if len(foreign) == 0:
+        return False
+    lo, hi = min(x, edge), max(x, edge)
+    middle = (foreign[:, 1] + foreign[:, 3]) / 2.0
+    hit = (foreign[:, 2] > lo) & (foreign[:, 0] < hi) & (np.abs(middle - y) < band)
+    return bool(hit.any())
 
 
 def use_body(axes: list[LineAxis]) -> list[LineAxis]:

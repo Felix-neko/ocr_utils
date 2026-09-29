@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import cv2
@@ -24,6 +24,7 @@ from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, LINKING_ZONES, RE
 from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, gutter_filled
 from ocr_utils.page_layout.text_blocks.leaders import flatten_axis, inside_spans, leaders_of, spans_at
 from ocr_utils.page_layout.text_blocks.pieces import is_low_mark
+from ocr_utils.page_layout.text_blocks.typeset import glyphs_kegl, set_cuts
 from ocr_utils.page_layout import mm_to_px
 
 if TYPE_CHECKING:
@@ -1696,7 +1697,58 @@ def segments_of(
     # Обратный ход: корпусные обрывки внутри найденной крупной строки — это её же буквы.
     out = [segment for segment in body if not any(_swallowed(segment, big) for big in large)]
     out.extend(large)
+    # Строка, склеенная из разного набора (подпись + заголовок, шапка журнала + «Год издания»), режется
+    # независимо от того, каким путём её склеили: смыканием RLSA, сцепкой кусков, по отточию.
+    out = [part for segment in out for part in split_segment(segment)]
     return sorted(out, key=lambda item: item.cy), rules
 
 
-__all__ = ["SCALES", "Rule", "Scale", "Segment", "component_mask", "rules_of", "segments_of"]
+def split_segment(segment: Segment) -> list[Segment]:
+    """Разрезать строку на части разного набора (``typeset.set_cuts``); без разрезов — ``[segment]``.
+
+    Части — те же ``Segment`` с глифами, точками центр-линии и метками своего отрезка по x; высота строки
+    пересчитывается пропорционально кеглю части. Режется только крупный набор (``typeset.LARGE_KEGL_PX``):
+    у шапки журнала «ТЕХНИЧЕСКОЕ» и «август» (1968/08 IMG_0054_2R), «СНАБЖЕНИЕ» и «Г» (1967/02 IMG_0054_2R).
+
+    Args:
+        segment: Строка после сегментации.
+
+    Returns:
+        Части слева направо.
+    """
+    glyphs = segment.glyphs
+    if glyphs is None or len(glyphs) < 2 or segment.xs.size < 2:
+        return [segment]
+    glyphs = np.asarray(glyphs, dtype=float)
+    glyphs = glyphs[np.argsort(glyphs[:, 0])]
+    cuts = set_cuts(glyphs)
+    if not cuts:
+        return [segment]
+    whole = glyphs_kegl(glyphs) or 1.0
+    parts = []
+    for start, end in zip([0, *cuts], [*cuts, len(glyphs)]):
+        part = glyphs[start:end]
+        x0, x1 = part[:, 0].min(), part[:, 2].max()
+        inside = (segment.xs >= x0) & (segment.xs <= x1)
+        # Часть, у которой на центр-линии меньше двух точек, оси не даст.
+        if int(inside.sum()) < 2:
+            continue
+        parts.append(
+            replace(
+                segment,
+                x0=int(np.floor(x0)),
+                y0=int(np.floor(part[:, 1].min())),
+                x1=int(np.ceil(x1)),
+                y1=int(np.ceil(part[:, 3].max())),
+                height=float(segment.height * (glyphs_kegl(part) or whole) / whole),
+                xs=segment.xs[inside],
+                ys=segment.ys[inside],
+                weights=segment.weights[inside],
+                mark_spans=tuple(span for span in segment.mark_spans if x0 <= (span[0] + span[1]) / 2.0 <= x1),
+                glyphs=part,
+            )
+        )
+    return parts if parts else [segment]
+
+
+__all__ = ["SCALES", "Rule", "Scale", "Segment", "component_mask", "rules_of", "segments_of", "split_segment"]

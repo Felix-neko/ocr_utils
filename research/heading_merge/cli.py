@@ -1,4 +1,4 @@
-"""Команды стенда: ``run`` — пересчёт полос в варианте запретов, ``trace`` — виновники стыков, ``compare`` — «было | стало» по C, P, N."""
+"""Команды стенда: ``run`` — пересчёт полос текущим кодом под меткой прогона, ``trace`` — виновники стыков, ``compare`` и ``significant`` — «было | стало» по C, P, N."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from ocr_utils.page_layout.pack_analysis.stages import load_image, page_key
 from ocr_utils.page_layout.text_blocks.columns import GutterMode
 from ocr_utils.page_layout.text_blocks.page import AxisKind
 from research.gutter_crossing.cli import _init_worker as _base_init
-from research.heading_merge.gates import HeadingPatch, Variant
 from research.heading_merge.measure import candidate_joints
 from research.heading_merge.significant import SIGNIFICANT_PX, shift_of
 from research.heading_merge.trace import TracePatch, culprits
@@ -69,10 +68,9 @@ def _capturing_text_blocks(*args, **kwargs):
     return analysis, hints
 
 
-def _init_worker(variant: str) -> None:
-    """Воркер: hugepage и потоки BLAS выключены, подмены варианта установлены, разбор перехватывается."""
+def _init_worker() -> None:
+    """Воркер: hugepage и потоки BLAS выключены, разбор перехватывается (для подсчёта стыков)."""
     _base_init()
-    HeadingPatch(Variant(variant)).install()
     final.text_blocks = _capturing_text_blocks
 
 
@@ -119,22 +117,22 @@ def main() -> None:
 )
 @click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
 @click.option("--pages", "pages_file", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
-@click.option("--variant", type=click.Choice([v.value for v in Variant]), required=True)
+@click.option("--name", required=True, help="Метка прогона: папка выхода (например, коммит или «before»/«after»).")
 @click.option("--jobs", default=16, show_default=True)
-def run(sharpened_dir: Path, source: Path, out_dir: Path, pages_file: Path, variant: str, jobs: int) -> None:
-    """Пересчитать полосы списка в варианте запретов → ``<out-dir>/<variant>/`` (pages, overlays, summary.csv)."""
+def run(sharpened_dir: Path, source: Path, out_dir: Path, pages_file: Path, name: str, jobs: int) -> None:
+    """Пересчитать полосы списка текущим кодом → ``<out-dir>/<name>/`` (pages, overlays, summary.csv)."""
     tasks = list_tasks(sharpened_dir, pages_file)
-    out = out_dir / variant
+    out = out_dir / name
     out.mkdir(parents=True, exist_ok=True)
     context = get_context("forkserver")
-    with ProcessPoolExecutor(jobs, mp_context=context, initializer=_init_worker, initargs=(variant,)) as pool:
+    with ProcessPoolExecutor(jobs, mp_context=context, initializer=_init_worker) as pool:
         results = list(pool.map(run_page, [(t, source, out) for t in tasks], chunksize=2))
     fields = ["page", "axes", "blocks", "rows", "joints", "joint_list", "error"]
     with (out / "summary.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fields)
         writer.writeheader()
         writer.writerows(results)
-    logger.info("%s: полос %d, стыков %d", variant, len(results), sum(r.get("joints", 0) for r in results))
+    logger.info("%s: полос %d, стыков %d", name, len(results), sum(r.get("joints", 0) for r in results))
 
 
 @main.command()
@@ -146,15 +144,14 @@ def run(sharpened_dir: Path, source: Path, out_dir: Path, pages_file: Path, vari
     default=SETS_DIR / "cases.tsv",
     show_default=True,
 )
-@click.option("--variant", type=click.Choice([v.value for v in Variant]), default=Variant.BASE.value, show_default=True)
 @click.option("--kind", "kinds", multiple=True, help="Только случаи этих типов (как в cases.tsv).")
 @click.option("--out", type=click.Path(dir_okay=False, path_type=Path), required=True, help="TSV виновников.")
-def trace(sharpened_dir: Path, source: Path, cases: Path, variant: str, kinds: tuple[str, ...], out: Path) -> None:
-    """Под вариантом запретов: стыки-кандидаты подтверждённых полос и шаги, которые их склеили (последовательно)."""
+def trace(sharpened_dir: Path, source: Path, cases: Path, kinds: tuple[str, ...], out: Path) -> None:
+    """Стыки-кандидаты подтверждённых полос на текущем коде и шаги, которые их склеили (последовательно)."""
     chosen = {page: kind for page, kind in read_cases(cases).items() if not kinds or kind in kinds}
     tasks = {t.name: t for t in list_tasks(sharpened_dir)}
     out.parent.mkdir(parents=True, exist_ok=True)
-    with HeadingPatch(Variant(variant)), TracePatch() as tracer, out.open("w", newline="") as handle:
+    with TracePatch() as tracer, out.open("w", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(
             ["page", "type", "kind", "block", "row", "x_gap0", "x_gap1", "y", "h_left", "h_right", "culprits"]
@@ -231,7 +228,7 @@ def write_sheets(pairs: list[Path], out_dir: Path) -> None:
 
 @main.command()
 @click.option("--run-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
-@click.option("--before", "before_name", default=Variant.BASE.value, show_default=True)
+@click.option("--before", "before_name", required=True)
 @click.option("--after", "after_name", required=True)
 @click.option(
     "--cases",
@@ -295,7 +292,7 @@ def compare(run_dir: Path, before_name: str, after_name: str, cases: Path, set_p
 
 @main.command()
 @click.option("--run-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
-@click.option("--before", "before_name", default=Variant.BASE.value, show_default=True)
+@click.option("--before", "before_name", required=True)
 @click.option("--after", "after_name", required=True)
 def significant(run_dir: Path, before_name: str, after_name: str) -> None:
     """Заметные изменения (граница блока сдвинулась больше ``SIGNIFICANT_PX`` или сменилось число блоков) по группам; листы ``sheets_<группа>_big``."""

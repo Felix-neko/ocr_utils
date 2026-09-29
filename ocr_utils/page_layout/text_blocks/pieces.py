@@ -645,6 +645,48 @@ def end_kegl(piece: Piece, at_start: bool, letters: int = END_KEGL_LETTERS) -> f
     return float(chosen[1])
 
 
+def _end_letters(piece: Piece, at_start: bool, letters: int = END_KEGL_LETTERS) -> np.ndarray:
+    """Высоты до ``letters`` крайних букв куска — без низких меток и тире (как у :func:`end_kegl`); пусто — букв нет."""
+    letter = ~piece.marks & (piece.sizes[:, 1] >= END_KEGL_MIN_XH * piece.x_h)
+    heights = piece.sizes[letter, 1]
+    return heights[:letters] if at_start else heights[-letters:]
+
+
+def end_kegl_any(piece: Piece, at_start: bool) -> float | None:
+    """Кегль у конца куска: :func:`end_kegl`, а если букв мало — медиана имеющихся крайних букв.
+
+    ``end_kegl`` молчит у куска из одной-двух букв, и запрет сцепки разного набора молчал вместе с ним:
+    к подписи автора пристёгивалась одиночная первая буква заголовка («Д», 36 px, к подписи в 10 px —
+    1971/10 IMG_0019_2R), к шапке журнала — «Го» из «Год издания» (1966/02 IMG_0055_2R).
+
+    Args:
+        piece: Кусок.
+        at_start: ``True`` — левый конец, ``False`` — правый.
+
+    Returns:
+        Высота в пикселях рабочей копии; ``None`` — у куска нет ни одной буквы.
+    """
+    kegl = end_kegl(piece, at_start=at_start)
+    if kegl is not None:
+        return kegl
+    heights = _end_letters(piece, at_start)
+    return float(np.median(heights)) if heights.size else None
+
+
+def end_tall(piece: Piece, at_start: bool) -> float | None:
+    """Высота самой высокой из крайних букв куска (без меток); ``None`` — букв нет.
+
+    Args:
+        piece: Кусок.
+        at_start: ``True`` — левый конец, ``False`` — правый.
+
+    Returns:
+        Высота в пикселях рабочей копии.
+    """
+    heights = _end_letters(piece, at_start)
+    return float(heights.max()) if heights.size else None
+
+
 def axis_residual(piece: Piece) -> float:
     """Среднеквадратичный остаток якорей от оси куска (пиксели).
 
@@ -719,6 +761,8 @@ __all__ = [
     "letters_of",
     "merged",
     "end_kegl",
+    "end_kegl_any",
+    "end_tall",
     "page_x_height",
     "pieces_of",
     "pitch_of",
