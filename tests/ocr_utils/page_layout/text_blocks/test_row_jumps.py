@@ -119,6 +119,97 @@ def test_percent_upper_ring_sits_on_baseline():
     assert abs(base[6] - 100.0) < 1.5
 
 
+def test_percent_after_digits_sits_on_baseline():
+    """«10%.»: икс куска — высота цифры; кружок и черта «%» (центр масс черты смещён к нижнему кружку) — на строке цифр.
+
+    Боксы — с 1973/10 IMG_0194_1L: кружок стоит над чертой меньше чем на полыкса по серединам, а низ
+    черты по середине масс уходит на 5 px ниже строки и тянул прямую по трём буквам тела.
+    """
+    from ocr_utils.page_layout.text_blocks.pieces import baselines_of
+
+    boxes = np.array(
+        [
+            [282.3, 421.1, 6, 17],  # «1»
+            [293.5, 420.8, 10, 17],  # «0»
+            [304.5, 416.5, 6, 12],  # верхний кружок «%»
+            [311.0, 424.1, 11, 22],  # черта с нижним кружком
+            [321.7, 427.1, 4, 3],  # точка
+        ],
+        dtype=np.float64,
+    )
+    base = baselines_of(boxes, 17.0)
+    assert np.all(np.abs(base[:4] - 429.5) < 1.5)
+
+
+def test_percent_ring_just_above_line_is_lowered():
+    """«88%.»: кружок «%» над чертой стоит выше строки всего на полыкса — всё равно садится на строку."""
+    from ocr_utils.page_layout.text_blocks.pieces import baselines_of
+
+    boxes = np.array(
+        [
+            [151.5, 1153.5, 11, 16],
+            [163.1, 1153.3, 10, 17],
+            [175.0, 1149.5, 7, 10],
+            [181.9, 1156.4, 11, 20],
+            [194.5, 1159.8, 4, 3],
+        ],
+        dtype=np.float64,
+    )
+    base = baselines_of(boxes, 16.0)
+    assert abs(base[2] - 1161.6) < 1.5
+
+
+def test_percent_after_dash_range_keeps_first_digit():
+    """«5—7%» (1975/02 IMG_0058_2R): выносной — низ «%», а не «5»; уровень «5» по прямой через «7» и «%» не берётся."""
+    from ocr_utils.page_layout.text_blocks.pieces import baselines_of
+
+    boxes = np.array(
+        [[225.4, 323.6, 10, 17], [242.1, 326.1, 22, 3], [259.0, 322.3, 11, 15], [275.3, 325.3, 16, 20]],
+        dtype=np.float64,
+    )
+    base = baselines_of(boxes, 16.0)
+    assert abs(base[0] - 332.1) < 0.5
+    assert base[3] < 331.0
+
+
+def test_percent_in_four_fragments_keeps_digit_on_line():
+    """«6%.» (1969/03 IMG_0124_2R): «%» из четырёх обрывков склеивается в один знак, «6» остаётся на строке."""
+    from ocr_utils.page_layout.text_blocks.pieces import baselines_of
+
+    boxes = np.array(
+        [
+            [672.8, 192.2, 9, 16],  # «6»
+            [685.1, 186.6, 7, 11],  # верхний кружок
+            [691.2, 185.3, 4, 8],  # верх черты
+            [687.9, 196.4, 5, 11],  # низ черты
+            [693.5, 196.3, 6, 10],  # нижний кружок
+            [702.8, 197.3, 4, 4],  # точка
+        ],
+        dtype=np.float64,
+    )
+    base = baselines_of(boxes, 10.5)
+    assert np.all(np.abs(base[:5] - 201.0) < 1.5)
+
+
+def test_side_by_side_letters_are_not_glued():
+    """Соседние буквы одной высоты, заходящие друг на друга по x (курсив), в один знак не склеиваются."""
+    from ocr_utils.page_layout.text_blocks.pieces import _glued_groups
+
+    boxes = np.array([[10.0, 95.0, 9, 10], [17.0, 95.0, 9, 10], [26.0, 95.0, 9, 10]], dtype=np.float64)
+    assert np.unique(_glued_groups(boxes, 10.0)).size == 3
+
+
+def test_descender_in_short_word_is_found():
+    """Короткое слово из четырёх букв с одной выносной: выносная находится, прямая по остальным — ровная."""
+    from ocr_utils.page_layout.text_blocks.pieces import baselines_of
+
+    x_h = 10.0
+    boxes = np.array([[10 + 12 * i, 95.0, 9, x_h] for i in range(4)], dtype=np.float64)
+    boxes[2] = [34, 98.0, 9, 16]  # «р»: низ на 106 вместо 100
+    base = baselines_of(boxes, x_h)
+    assert np.all(np.abs(base - 100.0) < 0.5)
+
+
 def _piece(x0: float, y: float, letters: int, slope: float = 0.0):
     """Кусок строки из ``letters`` букв шириной 9 px с шагом 12 px, якоря на ``y`` (с наклоном ``slope``)."""
     from ocr_utils.page_layout.text_blocks.pieces import Piece

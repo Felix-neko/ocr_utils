@@ -60,6 +60,24 @@ STACKED_BELOW_WIDTH_RATIO = 2.5
 # ...и отстоит от него по высоте не больше чем на столько иксов (боксы по середине масс — с запасом).
 STACKED_GAP_XH = 0.25
 STACKED_BELOW_MAX_XH = 1.8
+# Обрывки одного знака друг над другом («%» из двух-четырёх компонент, кратка над «и», точка «!»)
+# перед поиском базовой линии склеиваются в один глиф: перекрытие по x — не меньше такой доли
+# ширины более узкого (кружок «%» над чертой «88%.» заходит на неё на 2 px из 7, 1975/11 IMG_0083_2R), середины масс расходятся по высоте хотя бы на столько иксов (соседние буквы
+# курсива, заходящие друг на друга, стоят на одной высоте), а просвет между ними по высоте — не
+# больше ``STACKED_GAP_XH`` икса (буква строки выше над буквой строки ниже отстоит на межстрочный
+# просвет). По отдельности обрывки «%» ломали прямую по низам: кружок садился на 7–10 px выше строки,
+# а на «6%.» из четырёх обрывков прямая через три из них подняла саму «6» на 22 px (1973/10
+# IMG_0194_1L, 1969/05 IMG_0080_1L, 1975/11 IMG_0083_2R, 1969/03 IMG_0124_2R).
+GLUE_OVERLAP_SHARE = 0.2
+GLUE_MIN_RISE_XH = 0.25
+# На куске до стольких букв тела выносной ищется по уровню ОСТАЛЬНЫХ букв: на трёх-четырёх точках
+# МНК-прямая сама тянется к выносу и прячет его. Склеенный «%» (центр масс смещён к нижнему кружку,
+# низ бокса по нему — на 5 px ниже строки) в «10%.» так тянул прямую, и знак садился ниже цифр.
+DESCENDER_LOO_LETTERS = 6
+# Уровень остальных букв — прямая от стольких букв, иначе медиана их низов: прямая по двум-трём
+# точкам, продолженная до крайней, уходит на наклон пары («7%» в «5—7%», 1975/02 IMG_0058_2R —
+# выносной объявлялась «5»).
+DESCENDER_LOO_LINE_LETTERS = 4
 # Парабола строится от стольких букв; меньше — прямая (по трём точкам парабола ловит форму буквы,
 # а не ход строки).
 AXIS_PARABOLA_LETTERS = 5
@@ -215,7 +233,113 @@ def _line_at(xs: np.ndarray, ys: np.ndarray, at: np.ndarray) -> np.ndarray:
     return np.polyval(np.polyfit(xs, ys, 1), at)
 
 
+def _glued_groups(boxes: np.ndarray, x_h: float) -> np.ndarray:
+    """Номер знака у каждого глифа куска: обрывки одного знака друг над другом получают общий номер.
+
+    Args:
+        boxes: Глифы куска ``(n, 4)`` — ``cx, cy, ширина, высота``.
+        x_h: Высота строчной буквы куска.
+
+    Returns:
+        Номера знаков ``(n,)``; у несклеенного глифа — свой номер.
+    """
+    count = boxes.shape[0]
+    groups = np.arange(count)
+    lefts, rights = boxes[:, 0] - boxes[:, 2] / 2.0, boxes[:, 0] + boxes[:, 2] / 2.0
+    tops, bottoms = boxes[:, 1] - boxes[:, 3] / 2.0, boxes[:, 1] + boxes[:, 3] / 2.0
+    # Попарные условия склейки: перекрытие по x, сдвиг по высоте, просвет по высоте.
+    overlap = np.minimum(rights[:, None], rights[None, :]) - np.maximum(lefts[:, None], lefts[None, :])
+    narrower = np.minimum(boxes[:, None, 2], boxes[None, :, 2])
+    rise = np.abs(boxes[:, None, 1] - boxes[None, :, 1])
+    gap = np.maximum(tops[:, None], tops[None, :]) - np.minimum(bottoms[:, None], bottoms[None, :])
+    # Обрывок выше ``STACKED_BELOW_MAX_XH`` иксов — не часть знака, а буквы двух строк, сросшиеся в
+    # один глиф: склеенный с буквой строки выше, он садил весь кусок между строками (1967/06
+    # IMG_0144_2R, глиф 2.4 икса под «цеха,»).
+    short = boxes[:, 3] <= STACKED_BELOW_MAX_XH * x_h
+    glue = (
+        (overlap >= GLUE_OVERLAP_SHARE * narrower)
+        & (rise >= GLUE_MIN_RISE_XH * x_h)
+        & (gap <= STACKED_GAP_XH * x_h)
+        & short[:, None]
+        & short[None, :]
+    )
+    np.fill_diagonal(glue, False)
+    # Связные компоненты графа склейки: номер знака — наименьший номер глифа в компоненте.
+    changed = True
+    while changed:
+        linked = np.where(glue, groups[None, :], count).min(axis=1)
+        fresh = np.minimum(groups, linked)
+        changed = bool((fresh != groups).any())
+        groups = fresh
+    return groups
+
+
+def _hangs_leave_one_out(xs: np.ndarray, bottoms: np.ndarray, body: np.ndarray, limit: float) -> np.ndarray:
+    """Самая выступающая вниз буква тела, если её низ ниже уровня ОСТАЛЬНЫХ букв больше чем на ``limit``.
+
+    Уровень остальных — прямая по ним (от ``DESCENDER_LOO_LINE_LETTERS`` букв), иначе медиана их
+    низов. Помечается одна буква: иначе крайняя обычная буква, сравнённая с уровнем, который тянет
+    вынос, тоже «выступала» бы.
+
+    Args:
+        xs: Абсциссы букв куска.
+        bottoms: Низы их боксов.
+        body: Какие буквы входят в тело (строят уровень).
+        limit: Порог выноса вниз, пиксели.
+
+    Returns:
+        Булев вектор выносных по всем буквам куска (вне тела — ``False``).
+    """
+    hangs = np.zeros(bottoms.size, dtype=bool)
+    members = np.nonzero(body)[0]
+    if members.size < 3:
+        return hangs
+    drops = np.zeros(members.size)
+    for position, index in enumerate(members):
+        others = members[members != index]
+        # Уровень остальных букв в точке проверяемой.
+        if others.size >= DESCENDER_LOO_LINE_LETTERS:
+            level = float(_line_at(xs[others], bottoms[others], xs[index : index + 1])[0])
+        else:
+            level = float(np.median(bottoms[others]))
+        drops[position] = bottoms[index] - level
+    worst = int(np.argmax(drops))
+    hangs[members[worst]] = bool(drops[worst] > limit)
+    return hangs
+
+
 def baselines_of(boxes: np.ndarray, x_h: float) -> np.ndarray:
+    """Базовая линия каждого глифа куска; обрывки одного знака (:func:`_glued_groups`) — как один глиф.
+
+    Склеенный знак получает габарит всех своих обрывков, базовая линия ищется по знакам
+    (:func:`_baselines_of_glyphs`) и раздаётся обрывкам.
+
+    Args:
+        boxes: Глифы куска ``(n, 4)`` — ``cx, cy, ширина, высота``.
+        x_h: Высота строчной буквы куска (единица порогов).
+
+    Returns:
+        Ординаты базовой линии по каждому глифу ``(n,)``.
+    """
+    if boxes.shape[0] < 2:
+        return _baselines_of_glyphs(boxes, x_h)
+    groups = _glued_groups(boxes, x_h)
+    if np.unique(groups).size == groups.size:
+        return _baselines_of_glyphs(boxes, x_h)
+    # Габарит каждого знака — объединение боксов его обрывков.
+    keys, owner = np.unique(groups, return_inverse=True)
+    merged = np.zeros((keys.size, 4))
+    for position in range(keys.size):
+        own = boxes[owner == position]
+        left = float((own[:, 0] - own[:, 2] / 2.0).min())
+        right = float((own[:, 0] + own[:, 2] / 2.0).max())
+        top = float((own[:, 1] - own[:, 3] / 2.0).min())
+        bottom = float((own[:, 1] + own[:, 3] / 2.0).max())
+        merged[position] = ((left + right) / 2.0, (top + bottom) / 2.0, right - left, bottom - top)
+    return _baselines_of_glyphs(merged, x_h)[owner]
+
+
+def _baselines_of_glyphs(boxes: np.ndarray, x_h: float) -> np.ndarray:
     """Базовая линия каждой буквы — низ её бокса с поправкой на выносные элементы вниз и верхние знаки.
 
     Низ буквы и есть базовая линия у строчных без выноса, у прописных, у цифр и у точки. Ниже
@@ -268,6 +392,8 @@ def baselines_of(boxes: np.ndarray, x_h: float) -> np.ndarray:
     limit = DESCENDER_MIN_XH * x_h
     line = _line_at(xs[body], bottoms[body], xs)
     hangs = (bottoms - line > limit) & body
+    if int(body.sum()) <= DESCENDER_LOO_LETTERS:
+        hangs |= _hangs_leave_one_out(xs, bottoms, body, limit)
     if hangs.any() and int((body & ~hangs).sum()) >= 2:
         line = _line_at(xs[body & ~hangs], bottoms[body & ~hangs], xs)
     raised = small & (line - bottoms > HIGH_MARK_MIN_XH * x_h)
