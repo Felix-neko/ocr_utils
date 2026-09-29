@@ -134,6 +134,9 @@ def page_json(analysis: PageAnalysis) -> dict:
         "seconds": round(analysis.seconds, 2),
         "ink_share": round(analysis.ink_share, 4),
         "note": analysis.note,
+        # Защита выровненных сторон от сора (``edge_guard``): выступы первого разбора и итоговые (помечены
+        # недостоверными), был ли второй проход, какие детекторы голосовали, выброшенная краска (пиксели рендера).
+        "edge_guard": analysis.edge_guard.to_json() if analysis.edge_guard is not None else None,
         "axes": [
             {
                 "column": axis.column,

@@ -22,6 +22,7 @@ from ocr_utils.page_layout.text_blocks.blocks import DEFAULT_BLOCKS_MODE, Blocks
 from ocr_utils.page_layout.text_blocks.columns import GutterMode
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
 from ocr_utils.page_layout.text_blocks.from_layout import build
+from ocr_utils.page_layout.text_blocks.glyph_maps import load_maps
 from ocr_utils.page_layout.text_blocks.page import AxisKind, analyse_gray
 from ocr_utils.page_layout.text_blocks.report import filled_json
 from ocr_utils.page_layout.text_blocks.segment import SPLIT_ROWS_DEFAULT
@@ -156,6 +157,7 @@ def text_blocks(
     join_leaders: bool = True,
     split_rows: bool = SPLIT_ROWS_DEFAULT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    glyph_maps: dict | None = None,
 ):
     """Текстовые блоки полосы с запретами: растр, печати, таблицы, line art, формулы; барьеры — рамки и линейки.
 
@@ -172,6 +174,8 @@ def text_blocks(
         join_leaders: Сращивать ли строки, сошедшиеся на общей точке отточия (``text_blocks.leader_join``).
         split_rows: Резать ли сгустки RLSA, собравшие буквы двух рядов (``segment._split_two_rows``).
         blocks_mode: Способ группировки строк в блоки и их границы (``text_blocks.blocks.BlocksMode``).
+        glyph_maps: Карты CRAFT и pero полосы (``text_blocks.glyph_maps.load_maps``) — второй проход защиты
+            сторон; ``None`` — только пометка выступов недостоверными.
 
     Returns:
         Пара: ``PageAnalysis`` детектора текстовых блоков (пиксели рабочей копии 150 dpi) и подсказки.
@@ -200,6 +204,7 @@ def text_blocks(
             variant="sharpened",
             axis=axis,
             blocks_mode=blocks_mode,
+            glyph_maps=glyph_maps,
         ),
         hints,
     )
@@ -459,6 +464,7 @@ def reblock_page(
     axis: AxisKind = AxisKind.BODY,
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    glyph_maps_dir: Path | None = None,
 ) -> dict:
     """Пересчитать только текстовые блоки полосы по готовому разбору пака; объекты, надписи и кандидаты — как были.
 
@@ -473,6 +479,8 @@ def reblock_page(
         axis: Ось строки для рядов и блоков.
         gutter_mode: Как межколонники становятся запретами сцепки.
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
+        glyph_maps_dir: Кэш карт CRAFT и pero (``<детектор>/<полоса>.png``) — второй проход защиты сторон, если
+            карты полосы там есть; ``None`` — без второго прохода.
 
     Returns:
         Строка описи, как у :func:`final_page`.
@@ -483,8 +491,26 @@ def reblock_page(
     image = load_image(task, record["rotate_cw"])
     return finish_page(
         task, image, record, final["objects"], final["titles"], final["candidates"], final["orientation"], out,
-        axis, gutter_mode, started, blocks_mode,
+        axis, gutter_mode, started, blocks_mode, glyph_maps_dir,
     )  # fmt: skip
+
+
+def render_for_maps(task: PageTask, source: Path, png_dir: Path) -> str:
+    """Рендер полосы ``RENDER_DPI`` для карт CRAFT и pero — тот же, что разбирает детектор текстовых блоков.
+
+    Args:
+        task: Полоса.
+        source: Корень разбора (поворот полосы — из его итогового JSON).
+        png_dir: Куда писать PNG.
+
+    Returns:
+        Путь PNG.
+    """
+    final = json.loads((source / "pages" / f"{page_key(task.name)}.json").read_text())
+    image = load_image(task, page_record(final)["rotate_cw"])
+    path = png_dir / f"{page_key(task.name)}.png"
+    cv2.imwrite(str(path), image.gray_at(RENDER_DPI))
+    return str(path)
 
 
 def finish_page(
@@ -500,6 +526,7 @@ def finish_page(
     gutter_mode: GutterMode,
     started: float,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    glyph_maps_dir: Path | None = None,
 ) -> dict:
     """Текстовые блоки полосы, оверлей в папку по классам и итоговый JSON — общий хвост :func:`final_page` и :func:`reblock_page`.
 
@@ -516,11 +543,13 @@ def finish_page(
         gutter_mode: Как межколонники становятся запретами сцепки.
         started: Время начала обработки полосы (``time.time()``) — для поля ``seconds``.
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
+        glyph_maps_dir: Кэш карт CRAFT и pero — второй проход защиты сторон, если карты полосы там есть.
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
     """
-    analysis, hints = text_blocks(image, record, objects, axis, gutter_mode, blocks_mode=blocks_mode)
+    maps = load_maps(glyph_maps_dir, page_key(task.name)) if glyph_maps_dir is not None else None
+    analysis, hints = text_blocks(image, record, objects, axis, gutter_mode, blocks_mode=blocks_mode, glyph_maps=maps)
     lines = side_lines(analysis)
     folder = folder_of(objects)
     picture = draw(image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY)
@@ -550,11 +579,17 @@ def finish_page(
             # Участки перескока (``LineAxis.jump_spans``): номер оси в разборе, отрезок по x и ордината
             # оси на его концах — туда меры наклона и формы строки не смотрят.
             "row_jump_spans": _row_jump_spans(analysis),
+            # Защита выровненных сторон от сора: выступы, второй проход CRAFT + pero, выброшенная краска.
+            "edge_guard": analysis.edge_guard.to_json() if analysis.edge_guard is not None else None,
             "count": len(analysis.blocks),
             "axes": len(analysis.axes),
             "blocks": [
                 {
                     "polygon": np.asarray(b.envelope.polygon).round(1).tolist(),
+                    # Недостоверные участки сторон (отрезки по высоте): ступеньки по выносу за колонку и выступы
+                    # от сора, оставшиеся после защиты сторон (``text_blocks.edge_guard``).
+                    "unreliable_left": [[round(float(v), 1) for v in span] for span in getattr(b.envelope, "unreliable_left", ())],
+                    "unreliable_right": [[round(float(v), 1) for v in span] for span in getattr(b.envelope, "unreliable_right", ())],
                     # Дополнительные линии сторон (метод выравнивания — ``SIDE_ALIGN_METHOD``).
                     "sides": {side.value: filled_json(line) for side, line in own.items()},
                 }
@@ -583,6 +618,7 @@ __all__ = [
     "folder_of",
     "page_record",
     "reblock_page",
+    "render_for_maps",
     "side_lines",
     "text_blocks",
 ]

@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, framed
+from ocr_utils.page_layout.text_blocks import RENDER_DPI
 from ocr_utils.page_layout.text_blocks.alignment import AlignKind, Alignment
 from ocr_utils.page_layout.text_blocks.blocks import dilate_polygon
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
@@ -18,6 +19,8 @@ from ocr_utils.page_layout.text_blocks.page import PageAnalysis
 COLOUR_ENVELOPE = (220, 90, 20)
 # Недостоверный участок стороны гладкой границы (ступенька по выносу за колонку) — красный пунктир.
 COLOUR_UNRELIABLE = (40, 40, 220)
+# Краска, выброшенная фильтром второго прохода защиты сторон, — цвет «подсказка, вспомогательное».
+COLOUR_DROPPED = (200, 140, 60)
 # Справочная кромка по краске: на оверлеях страниц больше не рисуется, цвет нужен отчёту об огибающей.
 COLOUR_ENVELOPE_INK = (150, 170, 120)
 # Границы блоков рисуются полупрозрачно: под ними должны читаться буквы.
@@ -113,6 +116,7 @@ def draw(
     cv2.addWeighted(layer, ENVELOPE_ALPHA, canvas, 1.0 - ENVELOPE_ALPHA, 0, canvas)
     for block in analysis.blocks:
         _unreliable(canvas, block.envelope, scale)
+    _dropped(canvas, analysis, scale)
     for gutter in analysis.gutters:
         # Межколонник — ломаная: на трапеции он уезжает вбок вместе с колонками.
         for side in (1, 2):
@@ -152,6 +156,19 @@ def _unreliable(canvas: np.ndarray, envelope, scale: float) -> None:
             part = curve[(curve[:, 1] >= y0) & (curve[:, 1] <= y1)]
             if len(part) >= 2:
                 _dashed_run(canvas, np.asarray(part, dtype=np.float64) * scale, COLOUR_UNRELIABLE, 3)
+
+
+def _dropped(canvas: np.ndarray, analysis: PageAnalysis, scale: float) -> None:
+    """Рамки краски, выброшенной фильтром второго прохода защиты сторон (:mod:`edge_guard`), поверх исходной полосы.
+
+    Рамки — в пикселях рендера ``RENDER_DPI``; на холст они переводятся через рабочую копию.
+    """
+    report = analysis.edge_guard
+    if report is None or not report.dropped:
+        return
+    k = scale * analysis.dpi / RENDER_DPI
+    for x0, y0, x1, y1 in report.dropped:
+        cv2.rectangle(canvas, (int(x0 * k) - 3, int(y0 * k) - 3), (int(x1 * k) + 3, int(y1 * k) + 3), COLOUR_DROPPED, 2)
 
 
 def _hints(canvas: np.ndarray, hints, scale: float) -> None:
@@ -333,7 +350,9 @@ def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None, body_axis: 
     box = SampleStyle.BOX
     entries = [
         LegendEntry("граница блока", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
-        LegendEntry("недостоверный участок стороны (вынос за колонку)", COLOUR_UNRELIABLE, style=SampleStyle.DASHED),
+        LegendEntry("недостоверный участок стороны (выступ от сора, вынос за колонку)", COLOUR_UNRELIABLE,
+                    style=SampleStyle.DASHED),
+        LegendEntry("краска, выброшенная защитой сторон (CRAFT + pero)", COLOUR_DROPPED, style=SampleStyle.BOX),
         LegendEntry("крупная огибающая", COLOUR_COARSE),
         LegendEntry("ось строки (вторая, по базовой линии глифов)" if body_axis else "ось строки", COLOUR_AXIS),
     ]

@@ -151,6 +151,19 @@ def main() -> None:
     show_default=True,
     help="способ группировки строк в блоки и их границы: smooth — гладкие стороны, legacy — прежний ход",
 )
+@click.option(
+    "--edge-craft/--no-edge-craft",
+    default=True,
+    show_default=True,
+    help="второй проход защиты сторон на полосах с выступами на выровненных сторонах: карты CRAFT + pero (GPU), "
+    "фильтр сора голосованием, повторный разбор; выступы, оставшиеся по итогу, помечаются недостоверными всегда",
+)
+@click.option(
+    "--glyph-maps-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="кэш карт CRAFT и pero (<детектор>/<полоса>.png); по умолчанию <out-dir>/glyph_maps",
+)
 def analyze(
     geo_dir: Path,
     nogeo_dir: Path,
@@ -171,10 +184,18 @@ def analyze(
     rule_barriers: bool,
     axis_kind: str,
     blocks_mode: str,
+    edge_craft: bool,
+    glyph_maps_dir: Path | None,
     **options,
 ) -> None:
-    """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку."""
+    """Разобрать отобранные страницы и выложить JSON, CSV, оверлеи и сводку.
+
+    С ``--edge-craft`` полосы, где на выровненных сторонах блоков нашлись выступы, после первого прохода
+    разбираются ещё раз: карты CRAFT и pero считаются одним заходом на все такие полосы, сор за аномальными
+    сторонами выбрасывается голосованием, JSON и оверлей полосы перезаписываются.
+    """
     from ocr_utils.page_layout.text_blocks import overlay
+    from ocr_utils.page_layout.text_blocks.glyph_maps import MapJob, compute_maps, load_maps
 
     extra = tuple(float(item) for item in dilate_compare.split(",") if item.strip())
     variants = [Variant.GEO.value, Variant.NOGEO.value] if variant == "both" else [variant]
@@ -185,6 +206,9 @@ def analyze(
         from ocr_utils.page_layout.surya import SuryaSourceConfig
 
         surya = SuryaSourceConfig(layout_cache).open()
+    maps_dir = glyph_maps_dir or out_dir / "glyph_maps"
+    # Полосы с выступами на выровненных сторонах — на второй проход: (номер в analyses, рендер, движок, аргументы).
+    pending = []
     for engine_name in engines:
         for name, page in parse_pages(pages):
             for current in variants:
@@ -197,21 +221,11 @@ def analyze(
                 if hints is not None and not rule_barriers:
                     hints = replace(hints, rules=())
                 engine = make_engine(engine_name, {**options, "hints": hints})
-                analysis = analyse_gray(
-                    gray300,
-                    engine,
-                    dpi=dpi,
-                    smooth_line=smooth_line,
-                    smooth_block=smooth_block,
-                    coarse_factor=coarse_factor,
-                    dilate=dilate_glyphs,
-                    name=name,
-                    page=page,
-                    variant=current,
-                    hints=hints,
-                    axis=AxisKind(axis_kind),
-                    blocks_mode=BlocksMode(blocks_mode),
-                )
+                arguments = dict(dpi=dpi, smooth_line=smooth_line, smooth_block=smooth_block,
+                                 coarse_factor=coarse_factor, dilate=dilate_glyphs, name=name, page=page,
+                                 variant=current, hints=hints, axis=AxisKind(axis_kind),
+                                 blocks_mode=BlocksMode(blocks_mode))  # fmt: skip
+                analysis = analyse_gray(gray300, engine, **arguments)
                 write_json(analysis, out_dir / "pages")
                 overlay.write(
                     analysis, gray300, out_dir / "overlays" / f"{analysis.key}.jpg", overlay_width, extra, hints
@@ -221,6 +235,21 @@ def analyze(
                     f"{analysis.key}: блоков {len(analysis.blocks)}, строк {len(analysis.axes)}, "
                     f"{analysis.seconds:.1f} с"
                 )
+                if edge_craft and analysis.edge_guard is not None and analysis.edge_guard.anomalous:
+                    pending.append((len(analyses) - 1, gray300, engine, arguments))
+    if pending:
+        # Карты — ключ по рендеру (PDF, страница, вариант), не по движку строк: одна карта на все движки.
+        keys = [f"{a['name']}_p{a['page']:03d}_{a['variant']}" for _, _, _, a in pending]
+        compute_maps([MapJob(key, gray) for key, (_, gray, _, _) in zip(keys, pending)], maps_dir)
+        for key, (index, gray300, engine, arguments) in zip(keys, pending):
+            analysis = analyse_gray(gray300, engine, glyph_maps=load_maps(maps_dir, key), **arguments)
+            write_json(analysis, out_dir / "pages")
+            overlay.write(analysis, gray300, out_dir / "overlays" / f"{analysis.key}.jpg", overlay_width, extra,
+                          arguments["hints"])  # fmt: skip
+            analyses[index] = analysis
+            report = analysis.edge_guard
+            click.echo(f"{analysis.key}: второй проход — выброшено {len(report.dropped)}, выступов "
+                       f"{len(report.bumps_first)} → {len(report.bumps_final)}")  # fmt: skip
     if analyses:
         write_csv(analyses, out_dir / "blocks.csv")
         (out_dir / "report.md").write_text(markdown(analyses), encoding="utf-8")

@@ -262,6 +262,14 @@ def analyze_command(
     help="Способ группировки строк в блоки и их границы: smooth — гладкие стороны и доработанная группировка "
     "(по умолчанию), legacy — прежний ход (reports/block_envelopes.md).",
 )
+@click.option(
+    "--edge-craft/--no-edge-craft",
+    default=True,
+    show_default=True,
+    help="Второй проход защиты сторон блоков: полосы с выступами на выровненных сторонах разбираются заново с "
+    "фильтром сора голосованием CRAFT + pero (карты — GPU); выступы, оставшиеся по итогу, помечаются недостоверными "
+    "всегда (reports/edge_guard.md).",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def analyze_pack_command(
     sharpened_dir: Path,
@@ -278,6 +286,7 @@ def analyze_pack_command(
     axis_name: str,
     gutter_mode: str,
     blocks_mode: str,
+    edge_craft: bool,
     log_level: str,
 ) -> None:
     """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
@@ -302,6 +311,7 @@ def analyze_pack_command(
         axis=AxisKind(axis_name),
         gutter_mode=GutterMode(gutter_mode),
         blocks_mode=BlocksMode(blocks_mode),
+        edge_craft=edge_craft,
     )
 
 
@@ -329,6 +339,14 @@ def analyze_pack_command(
     help="Способ группировки строк в блоки и их границы: smooth — гладкие стороны и доработанная группировка "
     "(по умолчанию), legacy — прежний ход (reports/block_envelopes.md).",
 )
+@click.option(
+    "--edge-craft/--no-edge-craft",
+    default=True,
+    show_default=True,
+    help="Второй проход защиты сторон блоков: полосы с выступами на выровненных сторонах разбираются заново с "
+    "фильтром сора голосованием CRAFT + pero (карты — GPU); выступы, оставшиеся по итогу, помечаются недостоверными "
+    "всегда (reports/edge_guard.md).",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def reblock_pack_command(
     sharpened_dir: Path,
@@ -341,10 +359,11 @@ def reblock_pack_command(
     gutter_mode: str,
     redo: bool,
     blocks_mode: str,
+    edge_craft: bool,
     log_level: str,
 ) -> None:
     """Пересчитать только текстовые блоки по готовому разбору пака (объекты и DeepSeek — как были) в новую папку."""
-    from ocr_utils.page_layout.pack_analysis.run import list_tasks, stage_reblock
+    from ocr_utils.page_layout.pack_analysis.run import list_tasks, stage_edge_craft, stage_reblock
     from ocr_utils.page_layout.text_blocks.blocks import BlocksMode
     from ocr_utils.page_layout.text_blocks.columns import GutterMode
     from ocr_utils.page_layout.text_blocks.page import AxisKind
@@ -354,6 +373,8 @@ def reblock_pack_command(
     stage_reblock(
         tasks, source, out_dir, jobs, AxisKind(axis_name), GutterMode(gutter_mode), redo, BlocksMode(blocks_mode)
     )
+    if edge_craft:
+        stage_edge_craft(tasks, out_dir, jobs, AxisKind(axis_name), GutterMode(gutter_mode), BlocksMode(blocks_mode))
 
 
 @main.command("prefill-surya")

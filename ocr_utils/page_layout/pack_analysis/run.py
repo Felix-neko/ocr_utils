@@ -22,7 +22,7 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
-from ocr_utils.page_layout.pack_analysis.final import final_page, reblock_page
+from ocr_utils.page_layout.pack_analysis.final import final_page, reblock_page, render_for_maps
 from ocr_utils.page_layout.pack_analysis.raster_db import load_raster, same_raster
 from ocr_utils.page_layout.pack_analysis.stages import (
     PageTask,
@@ -37,6 +37,7 @@ from ocr_utils.page_layout.pack_analysis.stages import (
 )
 from ocr_utils.page_layout.text_blocks.blocks import DEFAULT_BLOCKS_MODE, BlocksMode
 from ocr_utils.page_layout.text_blocks.columns import GutterMode
+from ocr_utils.page_layout.text_blocks.glyph_maps import MapJob, compute_maps
 from ocr_utils.page_layout.text_blocks.page import AxisKind
 
 logger = logging.getLogger(__name__)
@@ -399,6 +400,67 @@ def stage_reblock(
     write_index(ready, out)
 
 
+def stage_edge_craft(
+    tasks: list[PageTask],
+    out: Path,
+    jobs: int,
+    axis: AxisKind,
+    gutter_mode: GutterMode = GutterMode.SHORT,
+    blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    maps_dir: Path | None = None,
+) -> None:
+    """Второй проход защиты сторон по готовому итогу: полосы с выступами на выровненных сторонах разбираются заново
+    с фильтром сора голосованием CRAFT + pero (``text_blocks.edge_guard``).
+
+    Полосы берутся по итоговым JSON ``<out>/pages``: аномальные (``text_blocks.edge_guard.anomalous``), у которых
+    второго прохода ещё не было. Рендеры полос пишутся пулом, карты CRAFT и pero считаются одним GPU-процессом на
+    детектор (кэш ``maps_dir``), затем полосы пересчитываются пулом (:func:`final.reblock_page`) на месте.
+    Идемпотентна: полосы со вторым проходом пропускаются.
+
+    Args:
+        tasks: Полосы.
+        out: Корень итога (читается и перезаписывается).
+        jobs: Воркеров пула.
+        axis: Ось строки для рядов и блоков (как у основного прохода).
+        gutter_mode: Как межколонники становятся запретами сцепки.
+        blocks_mode: Способ группировки строк в блоки и их границы.
+        maps_dir: Кэш карт; по умолчанию ``<out>/glyph_maps``.
+    """
+    maps_dir = maps_dir or out / "glyph_maps"
+    todo = []
+    for task in tasks:
+        path = out / "pages" / f"{page_key(task.name)}.json"
+        if not path.is_file():
+            continue
+        guard = json.loads(path.read_text()).get("text_blocks", {}).get("edge_guard") or {}
+        if guard.get("anomalous") and not guard.get("second_pass"):
+            todo.append(task)
+    logger.info("Защита сторон: полос с выступами без второго прохода %d", len(todo))
+    if not todo:
+        return
+    png_dir = out / "work" / "glyph_maps_input"
+    png_dir.mkdir(parents=True, exist_ok=True)
+    with _pool(jobs) as pool:
+        pngs = list(pool.map(render_for_maps, todo, [out] * len(todo), [png_dir] * len(todo), chunksize=4))
+    # Карты — GPU, не в пуле: детекторы строго по очереди, каждый одним процессом на все полосы.
+    compute_maps([MapJob(page_key(t.name), png=Path(p)) for t, p in zip(todo, pngs)], maps_dir)
+    with _pool(jobs) as pool:
+        for done, result in enumerate(
+            pool.map(
+                _safe, [reblock_page] * len(todo), todo, [out] * len(todo), [out] * len(todo), [axis] * len(todo),
+                [gutter_mode] * len(todo), [blocks_mode] * len(todo), [maps_dir] * len(todo), chunksize=4,
+            ),
+            1,
+        ):  # fmt: skip
+            if "error" in result:
+                logger.error("защита сторон: %s", result)
+            if done % 200 == 0:
+                logger.info("защита сторон: %d/%d", done, len(todo))
+    for path in png_dir.glob("*.png"):
+        path.unlink()
+    write_index(tasks, out)
+
+
 def write_index(tasks: list[PageTask], out: Path) -> None:
     """Опись ``<out>/index.csv`` по итоговым JSON полос: папка, классы, число блоков, ориентация."""
     rows = []
@@ -447,6 +509,7 @@ def run(
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    edge_craft: bool = True,
 ) -> None:
     """Весь разбор по стадиям.
 
@@ -467,6 +530,8 @@ def run(
         axis: Ось строки, по которой детектор текстовых блоков собирает ряды и блоки.
         gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
+        edge_craft: Второй проход защиты сторон (карты CRAFT + pero на GPU) по полосам с выступами на выровненных
+            сторонах (:func:`stage_edge_craft`); выступы, оставшиеся по итогу, помечаются недостоверными всегда.
     """
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -500,6 +565,8 @@ def run(
         gutter_mode=gutter_mode,
         blocks_mode=blocks_mode,
     )
+    if edge_craft:
+        stage_edge_craft(tasks, out, jobs, axis, gutter_mode, blocks_mode)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -509,4 +576,4 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-__all__ = ["list_tasks", "run", "stage_reblock", "stage_reuse", "write_index"]
+__all__ = ["list_tasks", "run", "stage_edge_craft", "stage_reblock", "stage_reuse", "write_index"]

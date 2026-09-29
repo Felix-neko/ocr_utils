@@ -24,6 +24,7 @@ from ocr_utils.page_layout.text_blocks.blocks import (
     blocks_of,
 )
 from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
+from ocr_utils.page_layout.text_blocks.edge_guard import EdgeGuardReport, mark_unreliable, page_bumps, second_pass_gray
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column, with_jump_spans
@@ -63,6 +64,8 @@ class PageAnalysis:
     ink_share: float = 0.0  # доля краски текста, накрытая полосами найденных строк
     leaders: tuple = ()  # отточия страницы (``leaders.Leader``)
     note: str = ""
+    # Защита выровненных сторон от сора (:mod:`edge_guard`): выступы, второй проход, выброшенная краска.
+    edge_guard: EdgeGuardReport | None = None
 
     @property
     def key(self) -> str:
@@ -90,8 +93,62 @@ def analyse_gray(
     hints: LayoutHints | None = None,
     axis: AxisKind = AxisKind.CENTRE,
     blocks_mode: BlocksMode | None = None,
+    glyph_maps: dict | None = None,
 ) -> PageAnalysis:
-    """Разбор страницы по серому рендеру ``RENDER_DPI``.
+    """Разбор страницы по серому рендеру ``RENDER_DPI`` с защитой выровненных сторон блоков от сора.
+
+    Сначала обычный разбор (:func:`_analyse_plain`). Затем на сторонах, по которым блоки выровнены, ищутся
+    выступы (:func:`edge_guard.page_bumps`). Если даны карты детекторов символов ``glyph_maps`` и выступы есть,
+    краска за аномальными сторонами, которую хотя бы один детектор считает сором, закрашивается, и полоса
+    разбирается заново (второй проход). Выступы, оставшиеся по итогу, ВСЕГДА помечаются недостоверными участками
+    сторон. Полосы с повёрнутыми областями защита пропускает: стороны блоков там не левые и правые в координатах
+    страницы.
+
+    Args:
+        gray300, engine, dpi, smooth_line, smooth_block, coarse_factor, dilate, name, page, variant, hints, axis,
+            blocks_mode: Как у :func:`_analyse_plain`.
+        glyph_maps: Карты детекторов символов полосы (:func:`glyph_maps.load_maps`) — ``детектор → карта 0…1`` в
+            пикселях ``gray300``; ``None`` — без второго прохода, только пометка выступов.
+
+    Returns:
+        :class:`PageAnalysis` с отчётом защиты сторон ``edge_guard``.
+    """
+    options = dict(dpi=dpi, smooth_line=smooth_line, smooth_block=smooth_block, coarse_factor=coarse_factor,
+                   dilate=dilate, name=name, page=page, variant=variant, hints=hints, axis=axis,
+                   blocks_mode=blocks_mode)  # fmt: skip
+    analysis = _analyse_plain(gray300, engine, **options)
+    width = int(round(gray300.shape[1] * dpi / RENDER_DPI))
+    height = int(round(gray300.shape[0] * dpi / RENDER_DPI))
+    if any(area.rotate_cw != 0 for area in (hints or LayoutHints()).zones_or_page(width, height)):
+        return analysis
+    first = page_bumps(analysis.blocks, analysis.alignments)
+    final, dropped, second = first, [], False
+    if glyph_maps and first:
+        filtered, dropped = second_pass_gray(gray300, analysis.blocks, analysis.dpi, first, glyph_maps)
+        if dropped:
+            # Повторный разбор полосы без сора; выступы ищутся заново по новым границам.
+            analysis = _analyse_plain(filtered, engine, **options)
+            final, second = page_bumps(analysis.blocks, analysis.alignments), True
+    report = EdgeGuardReport(tuple(first), tuple(final), second, tuple(glyph_maps or ()), tuple(dropped))
+    return replace(analysis, blocks=mark_unreliable(analysis.blocks, final), edge_guard=report)
+
+
+def _analyse_plain(
+    gray300: np.ndarray,
+    engine: Engine,
+    dpi: float = WORK_DPI,
+    smooth_line: float = SMOOTH_HEIGHTS,
+    smooth_block: float = SMOOTH_PITCHES,
+    coarse_factor: float = COARSE_FACTOR,
+    dilate: float = DILATE_GLYPHS,
+    name: str = "page",
+    page: int = 1,
+    variant: str = Variant.NOGEO.value,
+    hints: LayoutHints | None = None,
+    axis: AxisKind = AxisKind.CENTRE,
+    blocks_mode: BlocksMode | None = None,
+) -> PageAnalysis:
+    """Разбор страницы по серому рендеру ``RENDER_DPI`` без защиты сторон (её добавляет :func:`analyse_gray`).
 
     Args:
         gray300: Серый рендер страницы в ``RENDER_DPI``.
@@ -300,7 +357,7 @@ def _analyse_areas(
         # Движок с подсказками (``InkEngine``) получает подсказки ОБЛАСТИ: со страничными он резал
         # бы вырезку по чужим координатам.
         area_engine = engine.with_hints(area_hints) if hasattr(engine, "with_hints") else engine
-        inner = analyse_gray(
+        inner = _analyse_plain(
             crop,
             area_engine,
             dpi=dpi,
