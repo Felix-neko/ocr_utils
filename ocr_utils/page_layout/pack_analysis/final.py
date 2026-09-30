@@ -12,7 +12,7 @@ import numpy as np
 
 from ocr_utils.page_layout.geometry import Box
 from ocr_utils.page_layout.line_art.classes import ObjectClass
-from ocr_utils.page_layout.line_art.deepseek.decide import DECISION_VERSION, Outcome
+from ocr_utils.page_layout.line_art.deepseek.decide import DECISION_VERSION, Outcome, is_thin_stroke
 from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, header_strip, legend_strip
 from ocr_utils.page_layout.pack_analysis.stages import PageTask, decide_candidates, load_image, page_key, write_json
 from ocr_utils.page_layout.regions import RegionKind
@@ -95,6 +95,7 @@ CLASS_COLOR = {
 }
 TITLE_COLOR = (150, 150, 150)  # надпись, снятая с line art (справочно, пунктир не нужен — тонкая рамка)
 MARK_COLOR = (180, 105, 255)  # пометка на полях, снятая с line art (розовый — не занят на этом оверлее), тонкая рамка
+STROKE_COLOR = (0, 165, 255)  # одиночная черта, снятая с line art (оранжевый — не занят на этом оверлее), тонкая рамка
 RULE_COLOR = (60, 90, 210)  # линейки-сироты (text_blocks.overlay.COLOUR_BARRIER)
 FILL_ALPHA = 0.18
 OVERLAY_WIDTH = 1600
@@ -159,6 +160,29 @@ def assemble(record: dict, decisions: list) -> dict:
         else:
             titles.append(candidate["crop"]["box"])
     return {"objects": objects, "titles": titles, "marks": marks}
+
+
+def split_strokes(objects: list[dict], dpi: float) -> tuple[list[dict], list]:
+    """Снять с объектов полосы одиночные черты: рамки рисунков и «неясно» тоньше ``decide.STROKE_MAX_MM``.
+
+    Концевая черта статьи, линейка колонки или бланка, край обложки, кусок фото или заголовка в рамке 3 мм — не
+    рисунок (просмотр пользователя 2026-09-30, 57 рамок пака-1): не запрет для текстовых блоков и не line art для
+    детектора порчи геометрии. Работает и на объектах прошлого разбора (``reblock_page``).
+
+    Args:
+        objects: Объекты полосы (:func:`assemble`).
+        dpi: Разрешение пикселей полосы.
+
+    Returns:
+        ``(объекты без черт, рамки черт)``.
+    """
+    kept, strokes = [], []
+    for obj in objects:
+        if obj["class"] in (PageClass.DRAWING.value, PageClass.UNCLEAR.value) and is_thin_stroke(obj["box"], dpi):
+            strokes.append(list(obj["box"]))
+        else:
+            kept.append(obj)
+    return kept, strokes
 
 
 def text_blocks(
@@ -373,6 +397,7 @@ def draw(
     lines: list[dict] | None = None,
     body_axis: bool = False,
     marks: list | None = None,
+    strokes: list | None = None,
 ) -> np.ndarray:
     """Оверлей полосы: текстовые блоки (огибающие, оси), стороны блоков, объекты по классам, линейки, легенда.
 
@@ -387,6 +412,7 @@ def draw(
         lines: Дополнительные линии сторон блоков (:func:`side_lines`); ``None`` — не рисовать.
         body_axis: Ряды и блоки собраны по второй оси строки (подпись в легенде).
         marks: Рамки пометок на полях, снятых с line art.
+        strokes: Рамки одиночных черт, снятых с line art (:func:`split_strokes`).
 
     Returns:
         Картинка BGR.
@@ -423,6 +449,9 @@ def draw(
     for box in marks or []:
         p0, p1 = rect(box)
         cv2.rectangle(canvas, p0, p1, MARK_COLOR, 2)
+    for box in strokes or []:
+        p0, p1 = rect(box)
+        cv2.rectangle(canvas, p0, p1, STROKE_COLOR, 2)
     for rule in record["loose_rules"]:
         points = np.array([[int(x * k), int(y * k)] for x, y in rule["points"]], np.int32)
         cv2.polylines(canvas, [points], False, RULE_COLOR, 2)
@@ -472,6 +501,7 @@ def _frame(
     classes = [LegendEntry(c.value, CLASS_COLOR[c], FILL_ALPHA, SampleStyle.BOX) for c in PageClass] + [
         LegendEntry("надпись (снята с line art)", TITLE_COLOR),
         LegendEntry("пометка на полях (снята с line art)", MARK_COLOR),
+        LegendEntry("одиночная черта (снята с line art)", STROKE_COLOR),
         LegendEntry("линейка-сирота", RULE_COLOR),
     ]
     blocks = blocks_overlay.legend_entries(body_axis=body_axis)
@@ -678,18 +708,25 @@ def finish_page(
         overlay: Писать ли оверлей полосы (``OverlayMode.NONE`` — только JSON и сайдкар).
         marks: Рамки пометок на полях, снятых с line art (в JSON — ``marks``; не запрет для текстовых блоков).
 
+    Одиночные черты (рамки рисунков и «неясно» тоньше ``decide.STROKE_MAX_MM``) снимаются с объектов здесь же
+    (:func:`split_strokes`) — в JSON это ``strokes``.
+
     Рядом с JSON пишется сайдкар ``<полоса>.npz`` (:mod:`text_blocks.store`): оси строк с участками
     перескоков и точек, стороны блоков (сырые и с заплатками), трассы линеек таблиц.
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
     """
+    # Одиночные черты — не рисунок: снимаются с объектов до текстовых блоков (не запрет для строк) и до JSON.
+    objects, strokes = split_strokes(objects, record["dpi"])
     maps = load_maps(glyph_maps_dir, page_key(task.name)) if glyph_maps_dir is not None else None
     analysis, hints = text_blocks(image, record, objects, axis, gutter_mode, blocks_mode=blocks_mode, glyph_maps=maps)
     lines = side_lines(analysis)
     folder = folder_of(objects)
     if overlay is OverlayMode.ALL:
-        picture = draw(image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY, marks)
+        picture = draw(
+            image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY, marks, strokes
+        )
         target = out / "overlays" / folder / f"{page_key(task.name)}.jpg"
         target.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(target), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -709,6 +746,8 @@ def finish_page(
         "titles": titles,
         # Пометки на полях, снятые с line art (``line_art.deepseek.marks``): рамки кандидатов в пикселях полосы.
         "marks": list(marks or []),
+        # Одиночные черты, снятые с line art (:func:`split_strokes`): рамки в пикселях полосы.
+        "strokes": strokes,
         "candidates": candidates,
         "loose_rules": record["loose_rules"],
         "text_blocks": {

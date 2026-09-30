@@ -12,6 +12,11 @@
   (плотная, без линеек, объединённая с согласной классикой, :func:`pass2.verdict_pass2`); они
   заменяют рисунки первого прохода, таблицы и формулы первого прохода остаются. Не нашлись —
   итог первого прохода; без объектов — правило надписи: «надпись» или «неясно».
+* **Одиночная черта** (:func:`is_thin_stroke`, 2026-09-30): рамка рисунка или «неясно» с короткой стороной меньше
+  ``STROKE_MAX_MM`` — не рисунок. На паке-1 все 57 таких рамок разбора v7 оказались концевыми чертами статей,
+  линейками колонок, таблиц и бланков, краями колонок и обложек, кусками фото и кусками заголовков после сужения
+  рамки вторым проходом (просмотр пользователя 2026-09-30); рамки снимаются в список ``strokes`` полосы
+  (``pack_analysis.final.split_strokes``).
 * **Пометка на полях** (:mod:`marks`, 2026-09-30): кандидат-«штрих» по одним пикселям, чей итог — только рисунки или
   «неясно», а остаток залитой вырезки — немного тонких волнистых штрихов без углов, становится «пометкой»: не рисунок
   (не запрет для текстовых блоков, не line art для детектора порчи геометрии).
@@ -41,8 +46,12 @@ from ocr_utils.page_layout.line_art.expand import FIGURE_GROW_MM, FORMULA_GROW_M
 
 # Версия решения по кандидату (правила этого модуля); пишется в JSON полосы (``pack_analysis.final.versions``).
 # Отдельно от ``LINE_ART_VERSION``: классический line art не менялся, его пересчёт в базе разметки не нужен.
-# v2 — пометка на полях (:mod:`marks`).
-DECISION_VERSION = 2
+# v2 — пометка на полях (:mod:`marks`); v3 — одиночная черта (:func:`is_thin_stroke`) — не рисунок.
+DECISION_VERSION = 3
+# Рамка рисунка или «неясно» с короткой стороной меньше — одиночная черта, а не рисунок, мм бумаги (57 рамок пака-1
+# тоньше 5 мм — ни одного рисунка; самый тонкий настоящий рисунок пака толще).
+STROKE_MAX_MM = 5.0
+MM_PER_INCH = 25.4
 
 
 class Outcome(str, Enum):
@@ -231,9 +240,34 @@ def _decide_objects(
     return Decision(Outcome.TITLE if is_title_like(blobs, crop, markdown) else Outcome.UNCLEAR)
 
 
+def is_thin_stroke(box, dpi: float) -> bool:
+    """Одиночная черта ли рамка: короткая сторона меньше ``STROKE_MAX_MM`` (концевая черта, линейка, край колонки).
+
+    Args:
+        box: Рамка ``(x0, y0, x1, y1)`` в пикселях полосы.
+        dpi: Разрешение пикселей полосы.
+
+    Returns:
+        ``True`` — черта, не рисунок.
+    """
+    short = min(float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+    return short * MM_PER_INCH / dpi < STROKE_MAX_MM
+
+
 def _as_dict(box: list[int]) -> dict:
     """Рамка списком → словарь ``x0 … y1`` (формат блоков DeepSeek)."""
     return {"x0": box[0], "y0": box[1], "x1": box[2], "y1": box[3]}
 
 
-__all__ = ["BoxSource", "DECISION_VERSION", "Decision", "Outcome", "decide", "is_mark", "needs_pass2", "regional_classes"]
+__all__ = [
+    "BoxSource",
+    "DECISION_VERSION",
+    "Decision",
+    "Outcome",
+    "STROKE_MAX_MM",
+    "decide",
+    "is_mark",
+    "is_thin_stroke",
+    "needs_pass2",
+    "regional_classes",
+]
