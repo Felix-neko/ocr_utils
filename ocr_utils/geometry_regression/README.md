@@ -15,7 +15,8 @@
 | корень | ядро v14: поле смещений, штрихи, строки, кромки, рамки — кирпичи, на которых стоит v16 | `$GEOMETRY_RUN_DIR` (v14, для сравнения) |
 
 Разбор `page_layout` обоих вариантов (`$GEOMETRY_LAYOUT_ROOT`, `run_scripts/page_layout/run_pack1_analysis_v6_fr.sh`)
-строится заранее на GPU: при промахе кэша v18 `verdict_for_page` меряет страницу (v16 — на месте, около 6 с), но
+строится заранее на GPU. Прогон по паку — `python -m ocr_utils.geometry_regression.quality run`
+(`run_scripts/geometry_regression/run_pack1_v18.sh`): кэш v16 (промахи меряет v16), меры v18, `verdicts.csv`. При промахе кэша v18 `verdict_for_page` меряет страницу (v16 — на месте, около 6 с), но
 разбор не строит. Прогон по паку, отчёты и оверлеи — стенд `research/geometry_quality`; отчёт — `reports/geometry_regression_v18.md`.
 
 ```python
