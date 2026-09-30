@@ -30,7 +30,16 @@ python -m research.geometry_quality sheets  --run-dir … --geo-dir … --nogeo-
 python -m research.geometry_quality diff --old-run … --new-run … --geo-dir … --nogeo-dir … --out-dir … --layout-root … [--labels …]
 ```
 
-Прогон v18 и сравнение с v17 — `run_scripts/geometry_quality/run_pack1_v18.sh`, `run_diff_v17_v18.sh`; отчёт —
+Выгрузки по вердиктам с описью `index.csv` (`--mode lineart_formula` — все страницы с line art или формулами по
+папкам good/mixed/bad и годам; `--mode damage_belts` — страницы без line art с вердиктом bad и mixed по худшей
+метрике и поясам её score):
+
+```bash
+python -m research.geometry_quality export --run-dir … --geo-dir … --nogeo-dir … --out-dir … --layout-root … --mode …
+```
+
+Боевой прогон целиком (мера, отчёт, сравнение с прошлым прогоном, обе выгрузки) —
+`run_scripts/geometry_quality/run_pack1_v18_full.sh`. Прогон v18 и сравнение с v17 — `run_scripts/geometry_quality/run_pack1_v18.sh`, `run_diff_v17_v18.sh`; отчёт —
 `reports/geometry_regression_v18.md`.
 
 Пороги: `--thr имя=число` (порог метрики порчи или выигрыша), `--hard имя=число` (жёсткий порог метрики

@@ -1,4 +1,4 @@
-"""CLI стенда v17–v18: ``measure`` (пул по страницам, кэш), ``report`` (вердикты, распределения, сравнение с v14/v16 и эталоном), ``sheets`` (оверлеи с метриками и порогами), ``diff`` (смены вердикта между прогонами)."""
+"""CLI стенда v17–v18: ``measure`` (пул по страницам, кэш), ``report`` (вердикты, распределения, сравнение с v14/v16 и эталоном), ``sheets`` (оверлеи с метриками и порогами), ``diff`` (смены вердикта между прогонами), ``export`` (выгрузки по вердиктам и поясам)."""
 
 from __future__ import annotations
 
@@ -275,6 +275,38 @@ def has_lineart(payload: dict, layout_root: Path) -> bool:
     return any(obj["class"] in LINEART_CLASSES for obj in objects)
 
 
+def page_classes(payload: dict, layout_root: Path) -> set[str]:
+    """Классы объектов разбора ``page_layout`` без коррекции на странице (пустое множество, если разбора нет)."""
+    path = layout_root / "nogeo" / "pages" / f"{payload['pdf']}_p{payload['page'] - 1:04d}.json"
+    objects = json.loads(path.read_text(encoding="utf-8")).get("objects", []) if path.is_file() else []
+    return {obj["class"] for obj in objects}
+
+
+# Пояса score худшей метрики в выгрузке bad/mixed страниц без line art (как в ``sheets --select belts``).
+DAMAGE_BELTS = (0.0, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, float("inf"))
+# Метрики в описи выгрузки: вердикт объясняют они и выигрыши.
+EXPORT_METRICS = (
+    "line_quality_mm", "line_quality_transferred_mm", "edge_quality_mm", "lineart_aad_mm", "lineart_seg_rel_mm",
+    "parallel_spread_lineart", "lineart_axis_delta_deg", "lineart_bend_mm", "lineart_shape_mm",
+    "lineart_part_turn_deg", "formula_bar_ptp_mm", "formula_skew_mm", "fraction_tilt_mean_delta_deg",
+    "lines_quality_gain_mm", "line_quality_gain_mm", "edge_quality_gain_mm",
+)  # fmt: skip
+
+
+def worst_metric(assessment) -> tuple[str, float]:
+    """Метрика порчи с наибольшим score (с мягкими) и её score: по ней страница раскладывается в пояс."""
+    item = max(assessment.scores.values(), key=lambda score: score.score)
+    return item.name, item.score
+
+
+def _belt(score: float) -> str:
+    """Имя пояса score: ``score_1-1.5``, ``score_5-inf``."""
+    for lo, hi in zip(DAMAGE_BELTS, DAMAGE_BELTS[1:]):
+        if lo <= score < hi:
+            return f"score_{lo:g}-{hi:g}"
+    return f"score_{DAMAGE_BELTS[-2]:g}-inf"
+
+
 def _draw_one(args: tuple) -> str:
     """Одна картинка «было | стало» в воркере пула; возвращает путь."""
     from research.geometry_quality.overlay import draw_pair
@@ -523,6 +555,70 @@ def diff(
         list(pool.map(_draw_one, tasks, chunksize=2))
     click.echo("\n".join(lines))
     logger.info("Сравнение: %s", out_dir)
+
+
+@main.command()
+@click.option("--run-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--geo-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--nogeo-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--out-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--layout-root", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Корень разбора page_layout: line art и формулы — по разбору без коррекции.")  # fmt: skip
+@click.option("--mode", required=True, type=click.Choice(["lineart_formula", "damage_belts"]),
+              help="lineart_formula — все страницы с line art или формулами, по папкам вердикта и годам; "
+                   "damage_belts — страницы без line art с вердиктом bad и mixed, по худшей метрике и поясам score.")  # fmt: skip
+@click.option("--jobs", default=8, show_default=True, type=int, help="Воркеров отрисовки.")
+@threshold_options
+def export(run_dir, geo_dir, nogeo_dir, out_dir, layout_root, mode, jobs, thr, hard, total, min_gain, ratio) -> None:
+    """Выгрузка оверлеев «было | стало» по вердиктам с описью index.csv.
+
+    ``lineart_formula``: ``<out>/<good|mixed|bad>/<год>/``, имя файла — страница, вид (``lineart``, ``formula``,
+    ``lineart+formula``), вердикт, правило, виновник. ``damage_belts``: ``<out>/<bad|mixed>/<метрика>/<пояс score>/``
+    — худшая метрика порчи страницы и пояс её score (``DAMAGE_BELTS``), как пояса ``sheets --select belts``.
+    """
+    from ocr_utils.geometry_regression.quality.measure import FORMULA_CLASSES, LINEART_CLASSES
+
+    thresholds = _thresholds(thr, hard, total, min_gain, ratio)
+    pages = load_run(run_dir)
+    rows, tasks = [], []
+    for payload in pages:
+        key = (payload["pdf"], payload["page"])
+        classes = page_classes(payload, layout_root)
+        lineart, formula = bool(classes & LINEART_CLASSES), bool(classes & FORMULA_CLASSES)
+        assessment = thresholds.assess(payload["metrics"])
+        verdict = assessment.verdict.value
+        metric, score = worst_metric(assessment)
+        if mode == "lineart_formula":
+            if not (lineart or formula):
+                continue
+            kind = "+".join(name for name, flag in (("lineart", lineart), ("formula", formula)) if flag)
+            folder = f"{VERDICT_FOLDER[verdict]}/{key[0].split('_')[1]}"
+        else:
+            if lineart or verdict == "ok":
+                continue
+            kind = "formula" if formula else "text"
+            folder = f"{verdict}/{metric}/{_belt(score)}"
+        culprit = assessment.culprit.replace(" ", "_") if assessment.culprit else "none"
+        name = f"{key[0]}_p{key[1]:03d}_{kind}_{verdict}_{assessment.rule.name.lower()}_{culprit}.jpg"
+        target = out_dir / folder / name
+        tasks.append((payload, thresholds, geo_dir / f"{key[0]}.pdf", nogeo_dir / f"{key[0]}.pdf", target))
+        rows.append([*key, kind, verdict, assessment.rule.value, assessment.culprit, metric, f"{score:.2f}",
+                     f"{assessment.total:.2f}", f"{assessment.gain:.2f}", f"{assessment.gain_other:.2f}",
+                     *(f"{float(payload['metrics'].get(n, 0.0) or 0.0):.3f}" for n in EXPORT_METRICS),
+                     str(target.relative_to(out_dir))])  # fmt: skip
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "index.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["pdf", "page", "kind", "verdict", "rule", "culprit", "worst_metric", "worst_score", "total",
+                         "gain", "gain_non_text", *EXPORT_METRICS, "picture"])  # fmt: skip
+        writer.writerows(rows)
+    counts = Counter((row[2], row[3]) for row in rows)
+    logger.info("Страниц: %d; по виду и вердикту: %s", len(rows), dict(sorted(counts.items())))
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=init_worker) as pool:
+        for done, _ in enumerate(pool.map(_draw_one, tasks, chunksize=4), 1):
+            if done % 500 == 0:
+                logger.info("картинок: %d/%d", done, len(tasks))
+    logger.info("Выгрузка: %s", out_dir)
 
 
 # Выборка на разметку (``review``): метрики поясов score, пояса, страниц на пояс; смены вердикта и сколько брать.
