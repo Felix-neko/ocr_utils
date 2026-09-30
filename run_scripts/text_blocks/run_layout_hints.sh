@@ -18,7 +18,7 @@ source "$SCRIPT_DIR/../geometry_regression/common.sh"
 cd "$SCRIPT_DIR/../.."
 
 OUT="${OUT:-/mnt/system/raw/mts/curved_layout_hints}"
-LAYOUT_CACHE="${LAYOUT_CACHE_DIR:-/mnt/system/raw/mts/pack1_page_layout}"
+LAYOUT_CACHE="${LAYOUT_CACHE_DIR:-/home/felix/Projects/mts_markup/pack1_page_layout}"
 # Кэш text_layer_fix: ячейки таблиц и поворот текста в них (123 выпуска пака-1).
 TEXT_LAYER_CACHE="${TEXT_LAYER_CACHE:-/mnt/system/raw/mts/pack1_text_layer_fix/pack1_v2/cache}"
 # Боковой текст на схемах и в таблицах, блок-схемы, крупные чертежи.

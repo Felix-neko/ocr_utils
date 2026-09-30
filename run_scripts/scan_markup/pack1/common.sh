@@ -28,7 +28,7 @@ DEBUG_DIR="$MARKUP_ROOT/debug"
 # (pack1_table_research/layout_surya_готовое и layout_surya, 2026-09-21) записями legacy —
 # полны на все 12 135 полос; fr_* набиваются `page_layout prefill-surya` (~0.7 с GPU на страницу).
 # detect берёт разметку отсюда и модель не зовёт, а полосу без записи размечает и дописывает сюда же.
-LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack1_page_layout"
+LAYOUT_CACHE_DIR="$MARKUP_ROOT/pack1_page_layout"  # перенесён с /mnt/system 2026-09-29 (там ссылка сюда)
 
 # Оглавления (шаг 1, команда toc): признаки полос окна, контактные листы для разметки эталона
 # и списки полос оглавления по выпускам для внешнего OCR (--pages / --skip-pages).

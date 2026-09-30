@@ -12,11 +12,12 @@ import numpy as np
 
 from ocr_utils.page_layout.geometry import Box
 from ocr_utils.page_layout.line_art.classes import ObjectClass
-from ocr_utils.page_layout.line_art.deepseek.decide import Outcome
+from ocr_utils.page_layout.line_art.deepseek.decide import DECISION_VERSION, Outcome
 from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, header_strip, legend_strip
 from ocr_utils.page_layout.pack_analysis.stages import PageTask, decide_candidates, load_image, page_key, write_json
 from ocr_utils.page_layout.regions import RegionKind
-from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout import version_tag
+from ocr_utils.page_layout.text_blocks import RENDER_DPI, TEXT_BLOCKS_VERSION, WORK_DPI
 from ocr_utils.page_layout.text_blocks import overlay as blocks_overlay
 from ocr_utils.page_layout.text_blocks.blocks import DEFAULT_BLOCKS_MODE, BlocksMode
 from ocr_utils.page_layout.text_blocks.columns import GutterMode
@@ -35,6 +36,14 @@ from ocr_utils.page_layout.text_blocks.sides import (
     sides_of,
 )
 from ocr_utils.page_layout.text_blocks.sides_overlay import FILLED_ALPHA, draw_filled_line
+from ocr_utils.page_layout.text_blocks.store import STORE_FORMAT_VERSION, page_arrays, write_arrays
+
+
+class OverlayMode(str, Enum):
+    """Писать ли оверлей полосы: на прогонах ради данных (PDF FineReader под детектор геометрии) — нет."""
+
+    ALL = "all"
+    NONE = "none"
 
 
 class PageClass(str, Enum):
@@ -85,6 +94,7 @@ CLASS_COLOR = {
     PageClass.UNCLEAR: (0, 0, 220),
 }
 TITLE_COLOR = (150, 150, 150)  # надпись, снятая с line art (справочно, пунктир не нужен — тонкая рамка)
+MARK_COLOR = (180, 105, 255)  # пометка на полях, снятая с line art (розовый — не занят на этом оверлее), тонкая рамка
 RULE_COLOR = (60, 90, 210)  # линейки-сироты (text_blocks.overlay.COLOUR_BARRIER)
 FILL_ALPHA = 0.18
 OVERLAY_WIDTH = 1600
@@ -111,7 +121,8 @@ def assemble(record: dict, decisions: list) -> dict:
         decisions: Пары (кандидат, :class:`Decision`).
 
     Returns:
-        ``{"objects": [{"class", "box", "source"}], "titles": [рамки]}`` в пикселях полосы.
+        ``{"objects": [{"class", "box", "source"}], "titles": [рамки], "marks": [рамки]}`` в пикселях полосы;
+        пометки на полях (``Outcome.MARK``) — отдельным списком: не объект полосы, не надпись.
     """
     objects = []
     for region in record["raster"]:
@@ -122,7 +133,7 @@ def assemble(record: dict, decisions: list) -> dict:
         objects.append({"class": PageClass.FORMULA.value, "box": region["box"], "source": "surya Equation"})
     for region in record["rotated_text"]:
         objects.append({"class": PageClass.ROTATED_TEXT.value, "box": region["box"], "source": "повёрнутый текст"})
-    titles = []
+    titles, marks = [], []
     for candidate, decision in decisions:
         if decision.outcome is Outcome.OBJECTS:
             for obj in decision.objects:
@@ -143,9 +154,11 @@ def assemble(record: dict, decisions: list) -> dict:
                     "candidate": candidate["id"],
                 }
             )
+        elif decision.outcome is Outcome.MARK:
+            marks.append(candidate["crop"]["box"])
         else:
             titles.append(candidate["crop"]["box"])
-    return {"objects": objects, "titles": titles}
+    return {"objects": objects, "titles": titles, "marks": marks}
 
 
 def text_blocks(
@@ -201,7 +214,7 @@ def text_blocks(
             InkEngine(hints=hints, gutter_mode=gutter_mode, join_leaders=join_leaders, split_rows=split_rows),
             hints=hints,
             name=page_key(record["page"]),
-            variant="sharpened",
+            variant=image.variant.value,
             axis=axis,
             blocks_mode=blocks_mode,
             glyph_maps=glyph_maps,
@@ -215,7 +228,9 @@ def side_lines(analysis) -> list[dict[SideKind, FilledSide | None]]:
 
     Стороны размечаются методом по умолчанию (``sides_of``), выровненные участки — методом
     ``SIDE_ALIGN_METHOD``; по ним :func:`sides.filled_side` строит линию без невыровненных концов и с
-    PCHIP-заплатками на невыровненных кусках в середине.
+    PCHIP-заплатками на невыровненных кусках в середине. Недостоверные участки огибающей
+    (``unreliable_left/right``: ступеньки выноса, выступы сора ``edge_guard``) тоже идут заплаткой — линия
+    стороны держится нормальных участков.
 
     Args:
         analysis: Разбор текстовых блоков.
@@ -230,9 +245,113 @@ def side_lines(analysis) -> list[dict[SideKind, FilledSide | None]]:
         lines: dict[SideKind, FilledSide | None] = {}
         for side in (SideKind.LEFT, SideKind.RIGHT):
             alignment = side_alignment(block, side, SIDE_ALIGN_METHOD)
-            lines[side] = None if alignment is None else filled_side(sides, alignment, block)
+            unreliable = tuple(getattr(block.envelope, f"unreliable_{side.value}", ()))
+            lines[side] = None if alignment is None else filled_side(sides, alignment, block, unreliable)
         out.append(lines)
     return out
+
+
+def table_traces(image, objects: list[dict]) -> list[tuple[int, object]]:
+    """Трассы линеек каждой таблицы полосы (``tables.traces.trace_rules``) в пикселях рабочей копии блоков.
+
+    Трассы строятся по вырезке таблицы в ``RENDER_DPI`` (как у сетки по кривым) и переносятся в
+    ``WORK_DPI`` кадра полосы: там же лежат оси строк и стороны блоков.
+
+    Args:
+        image: Страница (``PageImage``).
+        objects: Объекты полосы (:func:`assemble`); берутся объекты класса «таблица», рамки — в родных пикселях.
+
+    Returns:
+        Пары ``(номер объекта в objects, RuleTrace)``.
+    """
+    from ocr_utils.page_layout.tables.traces import trace_rules
+
+    tables = [(index, obj) for index, obj in enumerate(objects) if obj["class"] == PageClass.TABLE.value]
+    if not tables:
+        return []
+    gray = image.gray_at(RENDER_DPI)
+    to_render = RENDER_DPI / image.dpi
+    out = []
+    for index, obj in tables:
+        # Рамка таблицы в пикселях рендера, обрезанная кадром.
+        x0, y0, x1, y1 = (int(round(v * to_render)) for v in obj["box"])
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(gray.shape[1], x1), min(gray.shape[0], y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        traced = trace_rules(gray[y0:y1, x0:x1], RENDER_DPI)
+        # Вырезка рендера → кадр рабочей копии: масштаб WORK/RENDER, сдвиг — угол вырезки в рабочих пикселях.
+        scale = WORK_DPI / RENDER_DPI
+        out += [(index, trace.mapped(scale, x0 * scale, y0 * scale)) for trace in traced.all]
+    return out
+
+
+def blocks_json(analysis, lines: list[dict]) -> list[dict]:
+    """Блоки полосы для итогового JSON: контур, ряды, выключка, недостоверные участки и линии сторон.
+
+    Args:
+        analysis: Разбор текстовых блоков.
+        lines: Дополнительные линии сторон (:func:`side_lines`).
+
+    Returns:
+        По блоку словарь (координаты — пиксели рабочей копии).
+    """
+    out = []
+    for block, own, alignment in zip(analysis.blocks, lines, analysis.alignments):
+        envelope = block.envelope
+        out.append(
+            {
+                "polygon": np.asarray(envelope.polygon).round(1).tolist(),
+                # Ряды и оси блока: мера края большого блока должна весить больше, чем у заголовка в 2–3 строки.
+                "rows": len(block.rows),
+                "lines": sum(len(row.axes) for row in block.rows),
+                # Выключка (``alignment.AlignKind``) и выровненность каждой стороны: меры краёв смотрят только
+                # выровненные стороны.
+                "alignment": {
+                    "kind": alignment.kind.value,
+                    "left": bool(alignment.left.aligned),
+                    "right": bool(alignment.right.aligned),
+                    "left_core_share": round(float(alignment.left.core_share), 3),
+                    "right_core_share": round(float(alignment.right.core_share), 3),
+                },
+                # Недостоверные участки сторон (отрезки по высоте): ступеньки по выносу за колонку и выступы
+                # от сора, оставшиеся после защиты сторон (``text_blocks.edge_guard``).
+                "unreliable_left": [
+                    [round(float(v), 1) for v in span] for span in getattr(envelope, "unreliable_left", ())
+                ],
+                "unreliable_right": [
+                    [round(float(v), 1) for v in span] for span in getattr(envelope, "unreliable_right", ())
+                ],
+                # Дополнительные линии сторон (метод выравнивания — ``SIDE_ALIGN_METHOD``).
+                "sides": {side.value: filled_json(line) for side, line in own.items()},
+            }
+        )
+    return out
+
+
+def versions() -> dict:
+    """Версии семейств ``page_layout`` и детектора текстовых блоков — в JSON полосы, для инвалидации потребителями."""
+    from ocr_utils.page_layout import (
+        FORMULA_VERSION,
+        LINE_ART_VERSION,
+        ORIENTATION_VERSION,
+        RASTER_VERSION,
+        ROTATED_TEXT_VERSION,
+        TABLES_VERSION,
+    )
+
+    return {
+        "tag": version_tag(),
+        "raster": RASTER_VERSION,
+        "tables": TABLES_VERSION,
+        "formulas": FORMULA_VERSION,
+        "line_art": LINE_ART_VERSION,
+        "rotated_text": ROTATED_TEXT_VERSION,
+        "orientation": ORIENTATION_VERSION,
+        "text_blocks": TEXT_BLOCKS_VERSION,
+        "line_art_decision": DECISION_VERSION,
+        "arrays": STORE_FORMAT_VERSION,
+    }
 
 
 def folder_of(objects: list[dict]) -> Path:
@@ -253,6 +372,7 @@ def draw(
     orientation: dict,
     lines: list[dict] | None = None,
     body_axis: bool = False,
+    marks: list | None = None,
 ) -> np.ndarray:
     """Оверлей полосы: текстовые блоки (огибающие, оси), стороны блоков, объекты по классам, линейки, легенда.
 
@@ -266,6 +386,7 @@ def draw(
         orientation: Вердикт ориентации полосы.
         lines: Дополнительные линии сторон блоков (:func:`side_lines`); ``None`` — не рисовать.
         body_axis: Ряды и блоки собраны по второй оси строки (подпись в легенде).
+        marks: Рамки пометок на полях, снятых с line art.
 
     Returns:
         Картинка BGR.
@@ -299,6 +420,9 @@ def draw(
     for box in titles:
         p0, p1 = rect(box)
         cv2.rectangle(canvas, p0, p1, TITLE_COLOR, 1)
+    for box in marks or []:
+        p0, p1 = rect(box)
+        cv2.rectangle(canvas, p0, p1, MARK_COLOR, 2)
     for rule in record["loose_rules"]:
         points = np.array([[int(x * k), int(y * k)] for x, y in rule["points"]], np.int32)
         cv2.polylines(canvas, [points], False, RULE_COLOR, 2)
@@ -347,6 +471,7 @@ def _frame(
     width = canvas.shape[1]
     classes = [LegendEntry(c.value, CLASS_COLOR[c], FILL_ALPHA, SampleStyle.BOX) for c in PageClass] + [
         LegendEntry("надпись (снята с line art)", TITLE_COLOR),
+        LegendEntry("пометка на полях (снята с line art)", MARK_COLOR),
         LegendEntry("линейка-сирота", RULE_COLOR),
     ]
     blocks = blocks_overlay.legend_entries(body_axis=body_axis)
@@ -375,6 +500,7 @@ def final_page(
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    overlay: OverlayMode = OverlayMode.ALL,
 ) -> dict:
     """Стадия 6: итог полосы — объекты, текстовые блоки, JSON и оверлей в папку по классам.
 
@@ -387,6 +513,7 @@ def final_page(
         axis: По какой оси строки собирать ряды и блоки (см. :func:`text_blocks`).
         gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
+        overlay: Писать ли оверлей полосы.
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
@@ -399,7 +526,7 @@ def final_page(
     candidates = [{"id": c["id"], "box": c["crop"]["box"], **d.to_json()} for c, d in decisions]
     return finish_page(
         task, image, record, assembled["objects"], assembled["titles"], candidates, orientation, out, axis,
-        gutter_mode, started, blocks_mode,
+        gutter_mode, started, blocks_mode, overlay=overlay, marks=assembled["marks"],
     )  # fmt: skip
 
 
@@ -465,6 +592,7 @@ def reblock_page(
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
     glyph_maps_dir: Path | None = None,
+    overlay: OverlayMode = OverlayMode.ALL,
 ) -> dict:
     """Пересчитать только текстовые блоки полосы по готовому разбору пака; объекты, надписи и кандидаты — как были.
 
@@ -481,6 +609,7 @@ def reblock_page(
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
         glyph_maps_dir: Кэш карт CRAFT и pero (``<детектор>/<полоса>.png``) — второй проход защиты сторон, если
             карты полосы там есть; ``None`` — без второго прохода.
+        overlay: Писать ли оверлей полосы.
 
     Returns:
         Строка описи, как у :func:`final_page`.
@@ -491,7 +620,7 @@ def reblock_page(
     image = load_image(task, record["rotate_cw"])
     return finish_page(
         task, image, record, final["objects"], final["titles"], final["candidates"], final["orientation"], out,
-        axis, gutter_mode, started, blocks_mode, glyph_maps_dir,
+        axis, gutter_mode, started, blocks_mode, glyph_maps_dir, overlay, final.get("marks", []),
     )  # fmt: skip
 
 
@@ -527,6 +656,8 @@ def finish_page(
     started: float,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
     glyph_maps_dir: Path | None = None,
+    overlay: OverlayMode = OverlayMode.ALL,
+    marks: list | None = None,
 ) -> dict:
     """Текстовые блоки полосы, оверлей в папку по классам и итоговый JSON — общий хвост :func:`final_page` и :func:`reblock_page`.
 
@@ -544,6 +675,11 @@ def finish_page(
         started: Время начала обработки полосы (``time.time()``) — для поля ``seconds``.
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
         glyph_maps_dir: Кэш карт CRAFT и pero — второй проход защиты сторон, если карты полосы там есть.
+        overlay: Писать ли оверлей полосы (``OverlayMode.NONE`` — только JSON и сайдкар).
+        marks: Рамки пометок на полях, снятых с line art (в JSON — ``marks``; не запрет для текстовых блоков).
+
+    Рядом с JSON пишется сайдкар ``<полоса>.npz`` (:mod:`text_blocks.store`): оси строк с участками
+    перескоков и точек, стороны блоков (сырые и с заплатками), трассы линеек таблиц.
 
     Returns:
         Строка описи: полоса, папка, классы, число блоков, время.
@@ -552,14 +688,18 @@ def finish_page(
     analysis, hints = text_blocks(image, record, objects, axis, gutter_mode, blocks_mode=blocks_mode, glyph_maps=maps)
     lines = side_lines(analysis)
     folder = folder_of(objects)
-    picture = draw(image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY)
-    target = out / "overlays" / folder / f"{page_key(task.name)}.jpg"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(target), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if orientation.get("disputed"):
-        spare = out / "overlays" / DISPUTED_ORIENTATION / f"{page_key(task.name)}.jpg"
-        spare.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(spare), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if overlay is OverlayMode.ALL:
+        picture = draw(image, analysis, hints, record, objects, titles, orientation, lines, axis is AxisKind.BODY, marks)
+        target = out / "overlays" / folder / f"{page_key(task.name)}.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(target), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if orientation.get("disputed"):
+            spare = out / "overlays" / DISPUTED_ORIENTATION / f"{page_key(task.name)}.jpg"
+            spare.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(spare), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    # Сайдкар — до JSON: JSON полосы означает «полоса готова» и ссылается на сайдкар.
+    arrays_name = f"{page_key(task.name)}.npz"
+    write_arrays(out / "pages" / arrays_name, page_arrays(analysis, lines, table_traces(image, objects)))
     result = {
         "page": task.name,
         "size": record["size"],
@@ -567,6 +707,8 @@ def finish_page(
         "orientation": orientation,
         "objects": objects,
         "titles": titles,
+        # Пометки на полях, снятые с line art (``line_art.deepseek.marks``): рамки кандидатов в пикселях полосы.
+        "marks": list(marks or []),
         "candidates": candidates,
         "loose_rules": record["loose_rules"],
         "text_blocks": {
@@ -583,20 +725,12 @@ def finish_page(
             "edge_guard": analysis.edge_guard.to_json() if analysis.edge_guard is not None else None,
             "count": len(analysis.blocks),
             "axes": len(analysis.axes),
-            "blocks": [
-                {
-                    "polygon": np.asarray(b.envelope.polygon).round(1).tolist(),
-                    # Недостоверные участки сторон (отрезки по высоте): ступеньки по выносу за колонку и выступы
-                    # от сора, оставшиеся после защиты сторон (``text_blocks.edge_guard``).
-                    "unreliable_left": [[round(float(v), 1) for v in span] for span in getattr(b.envelope, "unreliable_left", ())],
-                    "unreliable_right": [[round(float(v), 1) for v in span] for span in getattr(b.envelope, "unreliable_right", ())],
-                    # Дополнительные линии сторон (метод выравнивания — ``SIDE_ALIGN_METHOD``).
-                    "sides": {side.value: filled_json(line) for side, line in own.items()},
-                }
-                for b, own in zip(analysis.blocks, lines)
-            ],
+            "blocks": blocks_json(analysis, lines),
+            # Оси строк, стороны блоков и трассы линеек таблиц — в сайдкаре (``text_blocks.store.load_page``).
+            "arrays": arrays_name,
         },
         "folder": str(folder),
+        "versions": versions(),
         "seconds": round(time.time() - started, 2),
     }
     write_json(out / "pages" / f"{page_key(task.name)}.json", result)
@@ -611,7 +745,9 @@ def finish_page(
 
 
 __all__ = [
+    "OverlayMode",
     "PageClass",
+    "blocks_json",
     "assemble",
     "final_page",
     "finish_page",
@@ -620,5 +756,7 @@ __all__ = [
     "reblock_page",
     "render_for_maps",
     "side_lines",
+    "table_traces",
     "text_blocks",
+    "versions",
 ]

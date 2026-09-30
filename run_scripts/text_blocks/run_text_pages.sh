@@ -30,7 +30,7 @@ cd "$SCRIPT_DIR/../.."
 
 OUT="${OUT:-/mnt/system/raw/mts/curved_layout_validation/text_and_toc}"
 OUT_HINTED="${OUT_HINTED:-${OUT}_hinted}"
-LAYOUT_CACHE="${LAYOUT_CACHE_DIR:-/mnt/system/raw/mts/pack1_page_layout}"
+LAYOUT_CACHE="${LAYOUT_CACHE_DIR:-/home/felix/Projects/mts_markup/pack1_page_layout}"
 PAGES="${PAGES:-full_1973_06:65,full_1971_10:87,full_1973_07:88,full_1967_10:63,full_1971_10:93,full_1973_11:79,full_1968_07:93,full_1973_07:77,full_1973_08:85,full_1971_10:95,full_1970_02:90,full_1975_05:97,full_1976_09:92}"
 
 common=(--geo-dir "$GEO_PDF_DIR" --nogeo-dir "$NOGEO_PDF_DIR" --pages "$PAGES"

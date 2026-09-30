@@ -57,12 +57,17 @@ class PageTask:
     """Полоса пака.
 
     Attributes:
-        name: Имя «год/выпуск/полоса» (оно же ключ кэша surya).
-        path: Путь к заострённой копии.
+        name: Имя «год/выпуск/полоса» (оно же ключ кэша surya); у страницы PDF — ``<stem>/pNNNN``.
+        path: Путь к заострённой копии или к PDF.
+        page: Номер страницы PDF с нуля; ``None`` — ``path`` это картинка полосы.
+        variant: Вариант картинки (``image.Variant``): заострённая копия или PDF FineReader с коррекцией
+            геометрии / без неё — от него ключ кэша surya.
     """
 
     name: str
     path: Path
+    page: int | None = None
+    variant: Variant = Variant.SHARPENED
 
 
 def page_key(name: str) -> str:
@@ -85,11 +90,17 @@ def load_image(task: PageTask, rotate: int = 0) -> PageImage:
     Returns:
         Страница.
     """
-    image = PageImage.from_file(task.path, Variant.SHARPENED, task.name, default_dpi=DEFAULT_DPI)
+    if task.page is not None:
+        # Страница PDF FineReader: документ остаётся открытым в рендере ``PageImage`` (закроется с ним).
+        import fitz
+
+        image = PageImage.from_pdf_page(fitz.open(str(task.path)), task.page, task.variant, task.name)
+    else:
+        image = PageImage.from_file(task.path, task.variant, task.name, default_dpi=DEFAULT_DPI)
     if rotate == 0:
         return image
     turned = rotate_cw(image.bgr_at(image.dpi), rotate)
-    return PageImage.from_array(turned, image.dpi, Variant.SHARPENED, rotated_name(task.name, rotate))
+    return PageImage.from_array(turned, image.dpi, task.variant, rotated_name(task.name, rotate))
 
 
 def orient_page(task: PageTask) -> dict:
@@ -219,7 +230,9 @@ def decide_candidates(record: dict, image: PageImage, deepseek: dict, work: Path
     Args:
         record: JSON полосы.
         image: Страница (повёрнутая, если надо) — краска для достройки рамок.
-        deepseek: ``{"pass1_markdown": {id: элементы}, "pass2_markdown": {id: элементы}}``.
+        deepseek: ``{"pass1_markdown": {id: элементы}, "pass2_markdown": {id: элементы}}`` и, если есть,
+            ``"pass1_ocr": {id: слова}`` — слова первого прохода: по ним вырезка заливается заново для проверки
+            «пометка на полях», когда второго прохода не было (без них пометка проверяется только по второму проходу).
         work: Рабочая папка.
 
     Returns:
@@ -236,7 +249,9 @@ def decide_candidates(record: dict, image: PageImage, deepseek: dict, work: Path
         binary = None
         if second is not None:
             binary = cv2.imread(str(work / "crops" / "pass2" / f"{candidate['id']}.png"), cv2.IMREAD_GRAYSCALE)
-        decisions.append((candidate, decide(crop, gray, markdown, ink, barriers, second, binary)))
+        words = deepseek["pass1_ocr"].get(candidate["id"], []) if "pass1_ocr" in deepseek else None
+        decision = decide(crop, gray, markdown, ink, barriers, second, binary, candidate.get("info"), words)
+        decisions.append((candidate, decision))
     return decisions
 
 

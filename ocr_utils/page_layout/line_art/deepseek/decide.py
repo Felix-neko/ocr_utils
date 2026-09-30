@@ -12,6 +12,9 @@
   (плотная, без линеек, объединённая с согласной классикой, :func:`pass2.verdict_pass2`); они
   заменяют рисунки первого прохода, таблицы и формулы первого прохода остаются. Не нашлись —
   итог первого прохода; без объектов — правило надписи: «надпись» или «неясно».
+* **Пометка на полях** (:mod:`marks`, 2026-09-30): кандидат-«штрих» по одним пикселям, чей итог — только рисунки или
+  «неясно», а остаток залитой вырезки — немного тонких волнистых штрихов без углов, становится «пометкой»: не рисунок
+  (не запрет для текстовых блоков, не line art для детектора порчи геометрии).
 """
 
 from __future__ import annotations
@@ -23,7 +26,8 @@ import numpy as np
 
 from ocr_utils.page_layout.geometry import Box
 from ocr_utils.page_layout.line_art.classes import ObjectClass
-from ocr_utils.page_layout.line_art.deepseek.pass2 import classic_boxes, verdict_pass2
+from ocr_utils.page_layout.line_art.deepseek.marks import is_stroke_candidate, looks_like_mark, residue
+from ocr_utils.page_layout.line_art.deepseek.pass2 import classic_boxes, fill_words, verdict_pass2
 from ocr_utils.page_layout.line_art.deepseek.rules import (
     Crop,
     block_class,
@@ -35,12 +39,19 @@ from ocr_utils.page_layout.line_art.deepseek.rules import (
 from ocr_utils.page_layout.line_art.expand import FIGURE_GROW_MM, FORMULA_GROW_MM, grow_to_components
 
 
+# Версия решения по кандидату (правила этого модуля); пишется в JSON полосы (``pack_analysis.final.versions``).
+# Отдельно от ``LINE_ART_VERSION``: классический line art не менялся, его пересчёт в базе разметки не нужен.
+# v2 — пометка на полях (:mod:`marks`).
+DECISION_VERSION = 2
+
+
 class Outcome(str, Enum):
     """Итог кандидата."""
 
     OBJECTS = "объекты"
     TITLE = "надпись"
     UNCLEAR = "неясно"
+    MARK = "пометка"  # карандашная пометка на полях: не рисунок (:mod:`marks`)
 
 
 class BoxSource(str, Enum):
@@ -56,7 +67,7 @@ class Decision:
     """Решение по кандидату.
 
     Attributes:
-        outcome: Объекты, надпись или неясно.
+        outcome: Объекты, надпись, неясно или пометка.
         objects: Объекты ``{"class", "box" (пиксели полосы), "box_source"}``.
         pass2_used: Дал ли второй проход объекты.
     """
@@ -128,8 +139,10 @@ def decide(
     barriers: list[Box],
     pass2_blocks: list[dict] | None = None,
     pass2_binary: np.ndarray | None = None,
+    info: dict | None = None,
+    words: list[dict] | None = None,
 ) -> Decision:
-    """Итог по кандидату из обоих проходов.
+    """Итог по кандидату из обоих проходов с проверкой «пометка на полях».
 
     Args:
         crop: Где вырезка на полосе.
@@ -139,10 +152,63 @@ def decide(
         barriers: Растр и таблицы полосы — за них рамки не растут.
         pass2_blocks: Блоки ``markdown`` второго прохода или ``None`` (не было).
         pass2_binary: Залитая вырезка второго прохода (краска 0) или ``None``.
+        info: Сведения классического детектора о кандидате (``kind``, ``sources``); ``None`` — проверка пометки не делается.
+        words: Слова первого прохода (промпт ``ocr``) — залить вырезку заново, если второго прохода не было;
+            ``None`` — тогда пометка проверяется только по вырезке второго прохода.
 
     Returns:
         :class:`Decision`.
     """
+    decision = _decide_objects(crop, gray_crop, markdown, ink, barriers, pass2_blocks, pass2_binary)
+    if is_mark(decision, crop, gray_crop, pass2_binary, info, words):
+        return Decision(Outcome.MARK)
+    return decision
+
+
+def is_mark(
+    decision: Decision,
+    crop: Crop,
+    gray_crop: np.ndarray,
+    pass2_binary: np.ndarray | None,
+    info: dict | None,
+    words: list[dict] | None,
+) -> bool:
+    """Пометка ли кандидат: «штрих» по пикселям, итог — только рисунки или «неясно», остаток — ручные штрихи.
+
+    Args:
+        decision: Итог по кандидату без проверки пометки.
+        crop: Где вырезка на полосе.
+        gray_crop: Серая вырезка первого прохода.
+        pass2_binary: Залитая вырезка второго прохода или ``None``.
+        info: Сведения классического детектора о кандидате.
+        words: Слова первого прохода (для заливки заново).
+
+    Returns:
+        ``True`` — пометка (:func:`marks.looks_like_mark`).
+    """
+    drawings_only = decision.outcome is Outcome.OBJECTS and {o["class"] for o in decision.objects} == {
+        ObjectClass.DRAWING.value
+    }
+    if not (drawings_only or decision.outcome is Outcome.UNCLEAR) or not is_stroke_candidate(info):
+        return False
+    binary = pass2_binary
+    if binary is None:
+        if words is None:
+            return False
+        binary, _ = fill_words(gray_crop, crop.inner, words)
+    return looks_like_mark(residue(binary, crop.inner))
+
+
+def _decide_objects(
+    crop: Crop,
+    gray_crop: np.ndarray,
+    markdown: list[dict],
+    ink: np.ndarray,
+    barriers: list[Box],
+    pass2_blocks: list[dict] | None,
+    pass2_binary: np.ndarray | None,
+) -> Decision:
+    """Итог по кандидату из обоих проходов без проверки пометки: объекты, надпись или неясно (аргументы — как у :func:`decide`)."""
     blocks, classes, _ = regional_classes(crop, markdown)
     pass1 = _pass1_objects(crop, blocks, classes, ink, barriers) if classes else []
     if pass2_blocks is not None and pass2_binary is not None:
@@ -170,4 +236,4 @@ def _as_dict(box: list[int]) -> dict:
     return {"x0": box[0], "y0": box[1], "x1": box[2], "y1": box[3]}
 
 
-__all__ = ["BoxSource", "Decision", "Outcome", "decide", "needs_pass2", "regional_classes"]
+__all__ = ["BoxSource", "DECISION_VERSION", "Decision", "Outcome", "decide", "is_mark", "needs_pass2", "regional_classes"]

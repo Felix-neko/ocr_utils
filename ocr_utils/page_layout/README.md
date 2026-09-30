@@ -51,6 +51,7 @@ layout.rotated_text_not_in_tables_regions, layout.best_page_orientation, layout.
 | `tables/` | детектор таблиц v4.2 — бывший `scan_markup.table_detection` (README там же) |
 | `line_art/features.py` | признаки пятен и скоплений линеек — бывший `line_art_detection.features` |
 | `line_art/detector.py` | единый детектор: затравки (схемы детектора таблиц + surya Figure/Form/Equation/Picture + пятна и линейки) через одну пиксельную проверку, вне растра и таблиц; уверенность = доля семейств источников |
+| `line_art/deepseek/` | решение по кандидату двумя проходами DeepSeek-OCR-2 (`decide.py`): объекты, надпись, неясно или **пометка** — карандашная пометка на полях (подчёркивание, скобка, дуга через колонку) по остатку вырезки с залитыми словами (`marks.py`, `reports/margin_marks.md`); в JSON полосы разбора пака — список `marks`, не объект и не запрет для текстовых блоков; версия решения — `DECISION_VERSION` (в `versions.line_art_decision`) |
 | `rotated_text/` | Docstrum (бывший `text_layer_fix.docstrum`) и зоны повёрнутого текста вне таблиц (без tesseract) |
 | `orientation/` | ориентация полосы целиком — бывший `scan_markup.orientation` (`python -m ocr_utils.page_layout.orientation`) |
 | `analysis.py` | фасад `PageLayout`, `LayoutOptions`, `Find` |

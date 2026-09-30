@@ -115,3 +115,49 @@ def test_крапины_и_линейки_снимаются_а_рамка_из_
 
 def test_разрешение_вырезок() -> None:
     assert CROP_DPI == 300
+
+
+STROKE_INFO = {"kind": "штрих", "sources": ["ink"]}
+
+
+def _underline(wavy: bool) -> np.ndarray:
+    """Залитая вырезка (краска 0) с линией под строкой во всю рамку: волнистой (карандаш) или ровной (печать)."""
+    binary = np.full((170, 320), 255, np.uint8)
+    xs = np.arange(30, 290)
+    amplitude = 5.0 if wavy else 0.0  # 5 px при 300 dpi — 0.4 мм размаха волны
+    ys = (90 + amplitude * np.sin(xs / 18.0)).astype(int)
+    for dy in range(4):  # толщина 4 px — 0.34 мм, как карандаш пака
+        binary[ys + dy, xs] = 0
+    return binary
+
+
+def test_волнистое_подчёркивание_штрихом_пометка() -> None:
+    """Кандидат-«штрих», первый проход — текст, второй — image, остаток — ручная волнистая линия: пометка."""
+    gray = np.full((170, 320), 255, np.uint8)
+    first = [block("text", 10, 10, 310, 160)]
+    second = [block("image", 10, 10, 310, 160)]
+    result = decide(CROP, gray, first, np.zeros((800, 800), bool), [], second, _underline(True), STROKE_INFO)
+    assert result.outcome is Outcome.MARK and not result.objects
+
+
+def test_пометку_не_ищут_у_кандидата_не_штриха_и_у_ровной_линии() -> None:
+    """Кандидат от surya или детектора таблиц и ровная печатная линия остаются рисунком."""
+    gray = np.full((170, 320), 255, np.uint8)
+    first = [block("text", 10, 10, 310, 160)]
+    second = [block("image", 10, 10, 310, 160)]
+    ink = np.zeros((800, 800), bool)
+    other = decide(CROP, gray, first, ink, [], second, _underline(True), {"kind": "штрих", "sources": ["ink", "surya"]})
+    assert other.outcome is Outcome.OBJECTS and other.objects[0]["class"] == "рисунок"
+    printed = decide(CROP, gray, first, ink, [], second, _underline(False), STROKE_INFO)
+    assert printed.outcome is Outcome.OBJECTS and printed.objects[0]["class"] == "рисунок"
+
+
+def test_пометка_идёт_своим_списком_полосы() -> None:
+    """В итоге полосы пометка — не объект и не надпись, а рамка в ``marks``."""
+    from ocr_utils.page_layout.line_art.deepseek.decide import Decision
+    from ocr_utils.page_layout.pack_analysis.final import assemble
+
+    record = {"raster": [], "tables": [], "formulas": [], "rotated_text": []}
+    candidate = {"id": "p_0", "crop": {"box": [1, 2, 3, 4]}}
+    result = assemble(record, [(candidate, Decision(Outcome.MARK))])
+    assert result["marks"] == [[1, 2, 3, 4]] and not result["objects"] and not result["titles"]

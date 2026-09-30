@@ -1393,7 +1393,9 @@ def _aligned_spans(alignment: SideAlignment, theta: float) -> list[tuple[float, 
     return out
 
 
-def filled_side(sides: BlockSides, alignment: SideAlignment, block: TextBlock) -> FilledSide | None:
+def filled_side(
+    sides: BlockSides, alignment: SideAlignment, block: TextBlock, unreliable: tuple[tuple[float, float], ...] = ()
+) -> FilledSide | None:
     """Дополнительная линия вертикальной стороны и её меры против мер всей стороны.
 
     Берутся звенья стороны без углов и неуверенных концов (как у :func:`side_measures`). Середины звеньев
@@ -1410,6 +1412,10 @@ def filled_side(sides: BlockSides, alignment: SideAlignment, block: TextBlock) -
         sides: Разметка контура.
         alignment: Выравнивание этой стороны (метод задаёт, какие участки выровнены).
         block: Текстовый блок.
+        unreliable: Недостоверные участки этой стороны — отрезки по y кадра (``unreliable_left/right``
+            огибающей: ступеньки выноса за колонку, выступы сора ``edge_guard``). Точки стороны в них
+            считаются невыровненными, и в середине стороны их заменяет заплатка PCHIP между нормальными
+            участками; пусто — как раньше, только по выровненным сериям.
 
     Returns:
         :class:`FilledSide` или ``None``, если у стороны меньше трёх звеньев или выровненного на ней
@@ -1427,6 +1433,10 @@ def filled_side(sides: BlockSides, alignment: SideAlignment, block: TextBlock) -
     flags = np.zeros(len(v), dtype=bool)
     for v_from, v_to in _aligned_spans(alignment, theta):
         flags |= (v >= v_from) & (v <= v_to)
+    # Недостоверные участки (в y кадра) из выровненного исключаются: там сторону ведёт сор или вынос,
+    # а не край текста, и линия идёт заплаткой между нормальными участками.
+    for y_from, y_to in unreliable:
+        flags &= ~((points[:, 1] >= y_from) & (points[:, 1] <= y_to))
     result = fill_side_gaps(v, u, flags, mm_to_px(DENSIFY_MM, block.dpi))
     if result is None:
         return None

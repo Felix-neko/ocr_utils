@@ -208,7 +208,39 @@ def analyze_command(
 
 
 @main.command("analyze-pack")
-@click.option("--sharpened-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--sharpened-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Корень заострённых копий пака (или --pdf-dir).",
+)
+@click.option(
+    "--pdf-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Каталог полных PDF FineReader: разбираются их страницы (имя страницы — <stem>/pNNNN) вместо заострённых копий.",
+)
+@click.option(
+    "--variant",
+    "variant_name",
+    default="fr_nogeo",
+    show_default=True,
+    type=click.Choice(["fr_geo", "fr_nogeo"]),
+    help="Вариант страниц --pdf-dir: с коррекцией геометрии FineReader или без — от него ключ кэша surya.",
+)
+@click.option(
+    "--no-raster",
+    is_flag=True,
+    help="Не искать растр: полосы считаются без растра (бинарные PDF FineReader). Несовместимо с --raster-db.",
+)
+@click.option(
+    "--overlays",
+    "overlay_name",
+    default="all",
+    show_default=True,
+    type=click.Choice(["all", "none"]),
+    help="Писать ли оверлеи полос: none — только JSON и сайдкары .npz (прогон ради данных).",
+)
 @click.option("--cache", "cache_root", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--out-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--jobs", default=16, show_default=True, type=int, help="Воркеров CPU-пула.")
@@ -272,7 +304,11 @@ def analyze_command(
 )
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def analyze_pack_command(
-    sharpened_dir: Path,
+    sharpened_dir: Path | None,
+    pdf_dir: Path | None,
+    variant_name: str,
+    no_raster: bool,
+    overlay_name: str,
     cache_root: Path,
     out_dir: Path,
     jobs: int,
@@ -290,12 +326,16 @@ def analyze_pack_command(
     log_level: str,
 ) -> None:
     """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
+    from ocr_utils.page_layout.image import Variant
+    from ocr_utils.page_layout.pack_analysis.final import OverlayMode
     from ocr_utils.page_layout.pack_analysis.run import run
     from ocr_utils.page_layout.text_blocks.blocks import BlocksMode
     from ocr_utils.page_layout.text_blocks.columns import GutterMode
     from ocr_utils.page_layout.text_blocks.page import AxisKind
 
     _set_log_level(log_level)
+    if (sharpened_dir is None) == (pdf_dir is None):
+        raise click.UsageError("нужен ровно один из --sharpened-dir и --pdf-dir")
     run(
         sharpened_dir,
         cache_root,
@@ -312,6 +352,10 @@ def analyze_pack_command(
         gutter_mode=GutterMode(gutter_mode),
         blocks_mode=BlocksMode(blocks_mode),
         edge_craft=edge_craft,
+        pdf_dir=pdf_dir,
+        variant=Variant(variant_name) if pdf_dir is not None else Variant.SHARPENED,
+        no_raster=no_raster,
+        overlay=OverlayMode(overlay_name),
     )
 
 

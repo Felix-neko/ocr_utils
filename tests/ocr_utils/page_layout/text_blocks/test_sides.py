@@ -270,3 +270,22 @@ def test_robust_side_follows_changing_slope():
     block = max(analysis.blocks, key=lambda item: item.lines)
     for side in (SideKind.LEFT, SideKind.RIGHT):
         assert side_alignment(block, side, AlignMethod.ROBUST).aligned_share >= 0.9, side
+
+
+def test_filled_side_patches_an_unreliable_span(pages):
+    """Недостоверный участок в середине стороны закрывается заплаткой, концы и остальное — как без него."""
+    block = pages["plain"]
+    sides = sd.sides_of(block)
+    alignment = sd.side_alignment(block, sd.SideKind.LEFT, sd.AlignMethod.ROBUST)
+    plain = sd.filled_side(sides, alignment, block)
+    top, bottom = float(plain.points[0, 1]), float(plain.points[-1, 1])
+    middle = (top + bottom) / 2
+    span = (middle - 10.0, middle + 10.0)
+    patched = sd.filled_side(sides, alignment, block, (span,))
+    assert patched is not None
+    inside = (patched.points[:, 1] > span[0]) & (patched.points[:, 1] < span[1])
+    assert inside.any() and patched.filled[inside].all()
+    assert not patched.filled[~inside].any() or not plain.filled.any()
+    # Концы линии и её меры на ровной колонке не меняются: заплатка идёт по той же прямой.
+    assert patched.points[0, 1] == pytest.approx(top) and patched.points[-1, 1] == pytest.approx(bottom)
+    assert patched.tilt_deg == pytest.approx(plain.tilt_deg, abs=0.1)

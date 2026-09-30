@@ -22,7 +22,8 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
-from ocr_utils.page_layout.pack_analysis.final import final_page, reblock_page, render_for_maps
+from ocr_utils.page_layout.image import Variant
+from ocr_utils.page_layout.pack_analysis.final import OverlayMode, final_page, reblock_page, render_for_maps
 from ocr_utils.page_layout.pack_analysis.raster_db import load_raster, same_raster
 from ocr_utils.page_layout.pack_analysis.stages import (
     PageTask,
@@ -62,6 +63,36 @@ def list_tasks(root: Path, pages_file: Path | None = None, limit: int | None = N
         Задания.
     """
     tasks = [PageTask(str(p.relative_to(root).with_suffix("")), p) for p in sorted(root.rglob("*.jpg"))]
+    if pages_file is not None:
+        wanted = {line.strip() for line in pages_file.read_text().splitlines() if line.strip()}
+        tasks = [t for t in tasks if t.name in wanted]
+    return tasks[:limit] if limit else tasks
+
+
+def list_pdf_tasks(
+    pdf_dir: Path, variant: Variant, pages_file: Path | None = None, limit: int | None = None
+) -> list[PageTask]:
+    """Страницы полных PDF пака FineReader: ``<pdf_dir>/<stem>.pdf``, все страницы по порядку.
+
+    Имя страницы — ``<stem>/pNNNN`` (номер с нуля), как ключ кэша surya у ``PageImage.from_pdf_page``:
+    так попадает набитый ``prefill-surya`` кэш.
+
+    Args:
+        pdf_dir: Каталог PDF.
+        variant: ``Variant.FR_GEO`` или ``Variant.FR_NOGEO``.
+        pages_file: Файл с именами страниц ``<stem>/pNNNN`` по строке — только они.
+        limit: Только первые N (после отбора).
+
+    Returns:
+        Задания.
+    """
+    import fitz
+
+    tasks = []
+    for pdf in sorted(pdf_dir.glob("*.pdf")):
+        with fitz.open(str(pdf)) as document:
+            count = document.page_count
+        tasks += [PageTask(f"{pdf.stem}/p{index:04d}", pdf, index, variant) for index in range(count)]
     if pages_file is not None:
         wanted = {line.strip() for line in pages_file.read_text().splitlines() if line.strip()}
         tasks = [t for t in tasks if t.name in wanted]
@@ -303,6 +334,7 @@ def stage_final(
     axis: AxisKind = AxisKind.CENTRE,
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
+    overlay: OverlayMode = OverlayMode.ALL,
 ) -> None:
     """Стадия 6: итог полос, оверлеи по папкам, ``index.csv``.
 
@@ -317,9 +349,12 @@ def stage_final(
         axis: По какой оси строки собирать ряды и блоки (см. :func:`final.text_blocks`).
         gutter_mode: Как межколонники становятся запретами сцепки (``columns.GutterMode``).
         blocks_mode: Способ группировки строк в блоки и их границы (``text_blocks.blocks.BlocksMode``).
+        overlay: Писать ли оверлеи полос.
     """
     pass1 = read_jsonl_map(work / "deepseek" / "pass1" / "markdown.jsonl")
     pass2 = read_jsonl_map(work / "deepseek" / "pass2" / "markdown.jsonl")
+    # Слова первого прохода — для проверки «пометка на полях» у кандидатов без второго прохода.
+    words = read_jsonl_map(work / "deepseek" / "pass1" / "ocr.jsonl")
     ready = [t for t in tasks if (work / "pages" / f"{page_key(t.name)}.json").is_file()]
     todo = ready if redo else [t for t in ready if not (out / "pages" / f"{page_key(t.name)}.json").is_file()]
     logger.info("Итог: полос %d, к обработке %d", len(ready), len(todo))
@@ -334,6 +369,7 @@ def stage_final(
                 "pass2_markdown": {
                     k: v for k, v in pass2.items() if k.startswith(prefix) and k[len(prefix) :].isdigit()
                 },
+                "pass1_ocr": {k: v for k, v in words.items() if k.startswith(prefix) and k[len(prefix) :].isdigit()},
             }
         )
     if todo:
@@ -342,7 +378,7 @@ def stage_final(
                 pool.map(
                     _safe, [final_page] * len(todo), todo, [orientation[t.name] for t in todo], payloads,
                     [work] * len(todo), [out] * len(todo), [axis] * len(todo), [gutter_mode] * len(todo),
-                    [blocks_mode] * len(todo), chunksize=2,
+                    [blocks_mode] * len(todo), [overlay] * len(todo), chunksize=2,
                 ),
                 1,
             ):  # fmt: skip
@@ -408,6 +444,7 @@ def stage_edge_craft(
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
     maps_dir: Path | None = None,
+    overlay: OverlayMode = OverlayMode.ALL,
 ) -> None:
     """Второй проход защиты сторон по готовому итогу: полосы с выступами на выровненных сторонах разбираются заново
     с фильтром сора голосованием CRAFT + pero (``text_blocks.edge_guard``).
@@ -425,6 +462,7 @@ def stage_edge_craft(
         gutter_mode: Как межколонники становятся запретами сцепки.
         blocks_mode: Способ группировки строк в блоки и их границы.
         maps_dir: Кэш карт; по умолчанию ``<out>/glyph_maps``.
+        overlay: Писать ли оверлеи пересчитанных полос.
     """
     maps_dir = maps_dir or out / "glyph_maps"
     todo = []
@@ -448,7 +486,8 @@ def stage_edge_craft(
         for done, result in enumerate(
             pool.map(
                 _safe, [reblock_page] * len(todo), todo, [out] * len(todo), [out] * len(todo), [axis] * len(todo),
-                [gutter_mode] * len(todo), [blocks_mode] * len(todo), [maps_dir] * len(todo), chunksize=4,
+                [gutter_mode] * len(todo), [blocks_mode] * len(todo), [maps_dir] * len(todo), [overlay] * len(todo),
+                chunksize=4,
             ),
             1,
         ):  # fmt: skip
@@ -495,7 +534,7 @@ def upright(tasks: list[PageTask]) -> dict[str, dict]:
 
 
 def run(
-    sharpened: Path,
+    sharpened: Path | None,
     cache_root: Path,
     out: Path,
     jobs: int,
@@ -510,11 +549,15 @@ def run(
     gutter_mode: GutterMode = GutterMode.SHORT,
     blocks_mode: BlocksMode = DEFAULT_BLOCKS_MODE,
     edge_craft: bool = True,
+    pdf_dir: Path | None = None,
+    variant: Variant = Variant.SHARPENED,
+    no_raster: bool = False,
+    overlay: OverlayMode = OverlayMode.ALL,
 ) -> None:
     """Весь разбор по стадиям.
 
     Args:
-        sharpened: Корень заострённых копий пака.
+        sharpened: Корень заострённых копий пака; ``None`` — разбираются страницы PDF (``pdf_dir``).
         cache_root: Корень кэша surya.
         out: Корень выхода.
         jobs: Воркеров CPU-пула.
@@ -532,10 +575,20 @@ def run(
         blocks_mode: Способ группировки строк в блоки и их границы (``BlocksMode``).
         edge_craft: Второй проход защиты сторон (карты CRAFT + pero на GPU) по полосам с выступами на выровненных
             сторонах (:func:`stage_edge_craft`); выступы, оставшиеся по итогу, помечаются недостоверными всегда.
+        pdf_dir: Каталог полных PDF FineReader: разбираются их страницы (вместо ``sharpened``).
+        variant: Вариант страниц PDF (``FR_GEO`` / ``FR_NOGEO``) — от него ключ кэша surya.
+        no_raster: Детектор растра не запускать и растра не брать: полосы считаются без растра (бинарные PDF
+            FineReader — растр там всё равно бинаризован).
+        overlay: Писать ли оверлеи полос (``NONE`` — только JSON и сайдкары).
     """
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
-    tasks = list_tasks(sharpened, pages_file, limit)
+    if pdf_dir is not None:
+        tasks = list_pdf_tasks(pdf_dir, variant, pages_file, limit)
+    elif sharpened is not None:
+        tasks = list_tasks(sharpened, pages_file, limit)
+    else:
+        raise ValueError("нужен корень заострённых копий или каталог PDF")
     if detect_orientation:
         orientation = stage_orientation(tasks, work, jobs)
         stage_rotated_surya(tasks, orientation, cache_root)
@@ -543,7 +596,13 @@ def run(
         logger.info("Ориентация не определяется: все %d полос считаются прямыми", len(tasks))
         orientation = upright(tasks)
     raster = None
-    if raster_db is not None:
+    if no_raster:
+        if raster_db is not None:
+            raise ValueError("--no-raster и --raster-db несовместимы")
+        # Пустой растр у каждой полосы: детектор не запускается (см. ``stage_candidates``).
+        raster = {}
+        logger.info("Растр не ищется: полосы считаются без растра")
+    elif raster_db is not None:
         raster = load_raster(raster_db, pack_name)
         logger.info("Растр из базы %s: полос с растром %d", raster_db, len(raster))
         if reuse_from is not None:
@@ -564,9 +623,10 @@ def run(
         axis=axis,
         gutter_mode=gutter_mode,
         blocks_mode=blocks_mode,
+        overlay=overlay,
     )
     if edge_craft:
-        stage_edge_craft(tasks, out, jobs, axis, gutter_mode, blocks_mode)
+        stage_edge_craft(tasks, out, jobs, axis, gutter_mode, blocks_mode, overlay=overlay)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -576,4 +636,4 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-__all__ = ["list_tasks", "run", "stage_edge_craft", "stage_reblock", "stage_reuse", "write_index"]
+__all__ = ["list_pdf_tasks", "list_tasks", "run", "stage_edge_craft", "stage_reblock", "stage_reuse", "write_index"]
