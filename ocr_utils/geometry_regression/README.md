@@ -4,7 +4,30 @@
 отвергнуто — `research/geometry_regression/README.md` (стенд с прогоном по паку, сводками,
 картинками и пробником VLM) и `docs/status.md`.
 
-## Использование из кода
+## Боевой детектор — v18 (с 2026-09-30)
+
+Сборщик финальных PDF (`final_pdfs`) берёт вердикт у `quality.verdict.verdict_for_page`. Детектор v18 — три слоя:
+
+| Подпакет | Что в нём | Кэш прогона |
+|---|---|---|
+| `v16/` | движок v16: поле смещений, перекос блоков, штрихи по следу краски, дробные черты, line art по LSD, фото по кромкам; `v16/page.py` — мера страницы и её JSON | `$GEOMETRY_V16_DIR` (`run_scripts/geometry_regression/run_pack1_v15.sh`) |
+| `quality/` | меры v17–v18 по разбору `page_layout` обоих PDF: строки (`lines.py`, в том числе строки без пары в A — перенос оси полем), края блоков (`edges.py`), меры по плотному полю (`lineart_flow.py`), мера страницы (`measure.py`), вердикт по группам (`scoring.py`), вердикт для сборки (`verdict.py`) | `$GEOMETRY_V18_DIR` (`run_scripts/geometry_quality/run_pack1_v18.sh`) |
+| корень | ядро v14: поле смещений, штрихи, строки, кромки, рамки — кирпичи, на которых стоит v16 | `$GEOMETRY_RUN_DIR` (v14, для сравнения) |
+
+Разбор `page_layout` обоих вариантов (`$GEOMETRY_LAYOUT_ROOT`, `run_scripts/page_layout/run_pack1_analysis_v6_fr.sh`)
+строится заранее на GPU: при промахе кэша v18 `verdict_for_page` меряет страницу (v16 — на месте, около 6 с), но
+разбор не строит. Прогон по паку, отчёты и оверлеи — стенд `research/geometry_quality`; отчёт — `reports/geometry_regression_v18.md`.
+
+```python
+import fitz
+from ocr_utils.geometry_regression.quality.verdict import verdict_for_page
+
+with fitz.open(geo_pdf) as geo, fitz.open(nogeo_pdf) as nogeo:
+    result = verdict_for_page(v18_dir, v16_dir, layout_root, "full_1972_10", 79, geo_pdf, nogeo_pdf, geo, nogeo)
+result.assessment.verdict  # Verdict.BAD | MIXED | OK; result.reason — правило и виновник; result.cached
+```
+
+## Ядро v14: использование из кода
 
 ```python
 import fitz

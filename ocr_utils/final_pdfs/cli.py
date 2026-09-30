@@ -33,7 +33,8 @@ from ocr_utils.final_pdfs.assemble import (
 from ocr_utils.final_pdfs.pictures import DEFAULT_DESCREEN_SIGMA_MM, DEFAULT_JPEG_QUALITY, DEFAULT_PICTURE_DPI
 from ocr_utils.final_pdfs.plan import IssuePlan, load_plans
 from ocr_utils.final_pdfs.sources import IssuePair, margins_px, pair_issue_pdfs
-from ocr_utils.geometry_regression.scoring import DEFAULT_HARD, DEFAULT_MIN_GAIN, DEFAULT_RATIO
+from ocr_utils.geometry_regression.quality.scoring import DEFAULT_TOTAL
+from ocr_utils.geometry_regression.scoring import DEFAULT_MIN_GAIN, DEFAULT_RATIO
 from ocr_utils.text_layer_fix.rewrite import DEFAULT_FONT_PATH
 
 logger = logging.getLogger("ocr_utils.final_pdfs")
@@ -261,7 +262,19 @@ def main(log_level: str) -> None:
     "--geometry-run-dir",
     default=None,
     type=click.Path(file_okay=False, path_type=Path),
-    help="прогон детектора геометрии с cache/; без него — всегда мерить",
+    help="прогон детектора геометрии v18 с cache/: вердикт из него, при промахе — мера с записью туда же",
+)
+@click.option(
+    "--geometry-v16-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="прогон движка v16 с cache/ (поле смещений, штрихи); при промахе v16 меряет страницу",
+)
+@click.option(
+    "--geometry-layout-root",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="разбор page_layout обоих вариантов PDF (geo/pages, nogeo/pages) — строится заранее",
 )
 @click.option(
     "--layout-cache",
@@ -272,7 +285,8 @@ def main(log_level: str) -> None:
     "родителе), дальше детектор геометрии и правка слоя читают его в воркерах. Без него — без surya.",
 )
 @click.option("--geometry-thr", multiple=True, help="порог детектора «имя=значение», можно несколько")
-@click.option("--geometry-hard", default=DEFAULT_HARD, show_default=True, type=float)
+@click.option("--geometry-hard", multiple=True, help="жёсткий порог метрики «имя=значение», можно несколько")
+@click.option("--geometry-total", default=DEFAULT_TOTAL, show_default=True, type=float, help="порог суммы групп")
 @click.option("--geometry-min-gain", default=DEFAULT_MIN_GAIN, show_default=True, type=float)
 @click.option("--geometry-ratio", default=DEFAULT_RATIO, show_default=True, type=float)
 @click.option("--text-layer/--no-text-layer", default=True, show_default=True, help="править текстовый слой")
@@ -327,9 +341,12 @@ def run(
     only_year,
     only_issue,
     geometry_run_dir,
+    geometry_v16_dir,
+    geometry_layout_root,
     layout_cache_dir,
     geometry_thr,
     geometry_hard,
+    geometry_total,
     geometry_min_gain,
     geometry_ratio,
     text_layer,
@@ -354,8 +371,11 @@ def run(
     analysis = AnalysisParams(
         work_dir=work_dir,
         geometry_run_dir=geometry_run_dir,
+        geometry_v16_dir=geometry_v16_dir,
+        geometry_layout_root=geometry_layout_root,
         geometry_thr=tuple(geometry_thr),
-        geometry_hard=geometry_hard,
+        geometry_hard=tuple(geometry_hard),
+        geometry_total=geometry_total,
         geometry_min_gain=geometry_min_gain,
         geometry_ratio=geometry_ratio,
         text_layer=text_layer,

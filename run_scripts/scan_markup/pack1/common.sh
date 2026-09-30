@@ -79,6 +79,15 @@ FINAL_WORK_DIR="/mnt/system/raw/mts/pack1_final_pdfs_work"
 GEOMETRY_REGRESSION_ROOT="/mnt/system/raw/mts/pack1_geometry_regression"
 GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v14}"
 
+# Боевой детектор порчи геометрии v18 (ocr_utils.geometry_regression.quality, с 2026-09-30) — его вердикт берёт
+# сборщик финальных PDF. Три входа, все — прогоны 2026-09-30 на домашнем SSD (/mnt/system заполнен):
+# * разбор page_layout обоих PDF (line art, текстовые блоки; run_scripts/page_layout/run_pack1_analysis_v6_fr.sh);
+# * прогон движка v16 (поле смещений, штрихи, line art, фото; run_scripts/geometry_regression/run_pack1_v15.sh);
+# * прогон v18 (строки и края блоков по разбору, меры по плотному полю; run_scripts/geometry_quality/run_pack1_v18.sh).
+GEOMETRY_LAYOUT_ROOT="${GEOMETRY_LAYOUT_ROOT:-$MARKUP_ROOT/pack1_page_analysis_v7_fr}"
+GEOMETRY_V16_DIR="${GEOMETRY_V16_DIR:-$MARKUP_ROOT/pack1_geometry_quality/pack1_v16_20260930}"
+GEOMETRY_V18_DIR="${GEOMETRY_V18_DIR:-$MARKUP_ROOT/pack1_geometry_quality/pack1_v18_20260930}"
+
 # Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
 # невелики и живут ровно до выбора параметров.
 COMPARE_DIR="$MARKUP_ROOT/compare"

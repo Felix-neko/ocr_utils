@@ -4,7 +4,8 @@
 # с правкой текстового слоя (повёрнутый текст, пропущенный прямой) и возвратом иллюстраций.
 #
 # Читает: $GEO_PDF_DIR, $NOGEO_PDF_DIR (123 пары PDF), $BLURRED_DIR (очищенные полосы — источник
-#         иллюстраций, печати уже закрашены), $DB_REVIEWED (только чтение), $GEOMETRY_RUN_DIR/cache.
+#         иллюстраций, печати уже закрашены), $DB_REVIEWED (только чтение), детектор геометрии v18: $GEOMETRY_V18_DIR/cache, $GEOMETRY_V16_DIR/cache,
+#         разбор $GEOMETRY_LAYOUT_ROOT.
 # Пишет:  $FINAL_PDF_DIR/{год}/{год}_{выпуск}.pdf; $FINAL_WORK_DIR/{pages/<pdf>/pNNNN.json, analysis.csv,
 #         pages.csv, summary.csv, preview/}.
 # Стадии: 0 — кэш surya page_layout по страницам обеих PDF (GPU в родителе, ~0.7 с на страницу,
@@ -40,7 +41,9 @@ uv run python -m ocr_utils.final_pdfs run \
     --db "$DB_REVIEWED" \
     --pack-name "$PACK_NAME" \
     --work-dir "$FINAL_WORK_DIR" \
-    --geometry-run-dir "$GEOMETRY_RUN_DIR" \
+    --geometry-run-dir "$GEOMETRY_V18_DIR" \
+    --geometry-v16-dir "$GEOMETRY_V16_DIR" \
+    --geometry-layout-root "$GEOMETRY_LAYOUT_ROOT" \
     --layout-cache "$LAYOUT_CACHE_DIR" \
     --picture-dpi 300 \
     --jpeg-quality 75 \

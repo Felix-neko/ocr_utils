@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # Стенд v15 детектора «FineReader ухудшил геометрию» по всему паку-1 (движок
-# research.geometry_regression.v15: перекос блоков по полю и кромкам, наклон строк по проекции,
+# ocr_utils.geometry_regression.v16: перекос блоков по полю и кромкам, наклон строк по проекции,
 # наклон штрихов по краске, выигрыш по строкам таблиц, деcкью, снимки по одному).
 #
 # Читает: $GEO_PDF_DIR и $NOGEO_PDF_DIR (129 выпусков, ~12 тыс. страниц), кэш surya $LAYOUT_CACHE_DIR.
-# Пишет: $GEOMETRY_RUN_DIR (по умолчанию …/pack1_v15)/{run.json,metrics.csv,cache/<pdf>/pNNN.json}.
+# Пишет: $GEOMETRY_RUN_DIR (по умолчанию $GEOMETRY_V16_DIR)/{run.json,metrics.csv,cache/<pdf>/pNNN.json}.
 # ~3–4 с на страницу на воркер: 12 воркеров → ~1 ч на пак. Повторный запуск берёт готовые JSON (--skip-done).
 #
 # Запуск в фон: setsid ./run_pack1_v15.sh > лог 2>&1 < /dev/null & PID=$!; ждать по PID.
@@ -17,7 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR_V15:-$GEOMETRY_REGRESSION_ROOT/pack1_v15}"
+# По умолчанию — боевой прогон v16 из common.sh пака ($GEOMETRY_V16_DIR): его кэш читают меры v18.
+GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR_V15:-$GEOMETRY_V16_DIR}"
 JOBS="${JOBS:-16}"
 RESERVE_CPU_CORES=4
 

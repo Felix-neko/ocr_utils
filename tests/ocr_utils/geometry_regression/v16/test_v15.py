@@ -10,12 +10,12 @@ from ocr_utils.geometry_regression.lines import match_lines
 from ocr_utils.geometry_regression.regions import text_lines
 from ocr_utils.geometry_regression.render import RENDER_DPI, to_work
 from ocr_utils.geometry_regression.strokes import Stroke, find_strokes
-from research.geometry_regression.v15.blocks import block_edges, edge_metrics
-from research.geometry_regression.v15.field_shear import shear_metrics
-from research.geometry_regression.v15.lines import glyph_line_metrics, tilt_summary
-from research.geometry_regression.v15.raster import raster_edge_metrics
-from research.geometry_regression.v15.ridge import bend_metrics, trace_strokes
-from research.geometry_regression.v15.scoring import Thresholds15
+from ocr_utils.geometry_regression.v16.blocks import block_edges, edge_metrics
+from ocr_utils.geometry_regression.v16.field_shear import shear_metrics
+from ocr_utils.geometry_regression.v16.lines import glyph_line_metrics, tilt_summary
+from ocr_utils.geometry_regression.v16.raster import raster_edge_metrics
+from ocr_utils.geometry_regression.v16.ridge import bend_metrics, trace_strokes
+from ocr_utils.geometry_regression.v16.scoring import Thresholds15
 from tests.ocr_utils.geometry_regression.synthetic import add_rules, rotate, text_page
 from tests.ocr_utils.geometry_regression.test_raster import PHOTO, _halftone, _page_with_photo
 

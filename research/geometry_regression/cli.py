@@ -31,7 +31,7 @@ from research.geometry_regression.report import (
     write_csv,
 )
 from ocr_utils.geometry_regression.scoring import Thresholds
-from research.geometry_regression.v15.engine import ENGINES, get_engine
+from research.geometry_regression.engine import ENGINES, get_engine
 
 logger = logging.getLogger("research.geometry_regression")
 
@@ -199,7 +199,7 @@ def effective_jobs(jobs: int, reserve_cpu_cores: int) -> int:
     default="core",
     show_default=True,
     type=click.Choice(sorted(ENGINES)),
-    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд research.geometry_regression.v15",
+    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд ocr_utils.geometry_regression.v16",
 )
 def run(
     geo_dir,
@@ -358,7 +358,7 @@ def _write_pair(args: tuple) -> str:
     default="core",
     show_default=True,
     type=click.Choice(sorted(ENGINES)),
-    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд research.geometry_regression.v15",
+    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд ocr_utils.geometry_regression.v16",
 )
 def report(
     out_dir,
@@ -747,7 +747,7 @@ def vlm_report(out_dir, labels, md_report) -> None:
     default="core",
     show_default=True,
     type=click.Choice(sorted(ENGINES)),
-    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд research.geometry_regression.v15",
+    help="движок: core — ядро ocr_utils.geometry_regression, v15 — стенд ocr_utils.geometry_regression.v16",
 )
 def regress(
     geo_dir, nogeo_dir, labels, old_dir, md_report, thr, stroke_min_mm, line_min_mm, layout_cache_dir, engine_name

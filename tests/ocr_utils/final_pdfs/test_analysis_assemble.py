@@ -11,17 +11,18 @@ from ocr_utils.final_pdfs.analysis import AnalysisParams, analyse_chunk, chunk_j
 from ocr_utils.final_pdfs.assemble import AssembleParams, assemble_issue
 from ocr_utils.final_pdfs.plan import IssuePlan, PagePlan, PageSource
 from ocr_utils.final_pdfs.sources import IssuePair
-from ocr_utils.geometry_regression import VERSION as GEOMETRY_VERSION
-from ocr_utils.geometry_regression.cache import cache_path as geometry_cache_path
+from ocr_utils.geometry_regression.quality import ENGINE_VERSION as GEOMETRY_VERSION
+from ocr_utils.geometry_regression.quality.measure import cache_path as geometry_cache_path
+from ocr_utils.geometry_regression.quality.sources import PageRef
 from ocr_utils.text_layer_fix import VERSION as TEXT_LAYER_VERSION
 from ocr_utils.text_layer_fix.raster import page_raster
 from tests.ocr_utils.final_pdfs.conftest import INSET, MARGINS
 
 
 def _fake_geometry_cache(run_dir: Path, pdf_stem: str, page: int, bad: bool) -> None:
-    """JSON детектора геометрии текущей версии: порча линеек 5 мм → bad, нули → ok."""
-    metrics = {"vstroke_dev_max_delta_mm": 5.0 if bad else 0.0, "seconds": 0.1}
-    path = geometry_cache_path(run_dir, pdf_stem, page)
+    """JSON детектора геометрии текущей версии: строка наклонена на 5 мм (жёсткий порог) → bad, нули → ok."""
+    metrics = {"line_quality_mm": 5.0 if bad else 0.0, "seconds": 0.1}
+    path = geometry_cache_path(run_dir, PageRef(pdf_stem, page))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": GEOMETRY_VERSION, "metrics": metrics, "culprits": {}, "raw": {}}))
 
@@ -33,7 +34,13 @@ def _analysis(pack, text_layer: bool = False) -> AnalysisParams:
     _fake_geometry_cache(run_dir, pair.geo.stem, 1, True)
     for page in (2, 3, 4):
         _fake_geometry_cache(run_dir, pair.geo.stem, page, False)
-    return AnalysisParams(work_dir=tmp_path / "work", geometry_run_dir=run_dir, text_layer=text_layer)
+    return AnalysisParams(
+        work_dir=tmp_path / "work",
+        geometry_run_dir=run_dir,
+        geometry_v16_dir=tmp_path / "v16",
+        geometry_layout_root=tmp_path / "layout",
+        text_layer=text_layer,
+    )
 
 
 def test_analysis_decides_sources(pack) -> None:

@@ -1,6 +1,5 @@
 название	путь	аннотация
 full_1966_01 с.78	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_01_p078_d1.52_g1.38_parallel.jpg	шкаф: полки погнуты
-full_1966_01 с.95	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_01_p095_d1.18_g1.48_vtilt.jpg	вертикальные рамки наклонились
 full_1966_05 с.70	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1966_05.pdf#page=70	дробные черты формул наклонились (короткие
 full_1966_06 с.58	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1966/full_1966_06_p058_d3.37_g1.64_hmean.jpg	дробные черты формул наклонились
 full_1967_01 с.35	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1967/full_1967_01_p035_d4.00_g1.94_stretch.jpg	крупный заголовок наклонён на 0.8°
@@ -29,3 +28,4 @@ full_1971_11 с.70	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/
 full_1974_10 с.30	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_10_p030_d5.12_g0.60_parallel.jpg	лучи номограммы изогнуты
 full_1974_12 с.34	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_12_p034_d4.56_g2.67_parallel.jpg	блок-схема: рамки и линии покорёжены
 full_1974_12 с.42	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1974/full_1974_12_p042_d2.08_g0.44_parallel.jpg	блок-схема: рамки и стрелки покорёжены
+full_1968_05 с.55	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p055_d2.55_g3.09_edge.jpg	сетка графика: параллельные линии перестали быть параллельными (пересмотр 2026-09-29; было good: «изогнутые строки сверху страницы стали горизонтальными»)

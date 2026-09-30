@@ -1,4 +1,4 @@
-"""Движки стенда: ядро (v14) и v15 — измерение страницы, пороги, версия кэша.
+"""Движки стенда: ядро v14 и v16 (``ocr_utils.geometry_regression.v16``) — измерение страницы, пороги, версия кэша.
 
 Стенд (``research.geometry_regression.cli``) выбирает движок опцией ``--engine``; всё
 остальное — пул, кэш surya, CSV, картинки — общее. Кэш измерений у движков раздельный:
@@ -8,45 +8,18 @@ JSON с другой ``version`` не читается и переписывае
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import fitz
 
 from ocr_utils.geometry_regression import VERSION
 from ocr_utils.geometry_regression.cache import measure_page as core_measure_page
-from ocr_utils.geometry_regression.cache import surya_source_for
 from ocr_utils.geometry_regression.metrics import PageMeasure, Params
-from ocr_utils.geometry_regression.regions import layout_regions
-from ocr_utils.geometry_regression.render import render_gray
 from ocr_utils.geometry_regression.scoring import Thresholds
-from research.geometry_regression.v15 import ENGINE_VERSION
-from research.geometry_regression.v15.scoring import Thresholds15
-
-
-def measure_page_v15(
-    geo_doc: fitz.Document, nogeo_doc: fitz.Document, page: int, params: Params, surya=None
-) -> PageMeasure:
-    """Измерить одну пару страниц движком v15 (интерфейс как у ``cache.measure_page`` ядра)."""
-    from research.geometry_regression.v15.measure import measure_pair
-
-    started = time.time()
-    if surya is None:
-        surya = surya_source_for(params)
-    regions = layout_regions(nogeo_doc, page - 1, params.dpi, surya)
-    measure = measure_pair(
-        render_gray(nogeo_doc, page - 1),
-        render_gray(geo_doc, page - 1),
-        params,
-        regions.drawings,
-        regions.tables,
-        regions.raster,
-    )
-    measure.metrics["seconds"] = round(time.time() - started, 2)
-    measure.metrics["layout_surya"] = float(surya is not None)
-    return measure
+from ocr_utils.geometry_regression.v16 import ENGINE_VERSION
+from ocr_utils.geometry_regression.v16.page import measure_page as measure_page_v15
+from ocr_utils.geometry_regression.v16.scoring import Thresholds15
 
 
 @dataclass(frozen=True)

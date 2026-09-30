@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Разница вердиктов v15 → v16 (оба — стенд research.geometry_regression.v15, версии кэша v15 и v16):
+# Разница вердиктов v15 → v16 (оба — стенд ocr_utils.geometry_regression.v16, версии кэша v15 и v16):
 # CSV смен и пары «было | стало» по видам смен (ok_to_bad, bad_to_ok, mixed_to_bad, …), рамка
 # виновника — от движка с худшим вердиктом.
 #

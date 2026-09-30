@@ -2,7 +2,7 @@
 
 Порядок тот же, что в ``metrics.measure_pair`` ядра: поле смещений → области на B → штрихи,
 строки, кромки на обеих версиях → сопоставление через поле → разности. Отличия — в
-докстринге пакета ``research.geometry_regression.v15``.
+докстринге пакета ``ocr_utils.geometry_regression.v16``.
 """
 
 from __future__ import annotations
@@ -29,14 +29,14 @@ from ocr_utils.geometry_regression.strokes import (
     match_strokes,
     stroke_metrics,
 )
-from research.geometry_regression.v15 import ENGINE_VERSION
-from research.geometry_regression.v15.blocks import block_edges, edge_metrics, text_rows
-from research.geometry_regression.v15.field_shear import shear_metrics
-from research.geometry_regression.v15.lineart import lineart_metrics
-from research.geometry_regression.v15.lines import LineTilt, glyph_line_metrics, tilt_summary
-from research.geometry_regression.v15.parallel import parallel_metrics
-from research.geometry_regression.v15.raster import raster_edge_metrics
-from research.geometry_regression.v15.ridge import (
+from ocr_utils.geometry_regression.v16 import ENGINE_VERSION
+from ocr_utils.geometry_regression.v16.blocks import block_edges, edge_metrics, text_rows
+from ocr_utils.geometry_regression.v16.field_shear import shear_metrics
+from ocr_utils.geometry_regression.v16.lineart import lineart_metrics
+from ocr_utils.geometry_regression.v16.lines import LineTilt, glyph_line_metrics, tilt_summary
+from ocr_utils.geometry_regression.v16.parallel import parallel_metrics
+from ocr_utils.geometry_regression.v16.raster import raster_edge_metrics
+from ocr_utils.geometry_regression.v16.ridge import (
     StrokeTilt,
     bend_metrics,
     lsd_fallback,

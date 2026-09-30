@@ -11,13 +11,13 @@ from ocr_utils.geometry_regression.lines import match_lines
 from ocr_utils.geometry_regression.regions import text_lines
 from ocr_utils.geometry_regression.render import RENDER_DPI, to_work
 from ocr_utils.geometry_regression.strokes import find_strokes
-from research.geometry_regression.v15.blocks import block_edges, text_rows
-from research.geometry_regression.v15.lineart import lineart_metrics
-from research.geometry_regression.v15.lines import glyph_line_metrics
-from research.geometry_regression.v15.ridge import fraction_metrics, lsd_fallback, trace_strokes
-from research.geometry_regression.v15.scoring import Thresholds15
+from ocr_utils.geometry_regression.v16.blocks import block_edges, text_rows
+from ocr_utils.geometry_regression.v16.lineart import lineart_metrics
+from ocr_utils.geometry_regression.v16.lines import glyph_line_metrics
+from ocr_utils.geometry_regression.v16.ridge import fraction_metrics, lsd_fallback, trace_strokes
+from ocr_utils.geometry_regression.v16.scoring import Thresholds15
 from tests.ocr_utils.geometry_regression.synthetic import FONT_PATH, WORDS, add_rules, rotate, text_page
-from tests.research.geometry_regression.test_v15 import shear
+from tests.ocr_utils.geometry_regression.v16.test_v15 import shear
 
 DPI = 150
 

@@ -38,7 +38,7 @@ from ocr_utils.geometry_regression import mm_to_px, px_to_mm
 from ocr_utils.geometry_regression.field import Field, robust_affine
 from ocr_utils.geometry_regression.render import RENDER_DPI
 from ocr_utils.geometry_regression.strokes import Stroke, _wrap
-from research.geometry_regression.v15.ridge import Trace, trace_line
+from ocr_utils.geometry_regression.v16.ridge import Trace, trace_line
 
 Box = tuple[int, int, int, int]
 

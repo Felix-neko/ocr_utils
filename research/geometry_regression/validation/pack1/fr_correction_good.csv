@@ -14,7 +14,6 @@ full_1968_01 с.96	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brighten
 full_1968_02 с.69	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_02.pdf#page=69	трапециевидные искажения ушли
 full_1968_02 с.92	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_02_p092_d1.26_g0.69_stretch.jpg	наклонный заголовок рубрики стал горизонтальным
 full_1968_03 с.89	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_03.pdf#page=89	наклонный заголовок рубрики стал горизонтальнее
-full_1968_05 с.55	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p055_d2.55_g3.09_edge.jpg	изогнутые строки сверху страницы стали горизонтальными
 full_1968_05 с.72	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/mixed/1968/full_1968_05_p072_d1.11_g3.86_parallel.jpg	волнистые строки внизу выправлены; формулы покорёжило незначительно
 full_1968_05 с.95	/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_1968_05.pdf#page=95	волнистые строки сверху и снизу стали горизонтальными
 full_1968_08 с.86	/mnt/system/raw/mts/pack1_geometry_regression/pack1_v7/pairs/bad/1968/full_1968_08_p086_d2.67_g3.50_wobble.jpg	ложная тревога: строка распалась в A на куски, куски зацепились за соседнюю строку — «волна»; коррекция нормальная

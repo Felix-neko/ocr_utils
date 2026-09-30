@@ -70,14 +70,16 @@ uv run python -m ocr_utils.geometry_regression report --out-dir … --list-thres
 
 Пороги в `scoring.py` — по перцентилям пака и просмотру поясов; менять — `report --thr`.
 
-## Стенд v15/v16 (`v15/`, 2026-09-22)
+## Стенд v15/v16 (движок — `ocr_utils/geometry_regression/v16/`, 2026-09-22; перенесён в ядро 2026-09-30)
 
 Второй движок рядом с ядром: `--engine v15` у `run`, `report`, `regress`; кэш измерений раздельный
-(`version` = `ENGINE_VERSION`, сейчас `v16`), пороги — `v15/scoring.py` (`Thresholds15`, те же перекрытия
+(`version` = `ENGINE_VERSION`, сейчас `v16`), пороги — `ocr_utils/geometry_regression/v16/scoring.py` (`Thresholds15`, те же перекрытия
 `--thr имя=число`). Разница вердиктов двух прогонов — `diff --old-dir …/pack1_v15 --new-dir …/pack1_v16 --csv-out … --pairs-dir …`
 (картинки по видам смен `changed/<старый>_to_<новый>/`, рамка виновника — от движка с худшим вердиктом).
 Run-скрипты: `run_pack1_v15.sh`, `run_report_v15.sh`, `run_diff_v14_v15.sh`, `run_diff_v15_v16.sh` (каталог
 прогона — `GEOMETRY_RUN_DIR_V15`, у diff v15→v16 новый прогон — `GEOMETRY_RUN_DIR_V16`).
+
+Модули ниже — в `ocr_utils/geometry_regression/v16/`; выбор движка стенда — `engine.py` здесь.
 
 | Модуль | Что меряет | Флаговые метрики |
 |---|---|---|

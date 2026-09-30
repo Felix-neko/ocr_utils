@@ -20,10 +20,11 @@ from pathlib import Path
 from ocr_utils.final_pdfs import VERSION
 from ocr_utils.final_pdfs.plan import IssuePlan, PageDecision, PageSource, decide_source
 from ocr_utils.final_pdfs.sources import IssuePair
-from ocr_utils.geometry_regression.cache import verdict_for_page
 from ocr_utils.geometry_regression.metrics import Params as GeometryParams
+from ocr_utils.geometry_regression.quality.scoring import DEFAULT_TOTAL, Thresholds17
+from ocr_utils.geometry_regression.quality.verdict import verdict_for_page
+from ocr_utils.geometry_regression.scoring import DEFAULT_MIN_GAIN, DEFAULT_RATIO
 from ocr_utils.page_layout.surya.source import SuryaSourceConfig
-from ocr_utils.geometry_regression.scoring import Thresholds
 from ocr_utils.text_layer_fix import VERSION as TEXT_LAYER_VERSION
 from ocr_utils.text_layer_fix.cache import cache_path, load_page, save_page
 from ocr_utils.text_layer_fix.classify import Verdict
@@ -42,11 +43,17 @@ class AnalysisParams:
     """Параметры стадии анализа (пиклуются в воркер)."""
 
     work_dir: Path
-    geometry_run_dir: Path | None  # каталог прогона детектора геометрии с cache/; None — всегда мерить
-    geometry_thr: tuple[str, ...] = ()  # переопределения порогов «имя=значение»
-    geometry_hard: float = 5.0
-    geometry_min_gain: float = 1.0
-    geometry_ratio: float = 0.75
+    # Детектор порчи геометрии v18 (``geometry_regression.quality``): прогон v18 с cache/ (вердикт из него, при
+    # промахе — мера на месте с записью туда же), прогон v16 с cache/ (поле смещений, штрихи; при промахе v16
+    # меряет страницу), разбор page_layout обоих вариантов (geo/pages, nogeo/pages) — его здесь не строят.
+    geometry_run_dir: Path | None
+    geometry_v16_dir: Path | None = None
+    geometry_layout_root: Path | None = None
+    geometry_thr: tuple[str, ...] = ()  # переопределения порогов «имя=значение» (метрики порчи и выигрыша)
+    geometry_hard: tuple[str, ...] = ()  # жёсткие пороги «имя=значение»
+    geometry_total: float = DEFAULT_TOTAL
+    geometry_min_gain: float = DEFAULT_MIN_GAIN
+    geometry_ratio: float = DEFAULT_RATIO
     text_layer: bool = True  # разбирать ли слой (False — только выбор источника)
     allowed_rotations: tuple[int, ...] = (0, 90, 180, 270)
     lang: str = "rus"
@@ -62,8 +69,15 @@ class AnalysisParams:
         """Корень JSON страниц."""
         return self.work_dir / "pages"
 
-    def thresholds(self) -> Thresholds:
-        return Thresholds.parse(self.geometry_thr, self.geometry_hard, self.geometry_min_gain, self.geometry_ratio)
+    def thresholds(self) -> Thresholds17:
+        """Пороги вердикта v18 с переопределениями из командной строки."""
+        return Thresholds17(
+            Thresholds17.parse_pairs(self.geometry_thr),
+            Thresholds17.parse_pairs(self.geometry_hard),
+            self.geometry_total,
+            self.geometry_min_gain,
+            self.geometry_ratio,
+        )
 
 
 @dataclass
@@ -180,19 +194,26 @@ def decide_page(
     if page_plan.pictures:
         source, reason = decide_source(True, None)
         return PageDecision(source, reason)
-    stem = Path(pair.geo).stem
+    if params.geometry_run_dir is None or params.geometry_v16_dir is None or params.geometry_layout_root is None:
+        raise ValueError("детектор геометрии v18: нужны прогон v18, прогон v16 и разбор page_layout обоих вариантов")
     geometry_params = GeometryParams(layout_cache_dir=params.layout_cache_dir)
     result = verdict_for_page(
-        params.geometry_run_dir, stem, index + 1, geo_doc, nogeo_doc, params.thresholds(), geometry_params
+        params.geometry_run_dir,
+        params.geometry_v16_dir,
+        params.geometry_layout_root,
+        Path(pair.geo).stem,
+        index + 1,
+        Path(pair.geo),
+        Path(pair.nogeo),
+        geo_doc,
+        nogeo_doc,
+        params.thresholds(),
+        geometry_params,
     )
-    source, reason = decide_source(False, result.verdict.verdict)
+    source, reason = decide_source(False, result.assessment.verdict.value)
+    # Балл — сумма групп Σ (против порога совокупности), причина — правило и виновник.
     return PageDecision(
-        source,
-        reason,
-        result.verdict.verdict,
-        round(float(result.verdict.score), 3),
-        result.verdict.reason,
-        result.cached,
+        source, reason, result.assessment.verdict.value, round(result.assessment.total, 3), result.reason, result.cached
     )
 
 
