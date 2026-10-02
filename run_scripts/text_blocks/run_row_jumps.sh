@@ -34,10 +34,10 @@
 set -euo pipefail
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-/mnt/system/raw/mts/pack1_row_jumps}"
-PACK="${PACK:-/mnt/system/raw/mts/pack1_page_analysis_v4}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/pack1_row_jumps}"
+PACK="${PACK:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v4}"
 # Оси всего пака — из прогона стенда межколонников (report.page_json, прежний ход межколонников).
-AXES="${AXES:-/mnt/system/raw/mts/pack1_gutter_crossing/legacy/pages}"
+AXES="${AXES:-/mnt/hotstore/scan_processing/mts/pack1_gutter_crossing/legacy/pages}"
 JOBS="${JOBS:-16}"
 STEP="${STEP:-all}"
 

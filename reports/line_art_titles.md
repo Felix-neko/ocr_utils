@@ -27,7 +27,7 @@ grounding: рамки слов и блоков вёрстки), посчитан
   (51 ложная область, например 1974/07 с.16). Исправлено в `detect.load_jobs` (`rotate_box`):
   на этих полосах осталось 24 области. Из ручной разметки ушли 24 области (C, D, F, X — ни одной
   надписи), листы `sheets/`/`holdout/` в этих клетках закрашены серым. Числа ниже — после исправления.
-- Выход: `/mnt/system/raw/mts/pack1_line_art_titles/` (текущий — поле 2 мм; поле 20 мм и HF-вывод
+- Выход: `/mnt/hotstore/scan_processing/mts/pack1_line_art_titles/` (текущий — поле 2 мм; поле 20 мм и HF-вывод
   DeepSeek — в `pad20/`) — `regions.jsonl` (1265 областей), `crops/`
   (вырезки 300 dpi), `ocr.jsonl`, `features.csv`, `deepseek_{markdown,ocr}.jsonl` и
   `deepseek_vllm_{markdown,ocr}.jsonl` (DeepSeek-OCR-2: HF и vLLM), `features_deepseek*.csv`,

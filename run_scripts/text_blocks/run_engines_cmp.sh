@@ -5,8 +5,8 @@
 #
 # Каждый движок — отдельным вызовом analyze в один и тот же каталог: сбой одного движка не роняет
 # остальные, JSON полос копятся в $OUT/pages. GPU-движки идут строго по одному (видеопамять одна).
-# Окружения движков: kraken/pero/eynollah — /mnt/system/raw/mts/curved_layout_engines,
-# остальные — ~/Projects/mts_markup/line_axis_engines (engines/catalog.py).
+# Окружения движков: kraken/pero/eynollah — /mnt/hotstore/scan_processing/mts/curved_layout_engines,
+# остальные — /mnt/hotstore/scan_processing/mts_markup/line_axis_engines (engines/catalog.py).
 #
 # Числа (2026-09-25): ink ~4 с/полосу, eynollah ~36 с, kraken ~22 с, surya ~10 с с загрузкой модели.
 #
@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../geometry_regression/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-OUT="${OUT:-/mnt/system/raw/mts/line_axis_models/text_and_toc}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/line_axis_models/text_and_toc}"
 PAGES="${PAGES:-full_1973_06:65,full_1971_10:87,full_1973_07:88,full_1967_10:63,full_1971_10:93,full_1973_11:79,full_1968_07:93,full_1973_07:77,full_1973_08:85,full_1971_10:95,full_1970_02:90,full_1975_05:97,full_1976_09:92}"
 ENGINES=(ink pero kraken eynollah surya orli paddle paddle6 chronicling laypa craft docufcn textsnake)
 if [ "$#" -gt 0 ]; then ENGINES=("$@"); fi

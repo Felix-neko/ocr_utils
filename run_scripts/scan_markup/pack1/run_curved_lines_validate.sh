@@ -15,7 +15,7 @@ set -m
 trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
 
 BASE_NAME="curved_lines_validate_pack1"
-CACHE_DIR="$MARKUP_ROOT/curved_lines_cache"
+CACHE_DIR="$HOT_MARKUP_ROOT/curved_lines_cache"
 
 ARGS=(
     run

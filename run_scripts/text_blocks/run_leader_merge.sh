@@ -25,9 +25,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-/mnt/system/raw/mts/pack1_leader_merge}"
-PACK="${PACK:-/mnt/system/raw/mts/pack1_page_analysis_v3}"
-SOURCE="${SOURCE:-/mnt/system/raw/mts/pack1_gutter_crossing/legacy}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/pack1_leader_merge}"
+PACK="${PACK:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v3}"
+SOURCE="${SOURCE:-/mnt/hotstore/scan_processing/mts/pack1_gutter_crossing/legacy}"
 JOBS="${JOBS:-16}"
 STEP="${STEP:-all}"
 # P: 20 полос (с разбросом по выпускам), N: 80 (по 16 на слой). Обязательные в P: пример пользователя и

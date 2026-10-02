@@ -23,8 +23,8 @@
 set -euo pipefail
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-PACK_DIR="${PACK_DIR:-/mnt/system/raw/mts/pack1_page_analysis_v4}"
-OUT="${OUT:-/mnt/system/raw/mts/research_loose_rules}"
+PACK_DIR="${PACK_DIR:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v4}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/research_loose_rules}"
 JOBS="${JOBS:-16}"
 
 uv run python -m research.loose_rules features \

@@ -18,7 +18,7 @@
   табличные или со схемами (1971/09 с.80, 1968/01 с.75, 1973/08 с.19, 1969/11 с.69).
 - Прогон: `run_scripts/text_blocks/run_sides.sh`, около 2 с на полосу, код на коммите `1ae726e` плюс
   незакоммиченный `sides.py`.
-- Выход: `/mnt/system/raw/mts/curved_layout_sides/`
+- Выход: `/mnt/hotstore/scan_processing/mts/curved_layout_sides/`
   - `sides_{construct,rays,frame}/` и `align_{trend,tangent,robust}/` — по оверлею на полосу;
   - `compare/<полоса>_sides.jpg` и `compare/<полоса>_align.jpg` — три метода рядом;
   - `pages/*.json` — метки, углы, меры и концы строк;

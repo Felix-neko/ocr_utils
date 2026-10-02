@@ -41,7 +41,7 @@ MIN_COMPONENT_AREA = 10
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32) * 255.0
 STD = np.array([0.229, 0.224, 0.225], dtype=np.float32) * 255.0
 
-DEFAULT_ROOT = "/home/felix/Projects/mts_markup/line_axis_engines"
+DEFAULT_ROOT = "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines"
 
 
 def parse_args() -> argparse.Namespace:

@@ -10,7 +10,7 @@
 
 ## Стенд и данные
 
-* Пак-1, разбор v4 (`/mnt/system/raw/mts/pack1_page_analysis_v4`): объекты, надписи и линейки — из его JSON,
+* Пак-1, разбор v4 (`/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v4`): объекты, надписи и линейки — из его JSON,
   текстовые блоки пересчитываются (`pack_analysis.final.reblock_page`, `--axis body --gutter-mode short`) по
   заострённым копиям `SHARPENED_DIR`.
 * Код: HEAD 5c9350b (перескоки строк уже в основном коде). Стенд — `research/heading_merge`, прогон —
@@ -18,7 +18,7 @@
 * Выборки (`research/heading_merge/sets`): **C** — 47 подтверждённых глазами полос (48 случаев с типом,
   `cases.tsv`); **P** — все 322 полосы с кандидатами меры по паку (C входит); **N** — 300 случайных полос без
   кандидатов.
-* Выход: `/mnt/system/raw/mts/pack1_heading_merge/bench2` — `base/`, `full/` (оверлеи, JSON, `summary.csv`),
+* Выход: `/mnt/hotstore/scan_processing/mts/pack1_heading_merge/bench2` — `base/`, `full/` (оверлеи, JSON, `summary.csv`),
   `compare_base_full/` (`compare.csv`, склейки «было | стало» по C, P, N, листы `sheets_*_big`), трассировки
   `trace_*.tsv`. Замер по всему паку (12 135 полос) — `joints.csv` (645 тыс. рядов), кандидаты — `cand_b.csv`.
 
@@ -92,7 +92,7 @@ N глазами (все 9 изменённых, 7 из них со сдвиго
 * `segment.split_segment` — в конце `segments_of`;
 * `baseline_axis.extend_to_ink` — продление не заходит на глиф оси другой базовой линии (`_foreign_glyphs`, `_hits_foreign`).
 
-Проверка (стенд, `~/Projects/mts_markup/pack1_heading_merge/bench3`, до — снимок 04b2ea0): C стыков 66 → 0 (все типы 0),
+Проверка (стенд, `/mnt/hotstore/scan_processing/mts_markup/pack1_heading_merge/bench3`, до — снимок 04b2ea0): C стыков 66 → 0 (все типы 0),
 P полос со стыками 263 → 216, N изменилось 9 (7 заметно, те же полосы, что у стенда) — числа совпали с вариантом FULL.
 Тесты `tests/ocr_utils/page_layout/text_blocks/test_typeset.py` (9); все тесты `text_blocks` и `pack_analysis` проходят.
 Разбор пака v4 не пересчитан.

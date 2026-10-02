@@ -11,12 +11,12 @@
 * ``<png>`` — страница (градации серого или цвет), лучше 300 dpi: этот dpi Laypa принимает по умолчанию;
 * ``<out.json>`` — куда записать результат;
 * ``[каталог модели]`` — каталог с ``config.yaml`` и ``model_best_mIoU.pth`` (по умолчанию — общая модель
-  ``baseline2`` в ``~/Projects/mts_markup/line_axis_engines/models/laypa/baseline2``);
+  ``baseline2`` в ``/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/laypa/baseline2``);
 * ``--gpu`` — передать докеру ``--gpus all``; без флага модель считается на CPU (у Rancher Desktop проброса
   видеокарты нет, а на CPU страница идёт за несколько секунд).
 
 Рабочие файлы кладутся во временный каталог под ``LAYPA_WORK_ROOT`` (по умолчанию
-``~/Projects/mts_markup/line_axis_engines/laypa/tmp``): его должна видеть виртуальная машина докера.
+``/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/laypa/tmp``): его должна видеть виртуальная машина докера.
 
 Выход: ``{"lines": [{"baseline": [[x, y], …], "boundary": [[x, y], …], "centre": [], "height": 0,
 "x_height": h}], "regions": [[[x, y], …]], "meta": {"model": …, "device": "cpu|cuda", "seconds": …}}``.
@@ -34,7 +34,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Каталоги по умолчанию: модель и корень для временных каталогов (оба — на SSD, видимом докеру).
-ENGINES_ROOT = Path.home() / "Projects" / "mts_markup" / "line_axis_engines"
+ENGINES_ROOT = Path("/mnt/hotstore/scan_processing/mts_markup/line_axis_engines")
 DEFAULT_MODEL_DIR = ENGINES_ROOT / "models" / "laypa" / "baseline2"
 DEFAULT_WORK_ROOT = ENGINES_ROOT / "laypa" / "tmp"
 

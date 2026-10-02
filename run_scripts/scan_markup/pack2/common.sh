@@ -39,14 +39,13 @@ DEBUG_DIR="$PACK_WORK/debug"
 # Кэш surya layout (ocr_utils.page_layout.surya.SuryaCache): <корень>/<вариант>/<полоса>.json, см.
 # пак-1. Вариант scan перенесён из старого pickle-кэша (591 полоса, 2026-09-21); остальное
 # набивает detect сам (модель зовётся на полосу без записи, ~1 с GPU) либо `page_layout prefill-surya`.
-LAYOUT_CACHE_DIR="/mnt/system/raw/mts/pack2_page_layout"
+LAYOUT_CACHE_DIR="/mnt/hotstore/scan_processing/mts/pack2_page_layout"
 
 # Очистка пака (шаг 7): закрас разметки и размытие фона. Результат — на SSD, а не на
 # /mnt/dump3: корень /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы
 # поверх исходных. Объём небольшой: ~5 ГиБ (597 полос, почти все в сером по ~8 МиБ).
-# Регистр в /mnt/system ЗНАЧИМ: с 2026-09-20 том смонтирован как /mnt/system строчными;
-# прежний /mnt/SYSTEM заглавными больше не существует.
-CLEAN_ROOT="/mnt/system/raw/mts/pack2_background_blurred"
+# Промежуточные файлы — на отдельном SSD /mnt/hotstore (перенесены с /mnt/system/raw 2026-10-01).
+CLEAN_ROOT="/mnt/hotstore/scan_processing/mts/pack2_background_blurred"
 BLURRED_DIR="$CLEAN_ROOT/blurred"
 CLEAN_DEBUG_DIR="$CLEAN_ROOT/debug"
 

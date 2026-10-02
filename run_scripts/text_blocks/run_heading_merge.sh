@@ -31,8 +31,8 @@ set -m
 trap 'kill -- -$$ 2>/dev/null || true' EXIT INT TERM
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-$HOME/Projects/mts_markup/pack1_heading_merge/bench}"
-PACK="${PACK:-/mnt/system/raw/mts/pack1_page_analysis_v4}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts_markup/pack1_heading_merge/bench}"
+PACK="${PACK:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v4}"
 NAME="${NAME:-after}"
 BEFORE="${BEFORE:-base}"
 STEP="${STEP:-all}"

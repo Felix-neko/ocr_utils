@@ -17,6 +17,15 @@ PACK_NAME="пак-1"
 # ощутимо медленнее. Объём небольшой: ~12 тыс. превью по 75 dpi плюс отладочные оверлеи.
 MARKUP_ROOT="/home/felix/Projects/mts_markup"
 
+# Промежуточные файлы обработки (очистка, PDF, стенды, разборы) — на отдельном SSD 4 ТБ /mnt/hotstore
+# (NTFS через ntfs-3g), перенесены туда 2026-10-01 с /mnt/system/raw и из тяжёлых каталогов MARKUP_ROOT,
+# чтобы разгрузить системные SSD Linux и Windows. Раскладка зеркальная: /mnt/system/raw/<X> → $HOT_ROOT/<X>,
+# MARKUP_ROOT/<выход стенда> → $HOT_MARKUP_ROOT/<выход стенда>. В MARKUP_ROOT остались базы, cvat_share,
+# кэш layout, toc, validate, debug, compare.
+HOT_ROOT="/mnt/hotstore/scan_processing"
+HOT_MTS_ROOT="$HOT_ROOT/mts"
+HOT_MARKUP_ROOT="$HOT_ROOT/mts_markup"
+
 DB="$MARKUP_ROOT/pack1.sqlite"
 DB_REVIEWED="$MARKUP_ROOT/pack1_reviewed.sqlite"
 DEBUG_DIR="$MARKUP_ROOT/debug"
@@ -28,7 +37,7 @@ DEBUG_DIR="$MARKUP_ROOT/debug"
 # (pack1_table_research/layout_surya_готовое и layout_surya, 2026-09-21) записями legacy —
 # полны на все 12 135 полос; fr_* набиваются `page_layout prefill-surya` (~0.7 с GPU на страницу).
 # detect берёт разметку отсюда и модель не зовёт, а полосу без записи размечает и дописывает сюда же.
-LAYOUT_CACHE_DIR="$MARKUP_ROOT/pack1_page_layout"  # перенесён с /mnt/system 2026-09-29 (там ссылка сюда)
+LAYOUT_CACHE_DIR="$MARKUP_ROOT/pack1_page_layout"
 
 # Оглавления (шаг 1, команда toc): признаки полос окна, контактные листы для разметки эталона
 # и списки полос оглавления по выпускам для внешнего OCR (--pages / --skip-pages).
@@ -41,12 +50,11 @@ TOC_LABELS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/toc_labels.csv"
 CASES_DIR="$MARKUP_ROOT/некоторые проблемные картинки"
 VALIDATE_DIR="$MARKUP_ROOT/validate"
 
-# Очистка пака (шаги 5-7): закрас разметки и размытие фона. Результат — на SSD, а не
+# Очистка пака (шаги 5-7): закрас разметки и размытие фона. Результат — на SSD hotstore, а не
 # на /mnt/dump3: выход весит примерно столько же, сколько вход (~300 ГиБ), и писать его
 # на шпиндельный NTFS-3G значило бы упереться в диск на всём прогоне. Плюс корень
 # /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы поверх исходных.
-# Регистр в /mnt/system ЗНАЧИМ: с 2026-09-20 том смонтирован как /mnt/system строчными; прежний /mnt/SYSTEM заглавными больше не существует.
-CLEAN_ROOT="/mnt/system/raw/mts/pack1_background_blurred_v2"
+CLEAN_ROOT="$HOT_MTS_ROOT/pack1_background_blurred_v2"
 BLURRED_DIR="$CLEAN_ROOT/blurred"
 CLEAN_DEBUG_DIR="$CLEAN_ROOT/debug"
 
@@ -56,7 +64,7 @@ SHARPENED_DIR="$CLEAN_ROOT/sharpened"
 
 # Промежуточные PDF под FineReader: по паку, а не по годам — распознание идёт пакетом по
 # папке, и раскладка по годам означала бы одиннадцать отдельных заданий вместо одного.
-PDF_ROOT="/mnt/system/raw/mts/pack1_pdf"
+PDF_ROOT="$HOT_MTS_ROOT/pack1_pdf"
 FULL_PDF_DIR="$PDF_ROOT/full_intermediate_pdfs"
 PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
 
@@ -68,25 +76,25 @@ GEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening"
 NOGEO_PDF_DIR="$PDF_ROOT/full_pdfs_binary_no_bg_brightening_no_geometry_correction"
 
 # Финальные PDF ({год}/{год}_{выпуск}.pdf, по папке на год) и рабочий каталог сборщика
-# (JSON анализа на страницу, CSV, превью) — SSD. Сборка — run_final_pdfs.sh здесь же.
+# (JSON анализа на страницу, CSV, превью) — SSD hotstore. Сборка — run_final_pdfs.sh здесь же.
 FINAL_PDF_DIR="$PDF_ROOT/final_pdfs"
-FINAL_WORK_DIR="/mnt/system/raw/mts/pack1_final_pdfs_work"
+FINAL_WORK_DIR="$HOT_MTS_ROOT/pack1_final_pdfs_work"
 
 # Прогон детектора порчи геометрии по паку (run_scripts/geometry_regression): сборщик финальных
 # PDF берёт cache/<pdf>/pNNN.json той же версии детектора как есть, страницы без записи меряет
 # на месте (~3 с) и дописывает в этот же кэш. Перекрыть можно переменной окружения:
 # GEOMETRY_RUN_DIR=... ./run_final_pdfs.sh
-GEOMETRY_REGRESSION_ROOT="/mnt/system/raw/mts/pack1_geometry_regression"
+GEOMETRY_REGRESSION_ROOT="$HOT_MTS_ROOT/pack1_geometry_regression"
 GEOMETRY_RUN_DIR="${GEOMETRY_RUN_DIR:-$GEOMETRY_REGRESSION_ROOT/pack1_v14}"
 
 # Боевой детектор порчи геометрии v18 (ocr_utils.geometry_regression.quality, с 2026-09-30) — его вердикт берёт
-# сборщик финальных PDF. Три входа, все — прогоны 2026-09-30 на домашнем SSD (/mnt/system заполнен):
+# сборщик финальных PDF. Три входа, все — прогоны 2026-09-30, лежат на SSD hotstore:
 # * разбор page_layout обоих PDF (line art, текстовые блоки; run_scripts/page_layout/run_pack1_analysis_v6_fr.sh);
 # * прогон движка v16 (поле смещений, штрихи, line art, фото; run_scripts/geometry_regression/run_pack1_v15.sh);
 # * прогон v18 (строки и края блоков по разбору, меры по плотному полю; run_scripts/geometry_quality/run_pack1_v18.sh).
-GEOMETRY_LAYOUT_ROOT="${GEOMETRY_LAYOUT_ROOT:-$MARKUP_ROOT/pack1_page_analysis_v7_fr}"
-GEOMETRY_V16_DIR="${GEOMETRY_V16_DIR:-$MARKUP_ROOT/pack1_geometry_quality/pack1_v16_20260930}"
-GEOMETRY_V18_DIR="${GEOMETRY_V18_DIR:-$MARKUP_ROOT/pack1_geometry_quality/pack1_v18_20260930}"
+GEOMETRY_LAYOUT_ROOT="${GEOMETRY_LAYOUT_ROOT:-$HOT_MARKUP_ROOT/pack1_page_analysis_v7_fr}"
+GEOMETRY_V16_DIR="${GEOMETRY_V16_DIR:-$HOT_MARKUP_ROOT/pack1_geometry_quality/pack1_v16_20260930}"
+GEOMETRY_V18_DIR="${GEOMETRY_V18_DIR:-$HOT_MARKUP_ROOT/pack1_geometry_quality/pack1_v18_20260930}"
 
 # Сравнения параметров — рядом с рабочими файлами разметки: их смотрят глазами, они
 # невелики и живут ровно до выбора параметров.

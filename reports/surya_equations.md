@@ -18,7 +18,7 @@
 - **Кэш surya:** `LAYOUT_CACHE_DIR/sharpened`, импорт старых pickle (`legacy`). Кадр 150 dpi, JPEG — 600 dpi (масштаб 4.0).
 - **Подсказки:** markdown DeepSeek V4.1 Flash (`EXTERNAL_OCR_SERVICES_PAGES`). Выносная формула там — `$$…$$`, строчная — `$…$`. Это только подсказки: координат у DeepSeek нет, и `$$` бывает и ложным, и пропущенным (см. ниже).
 - **Стенд:** `research/surya_equations` (`python -m research.surya_equations collect|sample|view|snap|verdict|evaluate|overlays`), прогон — `run_scripts/surya_equations/run_surya_equations.sh`. Весь прогон занимает меньше минуты, `--jobs 16`. Код — поверх `6f3ccb5`.
-- **Выход на SSD:** `/mnt/system/raw/mts/pack1_surya_equations/`:
+- **Выход на SSD:** `/mnt/hotstore/scan_processing/mts/pack1_surya_equations/`:
   - `pages.csv` — 12 135 строк: боксы, `$$`, слой;
   - `eval_blocks.csv` — 95 блоков эталона;
   - `eval_boxes.csv` — 80 боксов surya;

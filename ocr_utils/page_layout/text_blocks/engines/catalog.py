@@ -14,7 +14,7 @@ from pathlib import Path
 from ocr_utils.page_layout.text_blocks.engines.generic import WorkerSpec
 
 # Корень окружений и моделей движков из сравнения 2026-09-25.
-LINE_ENGINES_ROOT = Path.home() / "Projects" / "mts_markup" / "line_axis_engines"
+LINE_ENGINES_ROOT = Path("/mnt/hotstore/scan_processing/mts_markup/line_axis_engines")
 MODELS = LINE_ENGINES_ROOT / "models"
 
 

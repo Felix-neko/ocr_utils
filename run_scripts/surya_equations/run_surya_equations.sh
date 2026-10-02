@@ -21,7 +21,7 @@ set -m
 trap 'kill -- -$$' EXIT INT TERM
 source "$(dirname "$0")/../external_ocr_services/common.sh"
 
-OUT="/mnt/system/raw/mts/pack1_surya_equations"
+OUT="/mnt/hotstore/scan_processing/mts/pack1_surya_equations"
 OVERLAYS="$(dirname "$0")/../../reports/surya_equations"
 JOBS=16
 

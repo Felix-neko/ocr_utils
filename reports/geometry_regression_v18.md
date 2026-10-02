@@ -11,15 +11,15 @@
 ## Стенд и данные
 
 - Пак-1, 12 135 полос. Из них 930 с line art — объекты «рисунок» и «неясно» в разборе v6 без коррекции (опись
-  `~/Projects/mts_markup/pack1_geometry_v17_lineart_v2/index.csv`).
+  `/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v17_lineart_v2/index.csv`).
 - Вход: разбор `page_layout` v6 обоих вариантов, кэш v16 (поле смещений), оба PDF (рендер 150 dpi).
 - Код: `research/geometry_quality`, версия кэша `v18`. Коммит на момент прогона — `4f75ca2`, стенд в git ещё не
   внесён.
 - Прогон: `run_scripts/geometry_quality/run_pack1_v18.sh`, `--jobs 16`, около 3.5 мин на пак (медиана 0.56 с на
   страницу, p99 1.3 с). Теперь рендерится каждая страница, а не только страницы с рамками.
 - Сравнение: `run_scripts/geometry_quality/run_diff_v17_v18.sh`. Оба прогона оцениваются при одних порогах.
-- Итоговый прогон — `~/Projects/mts_markup/pack1_geometry_quality/pack1_v18f`. Оверлеи смен —
-  `~/Projects/mts_markup/pack1_geometry_v18_lineart_diff_f/`.
+- Итоговый прогон — `/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_quality/pack1_v18f`. Оверлеи смен —
+  `/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v18_lineart_diff_f/`.
 - Промежуточные прогоны `pack1_v18` … `pack1_v18e` и `pack1_geometry_v18_lineart_diff{,_c,_d,_e}` оставлены от
   отладки. Код в них старый, а версия кэша та же, поэтому их нужно удалить.
 

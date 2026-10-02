@@ -14,7 +14,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../scan_markup/pack1/common.sh"
 # раскладка {год}/{выпуск}/полоса.{md,json,meta.json}, что у входа, плюс toc.json/toc.md и sidecar
 # {год}_{выпуск}.pages.json на выпуск, summary.csv, run.log, списки) и выпуски — только конечные md
 # {год}/{год}_{выпуск}.md, больше там ничего нет.
-EXTERNAL_OCR_SERVICES_ROOT="/mnt/system/raw/mts/pack1_external_ocr_services"
+EXTERNAL_OCR_SERVICES_ROOT="/mnt/hotstore/scan_processing/mts/pack1_external_ocr_services"
 EXTERNAL_OCR_SERVICES_PAGES="$EXTERNAL_OCR_SERVICES_ROOT/pages"
 EXTERNAL_OCR_SERVICES_OUT="$EXTERNAL_OCR_SERVICES_ROOT/out"
 # Сырые ответы модели, промпты и отправленные тайлы — по полосе; полезно при разборе сбоев

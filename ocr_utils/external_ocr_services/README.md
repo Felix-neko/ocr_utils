@@ -10,11 +10,11 @@
 
 ```bash
 uv run python -m ocr_utils.external_ocr_services run \
-    --in-dir /mnt/system/raw/mts/pack1_background_blurred_v2/sharpened \
-    --pages-dir /mnt/system/raw/mts/pack1_external_ocr_services/pages \
-    --issues-dir /mnt/system/raw/mts/pack1_external_ocr_services/out \
-    --debug-dir /mnt/system/raw/mts/pack1_external_ocr_services/debug \
-    --cache-dir /mnt/system/raw/mts/pack1_external_ocr_services/cache \
+    --in-dir /mnt/hotstore/scan_processing/mts/pack1_background_blurred_v2/sharpened \
+    --pages-dir /mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/pages \
+    --issues-dir /mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/out \
+    --debug-dir /mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/debug \
+    --cache-dir /mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/cache \
     --db ~/Projects/mts_markup/pack1_reviewed.sqlite --pack-name пак-1 \
     --only-year 1966 --only-issue 03 \
     --source "журнал «Материально-техническое снабжение», Москва, 1966–1976" \

@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../geometry_regression/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-OUT="${OUT:-/mnt/system/raw/mts/curved_layout_validation/tables_and_nontext}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/curved_layout_validation/tables_and_nontext}"
 PAGES="${PAGES:-full_1975_05:99,full_1968_01:54,full_1971_09:80,full_1974_07:78,full_1973_10:51,full_1976_07:19,full_1973_01:84,full_1974_11:45,full_1969_11:69,full_1970_06:62,full_1966_03:34,full_1970_01:19,full_1973_08:19,full_1973_08:24,full_1967_07:73,full_1968_01:75,full_1971_11:59,full_1969_06:44,full_1969_02:43,full_1974_11:50,full_1972_09:13}"
 
 uv run python -m ocr_utils.page_layout.text_blocks analyze \

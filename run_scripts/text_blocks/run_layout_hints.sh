@@ -17,10 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../geometry_regression/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-OUT="${OUT:-/mnt/system/raw/mts/curved_layout_hints}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/curved_layout_hints}"
 LAYOUT_CACHE="${LAYOUT_CACHE_DIR:-/home/felix/Projects/mts_markup/pack1_page_layout}"
 # Кэш text_layer_fix: ячейки таблиц и поворот текста в них (123 выпуска пака-1).
-TEXT_LAYER_CACHE="${TEXT_LAYER_CACHE:-/mnt/system/raw/mts/pack1_text_layer_fix/pack1_v2/cache}"
+TEXT_LAYER_CACHE="${TEXT_LAYER_CACHE:-/mnt/hotstore/scan_processing/mts/pack1_text_layer_fix/pack1_v2/cache}"
 # Боковой текст на схемах и в таблицах, блок-схемы, крупные чертежи.
 PAGES="${PAGES:-full_1974_11:50,full_1969_02:43,full_1972_09:13,full_1973_08:19,full_1967_07:73,full_1968_01:75,full_1971_11:59,full_1975_05:99,full_1970_06:62}"
 

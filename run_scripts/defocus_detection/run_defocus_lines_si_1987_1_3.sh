@@ -42,7 +42,7 @@ set -euo pipefail
 # репозитория — поднимаемся на два уровня.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/system/raw/SI/208_FUJI СИ 1987 04-06/"
+INPUT_DIR="/mnt/hotstore/scan_processing/SI/208_FUJI СИ 1987 04-06/"
 BASE_NAME="defocus_lines_si_87_4_6"
 
 REPORT_TXT="${BASE_NAME}.txt"

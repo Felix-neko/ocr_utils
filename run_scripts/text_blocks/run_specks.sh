@@ -13,7 +13,7 @@
 #     while kill -0 "$PID" 2>/dev/null; do sleep 30; done
 
 set -euo pipefail
-OUT="${OUT:-/mnt/system/raw/mts/text_block_specks}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/text_block_specks}"
 JOBS="${JOBS:-16}"
 
 PYTHONPATH=. uv run python -W ignore -m research.text_block_specks scan --out-dir "$OUT/scan" --jobs "$JOBS" "$@"

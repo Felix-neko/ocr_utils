@@ -25,8 +25,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-/mnt/system/raw/mts/pack1_gutter_crossing}"
-PACK="${PACK:-/mnt/system/raw/mts/pack1_page_analysis_v3}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/pack1_gutter_crossing}"
+PACK="${PACK:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v3}"
 JOBS="${JOBS:-16}"
 STEP="${STEP:-all}"
 

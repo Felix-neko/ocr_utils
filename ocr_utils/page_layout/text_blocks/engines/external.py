@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 # Корень окружений по умолчанию: рядом с данными пака, а не в репозитории.
-ENGINES_ROOT = Path("/mnt/system/raw/mts/curved_layout_engines")
+ENGINES_ROOT = Path("/mnt/hotstore/scan_processing/mts/curved_layout_engines")
 WORKERS = Path(__file__).parent / "workers"
 
 

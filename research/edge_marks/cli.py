@@ -14,8 +14,8 @@ import pandas as pd
 from research.text_block_specks.pages import NOGEO_DIR
 
 # Прошлый стенд соринок: концы строк всего пака и его разметка.
-SPECKS_DIR = Path("/mnt/system/raw/mts/text_block_specks")
-OUT_DIR = Path("/mnt/system/raw/mts/pack1_edge_marks")
+SPECKS_DIR = Path("/mnt/hotstore/scan_processing/mts/text_block_specks")
+OUT_DIR = Path("/mnt/hotstore/scan_processing/mts/pack1_edge_marks")
 # Сторона выровнена: доля концов «на кривой» не меньше этой.
 ALIGNED_SHARE = 0.8
 # Выброс наружу, мм: пояс, где встречается сор (дальше — почти всегда законная вёрстка, прошлый стенд).
@@ -112,11 +112,11 @@ JUDGES: dict[str, list[str]] = {
     "rule": ["uv", "run", "python", "-m", "research.edge_marks.judges.rule"],
     "tesseract": ["uv", "run", "python", "-m", "research.edge_marks.judges.tess"],
     "deepseek": ["uv", "run", "python", "-m", "research.edge_marks.judges.deepseek"],
-    "craft": ["/home/felix/Projects/mts_markup/line_axis_engines/craft/bin/python", "research/edge_marks/workers/craft_judge.py", "--fp16"],
-    "doctr": ["/home/felix/Projects/mts_markup/line_axis_engines/doctr/bin/python", "research/edge_marks/workers/doctr_judge.py"],
-    "pero": ["/mnt/system/raw/mts/curved_layout_engines/pero/bin/python", "research/edge_marks/workers/pero_judge.py"],
+    "craft": ["/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/craft/bin/python", "research/edge_marks/workers/craft_judge.py", "--fp16"],
+    "doctr": ["/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/doctr/bin/python", "research/edge_marks/workers/doctr_judge.py"],
+    "pero": ["/mnt/hotstore/scan_processing/mts/curved_layout_engines/pero/bin/python", "research/edge_marks/workers/pero_judge.py"],
     "surya": ["uv", "run", "python", "-m", "research.edge_marks.judges.surya_judge"],
-    "paddle": ["/home/felix/Projects/mts_markup/line_axis_engines/paddle/bin/python", "research/edge_marks/workers/paddle_judge.py"],
+    "paddle": ["/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/paddle/bin/python", "research/edge_marks/workers/paddle_judge.py"],
 }
 
 
@@ -214,9 +214,9 @@ def guard_jobs(pages_set: str) -> list:
 
 # Воркеры карт детекторов второго прохода: интерпретатор окружения и скрипт.
 MAP_WORKERS = {
-    "craft": ["/home/felix/Projects/mts_markup/line_axis_engines/craft/bin/python", "research/edge_marks/workers/craft_maps.py", "--fp16"],
-    "pero": ["/mnt/system/raw/mts/curved_layout_engines/pero/bin/python", "research/edge_marks/workers/pero_maps.py"],
-    "doctr": ["/home/felix/Projects/mts_markup/line_axis_engines/doctr/bin/python", "research/edge_marks/workers/doctr_maps.py"],
+    "craft": ["/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/craft/bin/python", "research/edge_marks/workers/craft_maps.py", "--fp16"],
+    "pero": ["/mnt/hotstore/scan_processing/mts/curved_layout_engines/pero/bin/python", "research/edge_marks/workers/pero_maps.py"],
+    "doctr": ["/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/doctr/bin/python", "research/edge_marks/workers/doctr_maps.py"],
 }
 
 
@@ -263,7 +263,7 @@ def detector_maps(jobs: list, engines: set, maps_dir: Path, base: Path) -> None:
                    "выступы, оставшиеся по итогу, помечаются всегда")  # fmt: skip
 @click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), default=OUT_DIR / "guard")
 @click.option("--layout-cache", type=click.Path(exists=True, file_okay=False, path_type=Path),
-              default=Path("/mnt/system/raw/mts/pack1_page_layout"))  # fmt: skip
+              default=Path("/mnt/hotstore/scan_processing/mts/pack1_page_layout"))  # fmt: skip
 @click.option("--bump-mm", type=float, default=None, help="порог выступа, мм (по умолчанию anomaly.BUMP_MM)")
 @click.option("--jobs", type=int, default=16, show_default=True, help="процессов разбора (CPU)")
 def guard(pages_set: str, passes: tuple[str, ...], out_dir: Path, layout_cache: Path, bump_mm: float | None,

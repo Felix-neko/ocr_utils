@@ -11,12 +11,12 @@
 
 ## Стенд и данные
 
-* Пак-1, разбор v4 (`/mnt/system/raw/mts/pack1_page_analysis_v4/pages/*.json`): 12 135 полос, сироты есть
+* Пак-1, разбор v4 (`/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v4/pages/*.json`): 12 135 полос, сироты есть
   на 6 023, всего 9 334 (7 884 горизонтали, 1 450 вертикалей).
 * Картинки — `$SHARPENED_DIR` (`pack1_background_blurred_v2/sharpened`), признаки на рабочей копии
   детектора таблиц 150 dpi, та же бинаризация (`ruling.binarize`).
 * 16 воркеров: признаки ~4 мин, пересчёт блоков 949 полос ~15 мин. Код на `3250433` + стенд.
-* Прогон: `run_scripts/text_blocks/run_loose_rules.sh`. Выход: `/mnt/system/raw/mts/research_loose_rules/`
+* Прогон: `run_scripts/text_blocks/run_loose_rules.sh`. Выход: `/mnt/hotstore/scan_processing/mts/research_loose_rules/`
   (`features.csv` — 9 334 строки, `eval/verdicts.csv`, `compare/compare.csv` — 949 строк, `compare/pages/`).
 * Разметка глазами: `research/loose_rules/sets/labels.csv`, 289 сирот из 11 листов по поясам признаков
   (`reports/loose_rules/листы/`).

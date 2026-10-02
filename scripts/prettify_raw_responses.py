@@ -8,7 +8,7 @@ JSON, иногда в ограждении ```json и с хвостом. Теп�
 появляется ``.raw.json``, а ``.raw.txt`` удаляется; не разобрался — файл не трогается.
 
 Запуск:
-    uv run python scripts/prettify_raw_responses.py /mnt/system/raw/mts/pack1_external_ocr_services/debug
+    uv run python scripts/prettify_raw_responses.py /mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/debug
     uv run python scripts/prettify_raw_responses.py <папка> --dry-run   # только посчитать, ничего не писать
 """
 

@@ -11,13 +11,13 @@
 ## Стенд и данные
 
 - Пак-1, разбор v6 по обоим полным PDF FineReader (без коррекции геометрии и с ней):
-  `/home/felix/Projects/mts_markup/pack1_page_analysis_v6_fr/{nogeo,geo}` — по 12 135 полос; кандидатов line art
+  `/mnt/hotstore/scan_processing/mts_markup/pack1_page_analysis_v6_fr/{nogeo,geo}` — по 12 135 полос; кандидатов line art
   1890 и 1866, из них рисунками или «неясно» стали 1191 и 1201.
 - Решение пересчитывается **без GPU** по готовому выводу DeepSeek (`work/deepseek/pass{1,2}`), вырезкам
   (`work/crops`) и записям стадии кандидатов (`work/pages`): `stages.decide_candidates`.
 - Код: коммит `4f39abe` + стенд `research/margin_marks` (`features`, `contact`, `replay`, `rule.py`), разметка —
-  `research/margin_marks/sets/labels.csv`. Признаки: `/home/felix/Projects/mts_markup/margin_marks/features.csv`
-  (2392 строки), пересчёт: `/home/felix/Projects/mts_markup/margin_marks/replay.csv` (3756 строк).
+  `research/margin_marks/sets/labels.csv`. Признаки: `/mnt/hotstore/scan_processing/mts_markup/margin_marks/features.csv`
+  (2392 строки), пересчёт: `/mnt/hotstore/scan_processing/mts_markup/margin_marks/replay.csv` (3756 строк).
 - Время: признаки — 1.5 мин, пересчёт всех кандидатов обоих вариантов — 4 мин (16 воркеров).
 
 ## Как пометка становится рисунком
@@ -54,7 +54,7 @@ DeepSeek на первом проходе видит на вырезке тол�
 ## Результат
 
 **Выборка.** Отсмотрено глазами около 400 кандидатов (мозаики «вырезка | залитая» в
-`/home/felix/Projects/mts_markup/margin_marks/contact_*`): все с тонким остатком (до 0.55 мм, 75 + 80), все с
+`/mnt/hotstore/scan_processing/mts_markup/margin_marks/contact_*`): все с тонким остатком (до 0.55 мм, 75 + 80), все с
 толстым остатком без рубричных заставок (26), кандидаты варианта с коррекцией, которых нет без неё (31), первые
 300 по «похожести на пометку». Пометок нашлось **16** (6 + 9 по вариантам и одна спорная — наклонная линия с
 сужающимся концом 1966/05 с.86): волнистые подчёркивания строк, скобка с подчёркиванием, дуги через колонку.
@@ -72,7 +72,7 @@ DeepSeek на первом проходе видит на вырезке тол�
 
 Пойманы все 15 пометок разметки; спорная 1966/05 с.86 оставлена рисунком (волнистость 0.07 — как у печатной
 линии). Ложное срабатывание одно — и это тоже ложный рисунок (мусор скана), ценного не теряется. Мозаики смен:
-`/home/felix/Projects/mts_markup/margin_marks/changes_{nogeo,geo}/sheet_00.jpg`.
+`/mnt/hotstore/scan_processing/mts_markup/margin_marks/changes_{nogeo,geo}/sheet_00.jpg`.
 
 ## Что нашлось попутно
 

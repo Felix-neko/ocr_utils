@@ -154,14 +154,14 @@ def check_disks(command: str, simple: list[list[str]]) -> None:
         if t.startswith(YANDEX_ROOT):
             deny(
                 f"Запись в «{t}»: это корень живой синхронизации Яндекс.Диска, демон переименует новый файл поверх "
-                "исходника скана (уже терялись оригиналы). Результаты писать на /mnt/system или в ~/Projects/mts_markup, "
+                "исходника скана (уже терялись оригиналы). Результаты писать в /mnt/hotstore/scan_processing или в ~/Projects/mts_markup, "
                 "внутрь переносит пользователь руками при остановленном демоне. См. docs/data_layout.md."
             )
     for t in targets:
         if t.startswith(DUMP3):
             ask(
-                f"Запись в «{t}» на /mnt/dump3 — это медленный NTFS-3G на шпинделе, выход прогона обычно кладут на "
-                "/mnt/system. Подтвердите, если запись туда действительно нужна."
+                f"Запись в «{t}» на /mnt/dump3 — это медленный NTFS-3G на шпинделе, выход прогона обычно кладут в "
+                "/mnt/hotstore/scan_processing. Подтвердите, если запись туда действительно нужна."
             )
 
     for argv in simple:

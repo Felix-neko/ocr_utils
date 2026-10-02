@@ -12,8 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 source run_scripts/geometry_regression/common.sh
 
-OUT="${OUT:-/mnt/system/raw/mts/text_block_specks/engines}"
-SET="${SET:-/mnt/system/raw/mts/text_block_specks/eval_pages.json}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/text_block_specks/engines}"
+SET="${SET:-/mnt/hotstore/scan_processing/mts/text_block_specks/eval_pages.json}"
 ENGINES=(ink pero paddle6 kraken surya eynollah)
 if [ "$#" -gt 0 ]; then ENGINES=("$@"); fi
 

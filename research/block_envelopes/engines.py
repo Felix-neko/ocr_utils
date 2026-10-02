@@ -14,7 +14,7 @@ from ocr_utils.page_layout.pack_analysis.stages import PageTask, load_image
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 
 # Кэш surya layout заострённых сканов пака-1 (``page_layout prefill-surya``).
-SURYA_CACHE = Path("/mnt/system/raw/mts/pack1_page_layout/sharpened")
+SURYA_CACHE = Path("/mnt/hotstore/scan_processing/mts/pack1_page_layout/sharpened")
 
 
 class EngineKind(str, Enum):

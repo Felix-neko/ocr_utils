@@ -19,7 +19,7 @@
 set -euo pipefail
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-OUT="/mnt/system/raw/mts/pack1_line_art_titles"
+OUT="/mnt/hotstore/scan_processing/mts/pack1_line_art_titles"
 JOBS=16
 
 uv run python -m research.line_art_titles detect \

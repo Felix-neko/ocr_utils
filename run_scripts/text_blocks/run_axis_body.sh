@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-/mnt/system/raw/mts/text_blocks_axis_body}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/text_blocks_axis_body}"
 KEYS="$OUT/control.txt"
 mkdir -p "$OUT"
 cat > "$KEYS" <<'LIST'

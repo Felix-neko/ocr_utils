@@ -18,8 +18,8 @@ surya layout) в один подпакет `ocr_utils/page_layout` с одним
   `line_art_schema` на 207 страницах + 200 контрольных (`text_layer_fix eval-lineart`),
   190 полос детектора таблиц, выборка текстового слоя 1050 страниц (seed 7, 200 контрольных).
 * Пак-2: 597 полос, база `pack2.sqlite`, проект CVAT пересоздан.
-* Кэш surya: `/mnt/system/raw/mts/pack1_page_layout/{scan,sharpened,fr_nogeo,fr_geo}`,
-  `/mnt/system/raw/mts/pack2_page_layout/scan`; страницы PDF — ~0.7 с GPU на страницу
+* Кэш surya: `/mnt/hotstore/scan_processing/mts/pack1_page_layout/{scan,sharpened,fr_nogeo,fr_geo}`,
+  `/mnt/hotstore/scan_processing/mts/pack2_page_layout/scan`; страницы PDF — ~0.7 с GPU на страницу
   (при двух моделях на одном GPU ~1.2 стр/с), `--jobs 12`.
 * Код: `4fceeca` и далее (ветка `zonal_defocus_with_surya`), 2026-09-21.
 
@@ -81,7 +81,7 @@ ok→mixed 1, mixed→bad 1. У новых `bad` причины: lineart 6, bend
 parallel 2, hmean 2; у ушедших из `bad`: lineart 8, vtilt 7, bend 3, hmean 2, htilt 2 — то
 есть перемены там, где поменялись рамки (line art и таблицы от `page_layout`), а не в
 текстовых метриках. Пары «было | стало» v12 и v13 по каждой из 46 страниц:
-`~/Projects/mts_markup/pack1_page_layout_review/geometry_changed/<v12>_to_<v13>/`, список —
+`/mnt/hotstore/scan_processing/mts_markup/pack1_page_layout_review/geometry_changed/<v12>_to_<v13>/`, список —
 `geometry_v12_v13_changed.csv` там же. Это и есть «каждый изменившийся вердикт разобран
 глазами» — смотреть пользователю.
 
@@ -117,12 +117,12 @@ v14: разбор `page_layout` для геометрии ищет и растр
 
 v13→v14 сменили вердикт 92 страницы: новые `bad` — photo_tilt 21, photo_bend 10, vtilt 9
 (вертикали таблиц), прочее 5; ушедшие из `bad` — lineart 10, parallel 8, bend 8, htilt 4,
-прочее 9. Пары: `~/Projects/mts_markup/pack1_page_layout_review/geometry_changed_v13_v14/`,
+прочее 9. Пары: `/mnt/hotstore/scan_processing/mts_markup/pack1_page_layout_review/geometry_changed_v13_v14/`,
 CSV `geometry_v13_v14_changed.csv`. Кромки фото по паку: растр найден на 403 страницах,
 `photo_tilt` p90 2.5 мм, p95 5.5 мм; `photo_bend` p90 0.9, p95 1.5 мм — 31 новый `bad` по
 снимкам пользователь смотрит в общем просмотре v14.
 
-Просмотр v14 целиком (по запросу пользователя): `~/Projects/mts_markup/pack1_geometry_v14_review/`
+Просмотр v14 целиком (по запросу пользователя): `/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v14_review/`
 — `pairs/{bad,mixed,ok}/<год>/` все 12 135 пар, `validation/{bad,good}/` эталон парами с
 вердиктом v14 в имени; README там же.
 

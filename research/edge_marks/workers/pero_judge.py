@@ -22,7 +22,7 @@ import torch
 from pero_ocr.layout_engines.torch_parsenet import TorchParseNet
 from pero_ocr.ocr_engine.pytorch_ocr_engine import PytorchEngineLineOCR
 
-MODEL_DIR = Path("/mnt/system/raw/mts/curved_layout_engines/pero_model/pero_eu_cz_print_newspapers_2022-09-26")
+MODEL_DIR = Path("/mnt/hotstore/scan_processing/mts/curved_layout_engines/pero_model/pero_eu_cz_print_newspapers_2022-09-26")
 # Базовая линия ниже середины строки на столько x-высот; окно поиска по высоте ± столько x-высот.
 BASELINE_BELOW_XH, BASELINE_WINDOW_XH = 0.5, 0.6
 

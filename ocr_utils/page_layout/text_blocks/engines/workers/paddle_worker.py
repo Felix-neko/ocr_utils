@@ -17,7 +17,7 @@
 ``{"lines": [{"baseline": [], "boundary": [[x, y], …], "centre": [], "height": 0, "confidence": c}],
 "regions": [], "meta": {"model": …, "device": "cuda|cpu", "params": {…}, "seconds": t}}``
 в пикселях поданного изображения. Базовых линий и высот модель не даёт — поля пустые.
-Кэш весов — ``$PADDLE_PDX_CACHE_HOME`` (по умолчанию ``…/mts_markup/line_axis_engines/models/paddle``).
+Кэш весов — ``$PADDLE_PDX_CACHE_HOME`` (по умолчанию ``/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/paddle``).
 """
 
 import argparse
@@ -27,7 +27,7 @@ import sys
 import time
 
 # Кэш весов и проверку источника моделей надо задать до импорта paddleocr: paddlex читает их при импорте.
-os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/home/felix/Projects/mts_markup/line_axis_engines/models/paddle")
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/paddle")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 import numpy as np

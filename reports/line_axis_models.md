@@ -19,10 +19,10 @@
   постпроцесс `text_blocks` (сглаживание оси 0.6 высоты, межколонники наши, блоки), т. е. сравнивается
   именно поиск строк.
 - RTX 5060 Ti 16 ГБ; движки строго по одному. Код — `1ae726e` плюс правки этой сессии.
-- Выход: `/mnt/system/raw/mts/line_axis_models/text_and_toc/` — `pages/*.json` (338 разборов),
+- Выход: `/mnt/hotstore/scan_processing/mts/line_axis_models/text_and_toc/` — `pages/*.json` (338 разборов),
   `overlays/`, `grid/` (сетка «движок × полоса»), `curls/` (вырезки завитков всеми движками),
-  `scores_{all,geo,nogeo}.md`. Окружения моделей — `~/Projects/mts_markup/line_axis_engines/`
-  (kraken, pero, eynollah — по-прежнему в `/mnt/system/raw/mts/curved_layout_engines/`).
+  `scores_{all,geo,nogeo}.md`. Окружения моделей — `/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/`
+  (kraken, pero, eynollah — по-прежнему в `/mnt/hotstore/scan_processing/mts/curved_layout_engines/`).
 
 ## Какие модели нашлись и что они отдают
 

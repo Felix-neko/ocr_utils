@@ -25,8 +25,8 @@
 set -euo pipefail
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-# Папку выхода можно переопределить: OUT=/mnt/system/raw/mts/pack1_page_analysis_v2 bash …
-OUT="${OUT:-/mnt/system/raw/mts/pack1_page_analysis}"
+# Папку выхода можно переопределить: OUT=/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v2 bash …
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis}"
 JOBS=16
 
 uv run python -m ocr_utils.page_layout analyze-pack \

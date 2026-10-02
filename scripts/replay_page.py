@@ -15,14 +15,14 @@ JSON, ``reasoning.effort none``, разбор, теги из ``edge_words``, д�
     # 2 повтора мини-набора повреждённых полос текущими промптами (PROMPT_VERSION пакета)
     uv run python scripts/replay_page.py run \\
         --in-dir "research/external_ocr_models/damaged/нарезанное по страницам" \\
-        --out-dir /mnt/system/raw/mts/replay/damaged_v16 --repeats 2
+        --out-dir /mnt/hotstore/scan_processing/mts/replay/damaged_v16 --repeats 2
 
     # то же промптами другой версии: папка с system.md.j2, user.md.j2 и, если нужно, damage_note.txt
     uv run python scripts/replay_page.py run ... --out-dir .../damaged_v15 --prompts-dir /tmp/prompts_v15
 
     # полосы пака со списком статей выпуска в промпте (toc.json из выхода боевого прогона)
     uv run python scripts/replay_page.py run --in-dir .../sharpened --pages полосы.txt \
-        --toc-root /mnt/system/raw/mts/pack1_external_ocr_services/pages --out-dir .../headings_v20 --repeats 2
+        --toc-root /mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/pages --out-dir .../headings_v20 --repeats 2
 
     # сводка по повторам (и сходство с другим прогоном тех же полос)
     uv run python scripts/replay_page.py summarize --out-dir .../damaged_v16 [--baseline-dir .../damaged_v15]

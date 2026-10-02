@@ -3,7 +3,7 @@
 # Поиск страниц с крупным line art в бинаризованных PDF пака-1 и выгрузка их картинками.
 #
 # ЗАЧЕМ. FineReader с включённым «исправлением искажений строк» иногда корёжит line art
-# (эталон дефекта — стр. 80 файла /mnt/system/raw/full_1967_01_bg_off_ori_off.pdf: схема
+# (эталон дефекта — стр. 80 файла /mnt/hotstore/scan_processing/full_1967_01_bg_off_ori_off.pdf: схема
 # организации диспетчерской службы вышла с чёрными гребёнками вместо рамок). Такие
 # страницы при сборке финального PDF надо брать из бинаризации БЕЗ распрямления строк.
 # Чтобы найти их глазами, не листая девять тысяч полос, прогоняем детектор и смотрим
@@ -58,7 +58,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_brightened_bg"
+INPUT_DIR="/mnt/hotstore/scan_processing/mts/pack1_pdf/full_pdfs_binary_brightened_bg"
 DB="$HOME/Projects/mts_markup/pack1_reviewed.sqlite"
 BASE_NAME="line_art_pack1"
 CSV="${BASE_NAME}.csv"

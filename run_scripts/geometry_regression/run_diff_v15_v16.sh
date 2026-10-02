@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 cd "$SCRIPT_DIR/../.."
 
-OUT="${OUT:-$HOME/Projects/mts_markup/pack1_geometry_v16_review}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v16_review}"
 
 uv run python -m research.geometry_regression diff \
     --old-dir "$GEOMETRY_REGRESSION_ROOT/pack1_v15" \

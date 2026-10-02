@@ -20,7 +20,7 @@
 
 - **Стенд:** `research/edge_marks`, `python -m research.edge_marks select|candidates|judge|score|overlays`;
   run-скрипт `run_scripts/text_blocks/run_edge_marks.sh`. Код — `c37863b` + правки стенда.
-- **Выход:** `/mnt/system/raw/mts/pack1_edge_marks/`:
+- **Выход:** `/mnt/hotstore/scan_processing/mts/pack1_edge_marks/`:
   - `set/` — выбросы и листы разметки;
   - `cand/` — кандидаты и вырезки;
   - `results/` — ответы судей, замеры, `summary.csv`;

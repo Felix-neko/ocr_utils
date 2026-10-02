@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Сводка и картинки «было | стало» по прогону v15 — без пересчёта, с порогами движка v15:
-# ./run_report_v15.sh --thr field_shear_p90_deg=0.9 --min-score 0 --pairs-dir ~/Projects/mts_markup/pack1_geometry_v15_review/pairs
+# ./run_report_v15.sh --thr field_shear_p90_deg=0.9 --min-score 0 --pairs-dir /mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v15_review/pairs
 #
 # Читает: $GEOMETRY_RUN_DIR (…/pack1_v15)/{metrics.csv,cache/}. Пишет: metrics_flagged.csv, report.md,
 # pairs/<вердикт>/<год>/*.jpg (по умолчанию — все страницы со score ≥ 1, без панели поля).

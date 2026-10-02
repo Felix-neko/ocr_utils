@@ -12,14 +12,14 @@
 
 ## Стенд и данные
 
-- Пак-1, заострённые копии `/mnt/system/raw/mts/pack1_background_blurred_v2/sharpened` (600 dpi,
+- Пак-1, заострённые копии `/mnt/hotstore/scan_processing/mts/pack1_background_blurred_v2/sharpened` (600 dpi,
   разбор на 300/150 dpi). Код — от коммита `fcdce2e` плюс правки этого отчёта.
 - Контрольная выборка для оси — 18 полос «только текст» с ≥ 20 длинными строками, отбор по
   `curved_lines_pack1.csv`: 8 по кривизне (`line_fit_sagitta_rel_p90` 0.40–0.55), 8 по трапеции
   (`|line_fit_slope_grad_y|` 5.2–7.0 — наклон строк меняется от верха полосы к низу), плюс
   1975/08 IMG_0087_2R и плотный набор 1975/05 IMG_0101_2R. Список и прогон —
   `run_scripts/text_blocks/run_axis_body.sh` (8 воркеров, ~1 мин).
-- Выход стенда: `/mnt/system/raw/mts/text_blocks_axis_body/` — `measures.csv` (18 строк),
+- Выход стенда: `/mnt/hotstore/scan_processing/mts/text_blocks_axis_body/` — `measures.csv` (18 строк),
   `summary.md`, `картинки/<полоса>_{полоса,вырезка_N}.jpg` (90 картинок: обе оси на одном холсте,
   прежняя — полупрозрачным оранжевым, вторая — зелёным, низы глифов точками; вырезки ×3 там, где оси
   расходятся сильнее всего; легенда в поле картинки).

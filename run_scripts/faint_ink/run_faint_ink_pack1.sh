@@ -26,7 +26,7 @@ set -euo pipefail
 # Скрипт лежит в run_scripts/<подсистема>/, пути внутри отсчитываются от корня.
 cd "$(dirname "$0")/../.."
 
-CLEAN_ROOT="/mnt/system/raw/mts/pack1_background_blurred_v2"
+CLEAN_ROOT="/mnt/hotstore/scan_processing/mts/pack1_background_blurred_v2"
 BLURRED_DIR="$CLEAN_ROOT/blurred"
 ORIGINALS="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/Готовое/пак-1"
 DB="/home/felix/Projects/mts_markup/pack1_reviewed.sqlite"

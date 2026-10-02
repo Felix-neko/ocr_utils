@@ -246,7 +246,7 @@ stretch 15, edge 12, line 7, vtilt 6, hmean 6, photo_bend 5, photo_tilt 3, bend 
 перекос куда чаще, чем виден на обзорной картинке, либо порог надо поднять до 1.0–1.2 мм. Это
 решается просмотром `changed/ok_to_bad/` (611 пар).
 
-Папка просмотра — `~/Projects/mts_markup/pack1_geometry_v15_review/`: `pairs/{bad,mixed,ok}/<год>/`,
+Папка просмотра — `/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v15_review/`: `pairs/{bad,mixed,ok}/<год>/`,
 `validation/{bad,good}/`, `changed/<v14>_to_<v15>/` (858 пар) и `changed_v14_v15.csv`, `README.md`.
 
 ## 7. Что дальше
@@ -475,7 +475,7 @@ step 5, bend 4, lineart 3, la_spread 3, jog 1.
 наклон; остаток сдвигов не различал наведённую и убранную дугу; логотип рубрики считался чертежом; модуль
 шира прятал развернувшуюся кромку.
 
-Папка просмотра — `~/Projects/mts_markup/pack1_geometry_v16_review/`: `pairs/<вердикт>/<год>/` (все
+Папка просмотра — `/mnt/hotstore/scan_processing/mts_markup/pack1_geometry_v16_review/`: `pairs/<вердикт>/<год>/` (все
 12 135 страниц), `validation/` (эталон 70), `changed/<смена>/` + `changed_v15_v16.csv` (разница с v15) и
 `changed_v14_v16/` + `changed_v14_v16.csv` (отдельное сравнение с ядром v14). Прогон повторяется
 `run_scripts/geometry_regression/{run_pack1_v15.sh, run_report_v15.sh, run_diff_v15_v16.sh,

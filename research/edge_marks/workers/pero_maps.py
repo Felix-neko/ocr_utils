@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from pero_ocr.layout_engines.torch_parsenet import TorchParseNet
 
-MODEL_DIR = Path("/mnt/system/raw/mts/curved_layout_engines/pero_model/pero_eu_cz_print_newspapers_2022-09-26")
+MODEL_DIR = Path("/mnt/hotstore/scan_processing/mts/curved_layout_engines/pero_model/pero_eu_cz_print_newspapers_2022-09-26")
 # Канал карт ParseNet с вероятностью базовой линии.
 BASELINE_CHANNEL = 2
 

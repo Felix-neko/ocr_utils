@@ -17,7 +17,7 @@ EXTRA="${EXTRA:-}"
 # По умолчанию — боевой прогон v18 из common.sh пака ($GEOMETRY_V18_DIR). pack1_v18 … pack1_v18f — прогоны
 # отладки стенда (кэш той же версии, но старого кода и разбора v6): не использовать.
 QUALITY_RUN_DIR_V18="${QUALITY_RUN_DIR_V18:-$GEOMETRY_V18_DIR}"
-DIFF_DIR="${DIFF_DIR:-$MARKUP_ROOT/pack1_geometry_v18_lineart_diff_f}"
+DIFF_DIR="${DIFF_DIR:-$HOT_MARKUP_ROOT/pack1_geometry_v18_lineart_diff_f}"
 
 # shellcheck disable=SC2086
 uv run python -m research.geometry_quality diff --old-run "$QUALITY_RUN_DIR" --new-run "$QUALITY_RUN_DIR_V18" \

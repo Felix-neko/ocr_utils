@@ -10,12 +10,12 @@ from ocr_utils.final_pdfs.plan import load_plans
 from ocr_utils.page_layout.pack_analysis.stages import page_key
 
 # Итог разбора пака v3 (по заострённым сканам): по нему известно, какие полосы — «только текст».
-V3_DIR = Path("/mnt/system/raw/mts/pack1_page_analysis_v3")
+V3_DIR = Path("/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v3")
 # Папка оверлеев v3 с полосами без объектов (растр, таблицы, line art и т. п.).
 ONLY_TEXT = "только_текст"
 # Бинаризованные PDF FineReader: без коррекции геометрии (основной вариант стенда) и с ней.
-NOGEO_DIR = Path("/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening_no_geometry_correction")
-GEO_DIR = Path("/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening")
+NOGEO_DIR = Path("/mnt/hotstore/scan_processing/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening_no_geometry_correction")
+GEO_DIR = Path("/mnt/hotstore/scan_processing/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening")
 # База разметки после ревью в CVAT и имя пака: из неё берётся порядок полос выпуска = номер страницы PDF.
 DB_REVIEWED = Path.home() / "Projects" / "mts_markup" / "pack1_reviewed.sqlite"
 PACK_NAME = "пак-1"

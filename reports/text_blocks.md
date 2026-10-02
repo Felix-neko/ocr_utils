@@ -20,9 +20,9 @@
   прогона `pack1_v16`: самые кривые строки (sagitta p90 в долях высоты 0.43–0.53) — 1971/10 с.87,
   1973/07 с.88, 1967/10 с.63, 1971/10 с.93, 1973/11 с.79, 1968/07 с.93; вёрстка в 2–4 колонки —
   1973/06 с.65, 1973/07 с.77, 1973/08 с.85, 1971/10 с.95, 1970/02 с.90, 1975/05 с.97.
-* Вход: `/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening{,_no_geometry_correction}`.
-* Выход: `/mnt/system/raw/mts/curved_layout_debug/{pages,overlays,blocks.csv,report.md}`;
-  сравнение движков — `/mnt/system/raw/mts/curved_layout_engines_cmp/`.
+* Вход: `/mnt/hotstore/scan_processing/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening{,_no_geometry_correction}`.
+* Выход: `/mnt/hotstore/scan_processing/mts/curved_layout_debug/{pages,overlays,blocks.csv,report.md}`;
+  сравнение движков — `/mnt/hotstore/scan_processing/mts/curved_layout_engines_cmp/`.
 * Время: свой ход — 0.2–0.8 с на страницу в один процесс, весь набор меньше минуты. Версия кода:
   ветка `zonal_defocus_with_surya`, от коммита `6ad5ece`.
 
@@ -142,13 +142,13 @@
 для корпуса, вчетверо меньше межколонника.
 
 Оверлеи сравнения: `--dilate-compare "0.5,1.0"` рисует поверх исходной границы ещё две (на
-полсимвола и на символ) с легендой — `/mnt/system/raw/mts/curved_layout_dilate/overlays/`.
+полсимвола и на символ) с легендой — `/mnt/hotstore/scan_processing/mts/curved_layout_dilate/overlays/`.
 
 ## Сравнение движков
 
 Все четыре движка считают одни и те же 12 страниц, дальше их строки проходят ОДИН И ТОТ ЖЕ
 постпроцесс (оси → колонки → блоки), поэтому сравнивается именно поиск строк. Чужие движки живут
-в отдельных `uv venv` под `/mnt/system/raw/mts/curved_layout_engines/` и вызываются подпроцессом
+в отдельных `uv venv` под `/mnt/hotstore/scan_processing/mts/curved_layout_engines/` и вызываются подпроцессом
 (обмен PNG/JSON); межколонники им отдаются наши, иначе колонки слипаются в один блок.
 
 | движок | строк | блоков | краска под строками | строк через межколонник | медиана \|dy\| от `ink`, мм | p90 \|dy\|, мм | с/страницу |

@@ -11,7 +11,7 @@ set -euo pipefail
 # репозитория — поднимаемся на два уровня.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/system/raw/2026-07-09 ЭГ/1957_07_12 четная"
+INPUT_DIR="/mnt/hotstore/scan_processing/2026-07-09 ЭГ/1957_07_12 четная"
 
 echo "select_best_raws (report):"
 echo "  input  = $INPUT_DIR"

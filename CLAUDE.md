@@ -81,7 +81,7 @@ uv run python scripts/gen_module_map.py        # карта модулей (ху
 ## Куда что класть
 
 Новый отчёт — `reports/` (навык `write-report`). Run-скрипт — `run_scripts/<пакет>/`. Черновик —
-`ai_slop/`. Выход прогона — на SSD (`/mnt/system/...`, регистр значим, или `~/Projects/mts_markup`),
+`ai_slop/`. Выход прогона — на SSD `/mnt/hotstore/scan_processing/...` (промежуточные файлы; базы и превью CVAT — в `~/Projects/mts_markup`),
 не в корень репо и **никогда в `/mnt/dump3/yandex_disk_*`** (Я.Диск затирает исходники).
 Хук блокирует `pgrep -f` без `[x]`-разрыва, запись в корень Я.Диска, старый путь `/mnt/SYSTEM` заглавными
 и `rm` баз разметки.

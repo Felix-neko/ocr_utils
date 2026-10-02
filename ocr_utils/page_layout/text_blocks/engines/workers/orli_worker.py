@@ -1,6 +1,6 @@
 """Воркер Orli (плагин kraken 7): базовые линии строк в порядке чтения в JSON. Запускается ЧУЖИМ питоном.
 
-Наш пакет не импортирует; окружение — ``mts_markup/line_axis_engines/orli`` (kraken 7 + orli + torch cu12x/cu13x).
+Наш пакет не импортирует; окружение — ``/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/orli`` (kraken 7 + orli + torch cu12x/cu13x).
 
 Аргументы: ``<png> <out.json> [--model PATH] [--device cuda|cpu] [--polygonize] [--max-lines N]``.
 
@@ -39,7 +39,7 @@ from kraken.models import load_models
 from kraken.tasks.segmentation import SegmentationTaskModel
 from orli.configs import OrliSegmentationInferenceConfig
 
-DEFAULT_MODEL = "/home/felix/Projects/mts_markup/line_axis_engines/models/orli/orli_base.safetensors"
+DEFAULT_MODEL = "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/orli/orli_base.safetensors"
 
 
 def parse_args() -> argparse.Namespace:

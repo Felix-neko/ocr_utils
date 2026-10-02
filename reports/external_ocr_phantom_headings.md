@@ -14,7 +14,7 @@
 
 * Пак-1 МТС, вход `SHARPENED_DIR` (`pack1_background_blurred_v2/sharpened`), 15 готовых выпусков:
   1966/03, 1968/12, 1974/01–12, 1976/12 (≈ 1500 полос), выход
-  `/mnt/system/raw/mts/pack1_external_ocr_services`: с 21.09.2026 в `out/` только md выпусков
+  `/mnt/hotstore/scan_processing/mts/pack1_external_ocr_services`: с 21.09.2026 в `out/` только md выпусков
   `{год}/{год}_{выпуск}.md`, рабочее — в `pages/` (полосы `.json`/`.md`/`.meta.json`, `toc.json`,
   sidecar `{год}_{выпуск}.pages.json`; до этого всё лежало в `out/`), кэш запросов `…/cache`, отладка `…/debug`.
 * Разбор проблемы — по выходам прогона 19.09.2026 (промпт v19); перегон промптом v20 — 20.09.2026

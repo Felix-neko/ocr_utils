@@ -32,9 +32,9 @@
 set -euo pipefail
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-/mnt/system/raw/mts/pack1_page_analysis_v3}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v3}"
 # Прошлый полный разбор (2026-09-27). Для --reuse-from — только при том же детекторе таблиц (см. выше).
-PREVIOUS="${PREVIOUS:-/mnt/system/raw/mts/pack1_page_analysis_v2}"
+PREVIOUS="${PREVIOUS:-/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v2}"
 JOBS=16
 
 uv run python -m ocr_utils.page_layout analyze-pack \

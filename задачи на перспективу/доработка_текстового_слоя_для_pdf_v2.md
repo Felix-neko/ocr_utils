@@ -37,7 +37,7 @@
 это первый вопрос исследования.
 
 Параллельно у нас есть VLM-OCR всех полос в markdown приемлемого качества
-(`ocr_utils/external_ocr_services`, выход в `/mnt/system/raw/mts/pack1_external_ocr_services/out`),
+(`ocr_utils/external_ocr_services`, выход в `/mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/out`),
 но читать глазами будут PDF, и слой нужен именно там.
 
 ## 2. Цель
@@ -69,13 +69,13 @@
 
 | Что | Где | Замечания |
 |---|---|---|
-| Финальные PDF пака (бинаризованные, без осветления фона) | `/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_{год}_{выпуск}.pdf`, 123 файла | Один PDF на выпуск. Соответствие «страница PDF ↔ полоса базы» — через `pdf_utils` (число страниц сверено при сборке) |
+| Финальные PDF пака (бинаризованные, без осветления фона) | `/mnt/hotstore/scan_processing/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening/full_{год}_{выпуск}.pdf`, 123 файла | Один PDF на выпуск. Соответствие «страница PDF ↔ полоса базы» — через `pdf_utils` (число страниц сверено при сборке) |
 | Соседние комплекты PDF | `.../full_pdfs_binary_brightened_bg`, `.../full_pdfs_binary_no_bg_brightening_no_geometry_correction` | Тот же слой FineReader; полезны, если надо проверить, зависит ли раскладка супа от варианта картинки |
 | База разметки после ручной правки | `pack1_reviewed.sqlite` (`DB_REVIEWED` в `docs/data_layout.md`) | `rect_regions.kind='table'` — 903 таблицы; line art — свои записи детектора; ориентация полос |
 | Детектор таблиц v4.2 | `ocr_utils/scan_markup/table_detection` | Рабочий: линейки → ядра → проверка «а таблица ли». Ячейки строятся сеткой по линейкам (`grid`), а не рамкой; лежащие ячейки склеиваются через отсутствующие линейки. `reports/table_processing_report.md` |
 | Повёрнутые ячейки таблиц: поиск, ориентация, чтение | `ocr_utils/rotated_text/tables` | Рабочий: ось — по форме букв, сторона — tesseract под углами-кандидатами; чтение tesseract (rus, psm 6), CER 0.034; surya как читалка боковых ячеек **отвергнута** (CER 2.36, выдумывает), paddle — CER 0.074 и медленно. Пороги подмены — `docs/status.md`, «действующие пороги». Отчёты: `reports/rotated_text_tables.md`, `table_processing_rotation.md`, `table_processing_ocr.md` |
 | Детектор line art | `ocr_utils/line_art_detection` | Рабочий: связное пятно + скопление линеек, порог покрытия ≥ 5 % полосы (610 страниц из 8656); формулы — только через surya `Equation`. Известные слабости и отвергнутые ходы — `docs/status.md`, раздел line_art; `reports/line_art_detection_report.md` |
-| VLM-OCR полос в markdown | `/mnt/system/raw/mts/pack1_external_ocr_services/out/{год}/{выпуск}/полоса.{md,json}` | DeepSeek V4.1 Flash, тайлы 4500 px, теги повреждений. Таблицы и подписи на схемах там читаются, но без привязки к координатам |
+| VLM-OCR полос в markdown | `/mnt/hotstore/scan_processing/mts/pack1_external_ocr_services/out/{год}/{выпуск}/полоса.{md,json}` | DeepSeek V4.1 Flash, тайлы 4500 px, теги повреждений. Таблицы и подписи на схемах там читаются, но без привязки к координатам |
 | Кэш surya layout | см. `docs/data_layout.md` | Для полос без поворота можно брать из кэша |
 | Бэклог по теме | `docs/status.md` «Открытые задачи»: смешанные ячейки (298) — делить по смене оси; вид `SIMPLE_ROTATED_TEXT` на стадии `detect`; улучшить поиск line art через surya layout | Это соседние задачи; здесь их не решать, но учитывать |
 
@@ -174,7 +174,7 @@ LLM. LLM — допустимый вариант, но не единственн
   по умолчанию; экспорт уже существующих внутренних функций. Не допустимо: изменение порогов
   по умолчанию, форматов выхода, схемы базы.
 - **Данные**: исходные PDF read-only; копии и оверлеи — на SSD
-  (`/mnt/system/raw/mts/pack1_text_layer/...`), не в репо, не на Я.Диск.
+  (`/mnt/hotstore/scan_processing/mts/pack1_text_layer/...`), не в репо, не на Я.Диск.
 - **Выборка** для Z1–Z2: `TODO: N` полос (ориентир 60: 20 таблиц из 258 с повёрнутыми
   ячейками, 20 полос с line art из 610, 10 полос с поворотом целиком, 10 с подписями рядом),
   выбирать по базе разметки, а не наугад; список полос — в отчёт.
@@ -203,7 +203,7 @@ LLM. LLM — допустимый вариант, но не единственн
 1. **Отчёт** `reports/text_layer_repair.md` по шаблону проекта (навык `write-report`):
    методики, числа по каждому вопросу Z1–Z6, что сработало, что отвергнуто и почему,
    рекомендация по внедрению в конвейер (куда, каким шагом, что менять в `pdf_utils`).
-2. **Оверлеи** в `/mnt/system/raw/mts/pack1_text_layer/overlays/{год}_{выпуск}/полоса.png`:
+2. **Оверлеи** в `/mnt/hotstore/scan_processing/mts/pack1_text_layer/overlays/{год}_{выпуск}/полоса.png`:
    страница PDF с рамками блоков слоя — «удалить» красным, «санировать» оранжевым,
    «оставить» зелёным тонким; области детекторов (ячейки, line art) — синим пунктиром.
    Отдельно — лист «было / стало» для Z6.

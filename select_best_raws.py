@@ -351,7 +351,7 @@ def build_groups(all_names: list[str], duplicates: dict[str, list[str]]) -> list
 @click.argument(
     "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-30/992_FUJI"
 )
-@click.argument("output_dir", required=False, default="/mnt/system/raw/1967_10_12")
+@click.argument("output_dir", required=False, default="/mnt/hotstore/scan_processing/1967_10_12")
 @click.option(
     "--mode",
     default="copy",

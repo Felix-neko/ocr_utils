@@ -13,7 +13,7 @@ import sys
 import time
 
 # Кэш весов HuggingFace и torch держим в каталоге моделей стенда, а не в ~/.cache.
-MODELS_DIR = "/home/felix/Projects/mts_markup/line_axis_engines/models/docufcn"
+MODELS_DIR = "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/docufcn"
 os.environ.setdefault("XDG_CACHE_HOME", MODELS_DIR)
 os.environ.setdefault("HF_HOME", os.path.join(MODELS_DIR, "hf"))
 # Чекпойнт сохранён старым torch целиком (не только тензоры): torch>=2.6 по умолчанию грузит weights_only.

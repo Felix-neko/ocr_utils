@@ -40,7 +40,8 @@ vmrun -T ws -gu admin -gp '<пароль>' runProgramInGuest       ~/vmware/win1
   UAC, класть в гостя `.bat` и просить пользователя запустить «от имени администратора».
 - «Быстрая вставка» в консоли: клик по окну переводит его в режим выделения и замораживает
   выполнение до Esc руками.
-- Общие папки в гостя: `/mnt/dump3` → `DUMP`, `/mnt/system` → `system`. Обмен файлами через
+- Общие папки в гостя: `/mnt/dump3` → `DUMP`, `/mnt/system` → `system`, `/mnt/hotstore` → `hotstore`
+  (промежуточные PDF пака с 2026-10-01 лежат на hotstore; пути задачи Hot Folder — через `hotstore`). Обмен файлами через
   них обычно проще guest ops.
 - Скрипты для гостя — `tools/win_vm/` (PowerShell/bat, вне git).
 

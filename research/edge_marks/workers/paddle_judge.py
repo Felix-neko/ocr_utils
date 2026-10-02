@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Видеопамять — по мере надобности: по умолчанию paddle сразу занимает почти всю свободную, и замер врёт.
 os.environ.setdefault("FLAGS_allocator_strategy", "auto_growth")
-os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/home/felix/Projects/mts_markup/line_axis_engines/models/paddle")
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/paddle")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "huggingface")
 

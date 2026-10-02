@@ -23,14 +23,14 @@
   - Воркер `research/edge_marks/workers/craft_maps.py` — окружение `line_axis_engines/craft`, fp16.
   - Команда: `PYTHONPATH=. uv run python -m research.edge_marks guard --pages-set bumps|clean|random200 [--no-craft]`.
 - **Боевой код не менялся.** Стенд зовёт `text_blocks.analyse_gray` с боевыми настройками: ink, гладкие границы,
-  подсказки `page_layout` из `/mnt/system/raw/mts/pack1_page_layout`.
+  подсказки `page_layout` из `/mnt/hotstore/scan_processing/mts/pack1_page_layout`.
 - **Наборы:**
   - `bumps` — 55 полос с выступами от сора, отобраны глазами (`test_pages_bumps/`);
   - `clean` — 30 чистых полос тестового множества;
   - `random200` — 200 случайных текстовых полос пака вне тестового множества, сид 0.
 - **Разметка:** 188 кандидатов стенда `edge_marks`. Среди них 75 кусков сора, выпятивших границу на ≥ 0.5 мм,
   и 82 законных выступа.
-- **Выход:** `/mnt/system/raw/mts/pack1_edge_marks/guard/<набор>/`:
+- **Выход:** `/mnt/hotstore/scan_processing/mts/pack1_edge_marks/guard/<набор>/`:
   - `before/` — первый разбор без пометок (только картинка «было»);
   - `plain/` — без CRAFT, выступы помечены;
   - `craft/` — с CRAFT, итоговые выступы помечены;
@@ -191,7 +191,7 @@
   Видеопамять pero и docTR — около 1 ГБ.
 
 Склейки «без второго прохода | CRAFT | CRAFT + pero | CRAFT + pero + docTR» —
-`/mnt/system/raw/mts/pack1_edge_marks/guard/<набор>/compare/<ключ>.jpg`.
+`/mnt/hotstore/scan_processing/mts/pack1_edge_marks/guard/<набор>/compare/<ключ>.jpg`.
 
 ## Боевой код
 
@@ -207,14 +207,14 @@
   `pack_analysis` проходят.
 
 **Проверка на бинаризованных PDF** — `text_blocks analyze` по 55 полосам с сором,
-`/mnt/system/raw/mts/pack1_edge_marks/prod_guard_pdf/`:
+`/mnt/hotstore/scan_processing/mts/pack1_edge_marks/prod_guard_pdf/`:
 - 52 полосы аномальны, второй проход на всех 52;
 - со стендом (вариант CRAFT + pero) совпали выброшенная краска и итоговые выступы на 52 полосах из 55; на трёх
   расхождение в одну компоненту (карты пересчитаны в fp16, оценки у порога);
 - из 75 кусков сора с выступом: убрано 52, помечено 20, пропущено 3 (стенд: 50 / 22 / 3); знаков не выброшено.
 
 **Проверка на заострённых сканах пака** — `reblock-pack` по тем же 55 полосам из v4,
-`/mnt/system/raw/mts/pack1_edge_marks/pack1_edge_guard_sharpened/`:
+`/mnt/hotstore/scan_processing/mts/pack1_edge_marks/pack1_edge_guard_sharpened/`:
 - аномальны 40 полос, второй проход на 30 (на 10 голосование ничего не выбросило);
 - выступов 53 → 22, полос без выступов после второго прохода — 20, выброшено 125 компонент;
 - отсмотрены 50 случайных выброшенных: штрихи и скобки ручкой, пыль у края колонки, тень у края страницы, букв нет;

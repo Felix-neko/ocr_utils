@@ -11,7 +11,7 @@ set -euo pipefail
 # репозитория — поднимаемся на два уровня.
 cd "$(dirname "$0")/../.."
 
-INPUT_DIR="/mnt/system/raw/ЭГ/PEG 1959 07-12 even"
+INPUT_DIR="/mnt/hotstore/scan_processing/ЭГ/PEG 1959 07-12 even"
 REPORT_FILE="59_712_even_report.txt"
 
 echo "select_best_raws (report):"

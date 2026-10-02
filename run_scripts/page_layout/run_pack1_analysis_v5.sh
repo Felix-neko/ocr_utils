@@ -30,7 +30,7 @@ set -m
 trap 'kill -- -$$ 2>/dev/null || true' EXIT INT TERM
 source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 
-OUT="${OUT:-$MARKUP_ROOT/pack1_page_analysis_v5}"
+OUT="${OUT:-$HOT_MARKUP_ROOT/pack1_page_analysis_v5}"
 JOBS="${JOBS:-16}"
 
 uv run python -m ocr_utils.page_layout analyze-pack \

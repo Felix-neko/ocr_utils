@@ -11,15 +11,15 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 #INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе"
-#INPUT_DIR="/mnt/system/raw/плохие сканы  ВЭ/06"
-#INPUT_DIR="/mnt/system/raw/ve_80s/in"
-#INPUT_DIR="/mnt/system/raw/ve_80s/in/1989/06 проверить зональный пересвет"
-#OUTPUT_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/out"
-#DEBUG_DIR="/mnt/system/raw/ve_80s/test_896_tiff_9/debug"
+#INPUT_DIR="/mnt/hotstore/scan_processing/плохие сканы  ВЭ/06"
+#INPUT_DIR="/mnt/hotstore/scan_processing/ve_80s/in"
+#INPUT_DIR="/mnt/hotstore/scan_processing/ve_80s/in/1989/06 проверить зональный пересвет"
+#OUTPUT_DIR="/mnt/hotstore/scan_processing/ve_80s/test_896_tiff_9/out"
+#DEBUG_DIR="/mnt/hotstore/scan_processing/ve_80s/test_896_tiff_9/debug"
 
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/Экономист/пак-2 (450 dpi)/1991/01"
-OUTPUT_DIR="/mnt/system/raw/economist/pak2/iter_1/out/1991/01"
-DEBUG_DIR="/mnt/system/raw/economist/pak2/iter_1/debug/1991/01"
+OUTPUT_DIR="/mnt/hotstore/scan_processing/economist/pak2/iter_1/out/1991/01"
+DEBUG_DIR="/mnt/hotstore/scan_processing/economist/pak2/iter_1/debug/1991/01"
 
 echo "detect_and_crop:"
 echo "  input  = $INPUT_DIR"

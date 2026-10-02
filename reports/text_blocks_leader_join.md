@@ -19,7 +19,7 @@
   кандидатов другой сессией (детектор таблиц: закрытие 2 мм, фильтр линеек-сирот; закончился
   2026-09-28 17:14), вторая ось строки, межколонники `legacy`.
 - Стенд `research/leader_merge` (`select` / `run --join|--no-join` / `compare`), run-скрипт
-  `run_scripts/text_blocks/run_leader_merge.sh`; выход — `/mnt/system/raw/mts/pack1_leader_merge/`:
+  `run_scripts/text_blocks/run_leader_merge.sh`; выход — `/mnt/hotstore/scan_processing/mts/pack1_leader_merge/`:
   - `scan.csv` — находки по всем полосам отбора;
   - `classify/` — полосы с находками, прогнанные с боксами глифов, для разделения на классы;
   - `problem.txt`, `normal.txt`, `sets.txt` — множества;

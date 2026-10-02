@@ -9,7 +9,7 @@
 Запуск::
 
     uv run python scripts/text_block_envelope_report.py --sharpened-dir "$SHARPENED_DIR" \\
-        --analysis-dir /mnt/system/raw/mts/pack1_page_analysis_v3 --out-dir reports/text_block_envelope \\
+        --analysis-dir /mnt/hotstore/scan_processing/mts/pack1_page_analysis_v3 --out-dir reports/text_block_envelope \\
         --page curved=1971/10/IMG_0046_2R --page trapezoid=1969/07/IMG_0037_1L#2
 """
 

@@ -12,7 +12,7 @@
 * Полоса: `full_1973_08` с. 85, вариант рендера **nogeo** (без коррекции геометрии FineReader) —
   одна из самых искажённых в валидационном наборе; на ней же видна известная беда с перескоком оси
   на соседнюю строку в низу левой колонки.
-* Вход: `/mnt/system/raw/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening_no_geometry_correction/full_1973_08.pdf`.
+* Вход: `/mnt/hotstore/scan_processing/mts/pack1_pdf/full_pdfs_binary_no_bg_brightening_no_geometry_correction/full_1973_08.pdf`.
 * Рендер 300 dpi (`RENDER_DPI`), рабочая копия 150 dpi (`WORK_DPI`). Размеры ниже — в пикселях
   рабочей копии, если не сказано иное; 1 мм = 5.9 px.
 * Версия кода: `6ad5ece` плюс правки этой сессии. Движок `ink`, сцепка по зонам

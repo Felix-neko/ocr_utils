@@ -394,7 +394,7 @@ scale = np.sqrt(abs(np.linalg.det(H[:2, :2])))
 ```bash
 python select_best_raws.py \
   "/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-25 ЭГ 1965 I-III" \
-  "/mnt/system/raw/1965_out" \
+  "/mnt/hotstore/scan_processing/1965_out" \
   --method local \
   --n-search 5 \
   --min-match-ratio 0.2 \
@@ -453,7 +453,7 @@ python select_best_raws.py \
 
 ### Анализ на реальных данных
 
-Проведён анализ на датасете `/mnt/system/raw/1962_small` (35 RAF-файлов: 17 пар дубликатов + 1 одиночный).
+Проведён анализ на датасете `/mnt/hotstore/scan_processing/1962_small` (35 RAF-файлов: 17 пар дубликатов + 1 одиночный).
 
 **Результаты сопоставления:**
 
@@ -576,7 +576,7 @@ dependencies = [
 #### Итоговая статистика:
 ```
 Групп дубликатов: 15, одиночных файлов: 42
-Скопировано 57 файлов в /mnt/system/raw/1965_out
+Скопировано 57 файлов в /mnt/hotstore/scan_processing/1965_out
 ```
 
 ### Файловая структура

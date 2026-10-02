@@ -13,13 +13,13 @@
   координаты ниже — в её пикселях (1 мм ≈ 5.9 px). Краска берётся с рендера 300 dpi (`RENDER_DPI`).
 - Код — `356e5ef` плюс незакоммиченные правки разбора v3.
 - Картинки делает `scripts/text_block_envelope_report.py`. Он вызывает те же функции, что и рабочий разбор, и рисует
-  их промежуточные значения. Подсказки взяты из `/mnt/system/raw/mts/pack1_page_analysis_v2/pages`.
+  их промежуточные значения. Подсказки взяты из `/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v2/pages`.
   Перегенерировать:
 
   ```bash
   PYTHONPATH=. uv run python scripts/text_block_envelope_report.py \
-      --sharpened-dir /mnt/system/raw/mts/pack1_background_blurred_v2/sharpened \
-      --analysis-dir /mnt/system/raw/mts/pack1_page_analysis_v2 --out-dir reports/text_block_envelope \
+      --sharpened-dir /mnt/hotstore/scan_processing/mts/pack1_background_blurred_v2/sharpened \
+      --analysis-dir /mnt/hotstore/scan_processing/mts/pack1_page_analysis_v2 --out-dir reports/text_block_envelope \
       --page curved=1971/10/IMG_0046_2R --page trapezoid=1969/07/IMG_0037_1L \
       --page dense=1975/05/IMG_0101_2R --page patch=1966/05/0220_2R#1
   ```
@@ -308,5 +308,5 @@
 
 ## Что дальше
 
-- Проверить глазами дополнительные линии на полном разборе v3 (`/mnt/system/raw/mts/pack1_page_analysis_v3/overlays`).
+- Проверить глазами дополнительные линии на полном разборе v3 (`/mnt/hotstore/scan_processing/mts/pack1_page_analysis_v3/overlays`).
   Особенно блоки, где линия начинается ниже первых строк: не слишком ли строг отбор серий наверху.

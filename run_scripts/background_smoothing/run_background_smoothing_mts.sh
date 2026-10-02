@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 INPUT_DIR="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/Готовое"
-BASE_DIR="/mnt/system/raw/mts/pack1_background_blurring"
+BASE_DIR="/mnt/hotstore/scan_processing/mts/pack1_background_blurring"
 OUTPUT_DIR="$BASE_DIR/background_blurred"
 DEBUG_DIR="$BASE_DIR/debug"
 

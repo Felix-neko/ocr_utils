@@ -327,7 +327,7 @@ def _page_hints(
 @click.option(
     "--sharpened-dir",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=Path("/mnt/system/raw/mts/pack1_background_blurred_v2/sharpened"),
+    default=Path("/mnt/hotstore/scan_processing/mts/pack1_background_blurred_v2/sharpened"),
     show_default=True,
     help="корень заострённых копий пака (для --key)",
 )
@@ -480,7 +480,7 @@ if __name__ == "__main__":  # pragma: no cover
 @click.option(
     "--sharpened-dir",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=Path("/mnt/system/raw/mts/pack1_background_blurred_v2/sharpened"),
+    default=Path("/mnt/hotstore/scan_processing/mts/pack1_background_blurred_v2/sharpened"),
     show_default=True,
 )
 @click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)

@@ -32,8 +32,8 @@ set -m
 trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
 
 BASE_NAME="curved_lines_pack1"
-CACHE_DIR="$MARKUP_ROOT/curved_lines_cache"
-OVERLAY_DIR="$MARKUP_ROOT/curved_lines_overlay"   # оверлеев сотни по 400 КБ — не в репозиторий
+CACHE_DIR="$HOT_MARKUP_ROOT/curved_lines_cache"
+OVERLAY_DIR="$HOT_MARKUP_ROOT/curved_lines_overlay"   # оверлеев сотни по 400 КБ — не в репозиторий
 
 ARGS=(
     run

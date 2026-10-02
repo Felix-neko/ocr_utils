@@ -14,7 +14,7 @@
   таблицы, line art, формулы, повёрнутый текст) — из итоговых JSON v3, вторая ось строки
   (`--axis body`), как в v3.
 - Стенд `research/gutter_crossing` (`run` / `measure` / `select` / `compare`), run-скрипт
-  `run_scripts/text_blocks/run_gutter_crossing.sh`; выход — `/mnt/system/raw/mts/pack1_gutter_crossing/`:
+  `run_scripts/text_blocks/run_gutter_crossing.sh`; выход — `/mnt/hotstore/scan_processing/mts/pack1_gutter_crossing/`:
   `legacy/` (весь пак прежним ходом, 12 135 JSON с осями и межколонниками, ~70 мин на 16 воркерах),
   `problem.txt`, `normal.txt`, `sets/{legacy,segmented,short}/` (P ∪ N в трёх режимах с оверлеями),
   `sets/compare_legacy_*/` (склейки «было | стало», вырезки у находок, `compare.csv`),

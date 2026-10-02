@@ -32,7 +32,7 @@ from threading import Thread
 from typing import List, Tuple
 
 # Корень клона и каталог весов: по умолчанию — рядом с venv модели.
-ENGINES_ROOT = Path("/home/felix/Projects/mts_markup/line_axis_engines")
+ENGINES_ROOT = Path("/mnt/hotstore/scan_processing/mts_markup/line_axis_engines")
 REPO_ROOT = ENGINES_ROOT / "src" / "chronicling_germany"
 MODELS_DIR = ENGINES_ROOT / "models" / "chronicling" / "Chronicling-Germany-Dataset-main-models" / "models"
 DEFAULT_LAYOUT_MODEL = MODELS_DIR / "layout_2025-05-14.pt"

@@ -19,7 +19,7 @@
   `PageLayout(Find.RASTER, TABLES, LINE_ART)`, `--jobs 8` (диск NTFS), 702 с, ошибок 0.
 - Скрипты: `ai_slop/table_vs_diagram/run.py` (прогон), `analyze.py` (сопоставление, матрица),
   `sheets.py` (контактные листы).
-- Выход: `/mnt/system/raw/mts/pack1_table_vs_diagram/` — `pages/**.json` (регионы + сырые находки
+- Выход: `/mnt/hotstore/scan_processing/mts/pack1_table_vs_diagram/` — `pages/**.json` (регионы + сырые находки
   детектора таблиц с видом и метриками), `objects.csv` (1774 строки), `sheets/<набор>/`.
   Ключевые листы скопированы в `reports/table_vs_diagram/` (вне git).
 
@@ -88,13 +88,13 @@
 причина у шапок — укорачивание линеек у края вырезки в `ruling._axis_mask`; исправлено в v4.3
 (`TABLES_VERSION = 2`, `LINE_ART_VERSION = 3`), вылечено 8 из 17, по всему паку +9 таблиц без
 потерь. Подробности и регресс — `ocr_utils/page_layout/tables/README.md`, «v4.3». Данные:
-`/mnt/system/raw/mts/pack1_axis_mask_fix/` (было / стало: pytest, `compare-detector`,
+`/mnt/hotstore/scan_processing/mts/pack1_axis_mask_fix/` (было / стало: pytest, `compare-detector`,
 `geometry_regression regress`, `pack_tables.jsonl` по 12 135 полосам, `pack_diff.json`).
 
 ## Продолжение 2: v4.4 и отсмотр «surya — таблица, детектор — нет»
 
 v4.4 (`TABLES_VERSION = 3`): открытые таблицы, разрез по мосту, таблица в две графы — подробности
-в `ocr_utils/page_layout/tables/README.md`, «v4.4». Данные — `/mnt/system/raw/mts/pack1_table_v44/`
+в `ocr_utils/page_layout/tables/README.md`, «v4.4». Данные — `/mnt/hotstore/scan_processing/mts/pack1_table_v44/`
 (`step2/`, `step5/`, `step4/` — замеры по шагам; `final/` — регресс; `final_try1/`, `final_try2/` —
 отвергнутые попытки).
 

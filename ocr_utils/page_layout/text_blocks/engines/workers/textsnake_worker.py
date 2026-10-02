@@ -17,7 +17,7 @@ import sys
 import time
 
 # Все кэши (torch hub, openmmlab) — в каталоге моделей стенда, а не в ~/.cache.
-MODELS_DIR = "/home/felix/Projects/mts_markup/line_axis_engines/models/textsnake"
+MODELS_DIR = "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/textsnake"
 os.environ.setdefault("TORCH_HOME", os.path.join(MODELS_DIR, "torch"))
 os.environ.setdefault("XDG_CACHE_HOME", MODELS_DIR)
 # Чекпойнт OpenMMLab хранит объекты mmengine (история лога): torch>=2.6 по умолчанию грузит только тензоры.

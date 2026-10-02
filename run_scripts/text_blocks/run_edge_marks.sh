@@ -5,8 +5,8 @@
 # строго по одному на GPU с замером времени, видеопамяти и ОЗУ, сводка и оверлеи.
 # Выход: $OUT/cand (вырезки), $OUT/results (<судья>.jsonl, _usage.json, summary.csv), $OUT/judges (оверлеи, листы).
 #
-# Окружения судей: pero — /mnt/system/raw/mts/curved_layout_engines/pero, craft/doctr/paddle —
-# ~/Projects/mts_markup/line_axis_engines/<движок>, DeepSeek — ocr_utils/page_layout/line_art/deepseek/vllm_env.
+# Окружения судей: pero — /mnt/hotstore/scan_processing/mts/curved_layout_engines/pero, craft/doctr/paddle —
+# /mnt/hotstore/scan_processing/mts_markup/line_axis_engines/<движок>, DeepSeek — ocr_utils/page_layout/line_art/deepseek/vllm_env.
 # Перед GPU-судьями проверить, что видеопамять свободна (vLLM соседней сессии держит до 13 ГБ).
 #
 # ВРЕМЯ: rule/tesseract — минуты; deepseek ~15–20 мин; pero/craft/doctr/paddle — минуты каждый.
@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PYTHONPATH=.
 
-OUT="${OUT:-/mnt/system/raw/mts/pack1_edge_marks}"
+OUT="${OUT:-/mnt/hotstore/scan_processing/mts/pack1_edge_marks}"
 JUDGES=(rule tesseract deepseek pero craft doctr paddle surya)
 if [ "$#" -gt 0 ]; then JUDGES=("$@"); fi
 

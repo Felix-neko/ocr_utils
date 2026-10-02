@@ -33,7 +33,7 @@ PDF под FineReader, `final_pdfs` — финальную из распозна
 uv run python -m ocr_utils.scan_markup detect \
     --pack-dir "/mnt/.../Готовое/пак-1" \
     --db ~/Projects/mts_markup/pack1.sqlite \
-    --layout-cache /mnt/system/raw/mts/pack1_table_research/layout_surya_готовое \
+    --layout-cache /mnt/hotstore/scan_processing/mts/pack1_table_research/layout_surya_готовое \
     --debug-dir ~/Projects/mts_markup/debug
 
 # 2. Уменьшенные копии в share + проект/задачи/джобы CVAT с предразметкой

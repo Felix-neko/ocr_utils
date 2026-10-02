@@ -97,7 +97,7 @@ picture = framed(canvas, ["1975/08 IMG_0087_2R — оси строк"], [
 
 ## Куда класть
 
-* Выход прогона — на SSD (`--out-dir` вида `/mnt/system/raw/mts/<тема>/overlays/`), не в репо.
+* Выход прогона — на SSD (`--out-dir` вида `/mnt/hotstore/scan_processing/mts/<тема>/overlays/`), не в репо.
 * Картинки к отчёту — `reports/<тема>/` (эта папка в `.gitignore`, файлы в git не попадают).
 * Никогда — в `/mnt/dump3/yandex_disk_*`.
 * Имя файла говорит, что на нём: `сноска_1973_08_с85/3_зоны_поиска.jpg`, а не `out3.jpg`.
