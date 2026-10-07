@@ -31,7 +31,9 @@ class EdgeLine:
     coverage: float
 
 
-def side_strip(gray: np.ndarray, p: np.ndarray, q: np.ndarray, inward: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def side_strip(
+    gray: np.ndarray, p: np.ndarray, q: np.ndarray, inward: np.ndarray, max_depth: int = MAX_DEPTH
+) -> tuple[np.ndarray, np.ndarray]:
     """Полоса кадра вдоль стороны: строки — глубина от −:data:`OUTSIDE` до :data:`MAX_DEPTH` внутрь, столбцы — вдоль стороны.
 
     Args:
@@ -39,13 +41,14 @@ def side_strip(gray: np.ndarray, p: np.ndarray, q: np.ndarray, inward: np.ndarra
         p: Начало стороны (px превью).
         q: Конец стороны.
         inward: Единичная нормаль внутрь.
+        max_depth: Глубина полосы внутрь, px превью.
 
     Returns:
         (полоса float32 (D, L), глубины строк (D,)).
     """
     length = int(np.linalg.norm(q - p))
     along = (q - p) / np.linalg.norm(q - p)
-    depths = np.arange(-OUTSIDE, MAX_DEPTH, dtype=np.float32)
+    depths = np.arange(-OUTSIDE, max_depth, dtype=np.float32)
     u = np.arange(length, dtype=np.float32)
     map_x = p[0] + u[None, :] * along[0] + depths[:, None] * inward[0]
     map_y = p[1] + u[None, :] * along[1] + depths[:, None] * inward[1]
@@ -55,7 +58,13 @@ def side_strip(gray: np.ndarray, p: np.ndarray, q: np.ndarray, inward: np.ndarra
 
 
 def find_inner_edge(
-    gray: np.ndarray, p: np.ndarray, q: np.ndarray, inward: np.ndarray, limit: np.ndarray, min_coverage: float = 0.6
+    gray: np.ndarray,
+    p: np.ndarray,
+    q: np.ndarray,
+    inward: np.ndarray,
+    limit: np.ndarray,
+    min_coverage: float = 0.6,
+    max_depth: int = MAX_DEPTH,
 ) -> EdgeLine | None:
     """Самая внутренняя прямая кромка в полосе у стороны (до печати), с перепадом «темнее снаружи — светлее внутри».
 
@@ -71,11 +80,12 @@ def find_inner_edge(
         inward: Нормаль внутрь.
         limit: Предел глубины для каждого столбца полосы (px от стороны; inf — печати нет).
         min_coverage: Наименьшая доля длины с перепадом.
+        max_depth: Глубина поиска внутрь, px превью.
 
     Returns:
         :class:`EdgeLine` или None (кромки нет).
     """
-    strip, depths = side_strip(gray, p, q, inward)
+    strip, depths = side_strip(gray, p, q, inward, max_depth)
     valid = np.isfinite(strip)
     strip = np.where(valid, strip, np.nanmedian(strip) if valid.any() else 0).astype(np.float32)
     strip = cv2.GaussianBlur(strip, (0, 0), SMOOTH)
