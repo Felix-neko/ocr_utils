@@ -167,4 +167,7 @@ def refine_colour(
     added, bgmask, _, band = refine_band(bgr, book, base, glued, max_depth)
     if not band.any():
         return RefineResult(glued, added, np.zeros_like(added), band)
-    return finish_refine(base, added, band, classify_colour(bgr, book, hulls, added), bgmask)
+    # Затравки цвета бумаги — внутри своей печати; на развороте без печати (пустые форзацы) — внутри бумаги SAM 3 до
+    # склейки, иначе модели цвета не по чему строиться.
+    seed_area = hulls if paper_seeds(bgr, hulls, book).sum() >= SEED_MIN else base
+    return finish_refine(base, added, band, classify_colour(bgr, book, seed_area, added), bgmask)

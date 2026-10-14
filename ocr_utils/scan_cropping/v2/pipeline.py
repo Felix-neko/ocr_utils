@@ -37,7 +37,7 @@ from ocr_utils.scan_cropping.v2.glyphs import content_mask
 from ocr_utils.scan_cropping.v2.ink_fill import fill_bold_ink, touching_ink
 from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp_for_layout
 from ocr_utils.scan_cropping.v2.page_pose import PageQuad, page_quads
-from ocr_utils.scan_cropping.v2.paper import postprocess_plain
+from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, postprocess_plain
 from ocr_utils.scan_cropping.v2.scale import Scale
 from ocr_utils.scan_cropping.v2.side_fit import regularize_sides
 
@@ -418,10 +418,11 @@ def sam3_ready(work: WorkPaths, params: RunParams) -> bool:
     """
     if params.redo or not work.sam3.exists():
         return False
-    if not params.ink_fill:
-        return True
     with np.load(work.sam3) as data:
-        return "raw_noink" in data.files
+        # Кэш прежней версии (без правил пустых страниц и слияния вложенных экземпляров) считается заново.
+        if "version" not in data.files or int(data["version"]) != SAM3_CACHE_VERSION:
+            return False
+        return not params.ink_fill or "raw_noink" in data.files
 
 
 # --- Шаг 3, GPU: SAM 3 --------------------------------------------------------------------------------------------
@@ -442,11 +443,13 @@ def gpu_sam3(job: FrameJob, predictor, params: RunParams) -> None:
     hulls = np.load(work.book)["hulls"]
     t0 = time.perf_counter()
     raw, inst = sam3_pages(predictor, img, hulls)
-    out = {"raw": raw, "inst": inst}
+    out = {"raw": raw, "inst": inst, "version": np.int32(SAM3_CACHE_VERSION)}
     if params.ink_fill:
         # Второй проход — по кадру без крупной краски.
         out["raw_noink"], out["inst_noink"] = sam3_pages(predictor, read_bgr(work.seg_noink), hulls)
     np.savez_compressed(work.sam3, **out)
+    # Страницы и их трапеции после нового SAM 3 могут быть другими, а surya считается по кадру, выпрямленному по ним.
+    work.layout.unlink(missing_ok=True)
     log.info("%s: SAM 3 %.1f с, страниц %d", job.key, time.perf_counter() - t0, int(inst.max()))
 
 

@@ -145,3 +145,63 @@ def test_gain_kept_only_near_ink():
     added[10:30, 150:190] = True  # колебание SAM 3 вдали
     kept = touching_ink(added, ink)
     assert kept[50:150, 55:80].all() and not kept[10:30, 150:190].any()
+
+
+def test_select_instance_blank_page_needs_size_and_confidence():
+    """Экземпляр без печати берётся, только если ≥ 30 % самого большого и уверенность ≥ 0.5; с печатью — всегда."""
+    from ocr_utils.scan_cropping.v2.paper import select_instance
+
+    hulls = np.zeros((100, 200), bool)
+    hulls[10:90, 110:190] = True  # печать только на правой странице
+    left = np.zeros((100, 200), bool)
+    left[5:95, 5:95] = True  # пустая левая страница
+    strip = np.zeros((100, 200), bool)
+    strip[5:95, 0:4] = True  # полоса торца
+    largest = int(left.sum())
+    assert select_instance(left, 0.9, hulls, largest)
+    assert not select_instance(left, 0.4, hulls, largest)
+    assert not select_instance(strip, 0.9, hulls, largest)
+    right = np.zeros((100, 200), bool)
+    right[5:95, 105:195] = True
+    assert select_instance(right, 0.3, hulls, largest)
+
+
+def test_merge_inserts_sticker_joins_page_strip_does_not():
+    """Наклейка внутри выпуклой оболочки страницы (с вырезом под неё) сливается; соседняя узкая страница — нет."""
+    from ocr_utils.scan_cropping.v2.paper import merge_inserts
+
+    page = np.zeros((200, 300), bool)
+    page[10:190, 100:290] = True
+    page[120:170, 100:180] = False  # вырез под наклейку, открытый к левому краю страницы
+    sticker = np.zeros((200, 300), bool)
+    sticker[120:170, 100:180] = True
+    narrow = np.zeros((200, 300), bool)
+    narrow[10:190, 60:95] = True  # узкая страница у корешка, рядом со страницей
+    out = merge_inserts([(0.9, page), (0.5, sticker), (0.7, narrow)])
+    assert len(out) == 2
+    merged = max(out, key=lambda t: t[1].sum())[1]
+    assert merged[140, 120] and merged[50, 200]
+    assert any(m[50, 70] and not m[50, 200] for _, m in out)
+
+
+def test_refine_colour_without_print():
+    """Разворот без печати (пустые форзацы): уточнение склейки не падает, затравки цвета — по бумаге SAM 3."""
+    import cv2
+
+    from ocr_utils.scan_cropping.v2.glue_refine import refine_colour
+
+    h, w = 500, 800
+    bgr = np.full((h, w, 3), 15, np.uint8)
+    book = np.zeros((h, w), bool)
+    book[40:460, 60:740] = True
+    bgr[book] = (60, 40, 30)
+    base = np.zeros((h, w), bool)
+    base[60:440, 80:385] = True
+    base[60:440, 415:720] = True
+    gap = np.zeros((h, w), bool)
+    gap[60:440, 385:415] = True
+    bgr[base | gap] = (200, 225, 235)
+    bgr[60:90, 385:415] = (90, 50, 30)  # кусок обложки у края щели
+    r = refine_colour(bgr, book, base, base | gap, np.zeros((h, w), bool), 70)
+    assert not r.paper[70, 400] and r.paper[300, 400]
+    assert cv2.countNonZero(r.paper.astype(np.uint8)) > 0

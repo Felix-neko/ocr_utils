@@ -24,6 +24,19 @@ SAM3_PROMPTS = ("book page", "paper page")
 SAM3_MIN_PRINT = 0.05
 # Экземпляры двух подсказок с IoU не меньше этого — одна страница.
 SAM3_SAME_IOU = 0.8
+# Экземпляр без печати (пустой форзац, внутренняя сторона обложки, страница с цветной печатью, которую не ловят оболочки)
+# берётся, если не меньше этой доли самого большого экземпляра кадра (из всех, не только с печатью) и уверенность SAM 3
+# не ниже SAM3_BLANK_MIN_CONF (решение пользователя 2026-10-15). На выборке 103 кадров пака-6 так добавились только
+# настоящие страницы (26 кадров, 0.71–0.96 уверенности), полосы торца и подклеенные листки (4–10 %) отсекаются.
+SAM3_BLANK_MIN_SHARE = 0.30
+SAM3_BLANK_MIN_CONF = 0.5
+# Наклейка, ярлык, вклейка — не отдельная страница: экземпляр меньше SAM3_INSERT_MAX_SHARE самого большого, лежащий
+# не меньше чем на SAM3_INSERT_INSIDE в выпуклой оболочке более крупного экземпляра, сливается с ним (МТС 1990/01
+# IMG_0828, 1991/07 IMG_0787: наклейка на обложке давала свою трапецию и залив в трапеции обложки).
+SAM3_INSERT_MAX_SHARE = 0.30
+SAM3_INSERT_INSIDE = 0.90
+# Версия кэша шага SAM 3 (``sam3.npz``): с правилами пустых страниц и слияния вложенных экземпляров — 2.
+SAM3_CACHE_VERSION = 2
 # Затравки бумаги: пиксели внутри оболочек своей печати, не краска (серое выше локального фона минус INK_DROP).
 INK_DROP = 25
 # Окно локального фона бумаги (серое закрытие), px масштаба сегментации.
@@ -69,10 +82,11 @@ def load_sam3(weights: str | Path = SAM3_WEIGHTS, imgsz: int = SAM3_IMGSZ):
 def sam3_pages(predictor, bgr: np.ndarray, hulls: np.ndarray, prompts=SAM3_PROMPTS) -> tuple[np.ndarray, np.ndarray]:
     """Страницы SAM 3 одним проходом: сырое объединение экземпляров и карта меток экземпляров-страниц.
 
-    Берутся экземпляры, накрывающие не меньше :data:`SAM3_MIN_PRINT` своей печати. В карте меток экземпляры двух
-    подсказок, совпадающие на ≥ :data:`SAM3_SAME_IOU` (IoU), считаются одной страницей; пересечения отдаются
-    экземпляру с большей оценкой. Это то же, что ``sam3_raw`` и ``sam3_instances`` стенда подшивок по отдельности,
-    но кадр кодируется и подсказки прогоняются один раз.
+    Отбор экземпляров (``select_instance``): с печатью — накрывает не меньше :data:`SAM3_MIN_PRINT` своей печати;
+    без печати — не меньше :data:`SAM3_BLANK_MIN_SHARE` самого большого экземпляра кадра и уверенность не ниже
+    :data:`SAM3_BLANK_MIN_CONF` (пустые форзацы). В карте меток экземпляры двух подсказок, совпадающие на
+    ≥ :data:`SAM3_SAME_IOU` (IoU), — одна страница; мелкий экземпляр внутри выпуклой оболочки крупного (наклейка) —
+    часть крупного (``merge_inserts``); пересечения отдаются экземпляру с большей оценкой.
 
     Args:
         predictor: ``SAM3SemanticPredictor``.
@@ -86,9 +100,7 @@ def sam3_pages(predictor, bgr: np.ndarray, hulls: np.ndarray, prompts=SAM3_PROMP
     import torch
 
     h, w = hulls.shape
-    raw = np.zeros((h, w), bool)
-    found: list[tuple[float, np.ndarray]] = []
-    need = SAM3_MIN_PRINT * max(hulls.sum(), 1)
+    candidates: list[tuple[float, np.ndarray]] = []
     with torch.inference_mode():
         predictor.set_image(bgr)
         for prompt in prompts:
@@ -97,26 +109,94 @@ def sam3_pages(predictor, bgr: np.ndarray, hulls: np.ndarray, prompts=SAM3_PROMP
                 continue
             scores = results[0].boxes.conf.cpu().numpy()
             for m, sc in zip(results[0].masks.data.cpu().numpy() > 0.5, scores):
-                m = cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
-                if (m & hulls).sum() < need:
-                    continue
-                raw |= m
-                # Тот же экземпляр по другой подсказке — склеить, иначе новая страница.
-                dup = [k for k, (_, o) in enumerate(found) if (m & o).sum() / max((m | o).sum(), 1) >= SAM3_SAME_IOU]
-                if dup:
-                    k = dup[0]
-                    found[k] = (max(found[k][0], float(sc)), found[k][1] | m)
-                else:
-                    found.append((float(sc), m))
+                candidates.append(
+                    (float(sc), cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0)
+                )
     # Сбросить картинку предиктора и кэш CUDA: иначе на следующем кадре растёт видеопамять.
     if hasattr(predictor, "reset_image"):
         predictor.reset_image()
     torch.cuda.empty_cache()
+    raw = np.zeros((h, w), bool)
+    found: list[tuple[float, np.ndarray]] = []
+    # «Самый большой» — из всех экземпляров кадра: на развороте из двух пустых страниц иначе не от чего отсчитывать.
+    largest = max((int(m.sum()) for _, m in candidates), default=0)
+    for sc, m in candidates:
+        if not select_instance(m, sc, hulls, largest):
+            continue
+        raw |= m
+        # Тот же экземпляр по другой подсказке — склеить, иначе новая страница.
+        dup = [k for k, (_, o) in enumerate(found) if (m & o).sum() / max((m | o).sum(), 1) >= SAM3_SAME_IOU]
+        if dup:
+            k = dup[0]
+            found[k] = (max(found[k][0], sc), found[k][1] | m)
+        else:
+            found.append((sc, m))
+    found = merge_inserts(found)
     labels = np.zeros((h, w), np.uint8)
     # Пересечения — экземпляру с большей оценкой: он кладётся последним.
     for k, (_, m) in sorted(enumerate(found), key=lambda t: t[1][0]):
         labels[m] = k + 1
     return raw, labels
+
+
+def select_instance(mask: np.ndarray, score: float, hulls: np.ndarray, largest: int) -> bool:
+    """Берётся ли экземпляр SAM 3 в бумагу: с печатью — всегда, без печати — крупный и уверенный.
+
+    Args:
+        mask: Маска экземпляра (bool).
+        score: Уверенность SAM 3.
+        hulls: Оболочки своей печати (bool).
+        largest: Площадь самого большого экземпляра кадра, px.
+
+    Returns:
+        True — экземпляр берётся.
+    """
+    if (mask & hulls).sum() >= SAM3_MIN_PRINT * max(int(hulls.sum()), 1):
+        return True
+    return mask.sum() >= SAM3_BLANK_MIN_SHARE * largest and score >= SAM3_BLANK_MIN_CONF
+
+
+def convex_hull_mask(mask: np.ndarray) -> np.ndarray:
+    """Выпуклая оболочка маски (bool того же размера)."""
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    out = np.zeros(mask.shape, np.uint8)
+    if contours:
+        cv2.fillPoly(out, [cv2.convexHull(np.vstack(contours))], 1)
+    return out > 0
+
+
+def merge_inserts(found: list[tuple[float, np.ndarray]]) -> list[tuple[float, np.ndarray]]:
+    """Наклейки и вклейки — к своей странице: мелкий экземпляр внутри выпуклой оболочки крупного сливается с ним.
+
+    Экземпляр меньше :data:`SAM3_INSERT_MAX_SHARE` самого большого, лежащий не меньше чем на :data:`SAM3_INSERT_INSIDE`
+    в выпуклой оболочке более крупного, добавляется к его маске (оценка — большего). Выпуклая оболочка, а не сама маска:
+    у страницы на месте наклейки вырез, и открытый к краю залив заливка дыр не закрывает. Узкая страница у корешка
+    лежит рядом с соседней, а не внутри её оболочки, и не сливается.
+
+    Args:
+        found: Экземпляры-страницы ``(уверенность, маска)``.
+
+    Returns:
+        Экземпляры после слияния.
+    """
+    if len(found) < 2:
+        return found
+    areas = [int(m.sum()) for _, m in found]
+    biggest = max(areas)
+    order = sorted(range(len(found)), key=lambda k: areas[k])
+    merged = {k: (sc, m.copy()) for k, (sc, m) in enumerate(found)}
+    for k in order:
+        if areas[k] >= SAM3_INSERT_MAX_SHARE * biggest or k not in merged:
+            continue
+        small = merged[k][1]
+        hosts = [j for j in merged if j != k and areas[j] > areas[k]]
+        for j in sorted(hosts, key=lambda j: -areas[j]):
+            if (small & convex_hull_mask(merged[j][1])).sum() >= SAM3_INSERT_INSIDE * small.sum():
+                sc_j, m_j = merged[j]
+                merged[j] = (max(sc_j, merged[k][0]), m_j | small)
+                del merged[k]
+                break
+    return [merged[k] for k in sorted(merged)]
 
 
 def postprocess_plain(raw: np.ndarray, book: np.ndarray, hulls: np.ndarray) -> np.ndarray:
