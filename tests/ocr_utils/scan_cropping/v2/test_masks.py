@@ -56,6 +56,51 @@ def test_copy_back_untouched_block_ignored() -> None:
     assert blocks == 0 and not returned.any() and (out == 255).all()
 
 
+def finger_on_block() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Блок 40..160 × 30..70, палец: ядро 90..110 × 45..55, зона закраса — ядро с кольцом 10 px.
+
+    Returns:
+        ``(оригинал 10, закрас 200, зона закраса, ядро, полигон блока)``.
+    """
+    original = np.full((100, 200, 3), 10, np.uint8)
+    clean = np.full_like(original, 200)
+    core = np.zeros((100, 200), bool)
+    core[45:55, 90:110] = True
+    paint = np.zeros((100, 200), np.uint8)
+    paint[35:65, 80:120] = 255
+    block = np.array([[40, 30], [160, 30], [160, 70], [40, 70]], np.float32)
+    return original, clean, paint, core, block
+
+
+def test_copy_back_text_returns_only_dilation_ring() -> None:
+    """Блок Text: с оригинала возвращается только зона дилатации пальца (кольцо), ядро остаётся закрашенным."""
+    original, clean, paint, core, block = finger_on_block()
+    out, returned, blocks = copy_back_blocks(
+        original, clean, [block], paint, np.ones((100, 200), bool), (0, 0), ["Text"], core
+    )
+    assert blocks == 1
+    assert (out[40, 85] == 10).all()  # кольцо в блоке — оригинал
+    assert (out[50, 100] == 200).all()  # ядро — закрас
+    assert returned[40, 85] and not returned[50, 100]
+
+
+def test_copy_back_picture_returns_whole_block() -> None:
+    """Блок Picture: возвращается целиком, ядро тоже (ложный палец на портрете)."""
+    original, clean, paint, core, block = finger_on_block()
+    out, _, blocks = copy_back_blocks(
+        original, clean, [block], paint, np.ones((100, 200), bool), (0, 0), ["Picture"], core
+    )
+    assert blocks == 1
+    assert (out[50, 100] == 10).all() and (out[40, 85] == 10).all()
+
+
+def test_copy_back_without_labels_whole_block() -> None:
+    """Без типов блоков (кэш layout.json v3) — прежнее поведение: блок целиком."""
+    original, clean, paint, core, block = finger_on_block()
+    out, _, _ = copy_back_blocks(original, clean, [block], paint, np.ones((100, 200), bool), (0, 0), None, core)
+    assert (out[50, 100] == 10).all()
+
+
 def test_glue_closes_gap_inside_book() -> None:
     """Щель 20 px между страницами склеивается, а за край книги склейка не выходит."""
     paper, book = spread(20)
@@ -154,7 +199,6 @@ def test_thin_bg_line_keeps_margin():
     hulls[250:500, 150:650] = True
     book = book_close_open(bg, hulls)
     assert book[105:185, 150:650].all()  # поле над линией осталось книгой
-
 
 
 def test_fill_then_overlay_no_trail() -> None:

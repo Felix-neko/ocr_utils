@@ -846,7 +846,10 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     # по ``--no-copy-back-over-fingers``, «не фон» без рук.
     allowed = book["book"] if params.copy_back_over_fingers else zone_seg
     filled_from = clean
-    clean, returned, blocks = copy_back_blocks(original, clean, polys, paint, to_frame(allowed, shape), pad)
+    # Picture и Figure — целиком (ложные пальцы на портретах), остальные блоки — только зона дилатации пальца.
+    clean, returned, blocks = copy_back_blocks(
+        original, clean, polys, paint, to_frame(allowed, shape), pad, labels, fingers["core"]
+    )
     paper = to_frame(masks.paper | protected, shape)
     box = paper_bbox(paper)
     # Стык страниц на кадре: закрас pull-push у продолжения стыка смешивает страницы с растушёвкой.
