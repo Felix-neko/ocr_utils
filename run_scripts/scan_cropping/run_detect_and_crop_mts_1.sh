@@ -34,7 +34,7 @@ echo "  debug  = $DEBUG_DIR"
 # (кончик) не достаёт до края кадра — с включённым флагом такой фрагмент отбрасывается
 # вместе с ложными. Признак в логе: «ядер не у края убрано=N» на кадрах без портретов.
 
-uv run python -m ocr_utils.scan_cropping \
+uv run python -m ocr_utils.scan_cropping.v1 \
     --input-dir "$INPUT_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir "$DEBUG_DIR" \

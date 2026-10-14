@@ -1,10 +1,10 @@
-"""CLI вырезки сканов: ``python -m ocr_utils.scan_cropping``.
+"""CLI вырезки сканов: ``python -m ocr_utils.scan_cropping.v1``.
 
 Здесь ТОЛЬКО click: объявление опций, их разбор и сборка :class:`CropParams`.
 Вся обработка изображений — в остальных модулях пакета, обход пачки файлов —
 в :func:`ocr_utils.scan_cropping.pipeline.run_batch`.
 
-    uv run python -m ocr_utils.scan_cropping \\
+    uv run python -m ocr_utils.scan_cropping.v1 \\
         --input-dir IN --output-dir OUT --debug-dir DBG \\
         --left-margin -150 --top-margin -150 --right-margin -150 --bottom-margin -150
 """

@@ -16,7 +16,7 @@ uv sync
 ## Запуск
 
 ```bash
-uv run python -m ocr_utils.scan_cropping \
+uv run python -m ocr_utils.scan_cropping.v1 \
     --input-dir  IN \
     --output-dir OUT \
     --debug-dir  DBG \
@@ -24,7 +24,7 @@ uv run python -m ocr_utils.scan_cropping \
     --left-margin -150 --top-margin -150 --right-margin -150 --bottom-margin -150
 ```
 
-Полный список опций — `uv run python -m ocr_utils.scan_cropping --help`.
+Полный список опций — `uv run python -m ocr_utils.scan_cropping.v1 --help`.
 Готовые прогоны под конкретные партии сканов лежат в `run_scripts/scan_cropping/`.
 
 Ключевые опции:

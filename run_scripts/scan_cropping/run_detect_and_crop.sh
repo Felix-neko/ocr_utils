@@ -30,7 +30,7 @@ echo "  output    = $OUTPUT_DIR"
 echo "  debug     = $DEBUG_DIR"
 echo "  x-margins = $X_MARGINS | y-margins = $Y_MARGINS"
 
-uv run python -m ocr_utils.scan_cropping \
+uv run python -m ocr_utils.scan_cropping.v1 \
     --input-dir  "$INPUT_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir  "$DEBUG_DIR" \
