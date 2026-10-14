@@ -37,7 +37,7 @@ from ocr_utils.scan_cropping.v2.glyphs import content_mask
 from ocr_utils.scan_cropping.v2.ink_fill import fill_bold_ink, touching_ink
 from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp_for_layout
 from ocr_utils.scan_cropping.v2.page_pose import PageQuad, page_quads
-from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, postprocess_plain
+from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, fill_page_pockets, postprocess_plain
 from ocr_utils.scan_cropping.v2.scale import Scale
 from ocr_utils.scan_cropping.v2.side_fit import regularize_sides
 
@@ -469,6 +469,7 @@ class PaperMasks:
         ink_added: Добавлено вторым проходом SAM 3 по кадру без крупной краски.
         side_added: Залито выравниванием боковых сторон (ямы).
         side_cut: Срезано выравниванием боковых сторон (выбросы).
+        pocket_added: Добавлено как карман, листок или вклейка на странице (``paper.fill_page_pockets``).
     """
 
     plain: np.ndarray
@@ -479,6 +480,7 @@ class PaperMasks:
     ink_added: np.ndarray
     side_added: np.ndarray
     side_cut: np.ndarray
+    pocket_added: np.ndarray | None = None
 
 
 def paper_masks(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> PaperMasks:
@@ -497,8 +499,10 @@ def paper_masks(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> P
     snapped = snap_outward(img, plain, book["book"], book["bg"], bg_reach=SNAP_BG_REACH)
     glued = glue_hull_bridge(snapped, book["book"], book["content"], sam3["inst"]).paper
     refined = refine_colour(img, book["book"], snapped, glued, book["hulls"], refine_depth)
+    # Карманы, листки, вклейки на странице, которые SAM 3 не взял в экземпляр страницы.
+    pocket = fill_page_pockets(img, refined.paper, book["book"], book["bg"], book["hulls"])
     empty = np.zeros_like(plain)
-    return PaperMasks(plain, snapped, glued, refined.paper, refined.cut, empty, empty, empty)
+    return PaperMasks(plain, snapped, glued, refined.paper | pocket, refined.cut, empty, empty, empty, pocket)
 
 
 def frame_paper(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> PaperMasks:
@@ -646,8 +650,18 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
         masks = replace(masks, paper=side.paper, side_added=side.added, side_cut=side.cut)
         pages = frame_pages(img, book, sam3, paint_seg, masks)
     np.savez_compressed(work.masks, **asdict(masks))
+    # Трапеции изменились (новая бумага) — разметка surya по кадру, выпрямленному по старым трапециям, устарела.
+    if work.pages.exists() and not same_quads(
+        read_page_quads(work.pages), [p.quad for p in pages if p.quad is not None]
+    ):
+        work.layout.unlink(missing_ok=True)
     write_pages(work.pages, pages)
     return job.key
+
+
+def same_quads(old: list[np.ndarray], new: list[np.ndarray], tol: float = 2.0) -> bool:
+    """Совпадают ли трапеции страниц (те же по числу, вершины не дальше ``tol`` px сегментации)."""
+    return len(old) == len(new) and all(np.abs(np.asarray(a) - np.asarray(b)).max() <= tol for a, b in zip(old, new))
 
 
 # --- Шаг 5, GPU: surya layout по выпрямленному кадру ---------------------------------------------------------------
@@ -825,7 +839,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     sam3 = dict(np.load(work.sam3))
     # Маски бумаги — с шага «бумага и страницы».
     with np.load(work.masks) as data:
-        masks = PaperMasks(**{name: data[name] for name in PaperMasks.__dataclass_fields__})
+        masks = PaperMasks(**{name: data[name] for name in PaperMasks.__dataclass_fields__ if name in data.files})
     clean = read_bgr(work.clean)
     shape = clean.shape[:2]
     fingers = np.load(work.fingers)

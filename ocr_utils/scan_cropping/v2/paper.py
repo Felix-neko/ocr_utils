@@ -10,6 +10,7 @@ from scipy import ndimage
 
 from ocr_utils.scan_cropping.gpu_models import MODELS_DIR
 from ocr_utils.scan_cropping.v2.book import disk
+from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM
 
 # Веса SAM 3 (ultralytics ``SAM3SemanticPredictor``): закрытые веса взяты с зеркала ModelScope со сверкой SHA
 # (``research/newspaper_crop/README.md``).
@@ -35,6 +36,25 @@ SAM3_BLANK_MIN_CONF = 0.5
 # IMG_0828, 1991/07 IMG_0787: наклейка на обложке давала свою трапецию и залив в трапеции обложки).
 SAM3_INSERT_MAX_SHARE = 0.30
 SAM3_INSERT_INSIDE = 0.90
+# Карманы, листки и вклейки на странице, которые SAM 3 не взял в экземпляр страницы (РИСК 1993/03 IMG_0377, 1991/03
+# IMG_0201, МТС 1991/04 002_IMG_0675), — ``fill_page_pockets``. Светлая бесцветная не-бумага в книге (L не ниже 5-го
+# перцентиля бумаги минус POCKET_L_MARGIN, хрома не выше 95-го плюс POCKET_CHROMA_MARGIN) открывается
+# диском POCKET_OPEN_MM: торец стопки и щели у корешка (полосы шириной до ~15 мм) уходят. Остаток минус бумага — кандидаты;
+# берутся компактные блоки: площадь ≥ POCKET_MIN_MM2, удлинение повёрнутой рамки ≤ POCKET_MAX_ASPECT, заполнение рамки
+# ≥ POCKET_MIN_FILL. На 36 кадрах выборки пака-6 у торца после открытия удлинение 4–10 или заполнение 0.1–0.36, у карманов
+# и вклеек — удлинение ≤ 2.3, заполнение ≥ 0.49, площадь ≥ 3 500 мм².
+POCKET_L_MARGIN = 10.0
+POCKET_CHROMA_MARGIN = 10.0
+POCKET_OPEN_MM = 20.0
+# Закрытие кандидатов перед открытием, мм: сшивает карман, взятый SAM 3 пятнами.
+POCKET_CLOSE_MM = 5.0
+# Кромка бумаги у светлых кандидатов, мм, которая идёт в кандидаты (островки кармана, связанные со страницей).
+POCKET_NEAR_MM = 5.0
+POCKET_MIN_MM2 = 2000.0
+POCKET_MAX_ASPECT = 2.5
+POCKET_MIN_FILL = 0.45
+# Доля блока внутри осевой рамки крупных страниц кадра, не меньше.
+POCKET_MIN_INSIDE = 0.8
 # Версия кэша шага SAM 3 (``sam3.npz``): с правилами пустых страниц и слияния вложенных экземпляров — 2.
 SAM3_CACHE_VERSION = 2
 # Затравки бумаги: пиксели внутри оболочек своей печати, не краска (серое выше локального фона минус INK_DROP).
@@ -213,12 +233,102 @@ def postprocess_plain(raw: np.ndarray, book: np.ndarray, hulls: np.ndarray) -> n
     paper = raw & book
     paper = cv2.morphologyEx(paper.astype(np.uint8), cv2.MORPH_CLOSE, disk(CLOSE_PX)) > 0
     paper = cv2.morphologyEx(paper.astype(np.uint8), cv2.MORPH_OPEN, disk(3)) > 0
-    # Компоненты, задевающие печать.
-    labels, _ = ndimage.label(paper)
-    keep = np.unique(labels[hulls & paper])
-    paper = np.isin(labels, keep[keep > 0]) if len(keep) else paper
+    # Компоненты, задевающие печать, и крупные без печати — пустые страницы (как отбор экземпляров ``select_instance``:
+    # иначе пустой форзац, взятый SAM 3, здесь снова выпадал, МТС 1990/06 IMG_1354).
+    labels, count = ndimage.label(paper)
+    if count:
+        sizes = np.bincount(labels.ravel())[1:]
+        keep = set(np.unique(labels[hulls & paper]).tolist()) - {0}
+        keep |= {k + 1 for k in np.nonzero(sizes >= SAM3_BLANK_MIN_SHARE * sizes.max())[0]}
+        paper = np.isin(labels, sorted(keep))
     paper = ndimage.binary_fill_holes(paper)
     return paper & book
+
+
+def disk_closing(mask: np.ndarray, radius: float) -> np.ndarray:
+    """Закрытие маски диском радиуса ``radius`` px через расстояния (быстро на больших радиусах)."""
+    dilated = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 5) <= radius
+    return cv2.distanceTransform(dilated.astype(np.uint8), cv2.DIST_L2, 5) > radius
+
+
+def disk_opening(mask: np.ndarray, radius: float) -> np.ndarray:
+    """Открытие маски диском радиуса ``radius`` px через расстояния (быстро на больших радиусах)."""
+    eroded = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5) > radius
+    return (cv2.distanceTransform((~eroded).astype(np.uint8), cv2.DIST_L2, 5) <= radius) & mask
+
+
+def fill_page_pockets(
+    bgr: np.ndarray, paper: np.ndarray, book: np.ndarray, bg: np.ndarray, hulls: np.ndarray
+) -> np.ndarray:
+    """Карманы, листки, вклейки на странице, не взятые SAM 3: компактные блоки светлой бесцветной не-бумаги в книге.
+
+    Цвет «бумаги» — относительно бумаги кадра (затравки ``paper_seeds``, без печати — сама бумага SAM 3), поэтому правило
+    работает и на пожелтевшей бумаге. Открытие диском :data:`POCKET_OPEN_MM` по «бумага ∪ светлое» отсекает торец стопки
+    и щели у корешка, затем берутся компактные блоки (см. константы). Вклейка, лежащая через стык страниц, берётся целиком;
+    по страницам её делит ``glue.split_pages`` (ближайший экземпляр SAM 3) — страница под вклейкой не теряет низ.
+
+    Args:
+        bgr: Кадр BGR (масштаб сегментации).
+        paper: Бумага (bool).
+        book: Грубая маска книги (bool).
+        bg: Фон (bool).
+        hulls: Оболочки своей печати (bool).
+
+    Returns:
+        Добавка к бумаге (bool), без пикселей ``paper``.
+    """
+    seeds = paper_seeds(bgr, hulls, book)
+    if seeds.sum() < 500:
+        seeds = cv2.erode(paper.astype(np.uint8), disk(7)) > 0
+    if seeds.sum() < 500:
+        return np.zeros_like(paper)
+    lab = smooth_lab(bgr)
+    light, chroma = lab[..., 0], np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+    pale = (light >= np.percentile(light[seeds], 5) - POCKET_L_MARGIN) & (
+        chroma <= np.percentile(chroma[seeds], 95) + POCKET_CHROMA_MARGIN
+    )
+    mm = SEG_PX_PER_MM
+    # Кандидаты — светлое вне бумаги, плюс то, что SAM 3 взял из кармана пятнами (РИСК 1991/03 IMG_0201: половина
+    # кармана — островки бумаги, часть связана со страницей): светлые островки бумаги, отделённые от крупных страниц, и
+    # светлая кромка бумаги у кандидатов шириной POCKET_NEAR_MM. Саму страницу целиком в открытие не включать: полоса
+    # торца вплотную к странице вместе с ней пережила бы открытие.
+    free = book & ~bg & pale & ~paper
+    labels, _ = ndimage.label(paper)
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    pages = np.isin(labels, np.nonzero(sizes >= SAM3_BLANK_MIN_SHARE * sizes.max())[0])
+    near = cv2.distanceTransform((~free).astype(np.uint8), cv2.DIST_L2, 5) <= POCKET_NEAR_MM * mm
+    candidates = free | (paper & pale & (~pages | near))
+    joined = disk_closing(candidates, POCKET_CLOSE_MM * mm) & book & ~bg
+    opened = disk_opening(joined, POCKET_OPEN_MM * mm)
+    opened = cv2.morphologyEx(opened.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    # Осевая рамка крупных страниц кадра: по ширине — от левого края левой до правого края правой, по высоте — от верха
+    # самой высокой до низа самой низкой (страница, у которой SAM 3 не взял низ, не укорачивает рамку).
+    spread = np.zeros_like(paper)
+    if pages.any():
+        ys, xs = np.nonzero(pages)
+        spread[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1] = True
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    added = np.zeros_like(paper)
+    for k in range(1, count):
+        area = stats[k, cv2.CC_STAT_AREA]
+        if area < POCKET_MIN_MM2 * mm * mm:
+            continue
+        comp = labels == k
+        rect = cv2.minAreaRect(np.column_stack(np.nonzero(comp))[:, ::-1].astype(np.float32))
+        short, long_ = sorted((max(rect[1][0], 1.0), max(rect[1][1], 1.0)))
+        if long_ / short > POCKET_MAX_ASPECT or area / (short * long_) < POCKET_MIN_FILL:
+            continue
+        # Карман и вклейка лежат в пределах разворота; веер торца стопки — за наружным краем страницы (РИСК 1991/01
+        # IMG_0390: блок 2 800 мм² за правой страницей).
+        if spread[comp].mean() < POCKET_MIN_INSIDE:
+            continue
+        # Открытие скругляет углы кармана; повёрнутая рамка блока прилегает к его прямым сторонам — светлое внутри неё
+        # добирает углы, а торец за краем страницы остаётся снаружи рамки.
+        box = np.zeros(paper.shape, np.uint8)
+        cv2.fillPoly(box, [np.round(cv2.boxPoints(rect)).astype(np.int32)], 1)
+        added |= (comp | ((box > 0) & free)) & ~paper
+    return added
 
 
 def paper_seeds(bgr: np.ndarray, hulls: np.ndarray, book: np.ndarray) -> np.ndarray:

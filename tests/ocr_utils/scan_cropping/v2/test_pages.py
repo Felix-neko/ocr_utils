@@ -205,3 +205,57 @@ def test_refine_colour_without_print():
     r = refine_colour(bgr, book, base, base | gap, np.zeros((h, w), bool), 70)
     assert not r.paper[70, 400] and r.paper[300, 400]
     assert cv2.countNonZero(r.paper.astype(np.uint8)) > 0
+
+
+def pocket_scene():
+    """Разворот на коврике: две светлые страницы, у наружных краёв — светлый торец стопки полосой 10 мм.
+
+    Returns:
+        ``(bgr, книга, фон, бумага, оболочки печати)`` на масштабе сегментации (~6.9 px/мм).
+    """
+    import cv2
+
+    h, w = 1600, 2400
+    bgr = np.full((h, w, 3), 15, np.uint8)
+    book = np.zeros((h, w), bool)
+    book[100:1500, 100:2300] = True
+    bg = ~book
+    bgr[book] = (60, 40, 30)  # крышка
+    paper = np.zeros((h, w), bool)
+    paper[150:1450, 220:1190] = True
+    paper[150:1450, 1210:2180] = True
+    bgr[paper] = (205, 225, 235)
+    bgr[150:1450, 150:220] = (190, 215, 228)  # торец стопки слева — светлая полоса 10 мм
+    hulls = np.zeros((h, w), bool)
+    for x0 in (300, 1290):
+        for y in range(250, 1350, 40):
+            cv2.line(bgr, (x0, y), (x0 + 800, y), (30, 30, 30), 3)
+        hulls[240:1360, x0 - 5 : x0 + 805] = True
+    return bgr, book, bg, paper, hulls
+
+
+def test_fill_page_pockets_corner_pocket_added_fore_edge_not():
+    """Карман в углу страницы, не взятый SAM 3 (выемка, открытая наружу), добавляется; полоса торца — нет."""
+    from ocr_utils.scan_cropping.v2.paper import fill_page_pockets
+
+    bgr, book, bg, paper, hulls = pocket_scene()
+    paper = paper.copy()
+    paper[900:1450, 220:800] = False  # карман 84×80 мм в левом нижнем углу левой страницы
+    bgr[900:1450, 220:800] = (215, 232, 240)
+    added = fill_page_pockets(bgr, paper, book, bg, hulls)
+    assert added[1200, 500] and added[1440, 230]
+    assert not added[500, 180]  # торец выше кармана (рядом с карманом полоса торца может войти в рамку кармана)
+    assert not added[120, 1200]  # крышка у корешка
+
+
+def test_fill_page_pockets_insert_across_spine_keeps_right_page():
+    """Вклейка через стык на низу правой страницы: вклейка и низ правой страницы — бумага, правая страница цела."""
+    from ocr_utils.scan_cropping.v2.paper import fill_page_pockets
+
+    bgr, book, bg, paper, hulls = pocket_scene()
+    paper = paper.copy()
+    paper[1000:1450, 1000:1700] = False  # SAM 3 вырезал вклейку из обеих страниц
+    bgr[1000:1450, 1000:1700] = (225, 236, 242)
+    added = fill_page_pockets(bgr, paper, book, bg, hulls)
+    full = paper | added
+    assert full[1300, 1500] and full[1300, 1100] and full[1440, 1650]
