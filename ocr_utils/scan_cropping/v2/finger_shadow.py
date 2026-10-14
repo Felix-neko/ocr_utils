@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from scipy import ndimage
 
 from ocr_utils.scan_cropping.v2.border_fill import pull_push
 
@@ -52,7 +51,7 @@ SMOOTH_SIGMA_MM = 1.5
 POST_SIGMA_MM = 1.0
 # Рампа карты от края области (там, где снаружи бумага), мм: на краю поправка 0 и растёт плавно (smoothstep).
 EDGE_RAMP_MM = 4.0
-# Продолжение поправки в закрас вне книги (закрас до рамки продолжил тёмный край листа), мм, со спадом до 0.
+# Полоса закраса вне книги у области, мм: карта мерится и на ней (закрас темнее опоры — осветляется), со спадом до 0.
 FILL_REACH_MM = 10.0
 # Перцентиль, которым карта ограничивается сверху внутри области (отсечка одиночных выбросов).
 CAP_PERCENTILE = 99.5
@@ -67,7 +66,8 @@ class FingerShadow:
         skin: Кожа (bool) — в оценку и осветление не входит.
         ink: Краска (bool) — в оценку не входит.
         content: Крупная печать (bool) — в оценку не входит.
-        delta: Прибавка по каналам BGR, float32 (H, W, 3), ≥ 0; ноль вне области и её продолжения в закрас.
+        delta: Прибавка по каналам BGR, float32 (H, W, 3), ≥ 0; ноль вне области и полосы закраса у неё.
+        fill: Полоса закраса вне книги у области (bool), где карта тоже мерится; None — пустая.
     """
 
     area: np.ndarray
@@ -75,6 +75,7 @@ class FingerShadow:
     ink: np.ndarray
     content: np.ndarray
     delta: np.ndarray
+    fill: np.ndarray | None = None
 
 
 def disk(mask: np.ndarray, radius_px: float) -> np.ndarray:
@@ -183,38 +184,42 @@ def window_of(mask: np.ndarray, margin: int) -> tuple[slice, slice]:
     )
 
 
-def postprocess(delta: np.ndarray, area: np.ndarray, book: np.ndarray, mm: float) -> np.ndarray:
-    """Карта после оценки: отсечка сверху, сглаживание по области, рампа от края, продолжение в закрас вне книги.
+def postprocess(delta: np.ndarray, area: np.ndarray, fill: np.ndarray, book: np.ndarray, mm: float) -> np.ndarray:
+    """Карта после оценки: отсечка сверху, сглаживание по области, рампа от края, спад в закрасе вне книги.
 
     Args:
-        delta: Прибавка по каналам, ≥ 0.
+        delta: Прибавка по каналам, ≥ 0 (оценена и на области, и на закрасе вне книги у неё).
         area: Область поиска (bool).
+        fill: Закрас вне книги в пределах ``FILL_REACH_MM`` от области (bool) — там карта мерится так же, как в области.
         book: Книга (bool).
         mm: Плотность, px/мм.
 
     Returns:
-        Карта; ноль вне области и вне её продолжения в закрас.
+        Карта; ноль вне области и полосы закраса у неё.
     """
-    inside = delta[area]
+    where = area | fill
+    inside = delta[where]
     cap = np.percentile(inside, CAP_PERCENTILE, axis=0) if inside.size else np.zeros(3)
     delta = np.minimum(delta, cap)
-    # Сглаживание только по области (нормированная свёртка): нули снаружи в среднее не входят.
-    wts = area.astype(np.float32)
-    num = cv2.GaussianBlur(delta * wts[..., None], (0, 0), POST_SIGMA_MM * mm)
-    den = cv2.GaussianBlur(wts, (0, 0), POST_SIGMA_MM * mm)
-    delta = num / np.maximum(den, 1e-6)[..., None]
+    # Сглаживание по области и по полосе закраса порознь (нормированная свёртка): через край листа карта не перетекает —
+    # большая поправка тёмного края листа не ложится на светлый закрас.
+    smoothed = np.zeros_like(delta)
+    for part in (area, fill):
+        wts = part.astype(np.float32)
+        num = cv2.GaussianBlur(delta * wts[..., None], (0, 0), POST_SIGMA_MM * mm)
+        den = cv2.GaussianBlur(wts, (0, 0), POST_SIGMA_MM * mm)
+        smoothed[part] = (num / np.maximum(den, 1e-6)[..., None])[part]
+    delta = smoothed
     # Рампа: 0 там, где снаружи области бумага (край тени), растёт smoothstep на EDGE_RAMP_MM. У края листа (снаружи
-    # не книга) рампы нет: поправка продолжается в закрас вне книги.
+    # не книга) рампы нет: там продолжается полоса закраса.
     paper_out = book & ~area
     d = cv2.distanceTransform((~paper_out).astype(np.uint8), cv2.DIST_L2, 5) / (EDGE_RAMP_MM * mm)
-    delta = delta * smoothstep(np.clip(d, 0, 1))[..., None] * area[..., None]
-    # Закрас до рамки продолжил тёмный край листа — та же поправка со спадом.
-    fill = ~book
-    if fill.any() and area.any():
-        dist, (iy, ix) = ndimage.distance_transform_edt(~area, return_indices=True)
-        near = fill & (dist <= FILL_REACH_MM * mm)
+    delta = delta * smoothstep(np.clip(d, 0, 1))[..., None] * where[..., None]
+    # Полоса закраса: карта там своя (закрас темнее опоры — осветляется, светлый — нет) и спадает к внешнему краю полосы.
+    if fill.any():
+        dist = cv2.distanceTransform((~area).astype(np.uint8), cv2.DIST_L2, 5)
         fade = smoothstep(np.clip(1 - dist / (FILL_REACH_MM * mm), 0, 1))
-        delta[near] = delta[iy[near], ix[near]] * fade[near][:, None]
+        delta[fill] *= fade[fill][:, None]
     return delta
 
 
@@ -275,11 +280,17 @@ def estimate_finger_shadow(
     win = window_of(area, int((REF_RING_MM[1] - SHADOW_REACH_MM + 3 * SMOOTH_SIGMA_MM) * mm) + 2)
     w_img = small[win].astype(np.float32)
     sigma = SMOOTH_SIGMA_MM * mm
-    back = smooth_fill(w_img, clean[win] & (from_core[win] <= REF_RING_MM[1]), sigma)
+    # Закрас до рамки вне книги у области: карта мерится и на нём — его тон задал pull-push от чистой полосы бумаги, и
+    # он бывает уже светлым там, где край листа тёмный (продолжение поправки с края переосветляло, МТС 1990/03 IMG_0972).
+    fill = ~book_s & disk(area, FILL_REACH_MM * mm)
+    # «Как есть» — порознь для листа и для полосы закраса: сглаживание через край листа смешало бы их тон.
+    back_book = smooth_fill(w_img, clean[win] & (from_core[win] <= REF_RING_MM[1]), sigma)
+    back_fill = smooth_fill(w_img, fill[win], sigma) if fill[win].any() else back_book
+    back = np.where(fill[win][..., None], back_fill, back_book)
     ref = smooth_fill(w_img, ring[win], sigma)
     delta = zeros.copy()
-    delta[win] = postprocess(np.maximum(ref - back, 0), area[win], book_s[win], mm)
-    return FingerShadow(area, skin, ink, content, delta)
+    delta[win] = postprocess(np.maximum(ref - back, 0), area[win], fill[win], book_s[win], mm)
+    return FingerShadow(area, skin, ink, content, delta, fill)
 
 
 def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
@@ -305,8 +316,21 @@ def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
     ky, kx = h / small.shape[0], w / small.shape[1]
     y0, y1 = int(rows.start * ky), min(h, int(np.ceil(rows.stop * ky)))
     x0, x1 = int(cols.start * kx), min(w, int(np.ceil(cols.stop * kx)))
-    # Растягивается только рамка карты (её края нулевые — запас 2 px, сдвиг сетки на долю пикселя не виден).
-    part = cv2.resize(small[rows, cols], (x1 - x0, y1 - y0), interpolation=cv2.INTER_CUBIC)
+    # Растягивается только рамка карты, отдельно по области на листе и по полосе закраса, с нормировкой по маске части:
+    # кубическая интерполяция через край листа переносила большую поправку тёмного края на светлый закрас (+20 уровней
+    # на первом пикселе) и давала «звон» с обратной стороны.
+    size = (x1 - x0, y1 - y0)
+    add = np.zeros((y1 - y0, x1 - x0, 3), np.float32)
+    fill = shadow.fill if shadow.fill is not None else np.zeros_like(shadow.area)
+    for region in (shadow.area & ~fill, fill):
+        part = region[rows, cols]
+        if not part.any():
+            continue
+        weight = part.astype(np.float32)
+        num = cv2.resize(small[rows, cols] * weight[..., None], size, interpolation=cv2.INTER_LINEAR)
+        den = cv2.resize(weight, size, interpolation=cv2.INTER_LINEAR)
+        inside = (cv2.resize(part.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0) & (den > 1e-6)
+        add[inside] = num[inside] / den[inside][:, None]
     out = img.copy()
-    out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + part + 0.5, 0, 255).astype(np.uint8)
+    out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + add + 0.5, 0, 255).astype(np.uint8)
     return out

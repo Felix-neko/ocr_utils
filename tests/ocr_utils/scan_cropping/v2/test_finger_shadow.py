@@ -21,14 +21,17 @@ def page(shadow: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     img = np.tile(PAPER, (H, W, 1))
     if shadow:
         yy, xx = np.mgrid[0:H, 0:W]
-        g = np.exp(-(((xx - 1050) / 80.0) ** 2 + ((yy - 800) / 110.0) ** 2))  # σ 10 и 14 мм: тень в пределах зоны поиска
+        g = np.exp(
+            -(((xx - 1050) / 80.0) ** 2 + ((yy - 800) / 110.0) ** 2)
+        )  # σ 10 и 14 мм: тень в пределах зоны поиска
         img *= (1 - 0.25 * g)[..., None]
     img = img.astype(np.uint8)
     for y in range(120, H - 80, 40):
         cv2.putText(img, "TEXT TEXT TEXT TEXT", (60, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (30, 30, 30), 2)
     book = np.zeros((H, W), bool)
     book[:, :1100] = True
-    img[~book] = (20, 20, 20)
+    # За краем книги в итоге к этому шагу — закрас pull-push цвета бумаги, а не коврик.
+    img[~book] = PAPER.astype(np.uint8)
     core = np.zeros((H, W), np.uint8)
     cv2.ellipse(core, (1100, 800), (90, 50), 0, 0, 360, 1, -1)
     paint = cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))) > 0
@@ -115,3 +118,21 @@ def test_black_print_on_cyan_paper_not_skin() -> None:
     img[50:90, 40:360] = lab_to_bgr(30, 1, 1)  # крупная чёрная печать
     everywhere = np.ones((400, 400), bool)
     assert not skin_mask(img, 4.0, everywhere, everywhere, everywhere).any()
+
+
+def test_light_fill_beyond_edge_not_overlit() -> None:
+    """Тёмный призрак у края листа, а закрас за краем уже цвета бумаги: закрас не осветляется сверх бумаги (IMG_0972)."""
+    img = np.tile(PAPER, (H, W, 1))
+    yy, xx = np.mgrid[0:H, 0:W]
+    ghost = np.exp(-(((xx - 1080) / 40.0) ** 2 + ((yy - 800) / 60.0) ** 2))
+    img = (img * (1 - 0.3 * ghost * (xx < 1100))[..., None]).astype(np.uint8)  # призрак только на листе
+    book = np.zeros((H, W), bool)
+    book[:, :1100] = True
+    core = np.zeros((H, W), np.uint8)
+    cv2.ellipse(core, (1150, 800), (60, 40), 0, 0, 360, 1, -1)
+    paint = (cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))) > 0) & book
+    out = lighten_finger_shadow(img, estimate_finger_shadow(img, paint, core > 0, book, ~paint, PX_PER_MM))
+    gray_in, gray_out = (cv2.cvtColor(x, cv2.COLOR_BGR2GRAY).astype(int) for x in (img, out))
+    paper = int(np.median(gray_in[100:300, 100:300]))
+    assert gray_out[700:900, 1100:1180].max() <= paper + 3  # закрас за краем не светлее бумаги
+    assert gray_out[790:810, 1060:1095].min() >= paper - 12  # призрак на листе осветлён
