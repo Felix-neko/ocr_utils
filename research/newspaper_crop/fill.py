@@ -7,10 +7,8 @@ from enum import Enum
 import cv2
 import numpy as np
 
-# Масштаб, на котором считается заливка Telea (она медленная на полном превью); вклейка — только в не-бумагу.
-FILL_SCALE = 0.25
-# Радиус Telea на уменьшенной копии, px.
-TELEA_RADIUS = 9
+from ocr_utils.scan_cropping.v2.fill import FILL_SCALE, TELEA_RADIUS, fill_non_paper  # noqa: F401 — ядро, ре-экспорт
+
 
 
 class CopyMode(Enum):
@@ -20,29 +18,6 @@ class CopyMode(Enum):
     WARP = "warp"
 
 
-def fill_non_paper(bgr: np.ndarray, paper: np.ndarray) -> np.ndarray:
-    """Дорисовывает не-бумагу цветом соседней бумаги (Telea на уменьшенной копии, вклейка только вне листа).
-
-    Args:
-        bgr: Картинка BGR.
-        paper: Булева маска бумаги того же размера.
-
-    Returns:
-        Картинка BGR, где пиксели листа не тронуты.
-    """
-    if paper.all():
-        return bgr
-    h, w = paper.shape
-    small = cv2.resize(bgr, None, fx=FILL_SCALE, fy=FILL_SCALE, interpolation=cv2.INTER_AREA)
-    hole = cv2.resize(
-        (~paper).astype(np.uint8) * 255, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_NEAREST
-    )
-    hole = cv2.dilate(hole, np.ones((3, 3), np.uint8))
-    filled = cv2.inpaint(small, hole, TELEA_RADIUS, cv2.INPAINT_TELEA)
-    big = cv2.resize(filled, (w, h), interpolation=cv2.INTER_CUBIC)
-    out = bgr.copy()
-    out[~paper] = big[~paper]
-    return out
 
 
 def quad_homography(quad: np.ndarray) -> tuple[np.ndarray, int, int]:

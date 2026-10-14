@@ -7,20 +7,14 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from ocr_utils.scan_cropping.v2.glyphs import CLOSE_PX, FINGER_MIN_GLYPHS, GUARD_PX, INK_BLOCK, INK_OFFSET
+from ocr_utils.scan_cropping.v2.glyphs import finger_protect, guard_mask  # noqa: F401 — ядро, ре-экспорт для стенда
 from research.newspaper_crop.ink_guard import text_lines
 from research.newspaper_crop.zone import Zone, quad_mask, zone_of
 
-# Зазор вокруг своей печати, px рабочего масштаба (½ превью). Медианная высота полосы ЭГ на рабочем масштабе
-# 2153 px; при высоте полосы ~430 мм это ≈ 5 px/мм, то есть 10 px ≈ 2 мм бумаги.
-GUARD_PX = 10
 # Глубина от края листа, глубже которой краска считается своей печатью, px рабочего масштаба: у самого края
 # адаптивный порог ловит тень кромки и торец листа, а не буквы.
 EDGE_PX = 3
-# Окно и сдвиг адаптивного порога краски на рабочем масштабе (как ``ink_guard``: ~три строки текста).
-INK_BLOCK, INK_OFFSET = 31, 18
-# Смыкание своей печати в сплошные колонки перед раздутием, px рабочего масштаба: край зазора идёт гладко по
-# краю колонки, а не по каждой букве (зазор между колонками ЭГ на рабочем масштабе 15–25 px, как в ``ink_guard``).
-CLOSE_PX = 41
 # Окрестность строк набора, в которой краска считается печатью, px рабочего масштаба: боксы строк не доходят до
 # букв у самой кромки загиба (их режет край листа), а бахрома переплёта лежит дальше.
 LINE_REACH_PX = 8
@@ -70,22 +64,8 @@ def own_print(rgb: np.ndarray, paper: np.ndarray, quad: np.ndarray) -> np.ndarra
     return keep[labels]
 
 
-def guard_mask(own: np.ndarray, guard_px: int = GUARD_PX, close_px: int = CLOSE_PX) -> np.ndarray:
-    """Зазор: своя печать, сомкнутая в колонки (:data:`CLOSE_PX`) и раздутая на ``guard_px``.
 
-    Args:
-        own: Маска своей печати.
-        guard_px: Ширина зазора, px рабочего масштаба.
-        close_px: Окно смыкания, px; 0 — без смыкания.
 
-    Returns:
-        Булева маска.
-    """
-    m = own.astype(np.uint8)
-    if close_px > 0:
-        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (close_px, close_px)))
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * guard_px + 1, 2 * guard_px + 1))
-    return cv2.dilate(m, k) > 0
 
 
 def expand_quad(quad: np.ndarray, pts: np.ndarray, frozen: tuple[int, ...] = ()) -> tuple[np.ndarray, float]:
@@ -164,10 +144,17 @@ def protect(rgb: np.ndarray, zone: Zone, guard_px: int = GUARD_PX, frozen: tuple
     before = float(near.sum() / total) if total else 0.0
     # Подозрение «свои строки ушли в дорисовку»: краска дорисовки внутри сомкнутых колонок своей печати (без зазора) —
     # движок не взял кусок своей бумаги с текстом (или рядом торчит чужой лист — разбирать глазами).
-    ink_all = cv2.adaptiveThreshold(
-        cv2.cvtColor(cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY),
-        1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, INK_BLOCK, INK_OFFSET,
-    ) > 0
+    ink_all = (
+        cv2.adaptiveThreshold(
+            cv2.cvtColor(cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY),
+            1,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY_INV,
+            INK_BLOCK,
+            INK_OFFSET,
+        )
+        > 0
+    )
     columns = guard_mask(own, 0)
     suspect = float((ink_all & fill_before & columns).sum() / total) if total else 0.0
     # Охват: точки зазора внутри кадра, которые вылезли за четырёхугольник.

@@ -122,3 +122,20 @@ def test_copy_rectangle_without_keep_unchanged():
     out = copy_rectangle(img, paper, quad, CopyMode.IN_PLACE)
     assert out.shape[:2] == (49, 49) or out.shape[:2] == (50, 50)
     assert cv2.absdiff(out, img[: out.shape[0], : out.shape[1]]).max() == 0
+
+
+def test_finger_protect_keeps_tilted_line_and_drops_blob():
+    """Наклонная строка (5°: прямоугольник по осям толще LINE_MAX_THICKNESS_PX) под защитой целиком; крупное тёмное пятно (тень, мрамор) — нет."""
+    from research.newspaper_crop.text_guard import finger_protect
+
+    img = np.full((800, 1600, 3), 225, np.uint8)
+    # Строка из 40 «букв» 14×20 px через 12 px с подъёмом 5° (в половинном масштабе — глифы 7×10, зазор 6 < RLSA).
+    for i in range(40):
+        x = 100 + i * 26
+        y = int(400 - i * 26 * np.tan(np.radians(5.0)))
+        cv2.rectangle(img, (x, y), (x + 13, y + 19), (30, 30, 30), 3)
+    cv2.circle(img, (800, 650), 70, (40, 40, 40), -1)
+    guard = finger_protect(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    first, last = (107, 410), (int(100 + 39 * 26 + 7), int(400 - 39 * 26 * np.tan(np.radians(5.0)) + 10))
+    assert guard[first[1], first[0]] and guard[last[1], last[0]]
+    assert not guard[650, 800]
