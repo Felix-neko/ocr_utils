@@ -142,7 +142,13 @@ def _is_junk_layout_block(
 
 
 def layout_polygons(rgb: np.ndarray, models) -> "list[np.ndarray]":
-    """Полигоны блоков layout (текст, заголовки, картинки, таблицы...).
+    """Полигоны блоков layout (текст, заголовки, картинки, таблицы...) без типов — см. ``layout_blocks``."""
+    polys, _ = layout_blocks(rgb, models)
+    return polys
+
+
+def layout_blocks(rgb: np.ndarray, models) -> "tuple[list[np.ndarray], list[str]]":
+    """Полигоны блоков layout и их типы surya (``Text``, ``SectionHeader``, ``Picture``, ``Table``...).
 
     ``models`` — ``scan_cropping.gpu_models.GpuModels`` (объект должен быть создан
     с ``with_layout=True``). Кадр уменьшается до ``LAYOUT_WORK_SIDE`` по длинной
@@ -151,6 +157,13 @@ def layout_polygons(rgb: np.ndarray, models) -> "list[np.ndarray]":
     «Мусорные» блоки (огромный блок во весь разворот/во всю высоту кадра — см.
     ``_is_junk_layout_block``) отбрасываются: они не контент, а артефакт детекции
     на пустых/нетекстовых страницах. Настоящие иллюстрации сохраняются.
+
+    Args:
+        rgb: Кадр RGB uint8.
+        models: ``GpuModels`` с surya layout.
+
+    Returns:
+        Кортеж (полигоны (N, 2) float32 в px кадра, типы блоков той же длины).
     """
     h, w = rgb.shape[:2]
     scale = min(1.0, LAYOUT_WORK_SIDE / max(h, w))
@@ -162,6 +175,7 @@ def layout_polygons(rgb: np.ndarray, models) -> "list[np.ndarray]":
     sh, sw = small.shape[:2]
     book_area = _book_region_area(small)
     polys: list[np.ndarray] = []
+    labels: list[str] = []
     for box in blocks:
         if getattr(box, "polygon", None) is not None:
             poly = np.asarray(box.polygon, dtype=np.float32)
@@ -171,7 +185,8 @@ def layout_polygons(rgb: np.ndarray, models) -> "list[np.ndarray]":
         if _is_junk_layout_block(box.label, float(box.confidence), poly, sh, sw, book_area):
             continue
         polys.append(poly / scale)
-    return polys
+        labels.append(str(box.label))
+    return polys, labels
 
 
 def polygons_to_mask(

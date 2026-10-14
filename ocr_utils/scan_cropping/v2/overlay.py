@@ -1,0 +1,453 @@
+"""Отладочный оверлей кадра v2: закрас пальцев, зона поиска тени, copy back, блоки surya, защита, книга, бумага, трапеции страниц — слева, итог — справа; отдельная картинка тени пальца: область поиска | карта осветления."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from PIL import Image, ImageDraw
+
+from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, _font, framed
+from ocr_utils.scan_cropping.finger_removal.text_protection import polygons_to_mask
+from ocr_utils.scan_cropping.v2.finger_shadow import SHADOW_REACH_MM, FingerShadow
+from ocr_utils.scan_cropping.v2.page_pose import PagePose, PageQuad
+
+# Цвета (BGR, палитра проекта ``/draw-overlay``).
+COLOUR_PAINT = (0, 165, 255)  # зона закраса пальца — оранжевый
+COLOUR_CORE = (180, 105, 255)  # ядро пальца — розовый
+COLOUR_BACK = (40, 170, 40)  # возвращено с оригинала (copy back surya) — зелёный
+COLOUR_BOOK = (220, 90, 20)  # граница грубой маски книги — синий
+COLOUR_PLAIN = (170, 170, 170)  # граница SAM 3 plain — серый, справочная
+COLOUR_ADDED = (140, 140, 0)  # добавлено доводкой края и склейкой — бирюзовый
+COLOUR_CUT = (0, 0, 220)  # срезано уточнением склейки — красный
+COLOUR_PAPER = (0, 150, 0)  # граница итоговой бумаги — зелёный тёмный
+COLOUR_BOX = (200, 60, 200)  # прямоугольник вырезки — фиолетовый
+COLOUR_SURYA = (200, 140, 60)  # блок surya — вспомогательный (``stages.COLOUR_HINT``)
+COLOUR_SURYA_LABEL = (150, 90, 30)  # подпись типа блока surya — тот же тон темнее, чтобы читался на бумаге
+COLOUR_PROTECT = (0, 200, 230)  # добавлено защитой контента — жёлтый
+COLOUR_SIDE_ADDED = (120, 200, 0)  # залито выравниванием боковой стороны — салатовый
+COLOUR_SIDE_CUT = (60, 20, 160)  # срезано выравниванием боковой стороны — тёмно-красный
+COLOUR_INK_ADDED = (255, 200, 0)  # добавлено вторым проходом SAM 3 (кадр без крупной краски) — голубой
+COLOUR_SHADOW = (120, 20, 120)  # граница зоны поиска тени пальца — тёмно-фиолетовый
+COLOUR_SKIN = (0, 0, 160)  # кожа в итоге (тень по ней не оценивается и не осветляется) — тёмно-красный
+# Трапеции страниц пунктиром: плоско лежащая — зелёный «принято», приподнятая — розовый (красный занят «срезано»).
+POSE_COLOUR = {PagePose.FLAT: (0, 150, 0), PagePose.RAISED: (180, 105, 255)}
+POSE_NAME = {PagePose.FLAT: "плоско", PagePose.RAISED: "приподнята"}
+# Пунктир: штрих и пробел, px холста.
+DASH_PX, GAP_PX = 14, 9
+# Прозрачность пунктира сырых блоков surya (без припусков).
+RAW_BLOCK_ALPHA = 0.5
+# Подписи типов блоков surya: кегль, px итоговой картинки; прозрачность букв и белой обводки под ними.
+LABEL_SIZE = 15
+LABEL_ALPHA = 0.8
+LABEL_HALO_ALPHA = 0.7
+# Отступ подписи внутрь блока от его верхнего левого угла, px итоговой картинки.
+LABEL_INSET_PX = 3
+# Кегль подписей трапеций на итоговой картинке оверлея, px.
+CAPTION_SIZE = 18
+# Прозрачность областей.
+AREA_ALPHA = 0.45
+# Ширина итоговой картинки оверлея, px.
+OVERLAY_WIDTH = 2600
+
+
+def _resize(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Булева маска → размер ``shape`` ближайшим соседом.
+
+    Args:
+        mask: Булева маска.
+        shape: ``(H, W)``.
+
+    Returns:
+        Булева маска.
+    """
+    return cv2.resize(mask.astype(np.uint8), (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+
+
+def _contour(canvas: np.ndarray, mask: np.ndarray, colour: tuple[int, int, int], width: int) -> None:
+    """Рисует внешние контуры маски на холсте.
+
+    Args:
+        canvas: Холст BGR (меняется на месте — это локальный холст оверлея).
+        mask: Булева маска размера холста.
+        colour: Цвет BGR.
+        width: Толщина, px.
+    """
+    cs, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    cv2.drawContours(canvas, cs, -1, colour, width)
+
+
+@dataclass(frozen=True)
+class OverlayLayers:
+    """Слои разметки кадра для оверлея.
+
+    Поля:
+        masks: ``pipeline.PaperMasks`` — бумага по шагам (масштаб сегментации).
+        protected: Добавлено защитой контента (масштаб сегментации).
+        fingers: Маски закраса (``paint``, ``core``) размера кадра.
+        returned: Возвращённое copy back (bool) размера кадра.
+        polys: Все блоки surya, px кадра.
+        pages: Страницы с трапециями (px сегментации) и классом положения.
+        box: Осевая рамка бумаги в px кадра или None.
+        pad: Припуск блоков surya (защита контента и copy back), px кадра (по X, по Y): контур зоны с припусками.
+        labels: Типы блоков surya по порядку ``polys`` или None (кэш ``layout.json`` версии 3 — без подписей).
+        shadow_area: Зона поиска тени пальца (bool) размера кадра или None (``--no-finger-shadow``).
+    """
+
+    masks: object
+    protected: np.ndarray
+    fingers: object
+    returned: np.ndarray
+    polys: list[np.ndarray]
+    pages: list[PageQuad]
+    box: tuple[int, int, int, int] | None
+    pad: tuple[int, int] = (0, 0)
+    labels: list[str] | None = None
+    shadow_area: np.ndarray | None = None
+
+
+def _dashed_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, int], width: int) -> None:
+    """Замкнутый пунктирный многоугольник на холсте.
+
+    Args:
+        canvas: Холст BGR (локальный холст оверлея, меняется на месте).
+        pts: Вершины (N, 2) в px холста.
+        colour: Цвет BGR.
+        width: Толщина, px.
+    """
+    for i in range(len(pts)):
+        a, b = pts[i].astype(float), pts[(i + 1) % len(pts)].astype(float)
+        length = float(np.linalg.norm(b - a))
+        step = DASH_PX + GAP_PX
+        for t0 in np.arange(0.0, length, step):
+            t1 = min(t0 + DASH_PX, length)
+            p0 = a + (b - a) * (t0 / max(length, 1e-9))
+            p1 = a + (b - a) * (t1 / max(length, 1e-9))
+            q0, q1 = tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int))
+            cv2.line(canvas, q0, q1, colour, width, cv2.LINE_AA)
+
+
+def _draw_blocks(canvas: np.ndarray, polys: list[np.ndarray], scale: float, pad: tuple[int, int]) -> None:
+    """Блоки surya: сырые полигоны — полупрозрачным пунктиром, зона с припусками защиты — тонким сплошным контуром.
+
+    Args:
+        canvas: Холст масштаба сегментации (меняется на месте).
+        polys: Полигоны блоков, px кадра.
+        scale: Масштаб холста относительно кадра.
+        pad: Припуск, px кадра (по X, по Y).
+    """
+    if not polys:
+        return
+    small = [np.asarray(p, np.float32) * scale for p in polys]
+    padded = polygons_to_mask(canvas.shape[:2], small, (max(1, round(pad[0] * scale)), max(1, round(pad[1] * scale))))
+    _contour(canvas, padded > 0, COLOUR_SURYA, 1)
+    layer = canvas.copy()
+    for poly in small:
+        _dashed_poly(layer, poly, COLOUR_SURYA, 1)
+    cv2.addWeighted(layer, RAW_BLOCK_ALPHA, canvas, 1 - RAW_BLOCK_ALPHA, 0, canvas)
+
+
+def block_labels(
+    picture: np.ndarray, polys: list[np.ndarray], labels: list[str] | None, size: int = LABEL_SIZE
+) -> np.ndarray:
+    """Типы блоков surya полупрозрачным шрифтом DejaVu у верхнего левого угла блока, внутри него.
+
+    Угол — вершина многоугольника с наименьшим ``x + y``: у наклонного четырёхугольника после обратной гомографии это
+    его верхний левый угол. Буквы — тёмным тоном цвета блоков с прозрачностью ``LABEL_ALPHA``, под ними полупрозрачная
+    белая обводка: подпись читается и на тексте страницы, и на тёмном фоне, а текст под ней не закрыт.
+
+    Args:
+        picture: Картинка BGR uint8.
+        polys: Многоугольники блоков (N, 2) в px ``picture``.
+        labels: Типы блоков по порядку ``polys``; None или пусто — картинка возвращается как есть.
+        size: Кегль, px.
+
+    Returns:
+        Новая картинка BGR uint8 с подписями.
+    """
+    if not labels:
+        return picture
+    image = Image.fromarray(cv2.cvtColor(picture, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    # Подписи — в отдельном прозрачном слое, затем смешиваются с картинкой.
+    layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    font = _font(size)
+    b, g, r = COLOUR_SURYA_LABEL
+    for poly, label in zip(polys, labels):
+        pts = np.asarray(poly, np.float32).reshape(-1, 2)
+        x, y = pts[np.argmin(pts.sum(axis=1))]
+        org = (int(max(x, 0)) + LABEL_INSET_PX, int(max(y, 0)) + LABEL_INSET_PX)
+        # Сначала обводка (полупрозрачная белая), потом сами буквы поверх неё.
+        draw.text(org, label, font=font, fill=(255, 255, 255, int(255 * LABEL_HALO_ALPHA)), stroke_width=2,
+                  stroke_fill=(255, 255, 255, int(255 * LABEL_HALO_ALPHA)))  # fmt: skip
+        draw.text(org, label, font=font, fill=(r, g, b, int(255 * LABEL_ALPHA)))
+    out = Image.alpha_composite(image, layer).convert("RGB")
+    return cv2.cvtColor(np.asarray(out), cv2.COLOR_RGB2BGR)
+
+
+def _page_caption(page: PageQuad) -> str:
+    """Подпись трапеции: класс и признаки.
+
+    Args:
+        page: Страница.
+
+    Returns:
+        Строка.
+    """
+    f = page.features
+    return f"{POSE_NAME[page.pose]} ш{f.width_share:.2f} св{f.light_share:.2f} з{f.fill:.2f} к{f.keystone:.0f}°"
+
+
+def _draw_pages(canvas: np.ndarray, pages: list[PageQuad]) -> None:
+    """Трапеции страниц пунктиром цвета класса.
+
+    Args:
+        canvas: Холст масштаба сегментации (меняется на месте).
+        pages: Страницы.
+    """
+    for page in pages:
+        if page.quad is not None:
+            _dashed_poly(canvas, page.quad, POSE_COLOUR[page.pose], 3)
+
+
+def _page_captions(picture: np.ndarray, pages: list[PageQuad], scale: float) -> np.ndarray:
+    """Подписи трапеций (класс и признаки) шрифтом DejaVu на белой подложке у левого верхнего угла трапеции.
+
+    Args:
+        picture: Итоговая картинка пары BGR.
+        pages: Страницы.
+        scale: Масштаб картинки относительно масштаба сегментации.
+
+    Returns:
+        Картинка BGR с подписями.
+    """
+    image = Image.fromarray(cv2.cvtColor(picture, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image)
+    font = _font(CAPTION_SIZE)
+    for page in pages:
+        if page.quad is None:
+            continue
+        x, y = page.quad.min(axis=0) * scale
+        org = (int(max(x, 0)) + 4, int(max(y, 0)) + 4)
+        text = _page_caption(page)
+        draw.rectangle(draw.textbbox(org, text, font=font), fill=(255, 255, 255))
+        b, g, r = POSE_COLOUR[page.pose]
+        draw.text(org, text, font=font, fill=(r, g, b))
+    return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+
+
+def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: np.ndarray, title: str) -> np.ndarray:
+    """Оверлей кадра: исходный кадр с разметкой шагов | итоговый прямоугольник; шапка и легенда — в полях.
+
+    Args:
+        frame: Исходный кадр BGR (с пальцами).
+        book: Маски шага «фон и книга» (``book`` — грубая маска книги, масштаб сегментации).
+        layers: Слои разметки.
+        result: Итоговый прямоугольник BGR.
+        title: Шапка.
+
+    Returns:
+        Картинка BGR.
+    """
+    masks = layers.masks
+    h, w = shape = masks.paper.shape
+    canvas = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+    # Области — полупрозрачно в отдельном слое.
+    layer = canvas.copy()
+    layer[_resize(layers.fingers["paint"], shape)] = COLOUR_PAINT
+    layer[_resize(layers.fingers["core"], shape)] = COLOUR_CORE
+    layer[_resize(layers.returned, shape)] = COLOUR_BACK
+    layer[masks.paper & ~masks.plain] = COLOUR_ADDED
+    layer[masks.cut] = COLOUR_CUT
+    layer[masks.ink_added] = COLOUR_INK_ADDED
+    layer[masks.side_added] = COLOUR_SIDE_ADDED
+    layer[masks.side_cut] = COLOUR_SIDE_CUT
+    layer[layers.protected] = COLOUR_PROTECT
+    cv2.addWeighted(layer, AREA_ALPHA, canvas, 1 - AREA_ALPHA, 0, canvas)
+    # Границы — тонкими линиями поверх.
+    _draw_blocks(canvas, layers.polys, h / frame.shape[0], layers.pad)
+    _contour(canvas, book["book"], COLOUR_BOOK, 2)
+    _contour(canvas, masks.plain, COLOUR_PLAIN, 1)
+    _contour(canvas, masks.paper | layers.protected, COLOUR_PAPER, 2)
+    if layers.shadow_area is not None:
+        _contour(canvas, _resize(layers.shadow_area, shape), COLOUR_SHADOW, 3)
+    if layers.box is not None:
+        sy, sx = h / frame.shape[0], w / frame.shape[1]
+        x0, y0, x1, y1 = layers.box
+        cv2.rectangle(canvas, (int(x0 * sx), int(y0 * sy)), (int(x1 * sx), int(y1 * sy)), COLOUR_BOX, 2)
+    _draw_pages(canvas, layers.pages)
+    # Итог справа той же высоты, белый зазор между.
+    rs = h / result.shape[0]
+    right = cv2.resize(result, (max(1, int(result.shape[1] * rs)), h), interpolation=cv2.INTER_AREA)
+    pair = np.hstack([canvas, np.full((h, 20, 3), 255, np.uint8), right])
+    s = OVERLAY_WIDTH / pair.shape[1]
+    pair = cv2.resize(pair, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    pair = _page_captions(pair, layers.pages, s)
+    # Типы блоков surya — у рамок без припусков (после обратного переноса с выпрямленного кадра), на итоговом масштабе.
+    to_pair = h / frame.shape[0] * s
+    pair = block_labels(pair, [np.asarray(p, np.float32) * to_pair for p in layers.polys], layers.labels)
+    legend = [
+        LegendEntry(
+            "зона закраса пальца (LaMa): ядро + асимметричная дилатация",
+            COLOUR_PAINT,
+            alpha=AREA_ALPHA,
+            style=SampleStyle.BOX,
+        ),
+        LegendEntry("ядро пальца (зона пальца детектора)", COLOUR_CORE, alpha=AREA_ALPHA, style=SampleStyle.BOX),
+        LegendEntry(f"зона поиска тени пальца (ядро + {SHADOW_REACH_MM:g} мм, в книге)", COLOUR_SHADOW),
+        LegendEntry(
+            "возвращено с оригинала: блоки surya внутри книги", COLOUR_BACK, alpha=AREA_ALPHA, style=SampleStyle.BOX
+        ),
+        LegendEntry(
+            "добавлено к SAM 3: доводка края до фона и склейка", COLOUR_ADDED, alpha=AREA_ALPHA, style=SampleStyle.BOX
+        ),
+        LegendEntry("срезано уточнением склейки (не бумага)", COLOUR_CUT, alpha=AREA_ALPHA, style=SampleStyle.BOX),
+        LegendEntry(
+            "залито выравниванием боковой стороны (яма)", COLOUR_SIDE_ADDED, alpha=AREA_ALPHA, style=SampleStyle.BOX
+        ),
+        LegendEntry(
+            "срезано выравниванием боковой стороны (выброс)", COLOUR_SIDE_CUT, alpha=AREA_ALPHA, style=SampleStyle.BOX
+        ),
+        LegendEntry(
+            "добавлено вторым проходом SAM 3 (кадр без крупной краски)",
+            COLOUR_INK_ADDED,
+            alpha=AREA_ALPHA,
+            style=SampleStyle.BOX,
+        ),
+        LegendEntry(
+            "добавлено защитой контента (surya плоских страниц в книге)",
+            COLOUR_PROTECT,
+            alpha=AREA_ALPHA,
+            style=SampleStyle.BOX,
+        ),
+        LegendEntry("блок surya с припусками (защита контента и copy back)", COLOUR_SURYA),
+        LegendEntry("блок surya без припусков (пунктир)", COLOUR_SURYA, alpha=RAW_BLOCK_ALPHA),
+        LegendEntry(
+            "тип блока surya у его угла (Text — текст, SectionHeader — заголовок, Picture — картинка…)",
+            COLOUR_SURYA_LABEL,
+            alpha=LABEL_ALPHA,
+        ),
+        LegendEntry("грубая маска книги (не фон)", COLOUR_BOOK),
+        LegendEntry("бумага SAM 3 (plain)", COLOUR_PLAIN),
+        LegendEntry("итоговая бумага (с защитой)", COLOUR_PAPER),
+        LegendEntry("прямоугольник вырезки", COLOUR_BOX),
+        LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
+        LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+    ]
+    sub = (
+        "слева — кадр с разметкой шагов (у трапеций: ш — ширина к соседней, св — свет, з — заполнение, к — сход "
+        "сторон), справа — итог"
+    )
+    return framed(pair, [title, sub], legend)
+
+
+# Карта осветления на картинке тени: шкала прибавки, уровни (насыщение цвета) и наименьшая видимая прибавка.
+SHADOW_HEAT_MAX = 30.0
+SHADOW_HEAT_MIN = 1.0
+# Высота панели на картинке тени, px; поле вокруг области поиска, доля её рамки.
+SHADOW_PANEL_H = 700
+SHADOW_MARGIN = 0.15
+
+
+def _heat_colour(level: float) -> tuple[int, int, int]:
+    """Цвет BGR прибавки ``level`` уровней на шкале ``COLORMAP_TURBO`` от 0 до ``SHADOW_HEAT_MAX``."""
+    v = np.uint8(np.clip(level / SHADOW_HEAT_MAX * 255, 0, 255))
+    return tuple(int(c) for c in cv2.applyColorMap(np.array([[v]], np.uint8), cv2.COLORMAP_TURBO)[0, 0])
+
+
+def _shadow_panels(
+    before: np.ndarray, shadow: FingerShadow, paint: np.ndarray, core: np.ndarray, rows: slice, cols: slice
+) -> np.ndarray:
+    """Две панели одной рамки: итог до осветления с зонами | карта прибавки поверх серого итога.
+
+    Args:
+        before: Итог до осветления на масштабе карты (¼), BGR.
+        shadow: Карта тени.
+        paint: Зона закраса на масштабе карты (bool).
+        core: Ядро пальца на масштабе карты (bool).
+        rows: Строки рамки.
+        cols: Столбцы рамки.
+
+    Returns:
+        Панели бок о бок, BGR, высота ``SHADOW_PANEL_H``.
+    """
+    crop = before[rows, cols]
+    k = SHADOW_PANEL_H / crop.shape[0]
+    size = (max(1, round(crop.shape[1] * k)), SHADOW_PANEL_H)
+    big = cv2.resize(crop, size, interpolation=cv2.INTER_CUBIC)
+    shape = (size[1], size[0])
+    zones = big.copy()
+    layer = zones.copy()
+    layer[_resize(paint[rows, cols], shape)] = COLOUR_PAINT
+    layer[_resize(core[rows, cols], shape)] = COLOUR_CORE
+    zones = cv2.addWeighted(layer, AREA_ALPHA, zones, 1 - AREA_ALPHA, 0)
+    _contour(zones, _resize(shadow.skin[rows, cols], shape), COLOUR_SKIN, 2)
+    _contour(zones, _resize(shadow.area[rows, cols], shape), COLOUR_SHADOW, 3)
+    # Карта: средняя по каналам прибавка, цвет по шкале, прозрачность растёт с прибавкой (нули — серый итог).
+    level = cv2.resize(shadow.delta[rows, cols].mean(axis=2), size, interpolation=cv2.INTER_CUBIC)
+    heat = cv2.applyColorMap(np.clip(level / SHADOW_HEAT_MAX * 255, 0, 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+    grey = cv2.cvtColor(cv2.cvtColor(big, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+    alpha = (np.clip(level / (4 * SHADOW_HEAT_MIN), 0, 1) * 0.75)[..., None]
+    estimate = (grey * (1 - alpha) + heat * alpha).astype(np.uint8)
+    _contour(estimate, _resize(shadow.area[rows, cols], shape), COLOUR_SHADOW, 3)
+    return np.hstack([zones, np.full((SHADOW_PANEL_H, 16, 3), 255, np.uint8), estimate])
+
+
+def draw_finger_shadow(
+    before: np.ndarray, shadow: FingerShadow, paint: np.ndarray, core: np.ndarray, px_per_mm: float, title: str
+) -> np.ndarray | None:
+    """Картинка тени пальца: по строке на компоненту зоны поиска — «область поиска с зонами | карта прибавки».
+
+    Args:
+        before: Итог до осветления BGR (полный масштаб).
+        shadow: Карта тени (масштаб ``finger_shadow.SHADOW_SCALE``).
+        paint: Зона закраса пальца в координатах итога (bool, полный масштаб).
+        core: Ядро пальца в координатах итога (bool, полный масштаб).
+        px_per_mm: Плотность итога, px/мм (площадь зоны в подписи).
+        title: Шапка.
+
+    Returns:
+        Картинка BGR или None, если зоны поиска нет.
+    """
+    if not shadow.area.any():
+        return None
+    shape = shadow.area.shape
+    small = cv2.resize(before, (shape[1], shape[0]), interpolation=cv2.INTER_AREA)
+    paint_s, core_s = _resize(paint, shape), _resize(core, shape)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(shadow.area.astype(np.uint8), connectivity=8)
+    rows_out = []
+    for i in range(1, n):
+        x, y, w, h = stats[i, :4]
+        mx, my = int(w * SHADOW_MARGIN) + 4, int(h * SHADOW_MARGIN) + 4
+        rows = slice(max(0, y - my), min(shape[0], y + h + my))
+        cols = slice(max(0, x - mx), min(shape[1], x + w + mx))
+        level = shadow.delta[labels == i].mean(axis=1)
+        mm = px_per_mm * shape[0] / before.shape[0]
+        caption = (
+            f"зона поиска {i}: {stats[i, cv2.CC_STAT_AREA] / mm**2:.0f} мм²; прибавка в ней средняя "
+            f"{level.mean():.1f}, 99 % — {np.percentile(level, 99):.1f} уровней"
+        )
+        panels = _shadow_panels(small, shadow, paint_s, core_s, rows, cols)
+        rows_out.append(framed(panels, [caption], []))
+    width = max(r.shape[1] for r in rows_out)
+    canvas = np.vstack(
+        [
+            cv2.copyMakeBorder(r, 0, 0, 0, width - r.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            for r in rows_out
+        ]
+    )
+    legend = [
+        LegendEntry("ядро пальца", COLOUR_CORE, alpha=AREA_ALPHA, style=SampleStyle.BOX),
+        LegendEntry(
+            "зона закраса пальца: ядро + асимметричная дилатация", COLOUR_PAINT, alpha=AREA_ALPHA, style=SampleStyle.BOX
+        ),
+        LegendEntry(f"зона поиска тени (ядро + {SHADOW_REACH_MM:g} мм, в книге)", COLOUR_SHADOW),
+        LegendEntry("кожа в итоге — не оценивается и не осветляется", COLOUR_SKIN),
+    ] + [
+        LegendEntry(f"прибавка {v:g} уровней", _heat_colour(v), alpha=0.75, style=SampleStyle.BOX)
+        for v in (2, 8, 15, 30)
+    ]
+    sub = "слева — итог до осветления с зонами, справа — карта прибавки (оценка тени) поверх серого итога"
+    return framed(canvas, [title, sub], legend)

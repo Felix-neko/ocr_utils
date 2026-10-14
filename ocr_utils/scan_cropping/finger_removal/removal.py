@@ -31,7 +31,6 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import (
 )
 from ocr_utils.timing import log_timing
 
-
 # Низкий порог нужен для recall (слабые боксы на смазанных/неярких пальцах, см.
 # IMG_0028.jpg — лучший бокс conf=0.046, ниже стандартного 0.05); раздутая маска
 # была из-за скин-добора и невложенных дублей боксов — то и другое уже устранено
@@ -69,6 +68,9 @@ FINGER_ROI_SCALE = 1.5
 # заметно снижает остаточное потемнение, не давая цветового ухода в оранжевый
 # (при 25-30 на тонированной («состаренной») бумаге появляется через чур тёплый оттенок).
 FINGER_ZONE_LIGHT_INCREMENT = 20
+# Поле вокруг ядра пальца (маска до дилатации), где внешняя защита ``protect_mask`` не действует, px кадра: кромка
+# и розовая тень пальца лежат за ядром на 10–20 px (DSCF0016 ЭГ: без поля остались розовые края на мраморе торца).
+PROTECT_CORE_MARGIN_PX = 16
 
 
 def brighten_finger_zone(
@@ -125,6 +127,9 @@ def remove_fingers(
     layout_pad_px: "int | tuple[int, int]" = DEFAULT_LAYOUT_PAD_PX,
     lama_roi_max_side: int = LAMA_ROI_MAX_SIDE,
     log_name: str = "",
+    protect_mask: Optional[np.ndarray] = None,
+    protect_core_margin_px: int = PROTECT_CORE_MARGIN_PX,
+    inpaint: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray], Optional[list]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking + GpuModels.inpaint) в BGR-кадре.
 
@@ -164,6 +169,16 @@ def remove_fingers(
     ``lama_roi_max_side`` — до какой длинной стороны уменьшать ROI перед сетью
     (см. ``gpu_models.LAMA_ROI_MAX_SIDE``): на нативных 450 DPI широкая дыра
     заливается серой кашей.
+
+    ``protect_mask`` — внешняя маска защиты (uint8 0/255 размера кадра, например печать с зазором): вырезается из
+    раздутой маски так же, как блоки layout в режиме ``limit-lama-zone`` (сам палец до дилатации и поле
+    ``PROTECT_CORE_MARGIN_PX`` вокруг него закрашиваются всегда). Дилатация на ``dilate_px`` иначе накрывает строку у кончика пальца, и LaMa перерисовывает буквы.
+    None — без защиты. ``protect_core_margin_px`` — ширина этого поля, px кадра: на 350 dpi у расфокусированного
+    пальца ореол кожи шире 16 px (подшивки МТО 1990, ``research/bound_volumes``).
+
+    ``inpaint=False`` — только маски: зона закраса и ядро пальца строятся как обычно, но LaMa не запускается и
+    возвращается исходный ``bgr``. Нужно тем, кто красит сам по своему контексту (``scan_cropping.v2.fingers``),
+    чтобы не тратить лишний проход сети.
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     with log_timing("build_finger_mask", log_name):
@@ -195,6 +210,13 @@ def remove_fingers(
             info = "auto(отсеяно: не у края)"
     if int(np.count_nonzero(mask)) == 0:
         return bgr, mask, None, yolo_boxes, info, predilate, None
+    if protect_mask is not None:
+        before = int(np.count_nonzero(mask))
+        # Кромка пальца лежит чуть за ядром маски (его добирает дилатация): у ядра защита не действует.
+        k = 2 * protect_core_margin_px + 1
+        core = cv2.dilate(mask_predilate, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        mask = limit_paint_zone(mask, core, protect_mask)
+        info = f"{info}, защита: зона закраски {before}→{int(np.count_nonzero(mask))} px"
 
     layout_polys: Optional[list] = None
     if protect_text:
@@ -225,6 +247,9 @@ def remove_fingers(
                     return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
 
     roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
+    if not inpaint:
+        # Только маски: закрас сделает вызывающий.
+        return bgr, mask, roi_bboxes, yolo_boxes, info, predilate, layout_polys
     with log_timing("brighten_finger_zone", log_name):
         rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
     with log_timing("lama_inpaint", log_name):

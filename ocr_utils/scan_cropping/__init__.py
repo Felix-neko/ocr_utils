@@ -1,4 +1,9 @@
-"""Вырезка сканов: детекция разворота, правильный поворот и crop.
+"""Вырезка сканов: v1 — детекция разворота YOLO-World + SAM, поворот и crop; v2 — бумага SAM 3 со склейкой страниц.
+
+Две версии CLI:
+  - ``python -m ocr_utils.scan_cropping.v1`` — прежний конвейер (описан ниже; модули — в корне пакета);
+  - ``python -m ocr_utils.scan_cropping.v2`` — пальцы LaMa inkback → фон → бумага SAM 3 → склейка страниц →
+    copy back surya в книге → закрас до осевой рамки (см. ``v2/__init__.py``).
 
 Раскладка по модулям:
   - ``gpu_models``      — все нейросети в одном объекте (создаётся раз на прогон);
@@ -10,7 +15,7 @@
   - ``cropping``        — вырезка (``rotate`` / ``pixel-exact``);
   - ``layout_filtering``, ``overlay``, ``image_io`` — отсев паразитных блоков
     layout, debug-оверлей, чтение/запись файлов;
-  - ``pipeline``        — оркестрация одного кадра, ``cli`` — только click.
+  - ``pipeline``        — оркестрация одного кадра v1, ``v1/cli`` — только click.
 
 Пайплайн на каждый кадр:
   1. ``page_detection.page_mask`` даёт криволинейный силуэт разворота (E1).
@@ -57,7 +62,7 @@ ROI-рамка контекста, переданного в LaMa.
     пикс. (E2 = диляция на extra + эрозия на 2*extra от E1); срезает тёмные куски
     обложки в углах crop-зоны (по умолчанию ``EXTRA_EROSION_PX``; 0 — выкл.).
 
-    uv run python -m ocr_utils.scan_cropping \\
+    uv run python -m ocr_utils.scan_cropping.v1 \\
         --input-dir IN --output-dir OUT --debug-dir DBG \\
         --left-margin -150 --top-margin -150 --right-margin -150 --bottom-margin -150
 """
