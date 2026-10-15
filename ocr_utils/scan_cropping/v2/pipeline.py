@@ -23,6 +23,7 @@ from ocr_utils.scan_cropping.v2.colour_pages import colour_pages_flat, colour_pa
 from ocr_utils.scan_cropping.v2.content_guard import protect_content
 from ocr_utils.scan_cropping.v2.copy_back import CORE_GROW_PX, LAYOUT_PAD_PX, copy_back_blocks
 from ocr_utils.scan_cropping.v2.edge import SNAP_BG_REACH, snap_outward
+from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.fill import (
     FillMethod,
     ReplicateParams,
@@ -69,6 +70,7 @@ class RunParams:
         debug_dir: Папка оверлеев или None.
         scale: Масштабы по плотности кадра.
         fill: Способ закраса до прямоугольника.
+        fill_seam_mm: Ширина мягкого шва от каймы листа к закрасу, мм (для ``fill=pull_push_seam``).
         replicate: Параметры прежней заливки v1 (для ``fill=replicate``).
         hole_max_px: Предел рамки дыры для LaMa, px; None — прежнее ужатие ROI до 512.
         finger_dilate_px: Припуск зоны закраса пальца, px калибровочного кадра.
@@ -109,7 +111,8 @@ class RunParams:
     work_dir: Path
     debug_dir: Path | None = None
     scale: Scale = field(default_factory=Scale)
-    fill: FillMethod = FillMethod.PULL_PUSH
+    fill: FillMethod = FillMethod.PULL_PUSH_SEAM
+    fill_seam_mm: float = SEAM_MM
     replicate: ReplicateParams = field(default_factory=ReplicateParams)
     hole_max_px: int | None = LAMA_HOLE_MAX_PX
     finger_dilate_px: int = TIGHT_DILATE_PX
@@ -925,9 +928,12 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
             params.replicate,
             params.scale.px_per_mm,
             spine,
+            params.fill_seam_mm,
         )
     else:
-        out = fill_to_rectangle(clean, paper, params.fill, params.replicate, None, params.scale.px_per_mm, spine)
+        out = fill_to_rectangle(
+            clean, paper, params.fill, params.replicate, None, params.scale.px_per_mm, spine, params.fill_seam_mm
+        )
     status = "ok"
     if out is None:
         # Бумага не найдена — кадр пишется без вырезки, как в v1.

@@ -1,4 +1,4 @@
-"""Закрас до прямоугольника: осевая рамка маски бумаги, всё вне бумаги — Telea, pull-push от чистой бумаги у края или прежней заливкой v1 (replicate)."""
+"""Закрас до прямоугольника: осевая рамка маски бумаги, всё вне бумаги — Telea, pull-push от чистой бумаги у края (с мягким швом от каймы листа или без), или прежней заливкой v1 (replicate)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from enum import Enum
 import cv2
 import numpy as np
 
-from ocr_utils.scan_cropping.v2.border_fill import fill_pull_push
+from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM, fill_pull_push
 from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM
 from ocr_utils.scan_cropping.background_fill import CROP_FILL_REPLICATE, book_mean_color, voronoi_fill
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX, CROP_FILL_FADE, crop_pixel_exact
@@ -33,6 +33,10 @@ class FillMethod(str, Enum):
     # Pull-push по пирамиде на ¼ копии с опорой на полосу бумаги у края без подозрительного (печать, край обложки,
     # тень), по страницам с растушёвкой (``border_fill``; стенд ``research/border_fill``): без шлейфов и лучей Telea.
     PULL_PUSH = "pull_push"
+    # Pull-push с мягким швом: у края закрас начинается с цвета каймы листа (завал, торец) и за ``seam_mm`` уходит к
+    # pull-push; печать и чужой цвет в кайме не участвуют (``border_fill.seam_ramp``; стенд ``research/border_fill``,
+    # вариант H5: резкий шов на 37 кадрах пака-6 13.4 → 8.9 тыс. мм, шлейфы не выросли).
+    PULL_PUSH_SEAM = "pull_push_seam"
 
 
 @dataclass(frozen=True)
@@ -74,7 +78,9 @@ def fill_non_paper(bgr: np.ndarray, paper: np.ndarray) -> np.ndarray:
     return out
 
 
-def fill_non_paper_pull_push(bgr: np.ndarray, paper: np.ndarray, px_per_mm: float, spine_x: float | None) -> np.ndarray:
+def fill_non_paper_pull_push(
+    bgr: np.ndarray, paper: np.ndarray, px_per_mm: float, spine_x: float | None, seam_mm: float = 0.0
+) -> np.ndarray:
     """Дорисовывает не-бумагу pull-push от чистой бумаги у края (``border_fill.fill_pull_push``), вклейка вне листа.
 
     Args:
@@ -82,6 +88,7 @@ def fill_non_paper_pull_push(bgr: np.ndarray, paper: np.ndarray, px_per_mm: floa
         paper: Булева маска бумаги того же размера.
         px_per_mm: Плотность картинки, px/мм.
         spine_x: Абсцисса стыка страниц в координатах картинки или None (одна страница).
+        seam_mm: Ширина мягкого шва от каймы листа, мм; 0 — без шва.
 
     Returns:
         Картинка BGR, где пиксели бумаги не тронуты.
@@ -94,7 +101,7 @@ def fill_non_paper_pull_push(bgr: np.ndarray, paper: np.ndarray, px_per_mm: floa
     # Бумага на ¼ копии — только вписанные пиксели: краевые смешаны с фоном.
     paper_small = cv2.resize(paper.astype(np.float32), size, interpolation=cv2.INTER_AREA) >= 0.99
     spine = None if spine_x is None else spine_x * FILL_SCALE
-    filled = fill_pull_push(small, paper_small, px_per_mm * FILL_SCALE, spine)
+    filled = fill_pull_push(small, paper_small, px_per_mm * FILL_SCALE, spine, seam_mm)
     big = cv2.resize(filled, (w, h), interpolation=cv2.INTER_CUBIC)
     out = bgr.copy()
     out[~paper] = big[~paper]
@@ -124,6 +131,7 @@ def fill_to_rectangle(
     box: tuple[int, int, int, int] | None = None,
     px_per_mm: float = REF_PX_PER_MM,
     spine_x: float | None = None,
+    seam_mm: float = SEAM_MM,
 ) -> np.ndarray | None:
     """Вырезка по осевой рамке маски бумаги с закрасом всего, что вне бумаги, выбранным способом.
 
@@ -136,6 +144,7 @@ def fill_to_rectangle(
             вырезка охватывает и защиту контента, а закрашивать надо от точного края бумаги.
         px_per_mm: Плотность кадра, px/мм (для ``PULL_PUSH``; по умолчанию — калибровочная).
         spine_x: Абсцисса стыка страниц в координатах кадра или None (для ``PULL_PUSH``).
+        seam_mm: Ширина мягкого шва, мм (только для ``PULL_PUSH_SEAM``).
 
     Returns:
         Картинка BGR прямоугольника или None, если бумаги нет.
@@ -147,9 +156,10 @@ def fill_to_rectangle(
     x0, y0, x1, y1 = box
     if method == FillMethod.TELEA:
         return fill_non_paper(bgr[y0:y1, x0:x1], paper[y0:y1, x0:x1])
-    if method == FillMethod.PULL_PUSH:
+    if method in (FillMethod.PULL_PUSH, FillMethod.PULL_PUSH_SEAM):
         spine = None if spine_x is None else spine_x - x0
-        return fill_non_paper_pull_push(bgr[y0:y1, x0:x1], paper[y0:y1, x0:x1], px_per_mm, spine)
+        seam = seam_mm if method == FillMethod.PULL_PUSH_SEAM else 0.0
+        return fill_non_paper_pull_push(bgr[y0:y1, x0:x1], paper[y0:y1, x0:x1], px_per_mm, spine, seam)
     # Прежняя заливка: рамка без поворота (угол 0, центр в начале координат — ext задаётся прямо в px кадра);
     # известным считается только бумага внутри рамки, всё остальное продлевается от её края.
     mask = paper.astype(np.uint8) * 255
@@ -177,6 +187,7 @@ def fill_then_overlay(
     replicate: ReplicateParams = ReplicateParams(),
     px_per_mm: float = REF_PX_PER_MM,
     spine_x: float | None = None,
+    seam_mm: float = SEAM_MM,
 ) -> np.ndarray | None:
     """Закрас до прямоугольника от точного края бумаги, затем поверх — бумага и сохраняемое из ``top``.
 
@@ -193,13 +204,14 @@ def fill_then_overlay(
         replicate: Параметры прежней заливки (только для ``REPLICATE``).
         px_per_mm: Плотность кадра, px/мм (для ``PULL_PUSH``).
         spine_x: Абсцисса стыка страниц в координатах кадра или None (для ``PULL_PUSH``).
+        seam_mm: Ширина мягкого шва, мм (только для ``PULL_PUSH_SEAM``).
 
     Returns:
         Картинка BGR прямоугольника или None, если бумаги нет.
     """
     visible = paper | keep
     box = paper_bbox(visible)
-    out = fill_to_rectangle(base, paper, method, replicate, box, px_per_mm, spine_x)
+    out = fill_to_rectangle(base, paper, method, replicate, box, px_per_mm, spine_x, seam_mm)
     if out is None:
         return None
     x0, y0, x1, y1 = box

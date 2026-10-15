@@ -1,4 +1,4 @@
-"""Закрас не-бумаги без участия краски у края: маска подозрительного в полосе бумаги у края (медиана и разброс участков), pull-push по пирамиде с опорой на чистую бумагу, раздельно по страницам с растушёвкой."""
+"""Закрас не-бумаги без участия краски у края: маска подозрительного в полосе бумаги у края (медиана и разброс участков), pull-push по пирамиде с опорой на чистую бумагу, раздельно по страницам с растушёвкой; мягкий шов от цвета каймы листа к закрасу."""
 
 from __future__ import annotations
 
@@ -23,6 +23,18 @@ SUSPECT_DARK_L = 10.0
 SUSPECT_GROW_MM = 1.0
 # Растушёвка закрасов двух страниц у продолжения стыка, мм.
 FEATHER_MM = 8.0
+# Мягкий шов у края (research/border_fill, вариант H5): ширина рампы от цвета каймы листа к закрасу, мм.
+SEAM_MM = 5.0
+# Глубина каймы листа, с которой берётся цвет края, мм.
+RIM_MM = 1.5
+# Чужой цвет в кайме (печать, синяя крышка, кожа): отклонение по a*b* от медианы участка больше порога.
+FOREIGN_AB = 12.0
+# Краска в кайме (текст и чёрная печать у края): темнее медианы участка по L больше порога. Завал и тень края —
+# темнее на 5–15, они остаются в опоре.
+INK_DARK_L = 20.0
+# Наибольшее отклонение цвета края от закраса по серому, уровни 0..255: дальше рампа не тянет даже то, что прошло
+# фильтры (потолок 40 давал −10 % резкого шва ценой +5 % шлейфа).
+SEAM_MAX_DELTA = 25.0
 
 
 def to_lab(bgr: np.ndarray) -> np.ndarray:
@@ -202,7 +214,104 @@ def by_page(
     return (1 - w) * left + w * right
 
 
-def fill_pull_push(small: np.ndarray, paper: np.ndarray, mm: float, spine_x: float | None) -> np.ndarray:
+def smoothstep_ramp(dist: np.ndarray, width: float) -> np.ndarray:
+    """Вес цвета края по расстоянию от бумаги: 1 у края, 0 с ``width`` и дальше, гладко (smoothstep).
+
+    Args:
+        dist: Расстояние до бумаги, px (0 на бумаге).
+        width: Ширина рампы, px.
+
+    Returns:
+        Вес float32 той же формы.
+    """
+    t = np.clip(dist / max(width, 1e-6), 0, 1)
+    return (1 - t * t * (3 - 2 * t)).astype(np.float32)
+
+
+def rim_support(per: Periphery, paper: np.ndarray, mm: float, strict: bool = True) -> np.ndarray:
+    """Опора цвета края: кайма листа ``RIM_MM`` без чужого цвета и краски.
+
+    Подозрительное ``periphery`` (темнее медианы на 10) тут не исключается: кайма завала и торца — как раз то, с чего
+    должен начинаться закрас.
+
+    Args:
+        per: Разбор периферии (Lab, медианы участков).
+        paper: Маска бумаги ¼ копии.
+        mm: px/мм ¼ копии.
+        strict: True — без чужого цвета и краски; False — вся кайма (только для стенда: тянет тёмные мазки).
+
+    Returns:
+        Булева маска опоры.
+    """
+    inside = ndimage.distance_transform_edt(paper)
+    rim = paper & (inside <= RIM_MM * mm)
+    if not strict:
+        return rim
+    lab, med = per.lab, per.medians
+    known = rim & ~np.isnan(med[..., 0])
+    # Отклонение цвета (a*b*) и затемнение (L) пикселя каймы от медианы его участка.
+    d_ab = np.hypot(lab[..., 1] - med[..., 1], lab[..., 2] - med[..., 2])
+    dark = med[..., 0] - lab[..., 0]
+    # NaN медиан вне полосы дают False в сравнениях; на кайме медианы есть (кайма ⊂ полоса).
+    with np.errstate(invalid="ignore"):
+        bad = (d_ab > FOREIGN_AB) | (dark > INK_DARK_L)
+    return known & ~bad
+
+
+def seam_ramp(
+    small: np.ndarray,
+    filled: np.ndarray,
+    paper: np.ndarray,
+    page: np.ndarray,
+    per: Periphery,
+    mm: float,
+    seam_mm: float,
+    feather_px: float,
+    strict: bool = True,
+    max_delta: float = SEAM_MAX_DELTA,
+) -> np.ndarray:
+    """Мягкий шов у края: закрас = ``pp + (край − pp) · r(d)``, ``r`` — smoothstep от 1 у бумаги до 0 на ``seam_mm``.
+
+    pull-push интерполирует только в опорных пикселях, и сразу за краем приходит среднее полосы 10 мм, а тёмная кайма
+    завала отсечена как подозрительная: на итоге ступенька (МТС 1990/05 IMG_1247, бумага ~230, кайма ~200, закрас
+    ~220). «Край» — pull-push по кайме листа (``rim_support``), раздельно по страницам с той же растушёвкой, что и
+    закрас: вдоль края он гладкий, через участки печати перекидывается от соседней каймы. Отклонение края от закраса
+    ограничено ``max_delta`` по серому, так что тёмное у края не уходит в закрас дальше рампы и не темнее порога.
+
+    Args:
+        small: ¼ копия BGR uint8.
+        filled: Закрас pull-push ¼ копии, float32 BGR.
+        paper: Маска бумаги ¼ копии.
+        page: Номер страницы пикселя.
+        per: Разбор периферии той же копии.
+        mm: px/мм ¼ копии.
+        seam_mm: Ширина рампы, мм (0 — без шва).
+        feather_px: Растушёвка страниц, px.
+        strict: Фильтр чужого цвета, краски и ограничение отклонения (False — без них, только для стенда).
+        max_delta: Потолок отклонения цвета края от закраса по серому, уровни.
+
+    Returns:
+        Закрас float32 BGR с рампой (бумагу вызывающий берёт из кадра).
+    """
+    if seam_mm <= 0:
+        return filled
+    support = rim_support(per, paper, mm, strict)
+    if not support.any():
+        return filled
+    edge = by_page(small.astype(np.float32), support, page, paper, pull_push_known, feather_px)
+    diff = edge - filled
+    if strict:
+        # Ограничение по серому: весь вектор разности ужимается, цвет края не меняет оттенка.
+        gray = diff @ np.array([0.114, 0.587, 0.299], np.float32)
+        scale = np.minimum(1.0, max_delta / np.maximum(np.abs(gray), 1e-6))
+        diff = diff * scale[..., None]
+    dist = ndimage.distance_transform_edt(~paper)
+    return filled + diff * smoothstep_ramp(dist, seam_mm * mm)[..., None]
+
+
+def fill_pull_push(
+    small: np.ndarray, paper: np.ndarray, mm: float, spine_x: float | None, seam_mm: float = 0.0
+) -> np.ndarray:
     """Закрас ¼ копии pull-push: опора — полоса бумаги у края без подозрительного, по страницам с растушёвкой.
 
     Args:
@@ -210,6 +319,7 @@ def fill_pull_push(small: np.ndarray, paper: np.ndarray, mm: float, spine_x: flo
         paper: Маска бумаги ¼ копии (вписанные пиксели).
         mm: px/мм ¼ копии.
         spine_x: Абсцисса стыка страниц на ¼ копии или None.
+        seam_mm: Ширина мягкого шва от цвета каймы листа (``seam_ramp``), мм; 0 — без шва (прежний pull-push).
 
     Returns:
         ¼ копия BGR uint8, заполненная везде (вклеивать только вне бумаги).
@@ -218,4 +328,5 @@ def fill_pull_push(small: np.ndarray, paper: np.ndarray, mm: float, spine_x: flo
     per = periphery(small, paper, page, mm)
     support = per.band & ~per.suspect
     filled = by_page(small.astype(np.float32), support, page, paper, pull_push_known, FEATHER_MM * mm)
+    filled = seam_ramp(small, filled, paper, page, per, mm, seam_mm, FEATHER_MM * mm)
     return np.clip(filled, 0, 255).astype(np.uint8)

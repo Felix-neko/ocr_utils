@@ -1,4 +1,4 @@
-"""Мера шлейфа закраса: отклонение цвета закраса (Lab) от робастного цвета бумаги у ближайшего участка края, площадь и пятна."""
+"""Меры закраса: шлейф (отклонение Lab от бумаги у края), ступенька серого на шве «край бумаги → закрас», чёрное после Sauvola у края."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from scipy import ndimage
+from skimage.filters import threshold_sauvola
 
 from ocr_utils.scan_cropping.v2.border_fill import to_lab
 
@@ -126,3 +127,135 @@ def trail_score(bgr: np.ndarray, paper: np.ndarray, keep: np.ndarray, px_per_mm:
     reach = float(dist[spots].max() / mm) if spots.any() else 0.0
     mean_de = float(de[measured].mean()) if measured.any() else 0.0
     return TrailScore(area, reach, mean_de, float(fill.sum() / (mm * mm)), spots)
+
+
+# Шов «край бумаги → закрас»: полосы по обе стороны края, мм (от и до), окно усреднения вдоль края, мм.
+SEAM_IN_MM = (0.25, 1.0)
+SEAM_OUT_MM = (0.25, 1.0)
+SEAM_WINDOW_MM = 3.0
+# Ступенька серого (уровни 0..255) на шве, выше которой участок края считается резким.
+SEAM_STEP = 8.0
+# Кляксы: Sauvola на ½ масштабе — окно, мм, и k; полоса закраса у края бумаги, где считается чёрное, мм.
+BLOT_SCALE = 0.5
+BLOT_WINDOW_MM = 4.0
+BLOT_K = (0.2, 0.05)
+BLOT_BAND_MM = 3.0
+
+
+@dataclass(frozen=True)
+class SeamScore:
+    """Ступенька серого на шве «край бумаги → закрас» одного прямоугольника.
+
+    Поля:
+        sharp_mm: Длина края бумаги (без защиты и рамки кадра), где закрас у края отличается от каймы листа больше
+            ``SEAM_STEP``, мм.
+        edge_mm: Длина измеренного края, мм.
+        p90: 90-й процентиль модуля ступеньки по измеренному краю, уровни.
+        step: Ступенька на пикселях края (закрас − кайма, уровни) на масштабе ``MEASURE_SCALE``, NaN вне края — для
+            миниатюр.
+    """
+
+    sharp_mm: float
+    edge_mm: float
+    p90: float
+    step: np.ndarray
+
+
+def local_mean(values: np.ndarray, mask: np.ndarray, sigma: float) -> np.ndarray:
+    """Среднее ``values`` по ``mask`` в гауссовом окне (нормированная свёртка), NaN, где маски рядом нет.
+
+    Args:
+        values: Картинка float32 (H, W).
+        mask: Где брать значения.
+        sigma: σ окна, px.
+
+    Returns:
+        Местное среднее float32.
+    """
+    m = mask.astype(np.float32)
+    num = cv2.GaussianBlur(values * m, (0, 0), sigma)
+    den = cv2.GaussianBlur(m, (0, 0), sigma)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(den > 1e-3, num / den, np.nan).astype(np.float32)
+
+
+def seam_step(bgr: np.ndarray, paper: np.ndarray, keep: np.ndarray, px_per_mm: float) -> SeamScore:
+    """Ступенька на шве: местное среднее серого закраса у края минус местное среднее каймы листа.
+
+    Обе полосы (``SEAM_IN_MM`` внутри бумаги, ``SEAM_OUT_MM`` снаружи, вне защиты) усредняются гауссом
+    ``SEAM_WINDOW_MM`` вдоль края; разность берётся на пикселях края бумаги, граничащих с закрасом. Край у рамки
+    прямоугольника не меряется — там закраса нет.
+
+    Args:
+        bgr: Итоговый прямоугольник BGR uint8 (полный масштаб).
+        paper: Маска бумаги прямоугольника.
+        keep: Маска защиты контента прямоугольника.
+        px_per_mm: Плотность, px/мм.
+
+    Returns:
+        Мера шва.
+    """
+    s = MEASURE_SCALE
+    small = cv2.resize(bgr, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    size = (small.shape[1], small.shape[0])
+    p = cv2.resize(paper.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+    k = cv2.resize(keep.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+    mm = px_per_mm * s
+    nan = np.full(p.shape, np.nan, np.float32)
+    if not p.any() or p.all():
+        return SeamScore(0.0, 0.0, 0.0, nan)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    d_in = ndimage.distance_transform_edt(p)
+    d_out = ndimage.distance_transform_edt(~p)
+    fill = ~p & ~k
+    ring_in = p & (d_in > SEAM_IN_MM[0] * mm) & (d_in <= SEAM_IN_MM[1] * mm + 1)
+    ring_out = fill & (d_out > SEAM_OUT_MM[0] * mm) & (d_out <= SEAM_OUT_MM[1] * mm + 1)
+    sigma = SEAM_WINDOW_MM * mm / 2
+    mean_in = local_mean(gray, ring_in, sigma)
+    mean_out = local_mean(gray, ring_out, sigma)
+    # Край бумаги, граничащий с закрасом (не с защитой), без пикселей у рамки прямоугольника.
+    edge = p & (cv2.dilate(fill.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+    edge[:2, :] = edge[-2:, :] = False
+    edge[:, :2] = edge[:, -2:] = False
+    step = nan.copy()
+    diff = mean_out - mean_in
+    good = edge & ~np.isnan(diff)
+    step[good] = diff[good]
+    if not good.any():
+        return SeamScore(0.0, 0.0, 0.0, step)
+    vals = np.abs(diff[good])
+    # Длина края в мм ≈ число пикселей края на ¼ / px/мм (край 8-связный, один пиксель на шаг).
+    return SeamScore(float((vals > SEAM_STEP).sum() / mm), float(good.sum() / mm), float(np.percentile(vals, 90)), step)
+
+
+def blot_area(bgr: np.ndarray, paper: np.ndarray, keep: np.ndarray, px_per_mm: float) -> tuple[float, ...]:
+    """Чёрное после бинаризации Sauvola в закрасе у края бумаги, мм², для каждого k из ``BLOT_K``.
+
+    Бумага у всех вариантов одна и та же, поэтому различие вариантов — только в закрасе: меряется чёрное в полосе
+    ``BLOT_BAND_MM`` за краем бумаги, вне защиты.
+
+    Args:
+        bgr: Итоговый прямоугольник BGR uint8 (полный масштаб).
+        paper: Маска бумаги.
+        keep: Маска защиты.
+        px_per_mm: Плотность, px/мм.
+
+    Returns:
+        Площади чёрного по k, мм².
+    """
+    s = BLOT_SCALE
+    small = cv2.resize(bgr, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    size = (small.shape[1], small.shape[0])
+    p = cv2.resize(paper.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+    k = cv2.resize(keep.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+    mm = px_per_mm * s
+    if not p.any() or p.all():
+        return tuple(0.0 for _ in BLOT_K)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    band = ~p & ~k & (ndimage.distance_transform_edt(~p) <= BLOT_BAND_MM * mm)
+    window = int(round(BLOT_WINDOW_MM * mm)) | 1
+    out = []
+    for kk in BLOT_K:
+        black = gray < threshold_sauvola(gray, window_size=window, k=kk, r=128.0)
+        out.append(float((black & band).sum() / (mm * mm)))
+    return tuple(out)

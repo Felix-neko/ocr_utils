@@ -97,3 +97,33 @@ def load_case(rel: Path, mask_cache: Path, clean_cache: Path, src_root: Path, px
         spine_x=spine_in_box(mask_cache / key, seg_to_frame, x0),
     )
     return Case(rel, key, inp, masks.box)
+
+
+def load_case_from_output(rel: Path, run_dir: Path, px_per_mm: float) -> Case | None:
+    """Вход закраса по готовому итогу прогона v2 (без GPU-шагов и ``--save-fingers``).
+
+    Итог — прямоугольник вырезки: бумага и защита в нём — финальные пиксели (после copy back, тени пальца и уровней),
+    вне них — прежний закрас, который варианты перекрашивают заново. Опора pull-push — полоса бумаги у края, она та
+    же, что видит пользователь; отличие от входа ``load_case`` — только в том, что бумага уже прошла copy back и уровни.
+
+    Args:
+        rel: Путь исходного кадра относительно корня пака.
+        run_dir: Папка прогона v2 (``output/`` с итогами ``.tiff`` и ``cache/`` с масками).
+        px_per_mm: Плотность кадра.
+
+    Returns:
+        Вход или None, если бумаги нет.
+    """
+    key = key_of(rel)
+    cache = run_dir / "cache" / key
+    masks = load_masks(cache)
+    if masks.box is None:
+        return None
+    out = read_image(run_dir / "output" / rel.with_suffix(".tiff"))
+    paper, keep = masks.crop(masks.paper), masks.crop(masks.protected)
+    if out.shape[:2] != paper.shape:
+        raise ValueError(f"размер итога {out.shape[:2]} ≠ рамке {paper.shape}")
+    with np.load(cache / "book.npz") as data:
+        seg_h = data["book"].shape[0]
+    spine = spine_in_box(cache, masks.paper.shape[0] / seg_h, masks.box[0])
+    return Case(rel, key, FillInput(out, out, paper, keep, px_per_mm, spine), masks.box)

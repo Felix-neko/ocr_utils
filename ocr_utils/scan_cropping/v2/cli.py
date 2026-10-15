@@ -17,6 +17,7 @@ from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX, CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
 from ocr_utils.scan_cropping.v2.copy_back import CORE_GROW_PX, LAYOUT_PAD_PX
+from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
 from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT, TIGHT_DILATE_PX
 from ocr_utils.scan_cropping.v2.glue_refine import REFINE_DEPTH
@@ -59,10 +60,14 @@ def parse_pad(value: str) -> tuple[int, int]:
 @click.option("--px-per-mm", default=REF_PX_PER_MM, show_default=True,
               help="Плотность кадра, px/мм бумаги; по умолчанию — калибровочные кадры подшивок МТО 1990 (пак-6). "
                    "Мерить заранее и задавать в run-скрипте.")  # fmt: skip
-@click.option("--fill", type=click.Choice([m.value for m in FillMethod]), default=FillMethod.PULL_PUSH.value,
+@click.option("--fill", type=click.Choice([m.value for m in FillMethod]), default=FillMethod.PULL_PUSH_SEAM.value,
               show_default=True,
-              help="Закрас до прямоугольника: pull_push (от чистой бумаги у края, без печатей и края обложки; "
-                   "research/border_fill), telea или прежняя заливка v1 (replicate).")  # fmt: skip
+              help="Закрас до прямоугольника: pull_push_seam (pull-push от чистой бумаги у края, без печатей и края "
+                   "обложки, с мягким швом от каймы листа; research/border_fill, вариант H5), pull_push (то же без "
+                   "шва — прежний), telea или прежняя заливка v1 (replicate).")  # fmt: skip
+@click.option("--fill-seam-mm", default=SEAM_MM, show_default=True,
+              help="pull_push_seam: ширина рампы от цвета каймы листа к закрасу, мм (3 — заметно резче, 8 — шлейф "
+                   "+8 %; research/border_fill).")  # fmt: skip
 @click.option("--crop-fill-blur-px", default=CROP_FILL_BLUR_PX, show_default=True,
               help="replicate: наибольшая σ размытия заливки, px.")  # fmt: skip
 @click.option("--crop-fill-fade", default=CROP_FILL_FADE, show_default=True,
@@ -130,6 +135,7 @@ def main(
     save_fingers: bool,
     px_per_mm: float,
     fill: str,
+    fill_seam_mm: float,
     crop_fill_blur_px: float,
     crop_fill_fade: float,
     lama_hole_max_px: int,
@@ -162,6 +168,7 @@ def main(
         debug_dir=debug_dir,
         scale=Scale(px_per_mm),
         fill=FillMethod(fill),
+        fill_seam_mm=fill_seam_mm,
         replicate=ReplicateParams(crop_fill_blur_px, crop_fill_fade),
         hole_max_px=lama_hole_max_px or None,
         finger_dilate_px=finger_dilate_px,

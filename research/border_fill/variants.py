@@ -1,4 +1,4 @@
-"""Варианты закраса не-бумаги до прямоугольника: Telea (как в v2), Telea без краски у края, pull-push по пирамиде, цвет участков с размытием, гармоническое продолжение, зерно бумаги."""
+"""Варианты закраса не-бумаги до прямоугольника: Telea (как в v2), Telea без краски у края, pull-push по пирамиде, цвет участков с размытием, гармоническое продолжение, зерно бумаги, pull-push с мягким швом у края."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ from ocr_utils.scan_cropping.v2.border_fill import (
     page_map,
     periphery,
     pull_push,
+    SEAM_MAX_DELTA,
     pull_push_known,
+    seam_ramp,
 )
 
 # Размытие заливки цветом участков, мм (σ гаусса).
@@ -47,6 +49,24 @@ class Variant(str, Enum):
     HARMONIC = "F_harmonic"
     # G — pull-push плюс зерно бумаги.
     PULL_PUSH_GRAIN = "G_pull_push_grain"
+    # H — pull-push с рампой от цвета каймы листа к закрасу на 3, 5, 8 мм (без печати и чужого цвета в кайме).
+    SEAM_3 = "H3_seam"
+    SEAM_5 = "H5_seam"
+    SEAM_8 = "H8_seam"
+    # H5n — рампа 5 мм без фильтра каймы и ограничения отклонения (нужен ли фильтр).
+    SEAM_5_LOOSE = "H5n_seam_loose"
+    # H5w — рампа 5 мм со строгим фильтром каймы и потолком отклонения 40 уровней вместо 25.
+    SEAM_5_WIDE = "H5w_seam_wide"
+
+
+# Вариант H: ширина рампы шва, мм; строгий ли фильтр каймы; потолок отклонения края от закраса, уровни.
+SEAM_PARAMS = {
+    Variant.SEAM_3: (3.0, True, SEAM_MAX_DELTA),
+    Variant.SEAM_5: (5.0, True, SEAM_MAX_DELTA),
+    Variant.SEAM_8: (8.0, True, SEAM_MAX_DELTA),
+    Variant.SEAM_5_LOOSE: (5.0, False, SEAM_MAX_DELTA),
+    Variant.SEAM_5_WIDE: (5.0, True, 40.0),
+}
 
 
 @dataclass(frozen=True)
@@ -178,6 +198,9 @@ def fill_variant(inp: FillInput, variant: Variant) -> np.ndarray:
                 filled = by_page(
                     filled, support, page, paper_s, partial(harmonic, iters=HARMONIC_ITERS), FEATHER_MM * mm
                 )
+            elif variant in SEAM_PARAMS:
+                seam_mm, strict, max_delta = SEAM_PARAMS[variant]
+                filled = seam_ramp(small, filled, paper_s, page, per, mm, seam_mm, FEATHER_MM * mm, strict, max_delta)
     big = cv2.resize(np.clip(filled, 0, 255).astype(np.uint8), (w, h), interpolation=cv2.INTER_CUBIC)
     out = big
     if variant == Variant.PULL_PUSH_GRAIN:
