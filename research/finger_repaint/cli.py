@@ -1,4 +1,4 @@
-"""CLI стенда тёмных пятен на месте пальцев: мера по итогам прогона v2 (``select``), листы отбора (``sheets``), точный стенд осветления тени (``edge``)."""
+"""CLI стенда тёмных пятен на месте пальцев: мера по итогам прогона v2 (``select``), листы отбора (``sheets``), точный стенд осветления тени (``edge``), copy back с припуском ядра пальца (``core-margin``)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import intersecting_
 from ocr_utils.scan_cropping.v2.copy_back import LAYOUT_PAD_PX
 from ocr_utils.scan_cropping.v2.pipeline import init_worker, read_layout, to_frame
 from research.border_fill.frames import key_of, load_masks, read_image
+from research.finger_repaint.core_margin import CORE_GROW_PX, load_margin_inputs, margin_rows
 from research.finger_repaint.edge import baseline_path, evaluate_frame, load_edge_inputs
 from research.finger_repaint.measure import MEASURE_SCALE, spot_score
 from research.finger_repaint.repaint import Variant, load_input, repaint, stage_cache
@@ -765,3 +766,99 @@ def edge_cmd(
     summary = table[columns].quantile([0.1, 0.5, 0.9]).T
     with pd.option_context("display.width", 200, "display.max_rows", 200):
         log.info("зон %d, кадров %d\n%s", len(table), table["key"].nunique(), summary.round(2))
+
+
+@dataclass(frozen=True)
+class MarginJob:
+    """Кадр стенда «кайма кожи в copy back».
+
+    Поля:
+        cache_dir: Папка кадра в кэше прогона v2 с ``--save-fingers``.
+        src_root: Корень исходных кадров (структура как у ``--input-dir`` v2).
+        grows: Припуски ядра, px калибровочного кадра.
+        px_per_mm: Плотность кадров, px/мм.
+    """
+
+    cache_dir: Path
+    src_root: Path
+    grows: tuple[int, ...]
+    px_per_mm: float
+
+
+def margin_one(job: MarginJob) -> tuple[list[dict], list[np.ndarray]]:
+    """Меры и вырезки одного кадра (для пула); без входа или с ошибкой — пусто."""
+    from ocr_utils.scan_cropping.v2.scale import Scale
+
+    try:
+        source = baseline_path(job.src_root, job.cache_dir.name)
+        inputs = None if source is None else load_margin_inputs(job.cache_dir, source)
+        if inputs is None:
+            return [], []
+        return margin_rows(inputs, list(job.grows), Scale(job.px_per_mm))
+    except Exception:  # кадр с ошибкой не роняет стенд
+        log.exception("%s: ошибка", job.cache_dir.name)
+        return [], []
+
+
+@main.command("core-margin")
+@click.option(
+    "--cache",
+    "cache_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="--cache прогона v2 с --save-fingers (в папках кадров clean.png, layout.json).",
+)
+@click.option(
+    "--src-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Корень исходных кадров (--input-dir того прогона).",
+)
+@click.option(
+    "--out-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="Куда писать margin.csv и листы вырезок.",
+)
+@click.option(
+    "--grows",
+    default=f"0,{CORE_GROW_PX},8",
+    show_default=True,
+    help="Припуски ядра пальца, px калибровочного кадра, через запятую; первый — опорный.",
+)
+@click.option("--px-per-mm", default=PACK6_PX_PER_MM, show_default=True, help="Плотность кадров, px/мм.")
+@click.option("--jobs", default=8, show_default=True, help="Процессов (кадры полного размера — память).")
+def core_margin_cmd(cache_root: Path, src_root: Path, out_dir: Path, grows: str, px_per_mm: float, jobs: int) -> None:
+    """Copy back без ядра пальца, раздутого на припуск: мера каймы кожи и вырезки «оригинал | закрас | припуски»."""
+    import pandas as pd
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    values = tuple(int(v) for v in grows.split(","))
+    jobs_list = [MarginJob(d, src_root, values, px_per_mm) for d in sorted(cache_root.iterdir()) if d.is_dir()]
+    rows: list[dict] = []
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=init_worker) as pool:
+        for job, (part, crops) in zip(jobs_list, pool.map(margin_one, jobs_list)):
+            rows += part
+            if crops:
+                width = max(c.shape[1] for c in crops)
+                sheet = np.vstack([cv2.copyMakeBorder(c, 0, 8, 0, width - c.shape[1], cv2.BORDER_CONSTANT,
+                                                      value=(255, 255, 255)) for c in crops])  # fmt: skip
+                cv2.imwrite(str(out_dir / f"{job.cache_dir.name}.jpg"), sheet, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not rows:
+        log.warning("нет кадров с clean.png и разметкой в %s", cache_root)
+        return
+    table = pd.DataFrame(rows)
+    table.to_csv(out_dir / "margin.csv", index=False)
+    summary = table.groupby("grow_px").agg(
+        frames=("key", "nunique"),
+        returned_px=("returned_px", "sum"),
+        removed_px=("removed_px", "sum"),
+        rim_a_median=("rim_a", "median"),
+        rim_a_p90=("rim_a", lambda v: float(np.nanpercentile(v, 90))),
+        rim_next_a_median=("rim_next_a", "median"),
+        rim_next_a_p90=("rim_next_a", lambda v: float(np.nanpercentile(v, 90))),
+    )
+    with pd.option_context("display.width", 200):
+        log.info("кайма кожи по припускам (rim_a — превышение a* над бумагой в 1–3 px за ядром, rim_next_a — сразу за "
+                 "припуском):\n%s", summary.round(2))  # fmt: skip
