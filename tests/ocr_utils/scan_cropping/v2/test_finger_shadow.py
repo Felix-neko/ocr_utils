@@ -136,3 +136,19 @@ def test_light_fill_beyond_edge_not_overlit() -> None:
     paper = int(np.median(gray_in[100:300, 100:300]))
     assert gray_out[700:900, 1100:1180].max() <= paper + 3  # закрас за краем не светлее бумаги
     assert gray_out[790:810, 1060:1095].min() >= paper - 12  # призрак на листе осветлён
+
+
+def test_ring_on_other_surface_not_lightened() -> None:
+    """Палец на голубой обложке у края, кольцо опоры — на белой бумаге: зона не осветляется (МТС 1990/04 IMG_1112)."""
+    cyan = np.array(lab_to_bgr(72, -25, -30), np.float32)  # светлее порога «крупной печати» (25 L), как у IMG_1112
+    img = np.tile(PAPER, (H, W, 1))
+    img[:, 1060:] = cyan  # полоса обложки у правого края; опора 25–35 мм от пальца — на белой бумаге слева
+    img = img.astype(np.uint8)
+    book = np.ones((H, W), bool)
+    core = np.zeros((H, W), np.uint8)
+    cv2.ellipse(core, (1150, 800), (60, 40), 0, 0, 360, 1, -1)
+    paint = (cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))) > 0) & book
+    shadow = estimate_finger_shadow(img, paint, core > 0, book, ~paint, PX_PER_MM)
+    assert shadow.gaps and max(shadow.gaps) > 20
+    out = lighten_finger_shadow(img, shadow)
+    assert np.abs(out.astype(int) - img.astype(int))[:, 1060:].max() <= 1

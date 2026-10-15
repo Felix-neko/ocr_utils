@@ -55,6 +55,13 @@ EDGE_RAMP_MM = 4.0
 FILL_REACH_MM = 10.0
 # Перцентиль, которым карта ограничивается сверху внутри области (отсечка одиночных выбросов).
 CAP_PERCENTILE = 99.5
+# Опора — та же поверхность, что вокруг пальца: тень меняет яркость, а не цвет. Если медианный цвет (a*, b*, 8-битные
+# единицы OpenCV Lab) кольца опоры зоны отличается от цвета поверхности у пальца больше чем на ZONE_MAX_AB_GAP, опора
+# взята с чужой поверхности, и зона не осветляется: палец на голубой обложке у края, а в кольце — белый торец и закрас
+# (МТС 1990/04 IMG_1112: прибавка 101 уровень в среднем, обложка высветлилась до белого). Пак-6, 5398 зон по оригиналам
+# кадров: у 5395 расхождение ≤ 10.8 (99 % — ≤ 6.3), у трёх — 31–35 (IMG_1112, МТС 1990/09 IMG_0248, IMG_0310: палец на
+# стыке белой страницы и голубой обложки).
+ZONE_MAX_AB_GAP = 20.0
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,8 @@ class FingerShadow:
         content: Крупная печать (bool) — в оценку не входит.
         delta: Прибавка по каналам BGR, float32 (H, W, 3), ≥ 0; ноль вне области и полосы закраса у неё.
         fill: Полоса закраса вне книги у области (bool), где карта тоже мерится; None — пустая.
+        gaps: Расхождение цвета опоры и поверхности у пальца по зонам (связным частям ``area``, по порядку меток), a*b*;
+            зоны с расхождением больше :data:`ZONE_MAX_AB_GAP` не осветляются.
     """
 
     area: np.ndarray
@@ -76,6 +85,7 @@ class FingerShadow:
     content: np.ndarray
     delta: np.ndarray
     fill: np.ndarray | None = None
+    gaps: tuple[float, ...] = ()
 
 
 def disk(mask: np.ndarray, radius_px: float) -> np.ndarray:
@@ -223,6 +233,38 @@ def postprocess(delta: np.ndarray, area: np.ndarray, fill: np.ndarray, book: np.
     return delta
 
 
+def zone_colour_gaps(
+    small: np.ndarray, area: np.ndarray, surface: np.ndarray, ring: np.ndarray, mm: float
+) -> tuple[np.ndarray, tuple[float, ...]]:
+    """Расхождение цвета опоры и поверхности у пальца по зонам — связным частям области поиска.
+
+    Args:
+        small: Итог BGR на масштабе карты.
+        area: Область поиска (bool).
+        surface: Поверхность у пальца, по которой мерится её цвет (bool): чистая бумага области вне зоны закраса.
+        ring: Кольцо опоры (bool).
+        mm: Плотность на масштабе карты, px/мм.
+
+    Returns:
+        ``(метки зон, расхождения a*b* по зонам 1..N)``; зона без пикселей поверхности или кольца — расхождение 0.
+    """
+    count, labels = cv2.connectedComponents(area.astype(np.uint8), connectivity=8)
+    ab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)[..., 1:].astype(np.float32)
+    # Кольцо зоны — пиксели кольца не дальше внешнего радиуса кольца от самой зоны.
+    reach = (REF_RING_MM[1] - SHADOW_REACH_MM) * mm + 2
+    gaps = []
+    for k in range(1, count):
+        zone = labels == k
+        near = cv2.distanceTransform((~zone).astype(np.uint8), cv2.DIST_L2, 5) <= reach
+        own_ring = ring & near
+        own_surface = surface & zone
+        if own_ring.sum() < 20 or own_surface.sum() < 20:
+            gaps.append(0.0)
+            continue
+        gaps.append(float(np.linalg.norm(np.median(ab[own_ring], axis=0) - np.median(ab[own_surface], axis=0))))
+    return labels, tuple(gaps)
+
+
 def estimate_finger_shadow(
     img: np.ndarray, paint: np.ndarray, core: np.ndarray, book: np.ndarray, original: np.ndarray, px_per_mm: float
 ) -> FingerShadow:
@@ -290,7 +332,18 @@ def estimate_finger_shadow(
     ref = smooth_fill(w_img, ring[win], sigma)
     delta = zeros.copy()
     delta[win] = postprocess(np.maximum(ref - back, 0), area[win], fill[win], book_s[win], mm)
-    return FingerShadow(area, skin, ink, content, delta, fill)
+    # Зоны, опора которых взята с другой поверхности (цвет кольца не тот, что у пальца), не осветляются — вместе с полосой
+    # закраса у них.
+    # Поверхность у пальца — чистая бумага области вне зоны закраса; если её нет, вся чистая бумага области.
+    surface = clean & area & ~paint_s
+    if surface.sum() < 20:
+        surface = clean & area
+    labels, gaps = zone_colour_gaps(small, area, surface, ring, mm)
+    for k, gap in enumerate(gaps, start=1):
+        if gap > ZONE_MAX_AB_GAP:
+            zone = labels == k
+            delta[disk(zone, FILL_REACH_MM * mm + 2)] = 0
+    return FingerShadow(area, skin, ink, content, delta, fill, gaps)
 
 
 def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
