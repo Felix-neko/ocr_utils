@@ -1,4 +1,4 @@
-"""CLI стенда тёмных пятен на месте пальцев: мера по итогам прогона v2 (``select``), листы отбора (``sheets``)."""
+"""CLI стенда тёмных пятен на месте пальцев: мера по итогам прогона v2 (``select``), листы отбора (``sheets``), точный стенд осветления тени (``edge``)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import intersecting_
 from ocr_utils.scan_cropping.v2.copy_back import LAYOUT_PAD_PX
 from ocr_utils.scan_cropping.v2.pipeline import init_worker, read_layout, to_frame
 from research.border_fill.frames import key_of, load_masks, read_image
+from research.finger_repaint.edge import baseline_path, evaluate_frame, load_edge_inputs
 from research.finger_repaint.measure import MEASURE_SCALE, spot_score
 from research.finger_repaint.repaint import Variant, load_input, repaint, stage_cache
 
@@ -681,3 +682,86 @@ def shadow_cmd(
     )
     with pd.option_context("display.width", 200, "display.max_rows", 200):
         log.info("\n%s", summary.round(2))
+
+
+@dataclass(frozen=True)
+class EdgeJob:
+    """Кадр точного стенда тени.
+
+    Поля:
+        cache_dir: Папка кадра в кэше прогона v2 с ``--save-before-shadow``.
+        px_per_mm: Плотность итога, px/мм.
+        baseline_root: Корень итогов прежнего прогона («было») или None.
+        sheets_dir: Папка листов «до | было | стало» или None.
+    """
+
+    cache_dir: Path
+    px_per_mm: float
+    baseline_root: Path | None
+    sheets_dir: Path | None
+
+
+def edge_one(job: EdgeJob) -> list[dict]:
+    """Меры и листы одного кадра (для пула); кадр без входа карты — пусто, ошибка — в лог, пусто."""
+    try:
+        inputs = load_edge_inputs(job.cache_dir)
+        if inputs is None:
+            return []
+        baseline = None
+        if job.baseline_root is not None:
+            path = baseline_path(job.baseline_root, inputs.key)
+            baseline = None if path is None else read_image(path)
+        return evaluate_frame(inputs, job.px_per_mm, baseline, job.sheets_dir)
+    except Exception:  # кадр с ошибкой не роняет стенд
+        log.exception("%s: ошибка", job.cache_dir.name)
+        return []
+
+
+@main.command("edge")
+@click.option(
+    "--cache",
+    "cache_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="--cache прогона v2 с --save-before-shadow (в папках кадров before_shadow.png, shadow_masks.npz).",
+)
+@click.option(
+    "--baseline",
+    "baseline_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Итоги прежнего прогона тех же кадров («было»), структура как у --output v2.",
+)
+@click.option(
+    "--out-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="Куда писать zones.csv и листы sheets/.",
+)
+@click.option("--px-per-mm", default=PACK6_PX_PER_MM, show_default=True, help="Плотность итогов, px/мм.")
+@click.option("--no-sheets", is_flag=True, help="Без листов — только меры.")
+@click.option("--jobs", default=12, show_default=True, help="Процессов.")
+def edge_cmd(
+    cache_root: Path, baseline_root: Path | None, out_dir: Path, px_per_mm: float, no_sheets: bool, jobs: int
+) -> None:
+    """Точный стенд осветления тени: карта текущим кодом на входе из кэша; меры каймы и пересвета по зонам, листы."""
+    import pandas as pd
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    sheets_dir = None if no_sheets else out_dir / "sheets"
+    (sheets_dir or out_dir).mkdir(parents=True, exist_ok=True)
+    jobs_list = [EdgeJob(d, px_per_mm, baseline_root, sheets_dir) for d in sorted(cache_root.iterdir()) if d.is_dir()]
+    rows: list[dict] = []
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=init_worker) as pool:
+        for part in pool.map(edge_one, jobs_list):
+            rows += part
+    if not rows:
+        log.warning("нет кадров с входом карты в %s", cache_root)
+        return
+    table = pd.DataFrame(rows)
+    table.to_csv(out_dir / "zones.csv", index=False)
+    # Сводка по вариантам: 10 % / медиана / 90 % каждой меры.
+    columns = [c for c in table.columns if c not in ("key", "zone")]
+    summary = table[columns].quantile([0.1, 0.5, 0.9]).T
+    with pd.option_context("display.width", 200, "display.max_rows", 200):
+        log.info("зон %d, кадров %d\n%s", len(table), table["key"].nunique(), summary.round(2))

@@ -152,3 +152,85 @@ def test_ring_on_other_surface_not_lightened() -> None:
     assert shadow.gaps and max(shadow.gaps) > 20
     out = lighten_finger_shadow(img, shadow)
     assert np.abs(out.astype(int) - img.astype(int))[:, 1060:].max() <= 1
+
+
+def edge_finger() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Книга до x = 1100, палец у её правого края.
+
+    Returns:
+        ``(зона закраса, ядро, книга)``.
+    """
+    book = np.zeros((H, W), bool)
+    book[:, :1100] = True
+    core = np.zeros((H, W), np.uint8)
+    cv2.ellipse(core, (1130, 800), (60, 40), 0, 0, 360, 1, -1)
+    paint = (cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))) > 0) & book
+    return paint, core > 0, book
+
+
+def test_sharp_blot_no_rim() -> None:
+    """Пятно LaMa с резким краем в зоне закраса снимается без тёмной дуги по краю (МТС 1991/02 IMG_0622)."""
+    paint, core, book = edge_finger()
+    img = np.tile(PAPER, (H, W, 1))
+    blot = np.zeros((H, W), np.uint8)
+    cv2.circle(blot, (1090, 800), 45, 1, -1)
+    # Тёмное пятно с резким краем: переход ~2 px, как у пятна LaMa (без однопиксельных выступов растровой окружности);
+    # краем листа и зоной закраса пятно срезано жёстко.
+    soft = cv2.GaussianBlur(blot.astype(np.float32), (0, 0), 1.0) * paint
+    blot = (blot > 0) & paint
+    img = (img * (1 - 0.45 * soft)[..., None]).astype(np.uint8)
+    out = lighten_finger_shadow(img, estimate_finger_shadow(img, paint, core, book, ~paint, PX_PER_MM))
+    gray_in, gray_out = (cv2.cvtColor(x, cv2.COLOR_BGR2GRAY).astype(int) for x in (img, out))
+    paper = int(np.median(gray_in[100:300, 100:300]))
+    # Полоса ±1 мм вокруг края пятна на листе.
+    edge = blot ^ (cv2.erode(blot.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+    edge = cv2.dilate(edge.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    edge &= book
+    assert np.percentile(gray_in[edge], 5) < paper - 40
+    # Нет тёмной дуги: темнее бумаги на 15 — не больше 5 % полосы (прежняя карта на ¼ с гладкой B — 59 %; остаток —
+    # 1–3 px у верха круга, где пятно срезано краем листа и медиана 1 мм берёт бумагу).
+    assert (gray_out[edge] < paper - 15).mean() <= 0.05
+    assert np.percentile(gray_out[edge], 98) <= paper + 6  # нет светлого ореола
+
+
+def edge_band(img: np.ndarray) -> np.ndarray:
+    """Серая полоса у края листа (торец, завал): к краю x = 1100 темнее на 30 уровней, ширина ~8 мм.
+
+    Args:
+        img: Картинка float32 (H, W, 3), меняется копия.
+
+    Returns:
+        Картинка с полосой, float32.
+    """
+    xx = np.arange(W, dtype=np.float32)
+    drop = 30 * np.clip((xx - 1036) / 64, 0, 1) * (xx < 1100)
+    return img - drop[None, :, None]
+
+
+def test_edge_band_not_lightened() -> None:
+    """Серая полоса у края листа без тени у пальца не высветляется (МТС 1991/02 IMG_0669)."""
+    paint, core, book = edge_finger()
+    img = edge_band(np.tile(PAPER, (H, W, 1))).astype(np.uint8)
+    out = lighten_finger_shadow(img, estimate_finger_shadow(img, paint, core, book, ~paint, PX_PER_MM))
+    band = np.zeros((H, W), bool)
+    band[650:950, 1060:1100] = True
+    diff = out.astype(int) - img.astype(int)
+    assert diff[band].mean() <= 2.0
+
+
+def test_shadow_in_edge_band_to_band_level() -> None:
+    """Тень пальца в серой полосе у края снимается до уровня полосы, а не до белого."""
+    paint, core, book = edge_finger()
+    clean = edge_band(np.tile(PAPER, (H, W, 1)))
+    yy, xx = np.mgrid[0:H, 0:W]
+    g = np.exp(-(((xx - 1090) / 40.0) ** 2 + ((yy - 800) / 60.0) ** 2))
+    img = (clean * (1 - 0.3 * g)[..., None]).astype(np.uint8)
+    out = lighten_finger_shadow(img, estimate_finger_shadow(img, paint, core, book, ~paint, PX_PER_MM))
+    gray_clean, gray_in, gray_out = (
+        cv2.cvtColor(np.clip(x, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(int) for x in (clean, img, out)
+    )
+    spot = (slice(780, 820), slice(1075, 1095))
+    assert (gray_clean[spot] - gray_in[spot]).mean() > 30  # тень есть
+    # Снята почти вся, и не светлее полосы без тени больше чем на 5.
+    assert np.abs(gray_out[spot] - gray_clean[spot]).mean() <= 6
+    assert (gray_out[spot] - gray_clean[spot]).max() <= 5

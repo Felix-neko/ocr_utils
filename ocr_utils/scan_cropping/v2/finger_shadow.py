@@ -49,9 +49,32 @@ CONTENT_GROW_MM = 1.0
 SMOOTH_SIGMA_MM = 1.5
 # Итоговое сглаживание карты внутри области, мм.
 POST_SIGMA_MM = 1.0
+# «Бумага как есть» в зоне закраса пальца (и SHARP_GROW_MM вокруг) и в полосе закраса вне книги — почти без сглаживания:
+# у пятна LaMa резкий край, и B с гауссом SMOOTH_SIGMA_MM недоосветляла его изнутри (тёмная дуга) и переосветляла
+# снаружи (светлый ореол) — «вмятина» у МТС 1991/02 IMG_0622, IMG_0634. Там B — pull-push с гауссом SHARP_SIGMA_MM и
+# медиана окна SHARP_MEDIAN_MM (гасит зерно, край пятна держит); переход к обычной B — гаусс маски SHARP_BLEND_MM; карта
+# там сглаживается SHARP_POST_SIGMA_MM.
+SHARP_GROW_MM = 1.0
+SHARP_SIGMA_MM = 0.3
+SHARP_MEDIAN_MM = 1.0
+SHARP_BLEND_MM = 0.5
+SHARP_POST_SIGMA_MM = 0.3
+# Опора у края листа — профиль кольца опоры по расстоянию от края книги: полоса у края (торец, завал страницы) темнее
+# бумаги в глубине, и pull-push кольца высветлял её до белого диска (МТС 1991/02 IMG_0669, IMG_0666). В полосе до
+# EDGE_PROFILE_MM от края опора — не светлее медианы кольца на том же расстоянии (корзины EDGE_BIN_MM, в корзине не
+# меньше EDGE_BIN_MIN_PX пикселей на масштабе карты).
+EDGE_PROFILE_MM = 15.0
+EDGE_BIN_MM = 0.5
+EDGE_BIN_MIN_PX = 10
+# Отсечка карты сверху — мягкая: до cap карта как есть, выше гладко подходит к (1 + CAP_SOFT_ROOM)·cap (без плато с
+# резким краем). Колено ниже cap (0.8·cap) недоосветляло самую глубокую часть пятна LaMa кольцами по изолиниям.
+CAP_SOFT_ROOM = 0.25
+# Кожа не осветляется, вокруг неё прибавка нарастает от нуля на SKIN_FEATHER_MM (без выреза с резким краем).
+SKIN_FEATHER_MM = 1.0
 # Рампа карты от края области (там, где снаружи бумага), мм: на краю поправка 0 и растёт плавно (smoothstep).
 EDGE_RAMP_MM = 4.0
-# Полоса закраса вне книги у области, мм: карта мерится и на ней (закрас темнее опоры — осветляется), со спадом до 0.
+# Полоса закраса вне книги у области, мм: карта мерится и на ней (закрас темнее опоры — осветляется) с той же опорой и
+# резкой B; в зоне закраса пальца без спада, дальше — спад до 0 на FILL_REACH_MM.
 FILL_REACH_MM = 10.0
 # Перцентиль, которым карта ограничивается сверху внутри области (отсечка одиночных выбросов).
 CAP_PERCENTILE = 99.5
@@ -79,6 +102,11 @@ class FingerShadow:
         fill: Полоса закраса вне книги у области (bool), где карта тоже мерится; None — пустая.
         gaps: Расхождение цвета опоры и поверхности у пальца по зонам (связным частям ``area``, по порядку меток), a*b*;
             зоны с расхождением больше :data:`ZONE_MAX_AB_GAP` не осветляются.
+        ref: Опора R «бумага без тени» по каналам BGR, float32 (H, W, 3); ноль вне рабочего окна. Для стенда и отладки.
+        back: «Бумага как есть» B на масштабе карты, float32 (H, W, 3); ноль вне рабочего окна.
+        sharp: Вес резкой B (0..1, float32): зона закраса пальца и полоса закраса — там осветление уточняется на полном
+            масштабе (:func:`lighten_finger_shadow`).
+        px_per_mm: Плотность итога, px/мм (полный масштаб).
     """
 
     area: np.ndarray
@@ -88,6 +116,10 @@ class FingerShadow:
     delta: np.ndarray
     fill: np.ndarray | None = None
     gaps: tuple[float, ...] = ()
+    ref: np.ndarray | None = None
+    back: np.ndarray | None = None
+    sharp: np.ndarray | None = None
+    px_per_mm: float = 0.0
 
 
 def disk(mask: np.ndarray, radius_px: float) -> np.ndarray:
@@ -196,14 +228,41 @@ def window_of(mask: np.ndarray, margin: int) -> tuple[slice, slice]:
     )
 
 
-def postprocess(delta: np.ndarray, area: np.ndarray, fill: np.ndarray, book: np.ndarray, mm: float) -> np.ndarray:
-    """Карта после оценки: отсечка сверху, сглаживание по области, рампа от края, спад в закрасе вне книги.
+def soft_cap(delta: np.ndarray, cap: np.ndarray) -> np.ndarray:
+    """Мягкая отсечка сверху: до ``cap`` карта как есть, выше — гладко к ``(1 + CAP_SOFT_ROOM)·cap`` (без плато с краем).
+
+    Args:
+        delta: Карта по каналам, ≥ 0.
+        cap: Порог по каналам, shape (3,).
+
+    Returns:
+        Карта, не больше ``(1 + CAP_SOFT_ROOM)·cap``; производная непрерывна в ``cap``.
+    """
+    room = np.maximum(CAP_SOFT_ROOM * cap, 1e-6)
+    over = np.maximum(delta - cap, 0)
+    # Выше порога — экспонента к пределу: наклон 1 в cap, предел cap + room на бесконечности.
+    return np.where(delta > cap, cap + room * (1 - np.exp(-over / room)), delta)
+
+
+def postprocess(
+    delta: np.ndarray,
+    area: np.ndarray,
+    fill: np.ndarray,
+    book: np.ndarray,
+    sharp: np.ndarray,
+    paint: np.ndarray,
+    mm: float,
+) -> np.ndarray:
+    """Карта после оценки: мягкая отсечка сверху, сглаживание по области и полосе закраса порознь, рампа, спад полосы.
 
     Args:
         delta: Прибавка по каналам, ≥ 0 (оценена и на области, и на закрасе вне книги у неё).
         area: Область поиска (bool).
         fill: Закрас вне книги в пределах ``FILL_REACH_MM`` от области (bool) — там карта мерится так же, как в области.
         book: Книга (bool).
+        sharp: Вес «резкой» B (0..1): зона закраса пальца и полоса закраса — там карта сглаживается
+            ``SHARP_POST_SIGMA_MM``, вне — ``POST_SIGMA_MM``.
+        paint: Зона закраса пальца (bool): в ней полоса закраса вне книги не спадает.
         mm: Плотность, px/мм.
 
     Returns:
@@ -211,28 +270,162 @@ def postprocess(delta: np.ndarray, area: np.ndarray, fill: np.ndarray, book: np.
     """
     where = area | fill
     inside = delta[where]
-    cap = np.percentile(inside, CAP_PERCENTILE, axis=0) if inside.size else np.zeros(3)
-    delta = np.minimum(delta, cap)
+    if inside.size:
+        delta = soft_cap(delta, np.percentile(inside, CAP_PERCENTILE, axis=0))
     # Сглаживание по области и по полосе закраса порознь (нормированная свёртка): через край листа карта не перетекает —
-    # большая поправка тёмного края листа не ложится на светлый закрас.
+    # большая поправка тёмного края листа не ложится на светлый закрас (МТС 1990/03 IMG_0972). В зоне резкой B — своё,
+    # малое сглаживание.
     smoothed = np.zeros_like(delta)
     for part in (area, fill):
         wts = part.astype(np.float32)
-        num = cv2.GaussianBlur(delta * wts[..., None], (0, 0), POST_SIGMA_MM * mm)
-        den = cv2.GaussianBlur(wts, (0, 0), POST_SIGMA_MM * mm)
-        smoothed[part] = (num / np.maximum(den, 1e-6)[..., None])[part]
+        pair = []
+        for sigma_mm in (POST_SIGMA_MM, SHARP_POST_SIGMA_MM):
+            num = cv2.GaussianBlur(delta * wts[..., None], (0, 0), sigma_mm * mm)
+            den = cv2.GaussianBlur(wts, (0, 0), sigma_mm * mm)
+            pair.append(num / np.maximum(den, 1e-6)[..., None])
+        mixed = (1 - sharp[..., None]) * pair[0] + sharp[..., None] * pair[1]
+        smoothed[part] = mixed[part]
     delta = smoothed
     # Рампа: 0 там, где снаружи области бумага (край тени), растёт smoothstep на EDGE_RAMP_MM. У края листа (снаружи
     # не книга) рампы нет: там продолжается полоса закраса.
     paper_out = book & ~area
     d = cv2.distanceTransform((~paper_out).astype(np.uint8), cv2.DIST_L2, 5) / (EDGE_RAMP_MM * mm)
     delta = delta * smoothstep(np.clip(d, 0, 1))[..., None] * where[..., None]
-    # Полоса закраса: карта там своя (закрас темнее опоры — осветляется, светлый — нет) и спадает к внешнему краю полосы.
+    # Полоса закраса: в зоне закраса пальца — как область, дальше спадает к внешнему краю полосы.
     if fill.any():
-        dist = cv2.distanceTransform((~area).astype(np.uint8), cv2.DIST_L2, 5)
+        dist = cv2.distanceTransform((~(area | paint)).astype(np.uint8), cv2.DIST_L2, 5)
         fade = smoothstep(np.clip(1 - dist / (FILL_REACH_MM * mm), 0, 1))
         delta[fill] *= fade[fill][:, None]
     return delta
+
+
+def sharp_paper(img: np.ndarray, weight: np.ndarray, mm: float, blur: bool = True) -> np.ndarray:
+    """Резкая «бумага как есть» по пикселям ``weight``: pull-push (с гауссом ``SHARP_SIGMA_MM`` или без) и медиана.
+
+    Args:
+        img: Окно итога BGR float32.
+        weight: Пиксели-опоры (bool).
+        mm: Плотность, px/мм.
+        blur: Гаусс ``SHARP_SIGMA_MM`` после pull-push; без него (полный масштаб) край пятна остаётся ступенькой —
+            медиана ``SHARP_MEDIAN_MM`` ступеньку не размывает, а зерно гасит.
+
+    Returns:
+        B по каналам, float32.
+    """
+    raw = smooth_fill(img, weight, SHARP_SIGMA_MM * mm) if blur else pull_push(img, weight.astype(np.float32))
+    k = max(3, int(round(SHARP_MEDIAN_MM * mm)) | 1)
+    # Медиана — по каналам uint8 (окно больше 5 px у OpenCV только для uint8).
+    return cv2.medianBlur(np.clip(raw + 0.5, 0, 255).astype(np.uint8), k).astype(np.float32)
+
+
+def paper_as_is(
+    img: np.ndarray, book_weight: np.ndarray, fill: np.ndarray, sharp_zone: np.ndarray, mm: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """«Бумага как есть» B: гладкая вне зоны закраса, почти без сглаживания в ней и в полосе закраса вне книги.
+
+    Лист и полоса закраса считаются порознь: сглаживание через край листа смешало бы их тон (тёмный край листа
+    затемнял B первого столбца закраса, и тот осветлялся сверх бумаги — МТС 1990/03 IMG_0972).
+
+    Args:
+        img: Окно итога BGR float32 на масштабе карты.
+        book_weight: Чистая бумага книги (bool) — опоры B на листе.
+        fill: Полоса закраса вне книги (bool) — опоры B на ней.
+        sharp_zone: Где B на листе резкая (bool): зона закраса пальца + ``SHARP_GROW_MM``.
+        mm: Плотность, px/мм.
+
+    Returns:
+        ``(B, вес резкой B 0..1)`` — вес нужен и сглаживанию карты; в полосе закраса вес 1.
+    """
+    soft = smooth_fill(img, book_weight, SMOOTH_SIGMA_MM * mm)
+    weight = np.zeros(fill.shape, np.float32)
+    back = soft
+    if sharp_zone.any():
+        sharp = sharp_paper(img, book_weight, mm)
+        weight = np.clip(cv2.GaussianBlur(sharp_zone.astype(np.float32), (0, 0), SHARP_BLEND_MM * mm), 0, 1)
+        # Внутри зоны вес ровно 1: размытие маски только расширяет переход наружу.
+        weight = np.maximum(weight, sharp_zone.astype(np.float32))
+        back = weight[..., None] * sharp + (1 - weight[..., None]) * soft
+    if fill.any():
+        back = np.where(fill[..., None], sharp_paper(img, fill, mm), back)
+        weight = np.where(fill, 1.0, weight).astype(np.float32)
+    return back, weight
+
+
+def fill_inner_holes(mask: np.ndarray) -> np.ndarray:
+    """Маска с залитыми внутренними дырами: «не маска», не связанная с краем картинки, становится маской.
+
+    Args:
+        mask: Маска (bool).
+
+    Returns:
+        Маска без внутренних дыр (bool).
+    """
+    outside = (~mask).astype(np.uint8)
+    count, labels = cv2.connectedComponents(outside, connectivity=4)
+    border = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    return mask | ((labels > 0) & ~np.isin(labels, border))
+
+
+def edge_profile_ref(
+    ref: np.ndarray, img: np.ndarray, ring: np.ndarray, zones: np.ndarray, book: np.ndarray, mm: float
+) -> np.ndarray:
+    """Опора у края листа: не светлее кольца опоры на том же расстоянии от края книги (профиль по зонам).
+
+    Полоса у края (торец, завал страницы) темнее бумаги в глубине. Pull-push кольца берёт тон в основном из глубины и
+    высветлял полосу; профиль медиан кольца по расстоянию от края оставляет полосу опорой, и осветляется только то,
+    что темнее неё на том же расстоянии (сама тень и пятно LaMa).
+
+    Args:
+        ref: Опора R по каналам (pull-push кольца), float32.
+        img: Итог BGR float32 (то же окно).
+        ring: Кольцо опоры (bool).
+        zones: Метки зон (связных частей области поиска), 0 — вне зон.
+        book: Книга (bool).
+        mm: Плотность, px/мм.
+
+    Returns:
+        Опора, ограниченная профилем в полосе ``EDGE_PROFILE_MM`` от края; вне полосы и без профиля — прежняя.
+    """
+    # Край листа — только внешний: дыры маски бумаги внутри книги (выемка у кончика пальца, МТС 1991/02 IMG_0669) не
+    # край, иначе опору вокруг них опускало до тона полосы у края — ступеньками по корзинам.
+    solid = fill_inner_holes(book)
+    if solid.all():
+        return ref
+    # Расстояние от края книги, мм; вне книги (полоса закраса) — 0.
+    dist = cv2.distanceTransform(solid.astype(np.uint8), cv2.DIST_L2, 5) / mm
+    bins = int(np.ceil(EDGE_PROFILE_MM / EDGE_BIN_MM))
+    centers = (np.arange(bins) + 0.5) * EDGE_BIN_MM
+    reach = (REF_RING_MM[1] - SHADOW_REACH_MM) * mm + 2
+    out = ref.copy()
+    for k in range(1, int(zones.max()) + 1):
+        zone = zones == k
+        near = cv2.distanceTransform((~zone).astype(np.uint8), cv2.DIST_L2, 5)
+        own = ring & (near <= reach) & (dist < EDGE_PROFILE_MM)
+        idx = np.minimum((dist[own] / EDGE_BIN_MM).astype(int), bins - 1)
+        values = img[own]
+        good, medians = [], []
+        for i in range(bins):
+            sel = idx == i
+            if sel.sum() >= EDGE_BIN_MIN_PX:
+                good.append(centers[i])
+                medians.append(np.median(values[sel], axis=0))
+        # Профиль нужен от самого края: без корзин у края (кольцо не доходит до полосы) опора не трогается.
+        if len(good) < 3 or good[0] > 3 * EDGE_BIN_MM:
+            continue
+        good, medians = np.asarray(good), np.asarray(medians)
+        # Профиль сглаживается по соседним корзинам (окно 3): медианы корзин скачут на 1–3 уровня, и опора шла ступеньками.
+        if len(good) >= 3:
+            padded = np.concatenate([medians[:1], medians, medians[-1:]])
+            medians = (padded[:-2] + padded[1:-1] + padded[2:]) / 3
+        # Где профиль: зона и полоса закраса у неё, ближе к краю, чем последняя корзина профиля.
+        target = (near <= FILL_REACH_MM * mm + 2) & (dist <= good[-1])
+        d = dist[target]
+        limit = np.stack([np.interp(d, good, medians[:, c]) for c in range(3)], axis=1)
+        # К концу профиля ограничение гладко сходит на нет (последние 2 мм) — без ступеньки на его границе.
+        fade = smoothstep(np.clip((good[-1] - d) / 2.0, 0, 1))[:, None]
+        cur = ref[target]
+        out[target] = np.minimum(cur, fade * limit + (1 - fade) * cur)
+    return out
 
 
 def zone_colour_gaps(
@@ -327,32 +520,39 @@ def estimate_finger_shadow(
         content = disk((light < np.median(light[ring]) - CONTENT_DROP_L) & original_s, CONTENT_GROW_MM * mm)
         clean &= ~content
         ring &= ~content
-    # Рабочее окно — рамка области с запасом кольца и сглаживания.
-    win = window_of(area, int((REF_RING_MM[1] - SHADOW_REACH_MM + 3 * SMOOTH_SIGMA_MM) * mm) + 2)
-    w_img = small[win].astype(np.float32)
-    sigma = SMOOTH_SIGMA_MM * mm
-    # Закрас до рамки вне книги у области: карта мерится и на нём — его тон задал pull-push от чистой полосы бумаги, и
-    # он бывает уже светлым там, где край листа тёмный (продолжение поправки с края переосветляло, МТС 1990/03 IMG_0972).
-    fill = ~book_s & disk(area, FILL_REACH_MM * mm)
-    # «Как есть» — порознь для листа и для полосы закраса: сглаживание через край листа смешало бы их тон.
-    back_book = smooth_fill(w_img, clean[win] & (from_core[win] <= REF_RING_MM[1]), sigma)
-    back_fill = smooth_fill(w_img, fill[win], sigma) if fill[win].any() else back_book
-    back = np.where(fill[win][..., None], back_fill, back_book)
-    ref = smooth_fill(w_img, ring[win], sigma)
-    delta = zeros.copy()
-    delta[win] = postprocess(np.maximum(ref - back, 0), area[win], fill[win], book_s[win], mm)
-    # Зоны, опора которых взята с другой поверхности (цвет кольца не тот, что у пальца), не осветляются — вместе с полосой
-    # закраса у них.
     # Поверхность у пальца — чистая бумага области вне зоны закраса; если её нет, вся чистая бумага области.
     surface = clean & area & ~paint_s
     if surface.sum() < 20:
         surface = clean & area
-    labels, gaps = zone_colour_gaps(small, area, surface, ring, mm)
+    zones, gaps = zone_colour_gaps(small, area, surface, ring, mm)
+    # Рабочее окно — рамка области с запасом кольца и сглаживания.
+    win = window_of(area, int((REF_RING_MM[1] - SHADOW_REACH_MM + 3 * SMOOTH_SIGMA_MM) * mm) + 2)
+    w_img = small[win].astype(np.float32)
+    # Закрас до рамки вне книги у области: карта мерится и на нём с той же опорой — его тон задал pull-push от чистой
+    # полосы бумаги, и он бывает уже светлым там, где край листа тёмный (МТС 1990/03 IMG_0972): резкая B там следует за
+    # ним, и светлый закрас не осветляется.
+    fill = ~book_s & disk(area, FILL_REACH_MM * mm)
+    soft_weight = clean[win] & (from_core[win] <= REF_RING_MM[1])
+    sharp_zone = disk(paint_s, SHARP_GROW_MM * mm) & book_s
+    back, sharp = paper_as_is(w_img, soft_weight, fill[win], sharp_zone[win], mm)
+    ref = smooth_fill(w_img, ring[win], SMOOTH_SIGMA_MM * mm)
+    ref = edge_profile_ref(ref, w_img, ring[win], zones[win], book_s[win], mm)
+    delta = zeros.copy()
+    delta[win] = postprocess(np.maximum(ref - back, 0), area[win], fill[win], book_s[win], sharp, paint_s[win], mm)
+    # Зоны, опора которых взята с другой поверхности (цвет кольца не тот, что у пальца), не осветляются — вместе с полосой
+    # закраса у них.
     for k, gap in enumerate(gaps, start=1):
         if gap > ZONE_MAX_AB_GAP:
-            zone = labels == k
-            delta[disk(zone, FILL_REACH_MM * mm + 2)] = 0
-    return FingerShadow(area, skin, ink, content, delta, fill, gaps)
+            delta[disk(zones == k, FILL_REACH_MM * mm + 2)] = 0
+    # Кожа не осветляется; вокруг неё прибавка нарастает от нуля на SKIN_FEATHER_MM — без выреза с резким краем.
+    if skin.any():
+        from_skin = cv2.distanceTransform((~skin).astype(np.uint8), cv2.DIST_L2, 5) / (SKIN_FEATHER_MM * mm)
+        delta *= smoothstep(np.clip(from_skin, 0, 1))[..., None]
+    ref_full, back_full = zeros.copy(), zeros.copy()
+    ref_full[win], back_full[win] = ref, back
+    sharp_full = np.zeros(area.shape, np.float32)
+    sharp_full[win] = sharp
+    return FingerShadow(area, skin, ink, content, delta, fill, gaps, ref_full, back_full, sharp_full, px_per_mm)
 
 
 def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
@@ -393,6 +593,81 @@ def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
         den = cv2.resize(weight, size, interpolation=cv2.INTER_LINEAR)
         inside = (cv2.resize(part.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0) & (den > 1e-6)
         add[inside] = num[inside] / den[inside][:, None]
+    add = add + sharp_detail(img[y0:y1, x0:x1], shadow, (rows, cols), add)
     out = img.copy()
     out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + add + 0.5, 0, 255).astype(np.uint8)
     return out
+
+
+def sharp_detail(roi: np.ndarray, shadow: FingerShadow, cut: tuple[slice, slice], add: np.ndarray) -> np.ndarray:
+    """Уточнение прибавки на полном масштабе в зоне резкой B: край пятна LaMa резче шага карты (¼).
+
+    Прибавка на ¼ — R − B; растянутая билинейно, она размывает край пятна на несколько пикселей, и по контуру пятна
+    остаются тонкие кольца. Полномасштабная прибавка — R − B_полн = (R − B)↑ + (B↑ − B_полн): к растянутой карте
+    добавляется разность растянутой B и B полного масштаба (тот же pull-push с медианой, по бумаге без краски, кожи и
+    печати, порознь по листу и полосе закраса). Только там, где карта не нулевая (зоны, отключённые правилами, и рампы
+    остаются как есть).
+
+    Args:
+        roi: Рамка итога BGR uint8 (полный масштаб).
+        shadow: Карта (с ``back``, ``sharp`` и ``px_per_mm``).
+        cut: Срезы рамки на масштабе карты ``(строки, столбцы)``.
+        add: Растянутая прибавка в рамке, float32 (h, w, 3).
+
+    Returns:
+        Добавка к ``add`` в рамке, float32; итоговая прибавка не опускается ниже нуля.
+    """
+    if shadow.back is None or shadow.sharp is None or shadow.px_per_mm <= 0 or not shadow.sharp[cut].any():
+        return np.zeros_like(add)
+    size = (roi.shape[1], roi.shape[0])
+    sharp_up = cv2.resize(shadow.sharp[cut], size, interpolation=cv2.INTER_LINEAR)
+    back_up = cv2.resize(shadow.back[cut], size, interpolation=cv2.INTER_LINEAR)
+    fill = shadow.fill if shadow.fill is not None else np.zeros_like(shadow.area)
+    # B на ¼ растягивается по частям с нормировкой, как и карта: билинейно через край листа светлая B полосы закраса
+    # подмешивалась к краю листа, и поправка там высветляла до белого.
+    for region in (shadow.area & ~fill, fill):
+        weight = region[cut].astype(np.float32)
+        if not weight.any():
+            continue
+        num = cv2.resize(shadow.back[cut] * weight[..., None], size, interpolation=cv2.INTER_LINEAR)
+        den = cv2.resize(weight, size, interpolation=cv2.INTER_LINEAR)
+        part = (cv2.resize(region[cut].astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0) & (den > 1e-6)
+        back_up[part] = num[part] / den[part][:, None]
+    # Кожа и крупная печать — с карты; краска — заново на полном масштабе (см. ниже).
+    excluded = (
+        cv2.resize((shadow.content | shadow.skin)[cut].astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+    )
+    img = roi.astype(np.float32)
+    back_full = back_up.copy()
+    parts = [
+        cv2.resize(region[cut].astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+        for region in (shadow.area & ~fill, fill)
+    ]
+    # Дорогая часть (краска, pull-push, медиана на полном масштабе) — только в рамках связных частей зоны резкой B с
+    # запасом на окно закрытия краски: рамка всей карты охватывает оба пальца и в разы больше.
+    margin = int(np.ceil((INK_CLOSE_MM + SHARP_MEDIAN_MM) * shadow.px_per_mm))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats((sharp_up > 0).astype(np.uint8), connectivity=8)
+    for k in range(1, count):
+        x, y, w, h = stats[k, :4]
+        box = (
+            slice(max(0, y - margin), min(size[1], y + h + margin)),
+            slice(max(0, x - margin), min(size[0], x + w + margin)),
+        )
+        # Лист и полоса закраса порознь — как у B на ¼: сглаживание через край листа смешало бы их тон.
+        for part_full in parts:
+            part = part_full[box]
+            if not part.any():
+                continue
+            # Краска своей части: чужая сторона заполнена pull-push своей. На ¼ и через край листа закрытие окном 3 мм
+            # заливало узкий серп пятна LaMa у края (за краем светлый закрас) — серп считался краской, B на нём
+            # интерполировалась с обеих сторон, и по ободу пятна оставалась дуга (МТС 1991/02 IMG_0622).
+            own = np.clip(pull_push(img[box], part.astype(np.float32)) + 0.5, 0, 255).astype(np.uint8)
+            clean = part & ~excluded[box] & ~ink_mask(own, shadow.px_per_mm)
+            if clean.sum() < 100:
+                continue
+            sub = back_full[box]
+            sub[part] = sharp_paper(img[box], clean, shadow.px_per_mm, blur=False)[part]
+    # Только на ненулевой карте: уровень карты ≥ 2 — полная поправка, к нулю — гладко на нет.
+    level = smoothstep(np.clip(add.max(axis=2) / 2.0, 0, 1))
+    detail = (sharp_up * level)[..., None] * (back_up - back_full)
+    return np.maximum(add + detail, 0) - add

@@ -105,6 +105,9 @@ def parse_pad(value: str) -> tuple[int, int]:
               help="После copy back и уровней осветлять тень пальца на бумаге по карте: зона ядро + 15 мм в книге, "
                    "опора — pull-push по кольцу бумаги, прибавка (research/finger_repaint). С ним высветление зоны "
                    "пальца перед LaMa не нужно: --finger-zone-light-increment 0.")  # fmt: skip
+@click.option("--save-before-shadow", is_flag=True,
+              help="Сохранять в --cache итог до осветления тени и маски входа карты (стенд research/finger_repaint "
+                   "edge, ~40 МБ на кадр).")  # fmt: skip
 @click.option("--output-format", type=click.Choice(["png", "tiff"]), default=None,
               help="Формат итога; по умолчанию как у входа.")  # fmt: skip
 @click.option("--force-dpi", type=int, default=None, help="Записать в итог это разрешение, dpi.")
@@ -137,6 +140,7 @@ def main(
     compensate_levels: bool,
     levels_max_black: int,
     finger_shadow: bool,
+    save_before_shadow: bool,
     output_format: str | None,
     force_dpi: int | None,
     log_level: str,
@@ -165,6 +169,7 @@ def main(
         compensate_levels=compensate_levels,
         levels_max_black=levels_max_black,
         finger_shadow=finger_shadow,
+        save_before_shadow=save_before_shadow,
         output_format=output_format,
         force_dpi=force_dpi,
         skip_if_exists=skip_if_exists,

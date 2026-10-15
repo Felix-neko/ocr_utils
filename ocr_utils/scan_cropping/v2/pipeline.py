@@ -95,6 +95,8 @@ class RunParams:
             финала кадра.
         finger_shadow: После copy back и растяжки уровней осветлять тень пальца по карте (``finger_shadow``): закрас
             LaMa продолжает тень пальца с бумаги у края зоны, copy back возвращает её с оригинала.
+        save_before_shadow: Сохранять в кэш кадра итог до осветления тени и маски входа карты (``before_shadow.png``,
+            ``shadow_masks.npz``, ~40 МБ на кадр) — для стенда ``research/finger_repaint edge``.
     """
 
     input_dir: Path
@@ -124,6 +126,7 @@ class RunParams:
     jobs: int = DEFAULT_JOBS
     save_fingers: bool = False
     finger_shadow: bool = False
+    save_before_shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,16 @@ class WorkPaths:
     def seg(self) -> Path:
         """Кадр без пальцев на масштабе сегментации (PNG)."""
         return self.root / "seg.png"
+
+    @property
+    def before_shadow(self) -> Path:
+        """Итог до осветления тени пальца (PNG без потерь) — вход стенда ``research/finger_repaint edge``."""
+        return self.root / "before_shadow.png"
+
+    @property
+    def shadow_masks(self) -> Path:
+        """Маски входа карты тени в координатах итога: ``paint``, ``core``, ``book``, ``original`` (npz)."""
+        return self.root / "shadow_masks.npz"
 
     @property
     def seg_noink(self) -> Path:
@@ -902,9 +915,17 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
         x0, y0, x1, y1 = box
         cut = (slice(y0, y1), slice(x0, x1))
         if out.shape[:2] == (y1 - y0, x1 - x0):
-            shadow = estimate_finger_shadow(
-                out, paint[cut], fingers["core"][cut], paper[cut], (~paint | returned)[cut], params.scale.px_per_mm
+            shadow_in = dict(
+                paint=paint[cut], core=fingers["core"][cut], book=paper[cut], original=(~paint | returned)[cut]
             )
+            if params.save_before_shadow:
+                # Точный вход карты — для стенда: итог до осветления и те же маски.
+                cv2.imwrite(str(work.before_shadow), out)
+                np.savez_compressed(work.shadow_masks, **shadow_in)
+            shadow = estimate_finger_shadow(
+                out, shadow_in["paint"], shadow_in["core"], shadow_in["book"], shadow_in["original"],
+                params.scale.px_per_mm,
+            )  # fmt: skip
             if shadow.gaps:
                 log.info("%s: тень пальца, расхождение цвета опоры и поверхности по зонам: %s", job.key,
                          ", ".join(f"{g:.1f}" for g in shadow.gaps))  # fmt: skip
