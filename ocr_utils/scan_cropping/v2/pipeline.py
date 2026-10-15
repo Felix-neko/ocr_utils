@@ -905,6 +905,9 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
             shadow = estimate_finger_shadow(
                 out, paint[cut], fingers["core"][cut], paper[cut], (~paint | returned)[cut], params.scale.px_per_mm
             )
+            if shadow.gaps:
+                log.info("%s: тень пальца, расхождение цвета опоры и поверхности по зонам: %s", job.key,
+                         ", ".join(f"{g:.1f}" for g in shadow.gaps))  # fmt: skip
             out = lighten_finger_shadow(out, shadow)
         else:
             log.warning("%s: итог %s не совпал с рамкой вырезки — тень не осветляется", job.key, out.shape[:2])

@@ -62,6 +62,8 @@ CAP_PERCENTILE = 99.5
 # кадров: у 5395 расхождение ≤ 10.8 (99 % — ≤ 6.3), у трёх — 31–35 (IMG_1112, МТС 1990/09 IMG_0248, IMG_0310: палец на
 # стыке белой страницы и голубой обложки).
 ZONE_MAX_AB_GAP = 20.0
+# Наименьшее число пикселей своего кольца опоры у зоны (на масштабе карты, ¼): меньше — опоры у зоны нет, не осветлять.
+ZONE_MIN_RING_PX = 20
 
 
 @dataclass(frozen=True)
@@ -246,7 +248,8 @@ def zone_colour_gaps(
         mm: Плотность на масштабе карты, px/мм.
 
     Returns:
-        ``(метки зон, расхождения a*b* по зонам 1..N)``; зона без пикселей поверхности или кольца — расхождение 0.
+        ``(метки зон, расхождения a*b* по зонам 1..N)``; зона без своего кольца опоры — бесконечность (не осветлять), без
+        пикселей поверхности — 0.
     """
     count, labels = cv2.connectedComponents(area.astype(np.uint8), connectivity=8)
     ab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)[..., 1:].astype(np.float32)
@@ -258,7 +261,13 @@ def zone_colour_gaps(
         near = cv2.distanceTransform((~zone).astype(np.uint8), cv2.DIST_L2, 5) <= reach
         own_ring = ring & near
         own_surface = surface & zone
-        if own_ring.sum() < 20 or own_surface.sum() < 20:
+        if own_ring.sum() < ZONE_MIN_RING_PX:
+            # Своей опоры нет — R в зоне достроен pull-push издалека, с чужой поверхности (МТС 1990/04 IMG_1112: голубая
+            # обложка целиком ушла в «крупную печать» против белого кольца соседней зоны): зона не осветляется.
+            gaps.append(float("inf"))
+            continue
+        if own_surface.sum() < ZONE_MIN_RING_PX:
+            # Поверхности у пальца не видно (всё — закрас или печать): сравнить не с чем, опора своя — зона осветляется.
             gaps.append(0.0)
             continue
         gaps.append(float(np.linalg.norm(np.median(ab[own_ring], axis=0) - np.median(ab[own_surface], axis=0))))
