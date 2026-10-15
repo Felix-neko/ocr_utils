@@ -39,7 +39,7 @@ from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp
 from ocr_utils.scan_cropping.v2.page_pose import PageQuad, page_quads
 from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, fill_page_pockets, postprocess_plain
 from ocr_utils.scan_cropping.v2.scale import Scale
-from ocr_utils.scan_cropping.v2.side_fit import regularize_sides
+from ocr_utils.scan_cropping.v2.side_fit import regularize_sides, snap_sheet_edges
 
 log = logging.getLogger(__name__)
 
@@ -659,10 +659,16 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
     paint_seg = paint_on_seg(np.load(work.fingers), img.shape[:2])
     pages = frame_pages(img, book, sam3, paint_seg, masks)
     if params.fit_sides:
+        # Поле страницы до кромки листа, где SAM 3 взял его рваными языками (цветная плашка с белым полем, МТС 1990/04
+        # IMG_1113); страницы пересчитываются — рваная маска делала страницу «приподнятой».
+        edge_added = snap_sheet_edges(masks.paper, pages, book["bg"], book["book"], img)
+        if edge_added.any():
+            masks = replace(masks, paper=masks.paper | edge_added)
+            pages = frame_pages(img, book, sam3, paint_seg, masks)
         # Выравнивание внешних боковых сторон плоских страниц: выбросы SAM 3 (заливка LaMa на торце, IMG_0240),
         # ямы, колебания края в тени у кромки (IMG_0538); затем страницы пересчитываются по выровненной бумаге.
         side = regularize_sides(masks.paper, pages, book["bg"], img, params.snap_sides)
-        masks = replace(masks, paper=side.paper, side_added=side.added, side_cut=side.cut)
+        masks = replace(masks, paper=side.paper, side_added=side.added | edge_added, side_cut=side.cut)
         pages = frame_pages(img, book, sam3, paint_seg, masks)
     np.savez_compressed(work.masks, **asdict(masks))
     # Трапеции изменились (новая бумага) — разметка surya по кадру, выпрямленному по старым трапециям, устарела.

@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from ocr_utils.scan_cropping.v2.finger_shadow import estimate_finger_shadow, lighten_finger_shadow, skin_mask
+from ocr_utils.scan_cropping.v2.finger_shadow import MAX_ADD_L, estimate_finger_shadow, lighten_finger_shadow, skin_mask
 from ocr_utils.scan_cropping.v2.overlay import draw_finger_shadow
 
 PX_PER_MM = 8.0
@@ -139,7 +139,8 @@ def test_light_fill_beyond_edge_not_overlit() -> None:
 
 
 def test_ring_on_other_surface_not_lightened() -> None:
-    """Палец на голубой обложке у края, кольцо опоры — на белой бумаге: зона не осветляется (МТС 1990/04 IMG_1112)."""
+    """Палец на голубой обложке у края, кольцо опоры большей частью на белой бумаге: опора — голубая часть кольца,
+    обложка не высветляется (МТС 1990/04 IMG_1112)."""
     cyan = np.array(lab_to_bgr(72, -25, -30), np.float32)  # светлее порога «крупной печати» (25 L), как у IMG_1112
     img = np.tile(PAPER, (H, W, 1))
     img[:, 1060:] = cyan  # полоса обложки у правого края; опора 25–35 мм от пальца — на белой бумаге слева
@@ -149,7 +150,6 @@ def test_ring_on_other_surface_not_lightened() -> None:
     cv2.ellipse(core, (1150, 800), (60, 40), 0, 0, 360, 1, -1)
     paint = (cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))) > 0) & book
     shadow = estimate_finger_shadow(img, paint, core > 0, book, ~paint, PX_PER_MM)
-    assert shadow.gaps and max(shadow.gaps) > 20
     out = lighten_finger_shadow(img, shadow)
     assert np.abs(out.astype(int) - img.astype(int))[:, 1060:].max() <= 1
 
@@ -234,3 +234,52 @@ def test_shadow_in_edge_band_to_band_level() -> None:
     # Снята почти вся, и не светлее полосы без тени больше чем на 5.
     assert np.abs(gray_out[spot] - gray_clean[spot]).mean() <= 6
     assert (gray_out[spot] - gray_clean[spot]).max() <= 5
+
+
+def test_cover_with_white_edge_strip() -> None:
+    """Голубая обложка с белой полосой обреза у края и тёмным пятном LaMa у пальца (МТС 1990/04 IMG_1112): пятно
+    снимается до голубого, полоса обреза не меняет цвет, голубое не белеет."""
+    cyan = np.array(lab_to_bgr(55, -25, -30), np.float32)
+    white = np.array(lab_to_bgr(90, 1, 4), np.float32)
+    img = np.tile(PAPER, (H, W, 1))
+    img[:, 500:1088] = cyan
+    img[:, 1088:1100] = white  # обрез 1.5 мм у края листа
+    img[:, 1100:] = cyan * 0.9  # закрас за краем — тон обложки
+    paint, core, book = edge_finger()
+    # Второй палец — на белой странице слева: порог «печати» по кольцам всего кадра брался бы с белой бумаги и забирал
+    # голубую обложку целиком (так было у IMG_1112).
+    left = np.zeros((H, W), np.uint8)
+    cv2.ellipse(left, (0, 800), (60, 40), 0, 0, 360, 1, -1)
+    core = core | (left > 0)
+    paint = paint | (cv2.dilate(left, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))) > 0)
+    blot = np.zeros((H, W), np.uint8)
+    cv2.circle(blot, (1060, 800), 35, 1, -1)
+    blot = (blot > 0) & paint & (np.arange(W)[None, :] < 1088)
+    img[blot] = cyan * 0.45  # тёмно-синее пятно LaMa
+    img = img.astype(np.uint8)
+    out = lighten_finger_shadow(img, estimate_finger_shadow(img, paint, core, book, ~paint, PX_PER_MM))
+    lab_in, lab_out = (cv2.cvtColor(x, cv2.COLOR_BGR2LAB).astype(int) for x in (img, out))
+    strip = np.zeros((H, W), bool)
+    strip[600:1000, 1089:1099] = True
+    strip &= ~paint
+    assert np.abs(lab_out[strip] - lab_in[strip]).max() <= 3  # обрез не меняет цвет
+    spot = blot & (cv2.erode(blot.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+    target = cv2.cvtColor(cyan.astype(np.uint8)[None, None], cv2.COLOR_BGR2LAB)[0, 0].astype(int)
+    assert np.abs(np.median(lab_out[spot], axis=0) - target).max() <= 8  # пятно — до голубого, не до белого
+
+
+def test_black_spot_lightness_capped() -> None:
+    """Почти чёрное пятно в зоне закраса на белой бумаге: светлота растёт не больше потолка MAX_ADD_L — чёрное не
+    уходит в белое."""
+    paint, core, book = edge_finger()
+    img = np.tile(PAPER, (H, W, 1))
+    blot = np.zeros((H, W), np.uint8)
+    cv2.circle(blot, (1070, 800), 35, 1, -1)
+    blot = (blot > 0) & paint
+    img[blot] = (12, 12, 12)
+    img = img.astype(np.uint8)
+    out = lighten_finger_shadow(img, estimate_finger_shadow(img, paint, core, book, ~paint, PX_PER_MM))
+    light_in, light_out = (cv2.cvtColor(x, cv2.COLOR_BGR2LAB)[..., 0].astype(float) * 100 / 255 for x in (img, out))
+    inner = blot & (cv2.erode(blot.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+    assert (light_out[inner] - light_in[inner]).max() <= MAX_ADD_L + 3  # + округление uint8 и Lab
+    assert light_out[inner].max() < 80

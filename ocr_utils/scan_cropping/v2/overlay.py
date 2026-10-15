@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 
 from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, _font, framed
 from ocr_utils.scan_cropping.finger_removal.text_protection import polygons_to_mask
-from ocr_utils.scan_cropping.v2.finger_shadow import SHADOW_REACH_MM, FingerShadow
+from ocr_utils.scan_cropping.v2.finger_shadow import REF_RING_MM, SHADOW_REACH_MM, FingerShadow
 from ocr_utils.scan_cropping.v2.page_pose import PagePose, PageQuad
 
 # Цвета (BGR, палитра проекта ``/draw-overlay``).
@@ -33,6 +33,10 @@ COLOUR_INK_ADDED = (255, 200, 0)  # добавлено вторым проход
 COLOUR_POCKET = (60, 110, 230)  # добавлено как карман, листок, вклейка на странице — оранжево-красный
 COLOUR_SHADOW = (120, 20, 120)  # граница зоны поиска тени пальца — тёмно-фиолетовый
 COLOUR_SKIN = (0, 0, 160)  # кожа в итоге (тень по ней не оценивается и не осветляется) — тёмно-красный
+COLOUR_RING = (0, 220, 255)  # кольцо опоры тени на листе (pull-push R) — жёлтый
+COLOUR_RING_OUT = (255, 200, 0)  # кольцо опоры за краем листа, на полосе закраса — голубой
+COLOUR_RING_DROPPED = (200, 0, 200)  # отсеяно из кольца: чужой цвет, тёмный закрас за краем — пурпурный
+COLOUR_PAPER_AS_IS = (80, 200, 80)  # «бумага как есть» B — пиксели, по которым она строится — зелёный
 # Трапеции страниц пунктиром: плоско лежащая — зелёный «принято», приподнятая — розовый (красный занят «срезано»).
 POSE_COLOUR = {PagePose.FLAT: (0, 150, 0), PagePose.RAISED: (180, 105, 255)}
 POSE_NAME = {PagePose.FLAT: "плоско", PagePose.RAISED: "приподнята"}
@@ -369,7 +373,7 @@ def _heat_colour(level: float) -> tuple[int, int, int]:
 def _shadow_panels(
     before: np.ndarray, shadow: FingerShadow, paint: np.ndarray, core: np.ndarray, rows: slice, cols: slice
 ) -> np.ndarray:
-    """Две панели одной рамки: итог до осветления с зонами | карта прибавки поверх серого итога.
+    """Панели одной рамки: итог до осветления с зонами | карта прибавки | опора (кольцо R, отсеянное, пиксели B).
 
     Args:
         before: Итог до осветления на масштабе карты (¼), BGR.
@@ -401,7 +405,22 @@ def _shadow_panels(
     alpha = (np.clip(level / (4 * SHADOW_HEAT_MIN), 0, 1) * 0.75)[..., None]
     estimate = (grey * (1 - alpha) + heat * alpha).astype(np.uint8)
     _contour(estimate, _resize(shadow.area[rows, cols], shape), COLOUR_SHADOW, 3)
-    return np.hstack([zones, np.full((SHADOW_PANEL_H, 16, 3), 255, np.uint8), estimate])
+    gap = np.full((SHADOW_PANEL_H, 16, 3), 255, np.uint8)
+    if shadow.ring is None:
+        return np.hstack([zones, gap, estimate])
+    # Опора: откуда берётся бумага для pull-push — кольцо R (на листе и за краем), отсеянное, пиксели B.
+    support = grey.copy()
+    layer = support.copy()
+    if shadow.paper is not None:
+        layer[_resize(shadow.paper[rows, cols], shape)] = COLOUR_PAPER_AS_IS
+    if shadow.ring_dropped is not None:
+        layer[_resize(shadow.ring_dropped[rows, cols], shape)] = COLOUR_RING_DROPPED
+    book = shadow.book if shadow.book is not None else np.ones_like(shadow.ring)
+    layer[_resize((shadow.ring & book)[rows, cols], shape)] = COLOUR_RING
+    layer[_resize((shadow.ring & ~book)[rows, cols], shape)] = COLOUR_RING_OUT
+    support = cv2.addWeighted(layer, 0.6, support, 0.4, 0)
+    _contour(support, _resize(shadow.area[rows, cols], shape), COLOUR_SHADOW, 3)
+    return np.hstack([zones, gap, estimate, gap, support])
 
 
 def draw_finger_shadow(
@@ -429,11 +448,13 @@ def draw_finger_shadow(
     rows_out = []
     for i in range(1, n):
         x, y, w, h = stats[i, :4]
-        mx, my = int(w * SHADOW_MARGIN) + 4, int(h * SHADOW_MARGIN) + 4
+        # Поле — до внешнего края кольца опоры (кольцо в REF_RING_MM от ядра, зона — в SHADOW_REACH_MM).
+        mm = px_per_mm * shape[0] / before.shape[0]
+        ring_px = int((REF_RING_MM[1] - SHADOW_REACH_MM) * mm) + 4
+        mx, my = max(int(w * SHADOW_MARGIN) + 4, ring_px), max(int(h * SHADOW_MARGIN) + 4, ring_px)
         rows = slice(max(0, y - my), min(shape[0], y + h + my))
         cols = slice(max(0, x - mx), min(shape[1], x + w + mx))
         level = shadow.delta[labels == i].mean(axis=1)
-        mm = px_per_mm * shape[0] / before.shape[0]
         caption = (
             f"зона поиска {i}: {stats[i, cv2.CC_STAT_AREA] / mm**2:.0f} мм²; прибавка в ней средняя "
             f"{level.mean():.1f}, 99 % — {np.percentile(level, 99):.1f} уровней"
@@ -454,9 +475,30 @@ def draw_finger_shadow(
         ),
         LegendEntry(f"зона поиска тени (ядро + {SHADOW_REACH_MM:g} мм, в книге)", COLOUR_SHADOW),
         LegendEntry("кожа в итоге — не оценивается и не осветляется", COLOUR_SKIN),
+        LegendEntry(
+            f"опора R: кольцо {REF_RING_MM[0]:g}–{REF_RING_MM[1]:g} мм от ядра на листе",
+            COLOUR_RING,
+            alpha=0.6,
+            style=SampleStyle.BOX,
+        ),
+        LegendEntry("опора R за краем листа (полоса закраса)", COLOUR_RING_OUT, alpha=0.6, style=SampleStyle.BOX),
+        LegendEntry(
+            "отсеяно из опоры: чужой цвет, тёмный закрас за краем",
+            COLOUR_RING_DROPPED,
+            alpha=0.6,
+            style=SampleStyle.BOX,
+        ),
+        LegendEntry(
+            "«бумага как есть» B: чистая бумага без краски, кожи, печати",
+            COLOUR_PAPER_AS_IS,
+            alpha=0.6,
+            style=SampleStyle.BOX,
+        ),
     ] + [
         LegendEntry(f"прибавка {v:g} уровней", _heat_colour(v), alpha=0.75, style=SampleStyle.BOX)
         for v in (2, 8, 15, 30)
     ]
-    sub = "слева — итог до осветления с зонами, справа — карта прибавки (оценка тени) поверх серого итога"
+    sub = (
+        "слева — итог до осветления с зонами, в середине — карта прибавки, справа — откуда берётся бумага для pull-push"
+    )
     return framed(canvas, [title, sub], legend)

@@ -71,6 +71,27 @@ EDGE_BIN_MIN_PX = 10
 CAP_SOFT_ROOM = 0.25
 # Кожа не осветляется, вокруг неё прибавка нарастает от нуля на SKIN_FEATHER_MM (без выреза с резким краем).
 SKIN_FEATHER_MM = 1.0
+# Опора чуть за краем листа (решение пользователя 2026-10-15): в кольцо входит и полоса закраса до RING_OUT_MM за краем
+# книги, но только пиксели не темнее медианы кольца на листе той же зоны больше чем на RING_OUT_MAX_DROP (L 0..100):
+# закрас — pull-push от края листа и продолжает тень у края (РИСК 1993/01 IMG_0258: без защиты прибавка зоны 38.9 → 5.7).
+RING_OUT_MM = 5.0
+# Опора зоны надёжна, если своего цвета в кольце-кандидате не меньше этой доли (стенд, 114 зон: у 112 — 0.78 и больше,
+# у зон на стыке белой страницы и голубой плашки — 0.28 и 0.46, МТС 1990/09 IMG_0310, IMG_0248).
+RING_MIN_SHARE = 0.5
+RING_OUT_MAX_DROP = 2.0
+# Цвет пикселя: пиксель оригинала осветляется, только если его «бумага как есть» близка по a*b* к опоре — вес 1 до
+# COLOUR_FULL_AB, к нулю на ZONE_MAX_AB_GAP. Тень меняет яркость, а не цвет: голубое у белой опоры не уходит в белое,
+# белый обрез у голубой — не розовеет. Стенд (52 кадра): у тени на пикселях оригинала расстояние B–R 99 % ≤ 12.6, у
+# голубого против белого — 34–44. Закрас LaMa от правила свободен: бурые и тёмно-синие пятна (РИСК 1993/04-05 IMG_0558,
+# МТС 1991/02 IMG_0622) другого оттенка, их как раз снимать.
+COLOUR_FULL_AB = 10.0
+# Потолок осветления (решение пользователя 2026-10-15: чёрное не должно уходить в белое): прибавка светлоты L (0..100)
+# мягко ограничена — до MAX_ADD_KNEE_L как есть, выше гладко к MAX_ADD_L. Стенд: нужная прибавка 99 % по кадру — медиана
+# 17, 90 % — 29, наибольшая 62 (IMG_0622: тёмно-синее пятно на голубом), чёрное → белое — 80–90. И итог не светлее
+# 90-го перцентиля L кольца своей зоны + RING_LIGHT_MARGIN.
+MAX_ADD_KNEE_L = 55.0
+MAX_ADD_L = 65.0
+RING_LIGHT_MARGIN = 2.0
 # Рампа карты от края области (там, где снаружи бумага), мм: на краю поправка 0 и растёт плавно (smoothstep).
 EDGE_RAMP_MM = 4.0
 # Полоса закраса вне книги у области, мм: карта мерится и на ней (закрас темнее опоры — осветляется) с той же опорой и
@@ -107,6 +128,10 @@ class FingerShadow:
         sharp: Вес резкой B (0..1, float32): зона закраса пальца и полоса закраса — там осветление уточняется на полном
             масштабе (:func:`lighten_finger_shadow`).
         px_per_mm: Плотность итога, px/мм (полный масштаб).
+        ring: Кольцо опоры — пиксели pull-push R (bool), включая полосу закраса за краем листа; для оверлея.
+        ring_dropped: Пиксели кольца-кандидата, отсеянные по цвету или как тёмный закрас за краем (bool); для оверлея.
+        paper: «Бумага как есть» — пиксели, по которым строится B (bool); для оверлея.
+        book: Книга на масштабе карты (bool); для оверлея (кольцо на листе и за краем).
     """
 
     area: np.ndarray
@@ -120,6 +145,10 @@ class FingerShadow:
     back: np.ndarray | None = None
     sharp: np.ndarray | None = None
     px_per_mm: float = 0.0
+    ring: np.ndarray | None = None
+    ring_dropped: np.ndarray | None = None
+    paper: np.ndarray | None = None
+    book: np.ndarray | None = None
 
 
 def disk(mask: np.ndarray, radius_px: float) -> np.ndarray:
@@ -262,7 +291,8 @@ def postprocess(
         book: Книга (bool).
         sharp: Вес «резкой» B (0..1): зона закраса пальца и полоса закраса — там карта сглаживается
             ``SHARP_POST_SIGMA_MM``, вне — ``POST_SIGMA_MM``.
-        paint: Зона закраса пальца (bool): в ней полоса закраса вне книги не спадает.
+        paint: Откуда отсчитывается спад полосы закраса (bool): область ∪ зона закраса пальца у неё — тот же отсчёт, что
+            у самой полосы (иначе прибавка обрывается на её границе ступенькой).
         mm: Плотность, px/мм.
 
     Returns:
@@ -428,8 +458,173 @@ def edge_profile_ref(
     return out
 
 
+def zone_rings(
+    small: np.ndarray,
+    area: np.ndarray,
+    clean: np.ndarray,
+    candidates: np.ndarray,
+    book: np.ndarray,
+    paint: np.ndarray,
+    original: np.ndarray,
+    mm: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Кольцо опоры по зонам (связным частям области) и крупная печать.
+
+    Для каждой зоны:
+    1. кандидаты кольца рядом с зоной;
+    2. цвет опоры — медиана a*b* поверхности у пальца (чистая бумага зоны вне закраса), не видно — преобладающий в
+       кольце; кандидаты дальше ``ZONE_MAX_AB_GAP`` от него отсеиваются (белый обрез у голубой обложки, МТС 1990/04
+       IMG_1112; голубая плашка у белой страницы);
+    3. пиксели закраса за краем листа — только не темнее кольца на листе (``RING_OUT_MAX_DROP``).
+
+    Крупная печать — пиксели оригинала темнее медианы колец всех зон того же цвета на ``CONTENT_DROP_L``: тень руки
+    бывает шире кольца одной зоны (РИСК 1993/01 IMG_0258), а зоны на разных поверхностях не смешиваются (у IMG_1112
+    порог по белой бумаге левой страницы забрал в «печать» всю голубую обложку).
+
+    Args:
+        small: Итог BGR на масштабе карты.
+        area: Область поиска (bool).
+        clean: Чистая бумага книги — без краски и кожи (bool).
+        candidates: Кольцо-кандидат: чистая бумага и закрас у края листа в полосе ``REF_RING_MM`` от ядра (bool).
+        book: Книга (bool).
+        paint: Зона закраса пальца (bool).
+        original: Пиксели оригинала (bool).
+        mm: Плотность на масштабе карты, px/мм.
+
+    Returns:
+        ``(кольцо, отсеянное из кандидатов, крупная печать, свой цвет)`` — bool. «Свой цвет» — пиксели, близкие по a*b*
+        к цвету опоры своей зоны: только по ним строится гладкая «бумага как есть» (резкий переход голубой обложки и
+        белого обреза не размывается в прибавку).
+    """
+    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.float32)
+    light, ab = lab[..., 0] * (100 / 255), lab[..., 1:]
+    count, zones = cv2.connectedComponents(area.astype(np.uint8), connectivity=8)
+    reach = (REF_RING_MM[1] - SHADOW_REACH_MM) * mm + 2
+    rings, colours, nears = [], [], []
+    for k in range(1, count):
+        zone = zones == k
+        near = cv2.distanceTransform((~zone).astype(np.uint8), cv2.DIST_L2, 5) <= reach
+        ring = candidates & near
+        if ring.sum() < ZONE_MIN_RING_PX:
+            continue
+        surface = clean & zone & ~paint
+        source = surface if surface.sum() >= ZONE_MIN_RING_PX else ring
+        colour = np.median(ab[source], axis=0)
+        # За краем листа допуск строже (COLOUR_FULL_AB): закрас у цветной плашки рядом подкрашен её цветом (МТС 1990/09
+        # IMG_0310: голубоватый закрас под голубой плашкой давал голубой налёт на осветлённой полосе).
+        gap = np.linalg.norm(ab - colour, axis=2)
+        ring &= np.where(book, gap <= ZONE_MAX_AB_GAP, gap <= COLOUR_FULL_AB)
+        on_book = ring & book
+        if on_book.sum() >= ZONE_MIN_RING_PX:
+            ring &= book | (light >= np.median(light[on_book]) - RING_OUT_MAX_DROP)
+        if ring.sum() < ZONE_MIN_RING_PX:
+            continue
+        rings.append(ring)
+        colours.append(np.median(ab[ring], axis=0))
+        nears.append(near)
+    kept = np.zeros(area.shape, bool)
+    content = np.zeros(area.shape, bool)
+    # Свой цвет: пиксель близок по a*b* к цвету опоры своей зоны (первой из задевающих его окрестностей); вне
+    # окрестностей зон — без ограничения.
+    own_colour = np.ones(area.shape, bool)
+    taken = np.zeros(area.shape, bool)
+    for colour, near in zip(colours, nears):
+        part = near & ~taken
+        own_colour[part] = (np.linalg.norm(ab - colour, axis=2) <= ZONE_MAX_AB_GAP)[part]
+        taken |= near
+    for ring, colour, near in zip(rings, colours, nears):
+        pool = np.zeros(area.shape, bool)
+        for other, other_colour in zip(rings, colours):
+            if np.linalg.norm(other_colour - colour) <= ZONE_MAX_AB_GAP:
+                pool |= other
+        printed = disk((light < np.median(light[pool]) - CONTENT_DROP_L) & original & near, CONTENT_GROW_MM * mm)
+        content |= printed
+        kept |= ring & ~printed
+    return kept, candidates & ~kept & ~content, content, own_colour
+
+
+def colour_weight(back: np.ndarray, ref: np.ndarray, original: np.ndarray) -> np.ndarray:
+    """Вес осветления по цвету: пиксель оригинала — только если его цвет близок по a*b* к опоре R (``COLOUR_FULL_AB``).
+
+    Args:
+        back: Цвет пикселя по каналам (картинка после медианы), float32.
+        ref: R по каналам, float32.
+        original: Пиксели оригинала вне зоны закраса (bool); остальным вес 1.
+
+    Returns:
+        Вес 0..1, float32.
+    """
+    ab_b = cv2.cvtColor(np.clip(back + 0.5, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB)[..., 1:].astype(np.float32)
+    ab_r = cv2.cvtColor(np.clip(ref + 0.5, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB)[..., 1:].astype(np.float32)
+    dist = np.linalg.norm(ab_b - ab_r, axis=2)
+    weight = 1 - smoothstep(np.clip((dist - COLOUR_FULL_AB) / (ZONE_MAX_AB_GAP - COLOUR_FULL_AB), 0, 1))
+    return np.where(original, weight, 1.0).astype(np.float32)
+
+
+def cap_lightness(base: np.ndarray, add: np.ndarray, limit: np.ndarray | None = None) -> np.ndarray:
+    """Прибавка, ужатая так, чтобы светлота росла не больше мягкого потолка ``MAX_ADD_L`` и не выше ``limit``.
+
+    Прибавка масштабируется целиком (по всем каналам одним множителем): цвет сдвига сохраняется.
+
+    Args:
+        base: Картинка до осветления, BGR float32.
+        add: Прибавка по каналам, float32, ≥ 0.
+        limit: Наибольшая светлота итога по пикселям (L 0..100) или None.
+
+    Returns:
+        Прибавка того же размера.
+    """
+    before, after = (
+        cv2.cvtColor(np.clip(x + 0.5, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+        * (100 / 255)
+        for x in (base, base + add)
+    )
+    gain = np.maximum(after - before, 0)
+    room = MAX_ADD_L - MAX_ADD_KNEE_L
+    # Мягкий потолок: до колена как есть, выше — экспонента к MAX_ADD_L.
+    target = np.where(
+        gain > MAX_ADD_KNEE_L, MAX_ADD_KNEE_L + room * (1 - np.exp(-(gain - MAX_ADD_KNEE_L) / room)), gain
+    )
+    if limit is not None:
+        target = np.minimum(target, np.maximum(limit - before, 0))
+    scale = np.where(gain > 1e-3, np.clip(target / np.maximum(gain, 1e-3), 0, 1), 1.0)
+    return add * scale[..., None]
+
+
+def ring_light_limit(small: np.ndarray, ring: np.ndarray, zones: np.ndarray, fill: np.ndarray, mm: float) -> np.ndarray:
+    """Наибольшая светлота итога по пикселям: 90-й перцентиль L кольца своей зоны + ``RING_LIGHT_MARGIN``.
+
+    Args:
+        small: Итог BGR на масштабе карты.
+        ring: Кольцо опоры (bool).
+        zones: Метки зон (0 — вне зон).
+        fill: Полоса закраса вне книги (bool) — предел ближайшей зоны.
+        mm: Плотность на масштабе карты, px/мм.
+
+    Returns:
+        Предел L (0..100), float32; вне зон и их полос — 100.
+    """
+    light = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32) * (100 / 255)
+    limit = np.full(ring.shape, 100.0, np.float32)
+    reach = (REF_RING_MM[1] - SHADOW_REACH_MM) * mm + 2
+    for k in range(1, int(zones.max()) + 1):
+        zone = zones == k
+        dist = cv2.distanceTransform((~zone).astype(np.uint8), cv2.DIST_L2, 5)
+        own = ring & (dist <= reach)
+        if own.sum() < ZONE_MIN_RING_PX:
+            continue
+        where = zone | (fill & (dist <= FILL_REACH_MM * mm + 2))
+        limit[where] = np.minimum(limit[where], np.percentile(light[own], 90) + RING_LIGHT_MARGIN)
+    return limit
+
+
 def zone_colour_gaps(
-    small: np.ndarray, area: np.ndarray, surface: np.ndarray, ring: np.ndarray, mm: float
+    small: np.ndarray,
+    area: np.ndarray,
+    surface: np.ndarray,
+    ring: np.ndarray,
+    mm: float,
+    dropped: np.ndarray | None = None,
 ) -> tuple[np.ndarray, tuple[float, ...]]:
     """Расхождение цвета опоры и поверхности у пальца по зонам — связным частям области поиска.
 
@@ -439,10 +634,12 @@ def zone_colour_gaps(
         surface: Поверхность у пальца, по которой мерится её цвет (bool): чистая бумага области вне зоны закраса.
         ring: Кольцо опоры (bool).
         mm: Плотность на масштабе карты, px/мм.
+        dropped: Отсеянные по цвету пиксели кольца-кандидата (bool) или None: если своего цвета в кольце меньше доли
+            ``RING_MIN_SHARE``, опора зоны ненадёжна.
 
     Returns:
-        ``(метки зон, расхождения a*b* по зонам 1..N)``; зона без своего кольца опоры — бесконечность (не осветлять), без
-        пикселей поверхности — 0.
+        ``(метки зон, расхождения a*b* по зонам 1..N)``; зона без своего кольца опоры или с ненадёжной — бесконечность
+        (не осветлять), без пикселей поверхности — 0.
     """
     count, labels = cv2.connectedComponents(area.astype(np.uint8), connectivity=8)
     ab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)[..., 1:].astype(np.float32)
@@ -457,6 +654,11 @@ def zone_colour_gaps(
         if own_ring.sum() < ZONE_MIN_RING_PX:
             # Своей опоры нет — R в зоне достроен pull-push издалека, с чужой поверхности (МТС 1990/04 IMG_1112: голубая
             # обложка целиком ушла в «крупную печать» против белого кольца соседней зоны): зона не осветляется.
+            gaps.append(float("inf"))
+            continue
+        if dropped is not None and own_ring.sum() < RING_MIN_SHARE * (own_ring.sum() + (dropped & near).sum()):
+            # Своего цвета в кольце меньше половины: палец на стыке поверхностей (белая страница у голубой плашки), опора
+            # — обрывки по краю и тянет тон с них (МТС 1990/09 IMG_0310: бурый клин в закрасе) — не осветлять.
             gaps.append(float("inf"))
             continue
         if own_surface.sum() < ZONE_MIN_RING_PX:
@@ -512,33 +714,44 @@ def estimate_finger_shadow(
     near = (from_core <= REF_RING_MM[1]) & ~area
     skin = skin_mask(small, mm, book_s, near, original_s)
     clean = book_s & ~ink & ~skin
-    ring = clean & ~area & ~paint_s & (from_core >= REF_RING_MM[0]) & (from_core <= REF_RING_MM[1])
-    content = empty
-    if ring.sum() >= 50:
-        # Крупная печать — только среди пикселей оригинала: глубокое пятно LaMa темнее порога, его надо осветлить.
-        light = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32) * (100 / 255)
-        content = disk((light < np.median(light[ring]) - CONTENT_DROP_L) & original_s, CONTENT_GROW_MM * mm)
-        clean &= ~content
-        ring &= ~content
+    # Кольцо-кандидат: чистая бумага книги и полоса закраса чуть за краем листа (RING_OUT_MM) за тенью пальца.
+    band = (from_core >= REF_RING_MM[0]) & (from_core <= REF_RING_MM[1])
+    outside = ~book_s & disk(book_s, RING_OUT_MM * mm)
+    candidates = (clean | outside) & ~area & ~paint_s & band
+    ring, ring_dropped, content, own_colour = zone_rings(
+        small, area, clean, candidates, book_s, paint_s, original_s, mm
+    )
+    clean &= ~content
     # Поверхность у пальца — чистая бумага области вне зоны закраса; если её нет, вся чистая бумага области.
     surface = clean & area & ~paint_s
     if surface.sum() < 20:
         surface = clean & area
-    zones, gaps = zone_colour_gaps(small, area, surface, ring, mm)
+    zones, gaps = zone_colour_gaps(small, area, surface, ring, mm, ring_dropped)
     # Рабочее окно — рамка области с запасом кольца и сглаживания.
     win = window_of(area, int((REF_RING_MM[1] - SHADOW_REACH_MM + 3 * SMOOTH_SIGMA_MM) * mm) + 2)
     w_img = small[win].astype(np.float32)
     # Закрас до рамки вне книги у области: карта мерится и на нём с той же опорой — его тон задал pull-push от чистой
     # полосы бумаги, и он бывает уже светлым там, где край листа тёмный (МТС 1990/03 IMG_0972): резкая B там следует за
     # ним, и светлый закрас не осветляется.
-    fill = ~book_s & disk(area, FILL_REACH_MM * mm)
-    soft_weight = clean[win] & (from_core[win] <= REF_RING_MM[1])
+    # Полоса — в FILL_REACH_MM от «область ∪ зона закраса»: тот же отсчёт, что у спада прибавки в ней (обрезанная раньше
+    # спада полоса давала ступеньку в закрасе, МТС 1990/04 IMG_1112).
+    fill_origin = area | (paint_s & disk(area, FILL_REACH_MM * mm))
+    fill = ~book_s & disk(fill_origin, FILL_REACH_MM * mm)
+    # Гладкая B — только по бумаге цвета своей зоны: гаусс 1.5 мм через резкий переход (белый обрез у голубой обложки)
+    # давал ложную прибавку по каналам до 68 уровней на голубой стороне перехода.
+    soft_weight = clean[win] & own_colour[win] & (from_core[win] <= REF_RING_MM[1])
     sharp_zone = disk(paint_s, SHARP_GROW_MM * mm) & book_s
     back, sharp = paper_as_is(w_img, soft_weight, fill[win], sharp_zone[win], mm)
     ref = smooth_fill(w_img, ring[win], SMOOTH_SIGMA_MM * mm)
     ref = edge_profile_ref(ref, w_img, ring[win], zones[win], book_s[win], mm)
+    # Цвет пикселя сравнивается с опорой по самой картинке (медиана 1 мм), а не по размытой B.
+    k = max(3, int(round(SHARP_MEDIAN_MM * mm)) | 1)
+    own = cv2.medianBlur(small[win], k).astype(np.float32)
+    raw = np.maximum(ref - back, 0) * colour_weight(own, ref, (original_s & ~paint_s)[win])[..., None]
     delta = zeros.copy()
-    delta[win] = postprocess(np.maximum(ref - back, 0), area[win], fill[win], book_s[win], sharp, paint_s[win], mm)
+    delta[win] = postprocess(raw, area[win], fill[win], book_s[win], sharp, fill_origin[win], mm)
+    # Потолок: мягкий по прибавке светлоты и не светлее 90-го перцентиля кольца своей зоны (+ запас).
+    delta[win] = cap_lightness(back, delta[win], ring_light_limit(small, ring, zones, fill, mm)[win])
     # Зоны, опора которых взята с другой поверхности (цвет кольца не тот, что у пальца), не осветляются — вместе с полосой
     # закраса у них.
     for k, gap in enumerate(gaps, start=1):
@@ -552,7 +765,10 @@ def estimate_finger_shadow(
     ref_full[win], back_full[win] = ref, back
     sharp_full = np.zeros(area.shape, np.float32)
     sharp_full[win] = sharp
-    return FingerShadow(area, skin, ink, content, delta, fill, gaps, ref_full, back_full, sharp_full, px_per_mm)
+    return FingerShadow(
+        area, skin, ink, content, delta, fill, gaps, ref_full, back_full, sharp_full, px_per_mm, ring, ring_dropped,
+        clean & (from_core <= REF_RING_MM[1]), book_s,
+    )  # fmt: skip
 
 
 def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
@@ -594,6 +810,8 @@ def lighten_finger_shadow(img: np.ndarray, shadow: FingerShadow) -> np.ndarray:
         inside = (cv2.resize(part.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0) & (den > 1e-6)
         add[inside] = num[inside] / den[inside][:, None]
     add = add + sharp_detail(img[y0:y1, x0:x1], shadow, (rows, cols), add)
+    # Потолок светлоты и на полном масштабе: уточнение у края пятна добавляет прибавку уже после потолка на ¼.
+    add = cap_lightness(img[y0:y1, x0:x1].astype(np.float32), add)
     out = img.copy()
     out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + add + 0.5, 0, 255).astype(np.uint8)
     return out

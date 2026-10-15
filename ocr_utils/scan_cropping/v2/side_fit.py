@@ -37,6 +37,33 @@ SNAP_MIN_SHARE = 0.5
 # Срез: бумага снаружи кривой дальше этого, мм. Заливка: ямы не глубже этого, мм.
 CUT_MARGIN_MM = 1.0
 MAX_FILL_MM = 10.0
+# Дыры, которые замкнула сама заливка ям: заливка идёт по строкам до самого внешнего пикселя страницы, и язычок бумаги
+# под кончиком пальца оставлял за собой замкнутую полулуну, а закрас до рамки красил её светлым (МТС 1991/02 IMG_0634,
+# 0641, 0666, 0669). Такая дыра доливается, если она светлая, как бумага вокруг: светлота кольца бумаги
+# CLOSED_RING_MM вокруг минус светлота дыры (медианы, L OpenCV 0..255) не больше CLOSED_MAX_DROP, и площадь не больше
+# CLOSED_MAX_MM2. Пак-6 (2480 кадров): замкнутых заливкой дыр 4824 (у пальцев 1134 в 395 кадрах), это бумага —
+# ΔL 99 % = 11, |Δb*| 99 % = 1.6, площадь до 621 мм²; замкнутые ещё до заливки (полосы у корешка, печать) не трогаются.
+CLOSED_RING_MM = 1.0
+CLOSED_MAX_DROP = 25.0
+CLOSED_MAX_MM2 = 1000.0
+# Кромка листа за светлым полем: SAM 3 берёт цветную плашку, а светлое поле страницы вокруг неё — рваными языками
+# (МТС 1990/04 IMG_1113: оранжевая обложка, кремовое поле 15 мм не взято, страница из-за этого «приподнята»). Если край
+# маски стороны рваный (MAD как у подтяжки, SNAP_MIN_MAD), в каждой строке ищется первый узкий провал светлоты наружу от
+# края маски в пределах EDGE_REACH_MM — тень кромки листа: темнее на EDGE_DIP уровней L (0..255) соседей в окне
+# EDGE_DIP_MM с обеих сторон. По провалам — прямая RANSAC (допуск EDGE_TOL_MM); если на ней не меньше EDGE_MIN_SHARE
+# строк стороны, поле между маской и прямой заливается (книга, не фон). Страницы со сходом больше EDGE_MAX_KEYSTONE
+# (по-настоящему поднятые) не трогаются. IMG_1113: слева прямая x = 327 + 0.006·y по 83 % строк (край листа по замеру
+# 325–334), сверху — 83 %; снизу провалов нет (маска у края).
+EDGE_REACH_MM = 25.0
+EDGE_DIP = 6.0
+EDGE_DIP_MM = 1.5
+EDGE_TOL_MM = 1.5
+EDGE_MIN_SHARE = 0.5
+EDGE_MAX_KEYSTONE = 12.0
+# Только цветные страницы — медианная насыщенность страницы (a*, b* OpenCV от 128) не меньше EDGE_MIN_PAGE_CHROMA: у
+# обычной страницы с текстом провал за краем маски — это торец стопки (полосы листов), и заливка его брала (пак-6:
+# 89 кадров без этого условия, почти все — торец).
+EDGE_MIN_PAGE_CHROMA = 25.0
 
 
 class Side(Enum):
@@ -176,8 +203,10 @@ def robust_curve(ys: np.ndarray, xs: np.ndarray) -> np.ndarray | None:
         num = ndimage.gaussian_filter1d(full * keep, sigma, mode="nearest")
         den = ndimage.gaussian_filter1d(keep, sigma, mode="nearest")
         smooth = num / np.maximum(den, 1e-6)
-        # Где рядом нет ни одной принятой точки — медиана.
-        curve = np.where(den > 0.05, smooth, curve)
+        # Где рядом нет принятых точек (яма длиннее ±3σ) — линейно между соседними опорными строками. Медиана здесь
+        # уже втянута ямой внутрь, и кривая шла ступенькой (прямоугольная выемка у пальца, МТС 1991/02 IMG_0622).
+        ok = den > 0.05
+        curve = np.interp(rows, rows[ok], smooth[ok]) if ok.any() else curve
     return np.interp(ys, rows, curve)
 
 
@@ -344,4 +373,183 @@ def regularize_sides(
             added |= a
             cut |= c
             curves.append(curve)
-    return SideFit((paper | added) & ~cut, added & ~cut, cut, curves)
+    added = (added | closed_holes(paper, (paper | added) & ~cut, added, bg, img)) & ~cut
+    return SideFit((paper | added) & ~cut, added, cut, curves)
+
+
+def closed_holes(paper: np.ndarray, new: np.ndarray, added: np.ndarray, bg: np.ndarray, img: np.ndarray) -> np.ndarray:
+    """Дыры, которые замкнула сама заливка ям и которые светлые, как бумага вокруг (см. ``CLOSED_*``).
+
+    Args:
+        paper: Бумага до выравнивания.
+        new: Бумага после заливки и среза.
+        added: Залитые ямы.
+        bg: Маска фона.
+        img: Кадр без пальцев BGR (масштаб сегментации).
+
+    Returns:
+        Маска дыр к доливке (bool).
+    """
+    holes = ndimage.binary_fill_holes(new) & ~new & ~ndimage.binary_fill_holes(paper) & ~bg
+    if not holes.any():
+        return np.zeros_like(paper)
+    light = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+    near_added = cv2.dilate(added.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    ring_px = mm(CLOSED_RING_MM)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ring_px + 1, 2 * ring_px + 1))
+    max_px = CLOSED_MAX_MM2 * SEG_PX_PER_MM**2
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(holes.astype(np.uint8), connectivity=8)
+    out = np.zeros_like(paper)
+    for k in range(1, count):
+        if stats[k, cv2.CC_STAT_AREA] > max_px:
+            continue
+        x, y, w, h = stats[k, :4]
+        # Рамка дыры с запасом на кольцо.
+        box = (slice(max(0, y - ring_px - 1), y + h + ring_px + 1), slice(max(0, x - ring_px - 1), x + w + ring_px + 1))
+        hole = labels[box] == k
+        if not (hole & near_added[box]).any():
+            continue
+        ring = (cv2.dilate(hole.astype(np.uint8), kernel) > 0) & ~hole & new[box]
+        if ring.sum() < 3:
+            continue
+        if np.median(light[box][ring]) - np.median(light[box][hole]) <= CLOSED_MAX_DROP:
+            out[box] |= hole
+    return out
+
+
+def ransac_line(t: np.ndarray, v: np.ndarray, tol: float, iters: int = 300) -> tuple[np.ndarray, np.ndarray] | None:
+    """Прямая ``v ≈ a·t + b`` по точкам, устойчивая к выбросам (RANSAC по парам, уточнение МНК по опоре).
+
+    Args:
+        t: Координата вдоль стороны (строки или столбцы).
+        v: Координата края.
+        tol: Допуск опоры, px.
+        iters: Число проб (генератор с фиксированным зерном — итог воспроизводим).
+
+    Returns:
+        ``((a, b), опора bool)`` или None (мало точек).
+    """
+    if len(t) < 20:
+        return None
+    rng = np.random.default_rng(0)
+    best = None
+    for _ in range(iters):
+        i, j = rng.choice(len(t), 2, replace=False)
+        if t[i] == t[j]:
+            continue
+        a = (v[j] - v[i]) / (t[j] - t[i])
+        inl = np.abs(v - (a * t + v[i] - a * t[i])) <= tol
+        if best is None or inl.sum() > best.sum():
+            best = inl
+    if best is None or best.sum() < 2:
+        return None
+    return np.polyfit(t[best], v[best], 1), best
+
+
+def edge_dips(light: np.ndarray, mask: np.ndarray, outward: int) -> tuple[np.ndarray, np.ndarray, int]:
+    """Первый узкий провал светлоты наружу от края маски по строкам (сторона — по знаку ``outward``).
+
+    Args:
+        light: Светлота L (0..255), float32; для верха и низа — транспонированная.
+        mask: Маска страницы (так же транспонированная).
+        outward: −1 — край слева (наружу влево), +1 — справа.
+
+    Returns:
+        ``(строки, абсциссы провала, число строк стороны)``.
+    """
+    has = mask.any(axis=1)
+    if outward < 0:
+        edge = np.argmax(mask, axis=1)
+    else:
+        edge = mask.shape[1] - 1 - np.argmax(mask[:, ::-1], axis=1)
+    reach, w = mm(EDGE_REACH_MM), mm(EDGE_DIP_MM)
+    rows, xs_found = [], []
+    for row in np.nonzero(has)[0]:
+        xs = edge[row] + outward * np.arange(1, reach)
+        xs = xs[(xs >= w + 2) & (xs < light.shape[1] - w - 2)]
+        if len(xs) < 2 * w + 4:
+            continue
+        prof = light[row, xs]
+        for i in range(w, len(xs) - w):
+            v = prof[i]
+            # Провал: темнее соседей с обеих сторон на EDGE_DIP и локальный минимум.
+            if v <= prof[i - w : i].max() - EDGE_DIP and v <= prof[i + 1 : i + w + 1].max() - EDGE_DIP:
+                if v <= prof[max(0, i - 2) : i + 3].min():
+                    rows.append(row)
+                    xs_found.append(xs[i])
+                    break
+    return np.asarray(rows, float), np.asarray(xs_found, float), int(has.sum())
+
+
+def ragged(mask: np.ndarray, outward: int) -> bool:
+    """Рваный ли край маски стороны: MAD отклонения края от скользящей медианы ≥ ``SNAP_MIN_MAD`` (как у подтяжки)."""
+    has = mask.any(axis=1)
+    if has.sum() < 20:
+        return False
+    if outward < 0:
+        edge = np.argmax(mask, axis=1)[has].astype(np.float64)
+    else:
+        edge = (mask.shape[1] - 1 - np.argmax(mask[:, ::-1], axis=1))[has].astype(np.float64)
+    res = edge - ndimage.median_filter(edge, size=mm(SNAP_GATE_MM), mode="nearest")
+    return float(np.median(np.abs(res - np.median(res)))) >= SNAP_MIN_MAD
+
+
+def snap_sheet_edges(
+    paper: np.ndarray, pages: list[PageQuad], bg: np.ndarray, book: np.ndarray, img: np.ndarray
+) -> np.ndarray:
+    """Поле страницы до кромки листа, где SAM 3 взял его рваными языками (см. ``EDGE_*``).
+
+    Стороны — внешняя боковая (по месту страницы), верх и низ; корешок не трогается.
+
+    Args:
+        paper: Маска бумаги (масштаб сегментации).
+        pages: Страницы слева направо с трапециями.
+        bg: Маска фона.
+        book: Грубая маска книги.
+        img: Кадр без пальцев BGR (масштаб сегментации).
+
+    Returns:
+        Добавка (bool).
+    """
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    light = cv2.GaussianBlur(lab[..., 0], (3, 3), 0)
+    chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+    added = np.zeros_like(paper)
+    h, w = paper.shape
+    for k, page in enumerate(pages):
+        if page.quad is None or page.features.keystone > EDGE_MAX_KEYSTONE:
+            continue
+        if not page.mask.any() or np.median(chroma[page.mask]) < EDGE_MIN_PAGE_CHROMA:
+            continue
+        # (наружу, транспонировано): внешняя боковая сторона по месту страницы, затем верх и низ.
+        sides = [(-1 if side is Side.LEFT else 1, False) for side in outer_sides(k, len(pages))]
+        sides += [(-1, True), (1, True)]
+        for outward, transposed in sides:
+            mask = page.mask.T if transposed else page.mask
+            lum = light.T if transposed else light
+            if not ragged(mask, outward):
+                continue
+            rows, xs, count = edge_dips(lum, mask, outward)
+            fit = ransac_line(rows, xs, mm(EDGE_TOL_MM))
+            if fit is None or fit[1].sum() < EDGE_MIN_SHARE * count:
+                continue
+            (a, b), inliers = fit
+            # Только строки между крайними провалами на прямой: ниже и выше кромки этой стороны (угол листа) провала
+            # нет, и заливка там ушла бы на картон под листом.
+            span = rows[inliers]
+            first, last = int(span.min()), int(span.max())
+            # Поле: строки страницы, от края маски наружу до прямой.
+            has = mask.any(axis=1)
+            line = a * np.arange(mask.shape[0]) + b
+            cols = np.arange(mask.shape[1])[None, :]
+            if outward < 0:
+                edge = np.argmax(mask, axis=1)
+                band = (cols >= line[:, None]) & (cols < edge[:, None])
+            else:
+                edge = mask.shape[1] - 1 - np.argmax(mask[:, ::-1], axis=1)
+                band = (cols <= line[:, None]) & (cols > edge[:, None])
+            band &= has[:, None]
+            band[:first] = False
+            band[last + 1 :] = False
+            added |= band.T if transposed else band
+    return added & book & ~bg & ~paper

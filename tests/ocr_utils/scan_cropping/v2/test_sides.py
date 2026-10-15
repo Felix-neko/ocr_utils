@@ -1,9 +1,9 @@
-"""Тесты выравнивания боковых сторон scan_cropping v2 на синтетике: выброс, яма, яма над фоном, подтяжка к краю, приподнятая страница."""
+"""Тесты выравнивания боковых сторон scan_cropping v2 на синтетике: выброс, яма, яма над фоном, подтяжка к краю, приподнятая страница, дыры, замкнутые заливкой, кромка листа за светлым полем цветной страницы."""
 
 import numpy as np
 
 from ocr_utils.scan_cropping.v2.page_pose import PageFeatures, PagePose, PageQuad
-from ocr_utils.scan_cropping.v2.side_fit import mm, regularize_sides
+from ocr_utils.scan_cropping.v2.side_fit import mm, regularize_sides, snap_sheet_edges
 
 # Цвета синтетики (BGR): жёлтая бумага, бумага в тени у кромки (того же оттенка), белая стопка, чёрный коврик.
 PAPER = (170, 225, 235)
@@ -103,3 +103,91 @@ def test_wavy_side_kept():
     bg = np.all(img == MAT, axis=2)
     r = regularize_sides(sam, single_page(sam), bg, img, snap=False)
     assert r.cut.sum() < 0.002 * sam.sum() and r.added.sum() < 0.002 * sam.sum()
+
+
+def finger_pit(sam: np.ndarray) -> np.ndarray:
+    """Яма от пальца на правой стороне с язычком бумаги под кончиком (как у МТС 1991/02 IMG_0634).
+
+    Args:
+        sam: Маска бумаги, меняется копия.
+
+    Returns:
+        Маска с ямой 5 мм глубиной на строках 300..380 и язычком бумаги у кромки на строках 360..380.
+    """
+    sam = sam.copy()
+    sam[300:380, 500 - mm(5) : 500] = False
+    sam[360:380, 500 - mm(1.5) : 500] = True  # язычок у кромки: заливка в этих строках упирается в него
+    return sam
+
+
+def test_hole_closed_by_fill_filled():
+    """Дыра за язычком, которую замкнула заливка ямы, доливается: внутри страницы не остаётся не-бумаги."""
+    img, paper, bg = frame()
+    sam = finger_pit(paper)
+    r = regularize_sides(sam, single_page(sam), bg, img)
+    # Последний столбец страницы кривая отсекает долями пикселя (как и без язычка) — проверка до него.
+    assert r.paper[300:380, 500 - mm(5) : 499].all()
+    assert r.added[360:380, 500 - mm(5) : 500 - mm(1.5)].any()
+
+
+def test_dark_hole_closed_by_fill_kept():
+    """Тёмная дыра (печать, которую SAM 3 не взял), замкнутая заливкой, не доливается: она темнее бумаги на 25+."""
+    img, paper, bg = frame()
+    sam = finger_pit(paper)
+    img[360:380, 500 - mm(5) : 500 - mm(1.5)] = (40, 40, 40)
+    r = regularize_sides(sam, single_page(sam), bg, img)
+    assert not r.paper[362:378, 500 - mm(4.5) : 500 - mm(2)].any()
+
+
+def test_hole_closed_before_fill_untouched():
+    """Дыра внутри страницы, замкнутая ещё до выравнивания (полоса у корешка, печать), не трогается."""
+    img, paper, bg = frame()
+    sam = paper.copy()
+    sam[300:340, 300:340] = False
+    r = regularize_sides(sam, single_page(sam), bg, img)
+    assert not r.paper[300:340, 300:340].any()
+
+
+
+def colour_page() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Цветная страница: оранжевая плашка, кремовое поле 15 мм слева, тень кромки листа, за ней белый картон.
+
+    Returns:
+        ``(картинка, рваная маска по плашке, книга, фон)``.
+    """
+    img = np.zeros((700, 600, 3), np.uint8)
+    img[:] = MAT
+    img[60:640, 40:560] = (240, 240, 240)  # белый картон переплёта
+    img[100:600, 150:500] = (200, 228, 238)  # кремовая бумага листа
+    img[100:600, 150:152] = (150, 170, 180)  # тень кромки листа
+    edge = 150 + mm(15)
+    img[110:590, edge:490] = (40, 140, 240)  # оранжевая плашка
+    paper = np.zeros((700, 600), bool)
+    paper[110:590, edge:490] = True
+    # Рваные языки SAM 3 в поле: случайной глубины 0–8 мм полосами по 10 строк (как у IMG_1113, ст. откл. края 23 px).
+    rng = np.random.default_rng(1)
+    for y in range(110, 590, 10):
+        paper[y : y + 10, edge - mm(rng.uniform(0, 8)) : edge] = True
+    paper[100:600, 490:500] = True
+    book = np.zeros((700, 600), bool)
+    book[60:640, 40:560] = True
+    bg = np.all(img == MAT, axis=2)
+    return img, paper, book, bg
+
+
+def test_sheet_edge_behind_margin():
+    """Поле цветной страницы до кромки листа заливается; картон за кромкой — нет."""
+    img, paper, book, bg = colour_page()
+    added = snap_sheet_edges(paper, single_page(paper), bg, book, img)
+    assert (added | paper)[200:500, 155 : 150 + mm(14)].mean() > 0.95
+    assert not added[:, :148].any()
+
+
+def test_sheet_edge_smooth_mask_untouched():
+    """Ровный край маски (SAM 3 уверен) — кромку не ищем, ничего не добавляется."""
+    img, paper, book, bg = colour_page()
+    paper[110:590, 150 + mm(10) : 150 + mm(15)] = False
+    paper = paper.copy()
+    paper[:, : 150 + mm(15)] = False
+    added = snap_sheet_edges(paper, single_page(paper), bg, book, img)
+    assert not added.any()
