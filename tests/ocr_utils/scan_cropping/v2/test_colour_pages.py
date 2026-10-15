@@ -1,11 +1,10 @@
-"""Тесты палитры страницы и уровней цветности (синтетика): оранжевая страница с кремовым полем — верхнее и нижнее поле в бумагу, красная ткань крышки и бело-голубой картон за тенью кромки — нет, вбок за сторону трапеции рост не идёт; поле в тени у кромки — тоже в бумагу."""
+"""Тесты цветных страниц (синтетика): уровни цветности; оранжевая страница с кремовым полем — верхнее и нижнее поле в бумагу по палитре, красная ткань крышки и бело-голубой картон за тенью кромки — нет, вбок за сторону трапеции рост не идёт."""
 
 import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.v2.paper import smooth_lab
-from research.colour_pages.classify import Colour, chroma_of, page_colour
-from research.colour_pages.palette import edge_light, grow_by_palette
+from ocr_utils.scan_cropping.v2.colour_pages import Colour, chroma_of, edge_light, grow_by_palette, page_colour
 
 H, W = 700, 700
 CREAM = (200, 228, 240)

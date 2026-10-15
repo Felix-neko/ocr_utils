@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.finger_removal.text_protection import intersecting_polygons, polygons_to_mask
@@ -15,6 +16,12 @@ LAYOUT_PAD_PX = (18, 36)
 # Классы блоков surya, которые при copy back возвращаются целиком, в том числе поверх ядра пальца: на рисунках и фото
 # детектор пальцев ошибается (лицо на портрете — «кожа»). Остальные классы — только зона дилатации пальца в блоке.
 FULL_COPY_LABELS = frozenset({"Picture", "Figure"})
+# Припуск ядра пальца, px калибровочного кадра (пересчёт через ``Scale.frame_px``): зона дилатации, которую copy back
+# возвращает с оригинала, отстоит от ядра SAM 3 на столько. Ядро чуть уже пальца, и без припуска с оригинала
+# возвращалась розовая кайма кожи у кончика (МТС 1990/04 IMG_1197). Замер: превышение a* над бумагой у края ядра
+# 6 → 5 → 4 на 1, 3, 5 px; решение пользователя 2026-10-15 — 4 px (кайма сильно слабеет, буквы у пальца на месте;
+# стенд research/finger_repaint core-margin, 53 кадра: a* в 1–3 px за ядром 6 → 0).
+CORE_GROW_PX = 4
 
 
 def copy_back_blocks(
@@ -26,6 +33,7 @@ def copy_back_blocks(
     pad_px: int | tuple[int, int] = LAYOUT_PAD_PX,
     labels: list[str] | None = None,
     core: np.ndarray | None = None,
+    core_grow_px: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Возвращает с оригинала пиксели блоков surya, задетых зоной закраса пальцев, — только внутри книги.
 
@@ -52,6 +60,8 @@ def copy_back_blocks(
         pad_px: Припуск блоков, px кадра: скаляр или пара (по X, по Y).
         labels: Типы блоков surya по порядку ``polygons`` или None.
         core: Ядро пальца (bool) размера кадра или None.
+        core_grow_px: Припуск ядра, px кадра: из возврата блоков «только зона дилатации» вычитается ядро, раздутое на
+            столько (0 — само ядро).
 
     Returns:
         ``(кадр, маска возвращённого bool, число задетых блоков)``.
@@ -76,7 +86,11 @@ def copy_back_blocks(
     if full:
         region |= polygons_to_mask(paint.shape, full, pad_px) > 0
     if ring:
-        region |= (polygons_to_mask(paint.shape, ring, pad_px) > 0) & paint_b & ~(core > 0)
+        core_b = core > 0
+        if core_grow_px > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * core_grow_px + 1, 2 * core_grow_px + 1))
+            core_b = cv2.dilate(core_b.astype(np.uint8), k) > 0
+        region |= (polygons_to_mask(paint.shape, ring, pad_px) > 0) & paint_b & ~core_b
     region &= book
     out = clean.copy()
     out[region] = original[region]

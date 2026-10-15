@@ -16,7 +16,7 @@ import click
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX, CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
-from ocr_utils.scan_cropping.v2.copy_back import LAYOUT_PAD_PX
+from ocr_utils.scan_cropping.v2.copy_back import CORE_GROW_PX, LAYOUT_PAD_PX
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
 from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT, TIGHT_DILATE_PX
 from ocr_utils.scan_cropping.v2.glue_refine import REFINE_DEPTH
@@ -105,6 +105,12 @@ def parse_pad(value: str) -> tuple[int, int]:
               help="После copy back и уровней осветлять тень пальца на бумаге по карте: зона ядро + 15 мм в книге, "
                    "опора — pull-push по кольцу бумаги, прибавка (research/finger_repaint). С ним высветление зоны "
                    "пальца перед LaMa не нужно: --finger-zone-light-increment 0.")  # fmt: skip
+@click.option("--copy-back-core-grow-px", default=CORE_GROW_PX, show_default=True,
+              help="Припуск ядра пальца при copy back, px калибровочного кадра: кайма кожи у края ядра SAM 3 не "
+                   "возвращается с оригинала; 0 — без припуска.")  # fmt: skip
+@click.option("--colour-pages/--no-colour-pages", default=True, show_default=True,
+              help="Правила для целиком цветных страниц: рост бумаги у края по палитре страницы вверх и вниз, защита "
+                   "контента при любой позе.")  # fmt: skip
 @click.option("--save-before-shadow", is_flag=True,
               help="Сохранять в --cache итог до осветления тени и маски входа карты (стенд research/finger_repaint "
                    "edge, ~40 МБ на кадр).")  # fmt: skip
@@ -141,6 +147,8 @@ def main(
     levels_max_black: int,
     finger_shadow: bool,
     save_before_shadow: bool,
+    copy_back_core_grow_px: int,
+    colour_pages: bool,
     output_format: str | None,
     force_dpi: int | None,
     log_level: str,
@@ -170,6 +178,8 @@ def main(
         levels_max_black=levels_max_black,
         finger_shadow=finger_shadow,
         save_before_shadow=save_before_shadow,
+        copy_back_core_grow_px=copy_back_core_grow_px,
+        colour_pages=colour_pages,
         output_format=output_format,
         force_dpi=force_dpi,
         skip_if_exists=skip_if_exists,

@@ -31,6 +31,7 @@ COLOUR_SIDE_ADDED = (120, 200, 0)  # залито выравниванием б�
 COLOUR_SIDE_CUT = (60, 20, 160)  # срезано выравниванием боковой стороны — тёмно-красный
 COLOUR_INK_ADDED = (255, 200, 0)  # добавлено вторым проходом SAM 3 (кадр без крупной краски) — голубой
 COLOUR_POCKET = (60, 110, 230)  # добавлено как карман, листок, вклейка на странице — оранжево-красный
+COLOUR_PALETTE = (230, 120, 255)  # добавлено у края цветной страницы по её палитре — сиреневый
 COLOUR_SHADOW = (120, 20, 120)  # граница зоны поиска тени пальца — тёмно-фиолетовый
 COLOUR_SKIN = (0, 0, 160)  # кожа в итоге (тень по ней не оценивается и не осветляется) — тёмно-красный
 COLOUR_RING = (0, 220, 255)  # кольцо опоры тени на листе (pull-push R) — жёлтый
@@ -271,6 +272,8 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
     layer[masks.side_cut] = COLOUR_SIDE_CUT
     if masks.pocket_added is not None:
         layer[masks.pocket_added] = COLOUR_POCKET
+    if masks.palette_added is not None:
+        layer[masks.palette_added] = COLOUR_PALETTE
     layer[layers.protected] = COLOUR_PROTECT
     cv2.addWeighted(layer, AREA_ALPHA, canvas, 1 - AREA_ALPHA, 0, canvas)
     # Границы — тонкими линиями поверх.
@@ -322,6 +325,9 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
             COLOUR_POCKET,
             alpha=AREA_ALPHA,
             style=SampleStyle.BOX,
+        ),
+        LegendEntry(
+            "добавлено у края цветной страницы по её палитре", COLOUR_PALETTE, alpha=AREA_ALPHA, style=SampleStyle.BOX
         ),
         LegendEntry(
             "добавлено вторым проходом SAM 3 (кадр без крупной краски)",

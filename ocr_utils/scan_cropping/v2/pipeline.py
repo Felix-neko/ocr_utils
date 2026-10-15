@@ -19,8 +19,9 @@ from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suff
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK, compensate_levels
 from ocr_utils.scan_cropping.v2.background import bg_flood, hand_mask
 from ocr_utils.scan_cropping.v2.book import book_close_open, content_hulls
+from ocr_utils.scan_cropping.v2.colour_pages import colour_pages_flat, colour_pages_growth
 from ocr_utils.scan_cropping.v2.content_guard import protect_content
-from ocr_utils.scan_cropping.v2.copy_back import LAYOUT_PAD_PX, copy_back_blocks
+from ocr_utils.scan_cropping.v2.copy_back import CORE_GROW_PX, LAYOUT_PAD_PX, copy_back_blocks
 from ocr_utils.scan_cropping.v2.edge import SNAP_BG_REACH, snap_outward
 from ocr_utils.scan_cropping.v2.fill import (
     FillMethod,
@@ -97,6 +98,10 @@ class RunParams:
             LaMa продолжает тень пальца с бумаги у края зоны, copy back возвращает её с оригинала.
         save_before_shadow: Сохранять в кэш кадра итог до осветления тени и маски входа карты (``before_shadow.png``,
             ``shadow_masks.npz``, ~40 МБ на кадр) — для стенда ``research/finger_repaint edge``.
+        copy_back_core_grow_px: Припуск ядра пальца при copy back, px калибровочного кадра (``copy_back.CORE_GROW_PX``):
+            кайма кожи у края ядра не возвращается с оригинала.
+        colour_pages: Правила для целиком цветных страниц (``colour_pages``): рост бумаги у края по палитре страницы
+            вверх и вниз, защита контента при любой позе.
     """
 
     input_dir: Path
@@ -127,6 +132,8 @@ class RunParams:
     save_fingers: bool = False
     finger_shadow: bool = False
     save_before_shadow: bool = False
+    copy_back_core_grow_px: int = CORE_GROW_PX
+    colour_pages: bool = True
 
 
 @dataclass(frozen=True)
@@ -485,6 +492,7 @@ class PaperMasks:
         side_added: Залито выравниванием боковых сторон (ямы).
         side_cut: Срезано выравниванием боковых сторон (выбросы).
         pocket_added: Добавлено как карман, листок или вклейка на странице (``paper.fill_page_pockets``).
+        palette_added: Добавлено у края цветной страницы по её палитре (``colour_pages.colour_pages_growth``).
     """
 
     plain: np.ndarray
@@ -496,6 +504,7 @@ class PaperMasks:
     side_added: np.ndarray
     side_cut: np.ndarray
     pocket_added: np.ndarray | None = None
+    palette_added: np.ndarray | None = None
 
 
 def paper_masks(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> PaperMasks:
@@ -517,7 +526,7 @@ def paper_masks(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> P
     # Карманы, листки, вклейки на странице, которые SAM 3 не взял в экземпляр страницы.
     pocket = fill_page_pockets(img, refined.paper, book["book"], book["bg"], book["hulls"])
     empty = np.zeros_like(plain)
-    return PaperMasks(plain, snapped, glued, refined.paper | pocket, refined.cut, empty, empty, empty, pocket)
+    return PaperMasks(plain, snapped, glued, refined.paper | pocket, refined.cut, empty, empty, empty, pocket, empty)
 
 
 def frame_paper(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> PaperMasks:
@@ -665,6 +674,13 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
         if edge_added.any():
             masks = replace(masks, paper=masks.paper | edge_added)
             pages = frame_pages(img, book, sam3, paint_seg, masks)
+        # Цветные страницы: поле и край — по палитре уверенного центра страницы, вверх и вниз (верхнее поле МТС 1990/04
+        # IMG_1113 — тень кромки нашлась, но край маски не «рваный»); страницы пересчитываются.
+        if params.colour_pages:
+            palette_added = colour_pages_growth(img, pages, masks.paper, book["book"], book["bg"])
+            if palette_added.any():
+                masks = replace(masks, paper=masks.paper | palette_added, palette_added=palette_added)
+                pages = frame_pages(img, book, sam3, paint_seg, masks)
         # Выравнивание внешних боковых сторон плоских страниц: выбросы SAM 3 (заливка LaMa на торце, IMG_0240),
         # ямы, колебания края в тени у кромки (IMG_0538); затем страницы пересчитываются по выровненной бумаге.
         side = regularize_sides(masks.paper, pages, book["bg"], img, params.snap_sides)
@@ -876,7 +892,9 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     pages = frame_pages(img, book, sam3, paint_on_seg(fingers, img.shape[:2]), masks)
     # Припуск блоков — один для защиты контента и copy back: на оверлее рисуется ровно возвращаемая зона.
     pad = (params.scale.frame_px(params.layout_pad_px[0]), params.scale.frame_px(params.layout_pad_px[1]))
-    protected = protect_content(masks.paper, polys, pages, zone_seg, img.shape[0] / shape[0], pad)
+    # Цветные страницы — защита контента при любой позе: рваная маска делала их «приподнятыми» (IMG_1113).
+    guard_pages = colour_pages_flat(img, pages) if params.colour_pages else pages
+    protected = protect_content(masks.paper, polys, guard_pages, zone_seg, img.shape[0] / shape[0], pad)
     np.savez_compressed(work.masks, **asdict(masks), protected=protected)
     # Copy back блоков surya в зоне закраса — только внутри грубой маски книги без рук.
     # Где copy back разрешён: «не фон» целиком (с пальцами и руками) — детектор пальцев ошибается, и лучше вернуть
@@ -885,8 +903,10 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     allowed = book["book"] if params.copy_back_over_fingers else zone_seg
     filled_from = clean
     # Picture и Figure — целиком (ложные пальцы на портретах), остальные блоки — только зона дилатации пальца.
+    # Ядро — с припуском: кайма кожи у края ядра SAM 3 не возвращается с оригинала (IMG_1197).
+    core_grow = params.scale.frame_px(params.copy_back_core_grow_px) if params.copy_back_core_grow_px > 0 else 0
     clean, returned, blocks = copy_back_blocks(
-        original, clean, polys, paint, to_frame(allowed, shape), pad, labels, fingers["core"]
+        original, clean, polys, paint, to_frame(allowed, shape), pad, labels, fingers["core"], core_grow
     )
     paper = to_frame(masks.paper | protected, shape)
     box = paper_bbox(paper)
