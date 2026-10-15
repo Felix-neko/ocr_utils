@@ -55,6 +55,12 @@ POCKET_MAX_ASPECT = 2.5
 POCKET_MIN_FILL = 0.45
 # Доля блока внутри осевой рамки крупных страниц кадра, не меньше.
 POCKET_MIN_INSIDE = 0.8
+# Карман — на странице: в кадре есть страница не меньше POCKET_MIN_PAGE_MM2 (страница пака-6 — 64–90 тыс. мм²), блок не
+# больше POCKET_MAX_SHARE её площади (карманы и вклейки выборки — до 0.32). Без этого на закрытой книге и обложке без
+# бумаги (≤ 250 мм² бумаги) блоком «кармана» становилась светлая крышка переплёта (пак-6: РИСК 1991/03 IMG_0200, 1993/01
+# IMG_0176, МТС 1990/07 IMG_0055 и ещё 7 кадров).
+POCKET_MIN_PAGE_MM2 = 20000.0
+POCKET_MAX_SHARE = 0.6
 # Версия кэша шага SAM 3 (``sam3.npz``): с правилами пустых страниц и слияния вложенных экземпляров — 2.
 SAM3_CACHE_VERSION = 2
 # Затравки бумаги: пиксели внутри оболочек своей печати, не краска (серое выше локального фона минус INK_DROP).
@@ -297,6 +303,10 @@ def fill_page_pockets(
     sizes = np.bincount(labels.ravel())
     sizes[0] = 0
     pages = np.isin(labels, np.nonzero(sizes >= SAM3_BLANK_MIN_SHARE * sizes.max())[0])
+    # Кармана без страницы не бывает: на закрытой книге светлая крышка — не карман.
+    page_area = float(sizes.max())
+    if page_area < POCKET_MIN_PAGE_MM2 * mm * mm:
+        return np.zeros_like(paper)
     near = cv2.distanceTransform((~free).astype(np.uint8), cv2.DIST_L2, 5) <= POCKET_NEAR_MM * mm
     candidates = free | (paper & pale & (~pages | near))
     joined = disk_closing(candidates, POCKET_CLOSE_MM * mm) & book & ~bg
@@ -312,7 +322,7 @@ def fill_page_pockets(
     added = np.zeros_like(paper)
     for k in range(1, count):
         area = stats[k, cv2.CC_STAT_AREA]
-        if area < POCKET_MIN_MM2 * mm * mm:
+        if area < POCKET_MIN_MM2 * mm * mm or area > POCKET_MAX_SHARE * page_area:
             continue
         comp = labels == k
         rect = cv2.minAreaRect(np.column_stack(np.nonzero(comp))[:, ::-1].astype(np.float32))

@@ -259,3 +259,17 @@ def test_fill_page_pockets_insert_across_spine_keeps_right_page():
     added = fill_page_pockets(bgr, paper, book, bg, hulls)
     full = paper | added
     assert full[1300, 1500] and full[1300, 1100] and full[1440, 1650]
+
+
+def test_fill_page_pockets_closed_book_cover_not_added():
+    """Закрытая книга со светлой крышкой, бумаги почти нет: крышка — не карман."""
+    from ocr_utils.scan_cropping.v2.paper import fill_page_pockets
+
+    h, w = 1600, 2400
+    bgr = np.full((h, w, 3), 15, np.uint8)
+    book = np.zeros((h, w), bool)
+    book[100:1500, 700:1700] = True
+    bgr[book] = (215, 228, 235)  # светлая крышка
+    paper = np.zeros((h, w), bool)
+    paper[300:340, 900:960] = True  # пятнышко «бумаги» SAM 3
+    assert not fill_page_pockets(bgr, paper, book, ~book, np.zeros((h, w), bool)).any()
