@@ -16,7 +16,7 @@ import numpy as np
 import threadpoolctl
 
 from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suffix, write_image
-from ocr_utils.scan_cropping.levels import compensate_levels
+from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK, compensate_levels
 from ocr_utils.scan_cropping.v2.background import bg_flood, hand_mask
 from ocr_utils.scan_cropping.v2.book import book_close_open, content_hulls
 from ocr_utils.scan_cropping.v2.content_guard import protect_content
@@ -85,6 +85,7 @@ class RunParams:
         ink_fill: Второй проход SAM 3 по кадру без крупной краски (``ink_fill``), бумага — объединение двух проходов.
         refine_depth: Глубина уточнения склейки от фона, px масштаба сегментации.
         compensate_levels: Растянуть уровни итога.
+        levels_max_black: Потолок чёрной точки растяжки, уровни; None — без потолка.
         output_format: Формат итога (``png`` / ``tiff``) или None — как у входа.
         force_dpi: Записать в итог это разрешение или None.
         skip_if_exists: Пропускать кадры, итог которых уже есть.
@@ -115,6 +116,7 @@ class RunParams:
     fill_before_copy_back: bool = True
     refine_depth: int = REFINE_DEPTH
     compensate_levels: bool = False
+    levels_max_black: int | None = LEVELS_MAX_BLACK
     output_format: str | None = None
     force_dpi: int | None = None
     skip_if_exists: bool = False
@@ -892,7 +894,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
         # Бумага не найдена — кадр пишется без вырезки, как в v1.
         out, status = clean, "no_paper"
     if params.compensate_levels:
-        out = compensate_levels(out)
+        out = compensate_levels(out, max_black=params.levels_max_black)
     shadow, before_shadow = None, out
     if params.finger_shadow and box is not None and status == "ok":
         # Тень пальца — на итоге (после закраса, copy back и уровней), в его координатах: маски — в рамке вырезки.

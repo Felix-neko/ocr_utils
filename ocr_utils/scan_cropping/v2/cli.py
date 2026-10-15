@@ -15,6 +15,7 @@ import click
 
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX, CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
+from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
 from ocr_utils.scan_cropping.v2.copy_back import LAYOUT_PAD_PX
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
 from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT, TIGHT_DILATE_PX
@@ -97,6 +98,9 @@ def parse_pad(value: str) -> tuple[int, int]:
 @click.option("--refine-depth", default=REFINE_DEPTH, show_default=True,
               help="Глубина уточнения склейки от фона, px масштаба сегментации (35 ≈ 5 мм).")  # fmt: skip
 @click.option("--compensate-levels", is_flag=True, help="Растянуть уровни итога по перцентилям.")
+@click.option("--levels-max-black", default=LEVELS_MAX_BLACK, show_default=True,
+              help="Потолок чёрной точки растяжки уровней, 0..255: пустой разворот без краски не растягивается "
+                   "«бумага → весь диапазон» (пятна цвета); 255 — без потолка.")  # fmt: skip
 @click.option("--finger-shadow/--no-finger-shadow", default=False, show_default=True,
               help="После copy back и уровней осветлять тень пальца на бумаге по карте: зона ядро + 15 мм в книге, "
                    "опора — pull-push по кольцу бумаги, прибавка (research/finger_repaint). С ним высветление зоны "
@@ -131,6 +135,7 @@ def main(
     fill_before_copy_back: bool,
     refine_depth: int,
     compensate_levels: bool,
+    levels_max_black: int,
     finger_shadow: bool,
     output_format: str | None,
     force_dpi: int | None,
@@ -158,6 +163,7 @@ def main(
         fill_before_copy_back=fill_before_copy_back,
         refine_depth=refine_depth,
         compensate_levels=compensate_levels,
+        levels_max_black=levels_max_black,
         finger_shadow=finger_shadow,
         output_format=output_format,
         force_dpi=force_dpi,
