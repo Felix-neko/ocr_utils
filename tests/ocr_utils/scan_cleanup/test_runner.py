@@ -249,3 +249,12 @@ def test_jpeg_output_is_not_forced_to_grey(pack, params):
     run_cleanup(params)
     with Image.open(params.out_dir / "1970" / "01" / "0010.jpg") as im:
         assert im.mode == "RGB"
+
+
+def test_always_color_writes_plain_pages_rgb(pack, params):
+    """С ``always_color`` полоса без цветной разметки остаётся трёхканальной: Capture One не видит серые TIFF."""
+    params.always_color = True
+    reports = {r.rel_path: r for r in run_cleanup(params)}
+    assert reports["1970/01/0010.tif"].grayscale is False
+    with Image.open(params.out_dir / "1970" / "01" / "0010.tif") as im:
+        assert im.mode == "RGB"

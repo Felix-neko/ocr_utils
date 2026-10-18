@@ -75,6 +75,8 @@ class CleanupParams:
     # следующий шаг конвейера не найдёт очищенные файлы — их имена содержат отпечаток.
     write_db: bool = True
     output_format: "str | None" = None
+    # Писать все полосы трёхканальными: Capture One не видит серые TIFF (пак-2, 2026-10-18).
+    always_color: bool = False
     jobs: int = 8
     report_csv: "Path | None" = None
 
@@ -175,8 +177,14 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
     #
     # Только для TIFF: JPEG и так ужимает почти нейтральные каналы почти в ничто, а вот
     # решение «серый» для него необратимо и цену имеет ту же.
+    #
+    # С ``always_color`` серого не бывает вовсе: Capture One серые TIFF не показывает, и полоса,
+    # пришедшая серой (одноканальный исходник), тоже расширяется до трёх каналов.
     to_write = result
-    if out_suffix.lower() in GRAYSCALE_SUFFIXES and not markup.has_colour and result.ndim == 3:
+    if params.always_color:
+        if result.ndim == 2:
+            to_write = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+    elif out_suffix.lower() in GRAYSCALE_SUFFIXES and not markup.has_colour and result.ndim == 3:
         to_write = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         report.grayscale = True
 

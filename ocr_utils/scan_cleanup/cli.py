@@ -260,6 +260,14 @@ def main() -> None:
     help="Записать в базу, куда легла каждая полоса: имя выходного файла содержит отпечаток.",
 )
 @click.option("--output-format", default=None, type=click.Choice(["tif", "tiff", "png", "jpg", "jpeg"]))
+@click.option(
+    "--always-color/--gray-when-plain",
+    "always_color",
+    default=False,
+    show_default=True,
+    help="Сохранять ВСЕ полосы трёхканальными. Без флага полосы без цветной разметки (TIFF) пишутся "
+    "одним серым каналом — втрое меньше места, но Capture One серые TIFF не видит.",
+)
 @click.option("--jobs", default=8, show_default=True, type=int, help="Воркеров на размытие (закрас всегда в родителе).")
 @click.option("--report-csv", default=None, type=click.Path(dir_okay=False, path_type=Path))
 def run_command(
@@ -311,6 +319,7 @@ def run_command(
     skip_if_exists,
     write_db,
     output_format,
+    always_color,
     jobs,
     report_csv,
 ) -> None:
@@ -333,6 +342,7 @@ def run_command(
         skip_if_exists=skip_if_exists,
         write_db=write_db,
         output_format=output_format,
+        always_color=always_color,
         jobs=jobs,
         report_csv=report_csv,
         inpaint=InpaintOptions(
