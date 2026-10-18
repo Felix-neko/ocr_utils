@@ -32,7 +32,8 @@ python -m research.geometry_quality diff --old-run … --new-run … --geo-dir �
 
 Выгрузки по вердиктам с описью `index.csv` (`--mode lineart_formula` — все страницы с line art или формулами по
 папкам good/mixed/bad и годам; `--mode damage_belts` — страницы без line art с вердиктом bad и mixed по худшей
-метрике и поясам её score):
+метрике и поясам её score; `--mode verdicts` — все страницы по папкам good/mixed/bad, bad — по подпапкам
+`<правило>__<виновник>`, например `bad/no_gain__edge_quality_mm/`, `bad/total__вертикали/`):
 
 ```bash
 python -m research.geometry_quality export --run-dir … --geo-dir … --nogeo-dir … --out-dir … --layout-root … --mode …

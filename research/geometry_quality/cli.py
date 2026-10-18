@@ -564,9 +564,10 @@ def diff(
 @click.option("--out-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--layout-root", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path),
               help="Корень разбора page_layout: line art и формулы — по разбору без коррекции.")  # fmt: skip
-@click.option("--mode", required=True, type=click.Choice(["lineart_formula", "damage_belts"]),
+@click.option("--mode", required=True, type=click.Choice(["lineart_formula", "damage_belts", "verdicts"]),
               help="lineart_formula — все страницы с line art или формулами, по папкам вердикта и годам; "
-                   "damage_belts — страницы без line art с вердиктом bad и mixed, по худшей метрике и поясам score.")  # fmt: skip
+                   "damage_belts — страницы без line art с вердиктом bad и mixed, по худшей метрике и поясам score; "
+                   "verdicts — все страницы по папкам good/mixed/bad, bad — по подпапкам причины (правило и виновник).")  # fmt: skip
 @click.option("--jobs", default=8, show_default=True, type=int, help="Воркеров отрисовки.")
 @threshold_options
 def export(run_dir, geo_dir, nogeo_dir, out_dir, layout_root, mode, jobs, thr, hard, total, min_gain, ratio) -> None:
@@ -575,6 +576,9 @@ def export(run_dir, geo_dir, nogeo_dir, out_dir, layout_root, mode, jobs, thr, h
     ``lineart_formula``: ``<out>/<good|mixed|bad>/<год>/``, имя файла — страница, вид (``lineart``, ``formula``,
     ``lineart+formula``), вердикт, правило, виновник. ``damage_belts``: ``<out>/<bad|mixed>/<метрика>/<пояс score>/``
     — худшая метрика порчи страницы и пояс её score (``DAMAGE_BELTS``), как пояса ``sheets --select belts``.
+    ``verdicts``: все страницы прогона, ``<out>/good/``, ``<out>/mixed/``, ``<out>/bad/<правило>__<виновник>/`` —
+    причина bad: правило, давшее вердикт (``Rule``: ``unforgivable``, ``hard``, ``total``, ``no_gain``,
+    ``hysteresis``), и метрика или группа, на которой оно сработало.
     """
     from ocr_utils.geometry_regression.quality.measure import FORMULA_CLASSES, LINEART_CLASSES
 
@@ -593,6 +597,13 @@ def export(run_dir, geo_dir, nogeo_dir, out_dir, layout_root, mode, jobs, thr, h
                 continue
             kind = "+".join(name for name, flag in (("lineart", lineart), ("formula", formula)) if flag)
             folder = f"{VERDICT_FOLDER[verdict]}/{key[0].split('_')[1]}"
+        elif mode == "verdicts":
+            # Вид — для описи и имени файла; у страницы без line art и формул — просто текст.
+            kind = "+".join(name for name, flag in (("lineart", lineart), ("formula", formula)) if flag) or "text"
+            folder = VERDICT_FOLDER[verdict]
+            if assessment.verdict is Verdict.BAD:
+                # Причина bad — правило и виновник; пробелы в имени группы («дробные черты») — в подчёркивания.
+                folder += f"/{assessment.rule.name.lower()}__{assessment.culprit.replace(' ', '_')}"
         else:
             if lineart or verdict == "ok":
                 continue

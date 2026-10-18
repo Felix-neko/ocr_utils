@@ -64,6 +64,27 @@ PDF_ROOT="/mnt/hotstore/scan_processing/mts/pack2_pdf"
 FULL_PDF_DIR="$PDF_ROOT/full_intermediate_pdfs"
 PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
 
+# Куда FineReader положил распознанное: два прогона по одним полным промежуточным PDF — с коррекцией
+# геометрии и без неё (без коррекции геометрия страницы = скан + поля, только туда точно возвращаются
+# иллюстрации). Имена файлов — как у промежуточных (full_1977_NN.pdf).
+GEO_PDF_DIR="$PDF_ROOT/binarized_geometry_on"
+NOGEO_PDF_DIR="$PDF_ROOT/binarized_geometry_off"
+
+# Финальные PDF ({год}/{год}_{выпуск}.pdf) и рабочий каталог сборщика (JSON анализа на страницу, CSV, превью).
+FINAL_PDF_DIR="$PDF_ROOT/final_pdfs"
+FINAL_WORK_DIR="/mnt/hotstore/scan_processing/mts/pack2_final_pdfs_work"
+
+# Детектор порчи геометрии FineReader v18 (ocr_utils.geometry_regression.quality) — его вердикт берёт сборщик
+# финальных PDF. Три входа, как у пака-1, все на SSD hotstore:
+# * разбор page_layout обоих PDF (run_9_page_layout_fr.sh): geo/, nogeo/;
+# * кэш движка v16 (поле смещений, штрихи, line art, фото) — набивает сам прогон v18 на промахах (~6 с на страницу);
+# * прогон v18 (run_10_geometry_v18.sh): cache/, verdicts.csv; оверлеи по вердиктам — run_12_geometry_overlays.sh.
+HOT_MARKUP_ROOT="/mnt/hotstore/scan_processing/mts_markup"
+GEOMETRY_LAYOUT_ROOT="${GEOMETRY_LAYOUT_ROOT:-$HOT_MARKUP_ROOT/pack2_page_analysis_fr}"
+GEOMETRY_QUALITY_ROOT="$HOT_MARKUP_ROOT/pack2_geometry_quality"
+GEOMETRY_V16_DIR="${GEOMETRY_V16_DIR:-$GEOMETRY_QUALITY_ROOT/pack2_v16}"
+GEOMETRY_V18_DIR="${GEOMETRY_V18_DIR:-$GEOMETRY_QUALITY_ROOT/pack2_v18}"
+
 # Должен лежать ВНУТРИ IMAGES_DIR из docker/.env (или совпадать с ним), иначе cvat_server
 # не увидит картинок: задачи заводятся из смонтированного share, по сети файлы не передаются.
 # Общий с паком-1: to-cvat сам кладёт превью в подпапку $PACK_NAME и заводит отдельный проект.
