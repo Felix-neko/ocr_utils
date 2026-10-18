@@ -22,15 +22,24 @@
   :class:`~ocr_utils.page_layout.geometry.HintBox` с меткой источника — тогда метка доезжает до
   ``info["sources"]`` и вида рамки; голая ``Box`` идёт как безымянная (``"hint"``).
 
-Сборщики подсказок из привычных источников — :func:`hints_from_surya` (``Figure``, ``Form``,
+Сборщики подсказок из привычных источников — :func:`hints_from_deepseek` (блоки ``image``
+DeepSeek-OCR-2 из его кэша: тонкий график 1977/04 0180_2R surya назвала ``Caption``, а DeepSeek
+нашёл как ``image``), :func:`hints_from_surya` (``Figure``, ``Form``,
 ``Picture``; ``Equation`` НЕ затравка: формула в словаре проекта — текст, метка CVAT «Схема или
 line art» её не включает, а на эталоне из 221 области блоки ``Equation`` дали 19 ложных
 областей на 200 контрольных страницах и ни одного совпадения) и :func:`hints_from_tables`
 (схема/рисунок детектора таблиц — уже выращены по штриховой краске и проверены по линейкам).
 
-Третий источник — собственный проход ``features.analyse_gray`` по битональной копии (связные
+Ещё один источник — собственный проход ``features.analyse_gray`` по битональной копии (связные
 пятна и скопления линеек); подсказки идут в тот же вызов как ``extra_boxes``, исключения — как
 ``exclude_boxes``.
+
+ОДНА ЗАТРАВКА НА ОБЪЕКТ. Один и тот же рисунок подсказывают несколько источников (surya
+``Figure`` и DeepSeek ``image`` с немного разными рамками). Перед проверкой пикселями подсказки,
+пересекающиеся не меньше чем на половину меньшей из рамок, сливаются в одну затравку по
+охватывающей рамке (:func:`merge_seeds`), а итоговые рамки ``analyse_gray`` ещё раз сливаются
+``merge_boxes`` — двух комплектов одной находки не бывает. Источники рамки при этом считаются
+по всем исходным подсказкам (:func:`to_regions`).
 """
 
 from __future__ import annotations
@@ -60,12 +69,14 @@ FINE_KIND_BY_SOURCE = {
     "surya:Form": "бланк",
     "surya:Equation": "формула",
     "surya:Picture": "рисунок",
+    "deepseek:image": "рисунок",
     "rules": "линейки",
     "ink": "штрих",
 }
 
 # Семейства источников, по доле которых считается уверенность рамки: таблицы, surya, пиксели.
-# Подсказка из другого семейства тоже засчитывается, но уверенность не выходит за единицу.
+# Подсказка из другого семейства (DeepSeek) тоже засчитывается, но уверенность не выходит за
+# единицу: знаменатель прежний, чтобы уверенность находок без DeepSeek не поменялась.
 SOURCE_FAMILIES = ("tables", "surya", "pixels")
 
 # Метки собственного прохода ``analyse_gray`` — семейство «пиксели».
@@ -76,6 +87,20 @@ SURYA_FAMILY = "surya"
 
 # Блоки surya, которые идут в затравки line art (формулы — нет, см. докстринг модуля).
 SEED_LABELS = FIGURE_LABELS + FORM_LABELS
+
+# Блоки DeepSeek-OCR-2 (режим grounding «Convert the document to markdown»), которые идут в затравки:
+# ``image`` — рисунок, схема, график, фотография (фотографию гасит исключение растра). ``table`` —
+# не затравка: таблицы ищет свой детектор, а ``equation`` — формула, она не line art.
+DEEPSEEK_SEED_LABELS = ("image",)
+DEEPSEEK_FAMILY = "deepseek"
+DEEPSEEK_LIKELY = (ObjectClass.DIAGRAM, ObjectClass.DRAWING)
+
+# Приоритет метки у слитой затравки (меньше — главнее): вид рамки берётся по метке её кандидата,
+# а детектор таблиц и surya знают вид точнее, чем DeepSeek.
+SEED_PRIORITY = ("tables", "surya", DEEPSEEK_FAMILY)
+
+# Подсказки сливаются в одну затравку, если пересекаются не меньше чем на эту долю меньшей рамки.
+SEED_MERGE_SHARE = 0.5
 
 # Вероятные классы объекта по метке блока surya и по виду находки детектора таблиц.
 SURYA_LIKELY = {
@@ -102,12 +127,16 @@ class LineArtInputs:
             пометит вызывающий). Кандидат, накрытый ими больше чем наполовину, выбрасывается.
         hinted_boxes: Затравки — рамки, где line art подозревают другие детекторы. Голая
             ``Box`` или ``HintBox`` с меткой источника и уверенностью.
+        text_boxes: Текстовые блоки полосы — правило A ``features``: низкое пятно под текстом —
+            слипшиеся буквы заголовка, а не штрих.
     """
 
     bitonal: np.ndarray
     dpi: int
     excluded_boxes: list[Box]
     hinted_boxes: list[Box]
+    # Текстовые блоки полосы (surya) в пикселях копии — для правила A (слипшаяся строка заголовка).
+    text_boxes: tuple[Box, ...] = ()
 
 
 def hints_from_surya(
@@ -149,6 +178,36 @@ def hints_from_surya(
     return hints
 
 
+def hints_from_deepseek(
+    blocks: LayoutBlocks | None, ink: np.ndarray | None = None, dpi: int | None = None, barriers: list[Box] = ()
+) -> list[HintBox]:
+    """Блоки DeepSeek-OCR-2 ``image`` как подсказки line art (рамки достраиваются, как у surya).
+
+    Args:
+        blocks: Разметка DeepSeek (кэш ``page_layout.deepseek``) в пикселях той же копии, что пойдёт
+            детектору, или ``None`` — кэша нет или в нём нет этой полосы.
+        ink: Маска краски той же копии (ненулевое — краска); ``None`` — рамки как у DeepSeek.
+        dpi: Разрешение копии (нужно вместе с ``ink``).
+        barriers: Рамки, за которые достройка не заходит (исключения детектора).
+
+    Returns:
+        Подсказки с меткой ``"deepseek:<метка>"`` без уверенности (DeepSeek её не даёт) и
+        ``likely`` схема/рисунок; пустой список без разметки.
+    """
+    if blocks is None:
+        return []
+    hints: list[HintBox] = []
+    # Порог уверенности нулевой: у блоков DeepSeek уверенности нет, в кэше она записана единицей.
+    for block in blocks.by_label(DEEPSEEK_SEED_LABELS, min_confidence=0.0):
+        box = block.box.clipped(blocks.width, blocks.height)
+        if box.area == 0:
+            continue
+        if ink is not None and dpi is not None:
+            box = grow_to_components(box, ink, dpi, FIGURE_GROW_MM, list(barriers)).box
+        hints.append(HintBox(*box.as_tuple(), source=f"{DEEPSEEK_FAMILY}:{block.label}", likely=DEEPSEEK_LIKELY))
+    return hints
+
+
 def hints_from_tables(drawings: list[TableBox]) -> list[HintBox]:
     """Находки детектора таблиц вида «схема»/«рисунок» как подсказки line art.
 
@@ -176,16 +235,74 @@ def _family(source: str) -> str:
     return source.split(":", 1)[0]
 
 
+def _seed_rank(source: str) -> int:
+    """Место метки в ``SEED_PRIORITY`` (чужое семейство — последним)."""
+    family = _family(source)
+    return SEED_PRIORITY.index(family) if family in SEED_PRIORITY else len(SEED_PRIORITY)
+
+
+def _root(parent: list[int], index: int) -> int:
+    """Корень элемента ``index`` в лесе союз-поиска ``parent`` (со сжатием пути на ходу).
+
+    Args:
+        parent: Ссылки на родителя; меняется на месте (сжатие пути).
+        index: Элемент.
+
+    Returns:
+        Номер корня группы.
+    """
+    while parent[index] != index:
+        parent[index] = parent[parent[index]]
+        index = parent[index]
+    return index
+
+
+def merge_seeds(seeds: list[tuple[Box, str]]) -> list[tuple[Box, str]]:
+    """Слить затравки разных источников, указывающие на один объект, в одну.
+
+    Затравки, пересекающиеся не меньше чем на ``SEED_MERGE_SHARE`` меньшей рамки, объединяются
+    (транзитивно) в охватывающую рамку; метка — у самого приоритетного источника
+    (``SEED_PRIORITY``), при равенстве — у первой в списке.
+
+    Args:
+        seeds: Пары ``(рамка, метка источника)``.
+
+    Returns:
+        Слитые пары в порядке первой затравки каждой группы.
+    """
+    # Союз-поиск по парам согласных затравок: группа — компонента связности.
+    parent = list(range(len(seeds)))
+    for first in range(len(seeds)):
+        for second in range(first + 1, len(seeds)):
+            if _agrees(seeds[first][0], seeds[second][0], SEED_MERGE_SHARE):
+                parent[_root(parent, second)] = _root(parent, first)
+    groups: dict[int, list[int]] = {}
+    for index in range(len(seeds)):
+        groups.setdefault(_root(parent, index), []).append(index)
+    merged: list[tuple[Box, str]] = []
+    for members in groups.values():
+        boxes = [seeds[i][0] for i in members]
+        box = Box(
+            min(b.x0 for b in boxes), min(b.y0 for b in boxes), max(b.x1 for b in boxes), max(b.y1 for b in boxes)
+        )
+        label = min((seeds[i][1] for i in members), key=_seed_rank)
+        merged.append((box, label))
+    return merged
+
+
 def seeds_from(inputs: LineArtInputs) -> list[tuple[tuple[int, int, int, int], str]]:
     """Подсказки как пары ``(рамка, метка источника)`` для ``analyse_gray(extra_boxes=...)``.
+
+    Подсказки разных источников на один объект сливаются в одну затравку (:func:`merge_seeds`).
 
     Args:
         inputs: Вход детектора.
 
     Returns:
-        По паре на каждую подсказку в порядке ``inputs.hinted_boxes``.
+        По паре на каждую слитую затравку; формульные подсказки не входят.
     """
-    return [(hint.as_tuple(), hint_source(hint)) for hint in inputs.hinted_boxes if not is_formula_hint(hint)]
+    seeds = [(Box(*hint.as_tuple()), hint_source(hint)) for hint in inputs.hinted_boxes if not is_formula_hint(hint)]
+    return [(box.as_tuple(), label) for box, label in merge_seeds(seeds)]
 
 
 def find_line_art(inputs: LineArtInputs) -> PageFindings:
@@ -199,7 +316,8 @@ def find_line_art(inputs: LineArtInputs) -> PageFindings:
     """
     params = params_for_dpi(inputs.dpi)
     exclude = [box.as_tuple() for box in inputs.excluded_boxes]
-    return analyse_gray(inputs.bitonal, params, exclude_boxes=exclude, extra_boxes=seeds_from(inputs))
+    texts = [box.as_tuple() for box in inputs.text_boxes]
+    return analyse_gray(inputs.bitonal, params, exclude_boxes=exclude, extra_boxes=seeds_from(inputs), text_boxes=texts)
 
 
 def to_regions(findings: PageFindings, inputs: LineArtInputs) -> list[Region]:
@@ -335,8 +453,10 @@ __all__ = [
     "detect_line_art",
     "is_formula_hint",
     "find_line_art",
+    "hints_from_deepseek",
     "hints_from_surya",
     "hints_from_tables",
+    "merge_seeds",
     "seeds_from",
     "to_regions",
 ]

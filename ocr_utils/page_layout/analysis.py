@@ -35,6 +35,7 @@ from ocr_utils.page_layout.line_art.detector import (
     LineArtInputs,
     detect_formulas,
     detect_line_art,
+    hints_from_deepseek,
     hints_from_surya,
     hints_from_tables,
 )
@@ -195,6 +196,8 @@ class PageLayout:
         self.known: dict[Find, list[Region]] = {k: list(v) for k, v in (known or {}).items()}
 
         self.blocks: LayoutBlocks | None = None  # surya в пикселях кадра surya
+        # Разбор DeepSeek-OCR-2 из его кэша (затравки line art), в пикселях того же кадра; ``None`` — нет.
+        self.deepseek_blocks: LayoutBlocks | None = None
         self.surya_used = False
         self.needs_surya = False
         self.prepared = False
@@ -285,11 +288,14 @@ class PageLayout:
 
     # --- Этап 1: пиксели --------------------------------------------------------------------
 
-    def prepare(self, cache: SuryaCache | None = None) -> "PageLayout":
+    def prepare(self, cache: SuryaCache | None = None, deepseek_cache: SuryaCache | None = None) -> "PageLayout":
         """Всё, что считается без GPU. Годится для воркера пула.
 
         Args:
             cache: Кэш surya (только чтение); ``None`` — surya в этом процессе не искать.
+            deepseek_cache: Кэш разбора DeepSeek-OCR-2 (только чтение, формат кэша surya, свой корень,
+                ``line_art.deepseek.page_cache``): его блоки ``image`` — затравки line art. ``None`` или
+                промах — без них.
 
         Returns:
             Себя. Если ``needs_surya`` — блоков нет, ждём :meth:`finish` от родителя; иначе
@@ -323,6 +329,9 @@ class PageLayout:
             image.gray_at(min(ROTATED_READ_DPI, image.dpi))
         if options.use_surya:
             image.surya_frame
+        # Кэш DeepSeek сверяется с картинкой так же, как кэш surya (отпечаток файла или дайджест кадра).
+        if deepseek_cache is not None and Find.LINE_ART in self.find:
+            self.deepseek_blocks = deepseek_cache.load(image)
         image.drop_full_frames()
         self.prepared = True
 
@@ -409,8 +418,16 @@ class PageLayout:
             bitonal = image.bitonal_at(work_dpi)
             excluded = raster_work + table_work
             surya_hints = hints_from_surya(work_blocks, bitonal == 0, work_dpi, excluded)
+            deepseek_work = self.deepseek_blocks.scaled_to(work_w, work_h) if self.deepseek_blocks is not None else None
+            deepseek_hints = hints_from_deepseek(deepseek_work, bitonal == 0, work_dpi, excluded)
+            # Текстовые блоки surya — правилу «слипшаяся строка заголовка» (line_art.features).
+            text_boxes = tuple(work_blocks.text_blocks()) if work_blocks is not None else ()
             inputs = LineArtInputs(
-                bitonal, work_dpi, excluded_boxes=excluded, hinted_boxes=hints_from_tables(drawings) + surya_hints
+                bitonal,
+                work_dpi,
+                excluded_boxes=excluded,
+                hinted_boxes=hints_from_tables(drawings) + surya_hints + deepseek_hints,
+                text_boxes=text_boxes,
             )
             self.line_arts = [_to_native(r, native, image) for r in detect_line_art(inputs)]
             self.formulas = [_to_native(r, native, image) for r in detect_formulas(inputs)]

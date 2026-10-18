@@ -118,6 +118,11 @@ class PublishParams:
     # Дозалить в существующие задачи теги оглавления (``is_toc`` / ``is_year_index``) — тем же
     # PATCH-ем и с той же идемпотентностью: только на кадры, где таких тегов ещё нет.
     append_tags: bool = False
+    # Виды прямоугольников, которые идут в ПЕРВИЧНУЮ предразметку (новая задача,
+    # ``--force-annotations``, свежие полосы при ``--recreate-stale``). Пусто — все виды из базы.
+    # Метки проекта это не сужает: в проекте всегда полный ``LABELS``, отбор касается только того,
+    # что детектор нарисует за разметчика.
+    kinds: tuple[str, ...] = ()
 
 
 @dataclass
@@ -478,7 +483,10 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 carried = shapes_to_requests(_by, frames, _skip)
                                 stats.shapes_carried += len(carried)
                                 fresh = rect_shapes(
-                                    ((p, p.rect_regions) for p in _pages if p.cvat_rel_path in _skip), frames, label_ids
+                                    ((p, p.rect_regions) for p in _pages if p.cvat_rel_path in _skip),
+                                    frames,
+                                    label_ids,
+                                    kinds=params.kinds or None,
                                 )
                                 # Теги переносятся со всех кадров, включая изменившиеся:
                                 # ориентацию разметчик ставит по содержимому полосы, и замена
@@ -565,7 +573,10 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                 assign_jobs_to_issues(task, issues)
 
                 if upload:
-                    shapes = rect_shapes(((page, page.rect_regions) for page in pages), frames, label_ids)
+                    # Отбор по видам — см. ``PublishParams.kinds``.
+                    shapes = rect_shapes(
+                        ((page, page.rect_regions) for page in pages), frames, label_ids, kinds=params.kinds or None
+                    )
                     tags = page_tags(pages, frames, label_ids)
                     upload_preannotations(task, shapes, tags)
                     stats.shapes += len(shapes)

@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -76,6 +77,16 @@ CHAIN_LONG_MM = 5.0
 # нижнюю линейку таблицы с подчёркиванием в соседней колонке, стоящим на 0.9 мм ниже
 # (1966/05 с.29): наклон линейки «предсказывал» как раз такой уход.
 CHAIN_OFFSET_MM = 0.35
+
+# Исключение — стык ЧЕРЕЗ УЗЕЛ: в зазоре между фрагментами лежит перпендикулярная линейка, которая
+# проходит через стык насквозь (на ``NODE_MARGIN_MM`` по обе стороны). Под жирной горизонталью
+# вертикали граф печатаются со сдвигом: строка номеров граф «1 | 2 | 3 | 4» под нижней линейкой
+# таблицы пака-2 (1977/04 с.69) уходила на 2,1–2,6 px при 150 dpi, и её обрывки по 4 мм оставались
+# без пары — таблица теряла последнюю строку. Через узел допуск 1 мм. Угол таблицы под исключение
+# не попадает: там перпендикуляр на стыке КОНЧАЕТСЯ, а не проходит насквозь, поэтому подчёркивание
+# в соседней колонке на 0,9 мм ниже нижней линейки (1966/05 с.29) по-прежнему не пришивается.
+CHAIN_NODE_OFFSET_MM = 1.0
+NODE_MARGIN_MM = 1.0
 
 # И если их наклоны согласны в этих пределах. Линейки пака лежат в 1.7°, изгиб добавляет доли.
 CHAIN_ANGLE_DEG = 2.0
@@ -221,8 +232,58 @@ def _predicted_across(first: Fragment, at_along: float) -> float:
     return first.across + slope * (at_along - centre_along)
 
 
-def continues(first: Fragment, second: Fragment, dpi: int, gap_mm: float = CHAIN_GAP_MM) -> bool:
-    """Продолжает ли второй фрагмент первый: зазор мал, стык соосен, наклон согласен."""
+def _node_in_gap(
+    first: Fragment, second: Fragment, joint_across: float, crossers: "Sequence[Fragment]", dpi: int
+) -> bool:
+    """Лежит ли в зазоре между фрагментами перпендикулярная линейка, проходящая через стык насквозь.
+
+    Args:
+        first: Первый фрагмент (тот, что продолжают).
+        second: Второй фрагмент той же оси.
+        joint_across: Поперечная координата стыка (где второй фрагмент на самом деле).
+        crossers: Фрагменты ПЕРПЕНДИКУЛЯРНОЙ оси — кандидаты в узел.
+        dpi: Разрешение — для перевода миллиметров в пиксели.
+
+    Returns:
+        ``True``, если какой-то перпендикуляр перекрывает зазор вдоль оси (с допуском на толщину
+        линейки) и тянется за стык не меньше чем на ``NODE_MARGIN_MM`` в обе стороны.
+    """
+    a0, a1 = first.along
+    b0, b1 = second.along
+    # Зазор вдоль оси: от конца одного фрагмента до начала другого.
+    low, high = (a1, b0) if b0 >= a1 else (b1, a0)
+    tolerance = mm_to_px(CROSS_TOL_MM, dpi)
+    margin = mm_to_px(NODE_MARGIN_MM, dpi)
+    for crosser in crossers:
+        if crosser.horizontal is first.horizontal:
+            continue
+        # Поперечный габарит перпендикуляра (его толщина) — это координата ВДОЛЬ оси сшиваемых фрагментов.
+        span = (crosser.box.y0, crosser.box.y1) if crosser.horizontal else (crosser.box.x0, crosser.box.x1)
+        if span[1] < low - tolerance or span[0] > high + tolerance:
+            continue
+        # Насквозь: перпендикуляр продолжается за стык в обе стороны, а не кончается в нём углом.
+        c0, c1 = crosser.along
+        if c0 <= joint_across - margin and c1 >= joint_across + margin:
+            return True
+    return False
+
+
+def continues(
+    first: Fragment, second: Fragment, dpi: int, gap_mm: float = CHAIN_GAP_MM, crossers: "Sequence[Fragment]" = ()
+) -> bool:
+    """Продолжает ли второй фрагмент первый: зазор мал, стык соосен, наклон согласен.
+
+    Args:
+        first: Первый фрагмент.
+        second: Кандидат в продолжение, той же оси.
+        dpi: Разрешение — для перевода миллиметров в пиксели.
+        gap_mm: Наибольший зазор вдоль оси.
+        crossers: Фрагменты перпендикулярной оси. Если среди них есть узел в зазоре (см.
+            :func:`_node_in_gap`), поперечный допуск — ``CHAIN_NODE_OFFSET_MM`` вместо ``CHAIN_OFFSET_MM``.
+
+    Returns:
+        ``True``, если второй фрагмент — продолжение первого.
+    """
     if first.horizontal is not second.horizontal:
         return False
     a0, a1 = first.along
@@ -239,7 +300,11 @@ def continues(first: Fragment, second: Fragment, dpi: int, gap_mm: float = CHAIN
     joint = b0 if b0 >= a1 else b1
     predicted = _predicted_across(first, joint)
     actual = _predicted_across(second, joint)
-    return abs(predicted - actual) <= mm_to_px(CHAIN_OFFSET_MM, dpi)
+    offset = abs(predicted - actual)
+    if offset <= mm_to_px(CHAIN_OFFSET_MM, dpi):
+        return True
+    # Шире обычного допуска — только на стыке через узел таблицы.
+    return offset <= mm_to_px(CHAIN_NODE_OFFSET_MM, dpi) and _node_in_gap(first, second, actual, crossers, dpi)
 
 
 def components(count: int, edges: list[tuple[int, int]]) -> list[list[int]]:
@@ -274,8 +339,13 @@ def components(count: int, edges: list[tuple[int, int]]) -> list[list[int]]:
 _components = components
 
 
-def _chain_edges(items: list[Fragment], dpi: int, gap_mm: float) -> list[tuple[int, int]]:
-    """Пары фрагментов, которые продолжают друг друга. Сравниваются только соседи по оси."""
+def _chain_edges(
+    items: list[Fragment], dpi: int, gap_mm: float, crossers: "Sequence[Fragment]" = ()
+) -> list[tuple[int, int]]:
+    """Пары фрагментов, которые продолжают друг друга. Сравниваются только соседи по оси.
+
+    ``crossers`` — фрагменты перпендикулярной оси для стыка через узел (см. :func:`continues`).
+    """
     order = sorted(range(len(items)), key=lambda index: items[index].along[0])
     reach = mm_to_px(gap_mm, dpi)
     edges: list[tuple[int, int]] = []
@@ -285,7 +355,7 @@ def _chain_edges(items: list[Fragment], dpi: int, gap_mm: float) -> list[tuple[i
             second = items[other]
             if second.along[0] - first.along[1] > reach:
                 break
-            if continues(first, second, dpi, gap_mm) or continues(second, first, dpi, gap_mm):
+            if continues(first, second, dpi, gap_mm, crossers) or continues(second, first, dpi, gap_mm, crossers):
                 edges.append((index, other))
     return edges
 
@@ -325,7 +395,11 @@ class ChainedRule:
 
 
 def chain_groups(
-    items: list[Fragment], dpi: int, min_mm: float = MIN_RULE_MM, gap_mm: float = CHAIN_GAP_MM
+    items: list[Fragment],
+    dpi: int,
+    min_mm: float = MIN_RULE_MM,
+    gap_mm: float = CHAIN_GAP_MM,
+    crossers: "Sequence[Fragment]" = (),
 ) -> list[ChainedRule]:
     """Сшить фрагменты в линейки, сохранив состав каждой; оставить те, что набрали ``min_mm``.
 
@@ -343,7 +417,7 @@ def chain_groups(
     """
     if not items:
         return []
-    groups = components(len(items), _chain_edges(items, dpi, gap_mm))
+    groups = components(len(items), _chain_edges(items, dpi, gap_mm, crossers))
     minimal = mm_to_px(min_mm, dpi)
     rules: list[ChainedRule] = []
     for group in groups:
@@ -353,9 +427,18 @@ def chain_groups(
     return rules
 
 
-def chain(items: list[Fragment], dpi: int, min_mm: float = MIN_RULE_MM, gap_mm: float = CHAIN_GAP_MM) -> list[Segment]:
-    """Сшить фрагменты в линейки и оставить те, что набрали ``min_mm``."""
-    return [rule.segment for rule in chain_groups(items, dpi, min_mm, gap_mm)]
+def chain(
+    items: list[Fragment],
+    dpi: int,
+    min_mm: float = MIN_RULE_MM,
+    gap_mm: float = CHAIN_GAP_MM,
+    crossers: "Sequence[Fragment]" = (),
+) -> list[Segment]:
+    """Сшить фрагменты в линейки и оставить те, что набрали ``min_mm``.
+
+    ``crossers`` — фрагменты перпендикулярной оси: через них стык сшивается с допуском узла.
+    """
+    return [rule.segment for rule in chain_groups(items, dpi, min_mm, gap_mm, crossers)]
 
 
 # Линейка-сирота (не вошедшая ни в таблицу, ни в схему) должна стоять на ЧИСТОЙ бумаге с обеих сторон.
@@ -460,8 +543,9 @@ def find_rules(
     """
     binary = binarize(gray) if binary is None else binary
     horizontal_fragments, vertical_fragments = found_fragments or fragments(binary, dpi)
-    horizontal = chain(horizontal_fragments, dpi)
-    vertical = chain(vertical_fragments, dpi)
+    # Каждая ось сшивается с фрагментами другой как кандидатами в узлы (см. ``CHAIN_NODE_OFFSET_MM``).
+    horizontal = chain(horizontal_fragments, dpi, crossers=vertical_fragments)
+    vertical = chain(vertical_fragments, dpi, crossers=horizontal_fragments)
 
     # Маски линеек — только те фрагменты, что вошли в линейку: по ним считаются краска без
     # линеек и трассы, а обрывки тире в них не нужны.

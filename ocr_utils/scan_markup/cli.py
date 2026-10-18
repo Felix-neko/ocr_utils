@@ -15,6 +15,7 @@ import click
 
 from ocr_utils.scan_markup.cvat import shapes
 from ocr_utils.scan_markup.cvat.client import CvatSettings
+from ocr_utils.scan_markup.cvat.delete import DeleteParams, run_delete
 from ocr_utils.scan_markup.cvat.export import ExportParams, copy_regions, run_export
 from ocr_utils.scan_markup.cvat.publish import PublishParams, run_publish
 from ocr_utils.db.models import LINE_ART_KINDS, RECT_KINDS, ROTATED_TEXT_KINDS, TABLE_KINDS
@@ -152,6 +153,14 @@ def main() -> None:
     "Запись есть и подходит по отпечатку файла — берётся с диска, модель не зовётся, и вся "
     "полоса достраивается в воркере; нет, битая или чужая — родитель зовёт модель и пишет "
     "запись заново. Старый кэш pickle переносится командой page_layout import-legacy-cache.",
+)
+@click.option(
+    "--deepseek-cache",
+    "deepseek_cache_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Корень кэша разбора DeepSeek-OCR-2 (набивает page_layout prefill-deepseek): его блоки image — "
+    "затравки line art. Без опции и для полос, которых в кэше нет, — без них.",
 )
 @click.option(
     "--raster/--no-raster",
@@ -750,10 +759,18 @@ def fix_pen_marks_command(
     help="ДОБАВИТЬ в уже существующие задачи теги оглавления («Оглавление», «Годовой указатель») "
     "по признакам is_toc / is_year_index из базы: PATCH, только на кадры без таких тегов.",
 )
+@click.option(
+    "--kinds",
+    default="",
+    show_default=True,
+    help="Виды прямоугольников через запятую, которые идут в ПЕРВИЧНУЮ предразметку (новая задача, "
+    "--force-annotations, свежие полосы при --recreate-stale). Пусто — все виды. Метки проекта не "
+    "сужаются: в проекте всегда полный набор.",
+)
 @_cvat_options
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def to_cvat_command(
-    db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org, log_level: str, append_kinds: str, **kwargs
+    db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org, log_level: str, append_kinds: str, kinds: str, **kwargs
 ) -> None:
     """Уменьшенные копии в share + проект/задачи/джобы CVAT с предразметкой."""
     _set_log_level(log_level)
@@ -761,6 +778,7 @@ def to_cvat_command(
         db_path=db_path,
         settings=CvatSettings(cvat_url, cvat_user, cvat_password, cvat_org),
         append_kinds=_parse_kinds(append_kinds),
+        kinds=_parse_kinds(kinds),
         **kwargs,
     )
     stats = run_publish(params, open_db(db_path))
@@ -777,6 +795,48 @@ def to_cvat_command(
             f"(изменившихся полос {stats.pages_changed}, не залитых {stats.pages_unpublished})."
             + ("" if stats.tasks_rebuilt else " Пересоздать их: --recreate-stale.")
         )
+
+
+@main.command("delete-project")
+@click.option("--db", "db_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--pack-name", required=True, help="Имя пака в базе (оно же имя проекта CVAT).")
+@click.option(
+    "--yes",
+    "confirm",
+    is_flag=True,
+    default=False,
+    help="Действительно удалить. Без флага — сухой прогон: только опись проекта, ничего не удаляется.",
+)
+@click.option(
+    "--backup-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Куда класть JSON-бэкап разметки задач перед удалением; по умолчанию — cvat_backup рядом с базой.",
+)
+@_cvat_options
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def delete_project_command(
+    db_path: Path, cvat_url, cvat_user, cvat_password, cvat_org, log_level: str, **kwargs
+) -> None:
+    """Удалить проект пака в CVAT (с JSON-бэкапом разметки) и отвязать от него базу."""
+    _set_log_level(log_level)
+    params = DeleteParams(
+        db_path=db_path, settings=CvatSettings(cvat_url, cvat_user, cvat_password, cvat_org), **kwargs
+    )
+    stats = run_delete(params, open_db(db_path))
+    if stats.project_id is None:
+        click.echo("Проекта в CVAT нет." + (" Ссылки в базе обнулены." if params.confirm else ""))
+        return
+    shapes = ", ".join(f"{label} {count}" for label, count in stats.shapes_by_label.most_common()) or "нет"
+    tags = ", ".join(f"{label} {count}" for label, count in stats.tags_by_label.most_common()) or "нет"
+    click.echo(
+        f"Проект id={stats.project_id}: задач {stats.tasks}, джобов {stats.jobs} "
+        f"(тронутых разметчиком {stats.jobs_touched}).\nШейпы: {shapes}.\nТеги: {tags}."
+    )
+    if stats.deleted:
+        click.echo("Удалён. Бэкап разметки: " + ", ".join(str(path) for path in stats.backups))
+    else:
+        click.echo("Сухой прогон: ничего не удалено. Удалить — с --yes.")
 
 
 @main.command("count-shapes")

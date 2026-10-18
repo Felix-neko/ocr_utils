@@ -51,6 +51,8 @@ class PageOptions:
     use_surya_layout: bool = True
     # Корень кэша surya (``page_layout.surya.SuryaCache``); ``None`` — без кэша.
     layout_cache_dir: Path | None = None
+    # Корень кэша разбора DeepSeek-OCR-2 (затравки line art, формат кэша surya); ``None`` — без него.
+    deepseek_cache_dir: Path | None = None
 
     # Пороги детекторов (растр и др.) и правило обложки.
     layout: LayoutOptions = LayoutOptions()
@@ -164,8 +166,9 @@ def analyse_page(
             Find.RASTER: [_known_region(item) for item in options.known_raster],
             Find.TABLES: [_known_region(item) for item in options.known_tables],
         }
+        deepseek = SuryaCache(options.deepseek_cache_dir, readonly=True) if options.deepseek_cache_dir else None
         layout = PageLayout(image, options.finds(), options.layout_options(), order_index, known)
-        analysis.layout = layout.prepare(cache if options.use_surya_layout else None)
+        analysis.layout = layout.prepare(cache if options.use_surya_layout else None, deepseek)
         return analysis
     except Exception as exc:  # noqa: BLE001 — одна битая полоса не должна валить прогон
         analysis.error = str(exc)

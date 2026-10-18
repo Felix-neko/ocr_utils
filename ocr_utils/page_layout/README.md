@@ -48,15 +48,17 @@ layout.rotated_text_not_in_tables_regions, layout.best_page_orientation, layout.
 | `surya/cache.py` | `SuryaCache`: `<root>/<variant>/<cache_name>.json`, попадание по отпечатку источника или дайджесту кадра, `legacy` из старых pickle (`import-legacy-cache`) |
 | `surya/source.py` | `SuryaSource` / `SuryaSourceConfig`: кэш → модель → политика промаха (`FAIL` / `SKIP`) |
 | `raster/` | растровый детектор (точки сетки, тон, цвет, обложка, сборка) — бывший `scan_markup.detection.*` |
-| `tables/` | детектор таблиц v4.2 — бывший `scan_markup.table_detection` (README там же) |
+| `tables/` | детектор таблиц (`TABLES_VERSION`) — бывший `scan_markup.table_detection` (README там же) |
 | `line_art/features.py` | признаки пятен и скоплений линеек — бывший `line_art_detection.features` |
-| `line_art/detector.py` | единый детектор: затравки (схемы детектора таблиц + surya Figure/Form/Equation/Picture + пятна и линейки) через одну пиксельную проверку, вне растра и таблиц; уверенность = доля семейств источников |
+| `line_art/detector.py` | единый детектор: затравки (схемы детектора таблиц + surya Figure/Form/Equation/Picture + блоки `image` DeepSeek-OCR-2 из его кэша + пятна и линейки) через одну пиксельную проверку, вне растра и таблиц; пересекающиеся затравки разных источников сливаются в одну (`merge_seeds`) — двух комплектов одной находки нет; уверенность = доля семейств источников (знаменатель — таблицы, surya, пиксели; DeepSeek сверх него) |
+| `line_art/features.py`: правила v6 | против ложных находок пака-2 (CVAT, 2026-10-18): **A** — низкое (≤ 1,5 строки) пятно под текстовым блоком surya — слипшиеся буквы заголовка; **B** — открытая ломаная из тонких линеек (≥ 80 % краски в осевых прогонах от двух строк, толщина ≤ 0,5 мм) — обломок рамки; **C** — затравка без подтверждения пикселями или детектором таблиц обязана иметь заполнение от `MIN_FILL` и штрих (двумерное пятно или две замкнутые коробки): строка бланка и рамка «Примечание» от surya `Form` не проходят |
+| `line_art/deepseek/page_cache.py` | кэш разбора полосы целиком DeepSeek-OCR-2 (затравки line art): кадр surya → воркер vLLM (`runner.run_worker`, под сторожем памяти) → блоки в формате кэша surya под своим корнем; `page_layout prefill-deepseek`, `scan_markup detect --deepseek-cache` |
 | `line_art/deepseek/` | решение по кандидату двумя проходами DeepSeek-OCR-2 (`decide.py`): объекты, надпись, неясно или **пометка** — карандашная пометка на полях (подчёркивание, скобка, дуга через колонку) по остатку вырезки с залитыми словами (`marks.py`, `reports/margin_marks.md`); в JSON полосы разбора пака — список `marks`, не объект и не запрет для текстовых блоков; **одиночная черта** — рамка рисунка или «неясно» тоньше 5 мм (`decide.is_thin_stroke`: концевые черты статей, линейки, края колонок, куски фото и заголовков — 57 рамок пака-1, ни одного рисунка) снимается с объектов в список `strokes` (`pack_analysis.final.split_strokes`, и при пересборке блоков из прошлого разбора); версия решения — `DECISION_VERSION` (в `versions.line_art_decision`) |
 | `rotated_text/` | Docstrum (бывший `text_layer_fix.docstrum`) и зоны повёрнутого текста вне таблиц (без tesseract) |
 | `orientation/` | ориентация полосы целиком — бывший `scan_markup.orientation` (`python -m ocr_utils.page_layout.orientation`) |
 | `analysis.py` | фасад `PageLayout`, `LayoutOptions`, `Find` |
 | `prefill.py` | набивка кэша surya пачкой: рендер в пуле, модель в родителе |
-| `cli.py` | `analyze` (одна страница, оверлей, JSON), `prefill-surya`, `import-legacy-cache`, `verify-cache` |
+| `cli.py` | `analyze` (одна страница, оверлей, JSON), `prefill-surya`, `prefill-deepseek`, `import-legacy-cache`, `verify-cache` |
 
 ## Версии
 

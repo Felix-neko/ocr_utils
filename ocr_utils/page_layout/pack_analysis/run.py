@@ -15,14 +15,13 @@ import csv
 import json
 import logging
 import shutil
-import subprocess
-import sys
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
 from ocr_utils.page_layout.image import Variant
+from ocr_utils.page_layout.line_art.deepseek.runner import run_worker
 from ocr_utils.page_layout.pack_analysis.final import OverlayMode, final_page, reblock_page, render_for_maps
 from ocr_utils.page_layout.pack_analysis.raster_db import load_raster, same_raster
 from ocr_utils.page_layout.pack_analysis.stages import (
@@ -43,12 +42,6 @@ from ocr_utils.page_layout.text_blocks.page import AxisKind
 
 logger = logging.getLogger(__name__)
 
-# Окружение и воркер vLLM (рядом с логикой DeepSeek).
-DEEPSEEK_DIR = Path(__file__).resolve().parent.parent / "line_art" / "deepseek" / "vllm_env"
-WATCHDOG = Path(__file__).resolve().parents[3] / "scripts" / "memory_watchdog.py"
-# Сторож: потолок памяти сессии vLLM и минимум свободной памяти системы, ГБ.
-WATCHDOG_LIMIT_GB = 90
-WATCHDOG_MIN_AVAILABLE_GB = 12
 
 
 def list_tasks(root: Path, pages_file: Path | None = None, limit: int | None = None) -> list[PageTask]:
@@ -273,31 +266,8 @@ def stage_candidates(
 
 
 def stage_deepseek(jobs_file: Path, out_dir: Path, prompts: str) -> None:
-    """Стадии 3 и 5: воркер vLLM подпроцессом (своя сессия) под сторожем памяти; ждёт окончания."""
-    if not jobs_file.read_text().strip():
-        return
-    log = out_dir.parent / f"{out_dir.name}.log"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        "uv", "run", "--project", str(DEEPSEEK_DIR), "python", str(DEEPSEEK_DIR / "worker.py"),
-        "--jobs", str(jobs_file), "--out-dir", str(out_dir), "--prompts", prompts,
-    ]  # fmt: skip
-    with log.open("a") as handle:
-        worker = subprocess.Popen(
-            command, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
-        )
-    watchdog = subprocess.Popen(
-        [
-            sys.executable, str(WATCHDOG), "--sid", str(worker.pid), "--limit-gb", str(WATCHDOG_LIMIT_GB),
-            "--min-available-gb", str(WATCHDOG_MIN_AVAILABLE_GB), "--log", str(out_dir.parent / f"{out_dir.name}_watchdog.log"),
-        ],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-    )  # fmt: skip
-    code = worker.wait()
-    watchdog.wait()
-    if code != 0:
-        raise RuntimeError(f"воркер DeepSeek завершился с кодом {code}, лог {log}")
-    logger.info("DeepSeek %s: готово (%s)", out_dir.name, prompts)
+    """Стадии 3 и 5: воркер vLLM подпроцессом под сторожем памяти (:func:`deepseek.runner.run_worker`); ждёт окончания."""
+    run_worker(jobs_file, out_dir, prompts)
 
 
 def stage_pass2(work: Path, jobs: int) -> None:

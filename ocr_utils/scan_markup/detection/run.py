@@ -108,6 +108,9 @@ class DetectParams:
     use_surya_layout: bool = True
     # Корень кэша surya (``page_layout.surya.SuryaCache``, вариант ``scan``); None — считать каждый раз.
     layout_cache_dir: Path | None = None
+    # Корень кэша разбора DeepSeek-OCR-2 (``line_art.deepseek.page_cache``): блоки ``image`` — затравки
+    # line art. None — без них; полосы, которых в кэше нет, идут тоже без них.
+    deepseek_cache_dir: Path | None = None
     # Что считать: растр, таблицы, line art, повёрнутый текст. Ориентация — ниже, у неё свой
     # набор ключей.
     raster: bool = True
@@ -189,6 +192,7 @@ class DetectParams:
             allowed_rotations=self.allowed_rotations(),
             use_surya_layout=self.use_surya_layout,
             layout_cache_dir=self.layout_cache_dir,
+            deepseek_cache_dir=self.deepseek_cache_dir,
             layout=layout,
         )
 

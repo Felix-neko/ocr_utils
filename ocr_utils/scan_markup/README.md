@@ -50,6 +50,13 @@ uv run python -m ocr_utils.scan_markup from-cvat \
 # 2а. Дозалить находки нового детектора в уже размеченные задачи (PATCH, ручная разметка цела)
 uv run python -m ocr_utils.scan_markup to-cvat ... --append-kinds table,line_art_schema,rotated_text
 
+# 2б. Первичная предразметка только части видов (метки проекта всё равно полные)
+uv run python -m ocr_utils.scan_markup to-cvat ... --kinds color,grayscale,table,line_art_schema
+
+# 2в. Снести проект пака с JSON-бэкапом разметки и отвязать базу, чтобы завести его заново;
+#     без --yes — только опись (задачи, джобы, тронутые разметчиком, шейпы и теги по меткам)
+uv run python -m ocr_utils.scan_markup delete-project --db ... --pack-name пак-2 --yes
+
 # 3а. Те же находки — в уточнённую базу, не дожидаясь разметчика (source=auto, растр не трогается)
 uv run python -m ocr_utils.scan_markup copy-regions \
     --db ~/Projects/mts_markup/pack1.sqlite \
@@ -405,6 +412,11 @@ Docstrum вне таблиц, без стороны), с `source = auto`. В PDF
 воркере; нет, битая или чужая — родитель зовёт модель и пишет запись. Старые pickle-кэши
 перенесены командой `page_layout import-legacy-cache` (записи `legacy`, принимаются на веру).
 Без surya (`--no-use-surya-layout`) детекторы работают по одним пикселям.
+
+**Кэш DeepSeek-OCR-2** (`--deepseek-cache`, тот же формат, свой корень): блоки `image` — затравки
+line art там, где surya промахнулась (тонкий график, названный `Caption`). Набивается заранее
+`page_layout prefill-deepseek` (vLLM в своём окружении, ~1 с на полосу); полоса без записи идёт
+без этих затравок. Пак-2: `run_scripts/scan_markup/pack2/run_0_prefill_deepseek.sh`.
 
 `--raster/--no-raster`, `--tables/--no-tables`, `--line-art/--no-line-art`,
 `--rotated-text/--no-rotated-text` выключают семейства целиком; выключенное в базе не трогается.

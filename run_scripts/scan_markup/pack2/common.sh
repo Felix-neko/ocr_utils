@@ -41,6 +41,12 @@ DEBUG_DIR="$PACK_WORK/debug"
 # набивает detect сам (модель зовётся на полосу без записи, ~1 с GPU) либо `page_layout prefill-surya`.
 LAYOUT_CACHE_DIR="/mnt/hotstore/scan_processing/mts/pack2_page_layout"
 
+# Кэш разбора полос DeepSeek-OCR-2 (тот же формат, свой корень): блоки image — затравки line art
+# (page_layout.line_art.deepseek.page_cache). Набивает run_0_prefill_deepseek.sh; рабочая папка —
+# кадры PNG и ответы воркера vLLM, после набивки её можно удалить. Обе — на SSD.
+DEEPSEEK_CACHE_DIR="/mnt/hotstore/scan_processing/mts/pack2_deepseek_layout"
+DEEPSEEK_WORK_DIR="/mnt/hotstore/scan_processing/mts/pack2_deepseek_work"
+
 # Очистка пака (шаг 7): закрас разметки и размытие фона. Результат — на SSD, а не на
 # /mnt/dump3: корень /mnt/dump3 синхронит Яндекс.Диск, а он переименовывает новые файлы
 # поверх исходных. Объём небольшой: ~5 ГиБ (597 полос, почти все в сером по ~8 МиБ).

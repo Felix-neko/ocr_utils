@@ -229,6 +229,42 @@ MIN_REGION_FRAC = 0.002
 # вклейка). Такие идут в отчёт отдельной группой: их и так видно.
 FULL_PAGE_FRAC = 0.75
 
+# --- ЛОЖНЫЕ НАХОДКИ ПАКА-2 (CVAT, 2026-10-18): три правила -----------------------------
+# Разметчик снял 4 рамки из 63; все четыре воспроизведены детектором в памяти, показа с
+# обратной стороны среди них нет. Правила отсекают их и ещё две такие же (03/0160_2R — слово
+# заголовка, 03/0030_1L — угол рамки выходных данных), не задевая ни одной оставленной рамки.
+#
+# A. СЛИПШАЯСЯ СТРОКА ЗАГОЛОВКА. Жирные буквы заголовка («…ашкирии», 1977/03 0190_2R)
+# сливаются в одно пятно 109×29 px при 150 dpi — по площади и сторонам это «штрих». Отличает
+# его высота (меньше полутора строк) и то, что его целиком накрывает текстовый блок surya.
+# Одно накрытие текстом не годится: у логотипов рубрик над статьями оно 0.85–0.98, но они
+# высотой от 2,7 шага строк.
+HEADING_MAX_HEIGHT_PX = int(1.5 * PITCH_PX)
+HEADING_TEXT_COVER = 0.9
+
+# B. ОТКРЫТАЯ ЛОМАНАЯ ИЗ ЛИНЕЕК. Обломок тонкой рамки полосы выходных данных (L из вертикали
+# и горизонтали, 1977/01 0050_1L) — одно пятно с рамкой во всю высоту. Почти вся его краска
+# лежит в длинных (от двух шагов строк) горизонтальных и вертикальных прогонах, а «толщина»
+# площадь / (w + h) — это толщина линии, 2–3 px при 150 dpi. Замкнутая рамка с надписью
+# (1977/03 0500_1L, оставлена) даёт удвоенную толщину (5,3 px), схемы и логотипы рубрик —
+# долю осевых прогонов 0.40–0.71.
+OPEN_FRAME_RUN_PX = 2 * PITCH_PX
+OPEN_FRAME_MIN_AXIS_FRAC = 0.8
+OPEN_FRAME_MAX_THICK_PX = 12  # 3 px при 150 dpi
+
+# C. ЗАТРАВКА БЕЗ ШТРИХА. Подсказки моделей (surya ``Form``: строка бланка с подчёркиваниями,
+# рамка «Примечание» под таблицей — 1977/05 0310_2R и 0410_1L) проверялись только на сплошную
+# массу и кляксу и проходили. Подсказка, которую не подтвердили ни пиксели, ни детектор таблиц,
+# теперь обязана иметь заполнение рамки не ниже ``MIN_FILL`` и штрих внутри: двумерное пятно (как
+# у ворот пятна, но без порога заполнения: тонкий график — 0,013) ИЛИ хотя бы ``SEED_MIN_BOXES``
+# замкнутых коробок (дыра площадью от квадрата шага строк — не просвет буквы): у блок-схемы из
+# отдельных коробок крупного пятна нет. В строке бланка и рамке примечания нет ни того, ни
+# другого; у пропущенного surya графика (1977/04 0180_2R) двумерное пятно есть.
+SEED_AGREE_SHARE = 0.5
+TABLE_SEED_PREFIX = "tables:"
+BOX_HOLE_MIN_PX = PITCH_PX * PITCH_PX
+SEED_MIN_BOXES = 2
+
 
 @dataclass(frozen=True)
 class LineArtParams:
@@ -265,6 +301,13 @@ class LineArtParams:
     merge_gap_px: int = MERGE_GAP_PX
     min_region_frac: float = MIN_REGION_FRAC
     full_page_frac: float = FULL_PAGE_FRAC
+    heading_max_height_px: int = HEADING_MAX_HEIGHT_PX
+    heading_text_cover: float = HEADING_TEXT_COVER
+    open_frame_run_px: int = OPEN_FRAME_RUN_PX
+    open_frame_min_axis_frac: float = OPEN_FRAME_MIN_AXIS_FRAC
+    open_frame_max_thick_px: int = OPEN_FRAME_MAX_THICK_PX
+    box_hole_min_px: int = BOX_HOLE_MIN_PX
+    seed_min_boxes: int = SEED_MIN_BOXES
 
 
 def params_for_dpi(dpi: int | None, **overrides) -> LineArtParams:
@@ -301,6 +344,10 @@ def params_for_dpi(dpi: int | None, **overrides) -> LineArtParams:
         halftone_hole_area_px=area(HALFTONE_HOLE_AREA_PX),
         long_run_px=length(LONG_RUN_PX),
         merge_gap_px=length(MERGE_GAP_PX),
+        heading_max_height_px=length(HEADING_MAX_HEIGHT_PX),
+        open_frame_run_px=length(OPEN_FRAME_RUN_PX),
+        open_frame_max_thick_px=length(OPEN_FRAME_MAX_THICK_PX),
+        box_hole_min_px=area(BOX_HOLE_MIN_PX),
     )
     return replace(params, **overrides) if overrides else params
 
@@ -388,6 +435,132 @@ def long_run_fraction(mask: np.ndarray, run_px: int) -> float:
     return float(np.count_nonzero(survived)) / total
 
 
+def axis_run_fraction(mask: np.ndarray, run_px: int) -> float:
+    """Доля краски, лежащей в ГОРИЗОНТАЛЬНЫХ или ВЕРТИКАЛЬНЫХ прогонах не короче ``run_px``.
+
+    То же размыкание, что у :func:`long_run_fraction`, но только по двум осям: у ломаной из
+    типографских линеек почти вся краска в таких прогонах, у рисунка и схемы — меньшая часть.
+
+    Args:
+        mask: Битовая маска пятна (uint8 0/1).
+        run_px: Минимальная длина прогона.
+
+    Returns:
+        Доля от 0 до 1; 0, если краски нет вовсе.
+    """
+    total = int(np.count_nonzero(mask))
+    if total == 0:
+        return 0.0
+    horizontal = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, run_px), np.uint8))
+    vertical = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((run_px, 1), np.uint8))
+    return float(np.count_nonzero(horizontal | vertical)) / total
+
+
+def is_open_frame(mask: np.ndarray, box, area: int, params: LineArtParams) -> bool:
+    """Правило B: пятно — открытая ломаная из тонких линеек (обломок рамки), а не рисунок.
+
+    Args:
+        mask: Маска пятна в его рамке (uint8 0/1).
+        box: Рамка пятна ``(x0, y0, x1, y1)``.
+        area: Площадь краски пятна, px.
+        params: Пороги.
+
+    Returns:
+        ``True``, если доля осевых длинных прогонов не ниже ``open_frame_min_axis_frac`` и толщина
+        ``area / (w + h)`` не больше ``open_frame_max_thick_px``.
+    """
+    thickness = area / max(1, (box[2] - box[0]) + (box[3] - box[1]))
+    if thickness > params.open_frame_max_thick_px:
+        return False
+    return axis_run_fraction(mask, params.open_frame_run_px) >= params.open_frame_min_axis_frac
+
+
+def is_glued_heading(box, text_boxes, params: LineArtParams) -> bool:
+    """Правило A: пятно — слипшиеся буквы строки заголовка (низкое и накрыто текстовым блоком).
+
+    Args:
+        box: Рамка пятна ``(x0, y0, x1, y1)``.
+        text_boxes: Текстовые блоки полосы ``(x0, y0, x1, y1)`` в тех же пикселях.
+        params: Пороги.
+
+    Returns:
+        ``True``, если высота не больше ``heading_max_height_px`` и текст накрывает рамку не меньше
+        чем на ``heading_text_cover``.
+    """
+    if box[3] - box[1] > params.heading_max_height_px:
+        return False
+    return bool(text_boxes) and _overlaps_any(box, text_boxes, params.heading_text_cover)
+
+
+def has_planar_blob(mask: np.ndarray, params: LineArtParams) -> bool:
+    """Правило C: есть ли в рамке двумерное связное пятно — то, что прошло бы ворота пятна без порога заполнения.
+
+    Args:
+        mask: Краска в рамке затравки (uint8 0/1).
+        params: Пороги (площадь, стороны, вытянутость).
+
+    Returns:
+        ``True``, если хотя бы одно пятно проходит площадь, длинную и короткую стороны и вытянутость.
+    """
+    count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return False
+    body = stats[1:]
+    widths, heights = body[:, cv2.CC_STAT_WIDTH], body[:, cv2.CC_STAT_HEIGHT]
+    majors = np.maximum(widths, heights)
+    minors = np.maximum(1, np.minimum(widths, heights))
+    planar = (
+        (body[:, cv2.CC_STAT_AREA] >= params.min_area_px)
+        & (majors >= params.min_side_px)
+        & (minors >= params.min_minor_px)
+        & (majors / minors <= params.max_aspect)
+    )
+    return bool(planar.any())
+
+
+def closed_boxes(mask: np.ndarray, params: LineArtParams) -> int:
+    """Сколько в маске замкнутых коробок — дыр площадью от ``box_hole_min_px`` (просветы букв мельче).
+
+    Args:
+        mask: Краска в рамке (uint8 0/1).
+        params: Пороги.
+
+    Returns:
+        Число крупных дыр (внутренних контуров).
+    """
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return 0
+    return sum(
+        1
+        for index, row in enumerate(hierarchy[0])
+        if row[3] != -1 and cv2.contourArea(contours[index]) >= params.box_hole_min_px
+    )
+
+
+def has_stroke_structure(mask: np.ndarray, params: LineArtParams) -> bool:
+    """Правило C: есть ли в рамке затравки штрих — двумерное пятно или несколько замкнутых коробок.
+
+    Args:
+        mask: Краска в рамке затравки (uint8 0/1).
+        params: Пороги.
+
+    Returns:
+        ``True``, если :func:`has_planar_blob` или коробок не меньше ``seed_min_boxes``.
+    """
+    return has_planar_blob(mask, params) or closed_boxes(mask, params) >= params.seed_min_boxes
+
+
+def _agrees(box, other, share: float) -> bool:
+    """Согласны ли две рамки: пересечение не меньше ``share`` площади меньшей из них."""
+    width = min(box[2], other[2]) - max(box[0], other[0])
+    height = min(box[3], other[3]) - max(box[1], other[1])
+    if width <= 0 or height <= 0:
+        return False
+    smaller = min((box[2] - box[0]) * (box[3] - box[1]), (other[2] - other[0]) * (other[3] - other[1]))
+    return width * height >= share * max(1, smaller)
+
+
 def solid_fraction(mask: np.ndarray, radius: int) -> float:
     """Доля краски пятна, пережившая эрозию диском радиуса ``radius``.
 
@@ -473,7 +646,9 @@ def classify(mask: np.ndarray, box, area: int, params: LineArtParams, touches_bo
     return Candidate(box, area, fill, holes, hole_median, long_run, compactness, source), None
 
 
-def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extra_boxes=()) -> PageFindings:
+def analyse_gray(
+    gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extra_boxes=(), text_boxes=()
+) -> PageFindings:
     """Находит на странице крупный штрих и считает, какую долю полосы он занимает.
 
     Порядок ровно такой: сначала дешёвые ворота по размеру (их проходят единицы пятен из
@@ -490,7 +665,10 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
             (таблицы, блоки surya, любые подсказки); метка с пространством имён
             («surya:Figure», «tables:схема») становится ``source`` кандидата как есть.
             Связная статистика их не видит: у таблицы без линеек и у формулы длинных
-            связных штрихов нет. Пиксельные проверки к ним применяются те же.
+            связных штрихов нет. Пиксельные проверки к ним применяются те же; подсказка, которую
+            не подтвердили ни пиксели, ни детектор таблиц, проходит ещё правило C (двумерное
+            пятно и ``min_fill``).
+        text_boxes: Текстовые блоки полосы (surya) для правила A — слипшаяся строка заголовка.
 
     Returns:
         Находки страницы вместе со счётчиком причин отбраковки.
@@ -533,7 +711,13 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
             )
             touches = box[0] <= 1 or box[1] <= 1 or box[2] >= width - 1 or box[3] >= height - 1
             mask = (labels[box[1] : box[3], box[0] : box[2]] == index + 1).astype(np.uint8)
-            candidate, reason = classify(mask, box, int(areas[index]), params, touches)
+            # Правила A и B — только для пятен: у затравок и скоплений линеек свои проверки.
+            if is_glued_heading(box, text_boxes, params):
+                candidate, reason = None, "слипшаяся строка заголовка"
+            elif is_open_frame(mask, box, int(areas[index]), params):
+                candidate, reason = None, "открытая ломаная из линеек"
+            else:
+                candidate, reason = classify(mask, box, int(areas[index]), params, touches)
             if candidate is None:
                 dropped[reason] = dropped.get(reason, 0) + 1
             else:
@@ -550,6 +734,8 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
             else:
                 candidates.append(candidate)
 
+    pixel_boxes = [c.box for c in candidates]  # пятна и скопления линеек — подтверждение затравок
+    table_seeds = [box for box, label in extra_boxes if label.startswith(TABLE_SEED_PREFIX)]
     for box, label in extra_boxes:
         box = (max(0, box[0]), max(0, box[1]), min(width, box[2]), min(height, box[3]))
         if box[2] - box[0] < 2 or box[3] - box[1] < 2:
@@ -557,8 +743,21 @@ def analyse_gray(gray: np.ndarray, params: LineArtParams, exclude_boxes=(), extr
         if any(_overlaps_any(box, [c.box], 0.8) for c in candidates):
             continue  # эту область уже нашли пиксели, второй раз не считаем
         mask = ink[box[1] : box[3], box[0] : box[2]]
+        area = int(np.count_nonzero(mask))
+        # Правило C: подсказка без подтверждения пикселями или детектором таблиц — только со штрихом.
+        agreed = label.startswith(TABLE_SEED_PREFIX) or any(
+            _agrees(box, other, SEED_AGREE_SHARE) for other in pixel_boxes + table_seeds
+        )
+        if not agreed:
+            fill = area / max(1, (box[2] - box[0]) * (box[3] - box[1]))
+            if fill < params.min_fill:
+                dropped["затравка: пустая рамка"] = dropped.get("затравка: пустая рамка", 0) + 1
+                continue
+            if not has_stroke_structure(mask, params):
+                dropped["затравка: нет штриха"] = dropped.get("затравка: нет штриха", 0) + 1
+                continue
         # Метка идёт в источник кандидата как есть («surya:Figure», «tables:схема», «hint»).
-        candidate, reason = classify(mask, box, int(np.count_nonzero(mask)), params, False, label)
+        candidate, reason = classify(mask, box, area, params, False, label)
         if candidate is None:
             dropped[reason] = dropped.get(reason, 0) + 1
         else:

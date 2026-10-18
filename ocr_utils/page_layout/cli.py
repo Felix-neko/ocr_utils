@@ -421,6 +421,56 @@ def reblock_pack_command(
         stage_edge_craft(tasks, out_dir, jobs, AxisKind(axis_name), GutterMode(gutter_mode), BlocksMode(blocks_mode))
 
 
+@main.command("prefill-deepseek")
+@click.option(
+    "--cache",
+    "cache_root",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Корень кэша DeepSeek (свой, НЕ корень surya): <корень>/<вариант>/<полоса>.json.",
+)
+@click.option("--variant", required=True, type=click.Choice(VARIANTS))
+@click.option("--pdf-dir", "pdf_dirs", multiple=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--scan-dir", default=None, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--default-dpi", default=None, type=int, help="Разрешение картинок без тега.")
+@click.option(
+    "--work-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Рабочая папка на SSD: кадры PNG, задания и ответы воркера (прерванный прогон продолжается).",
+)
+@click.option("--jobs", default=16, show_default=True, type=int, help="Воркеров на подготовку кадров.")
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def prefill_deepseek_command(
+    cache_root: Path,
+    variant: str,
+    pdf_dirs: tuple[Path, ...],
+    scan_dir: Path | None,
+    default_dpi: int | None,
+    work_dir: Path,
+    jobs: int,
+    log_level: str,
+) -> None:
+    """Набить кэш разбора полос DeepSeek-OCR-2 (затравки line art): кадры surya → vLLM → блоки."""
+    from ocr_utils.page_layout.line_art.deepseek.page_cache import prefill_page_cache
+    from ocr_utils.page_layout.prefill import pdf_requests, scan_requests
+
+    _set_log_level(log_level)
+    kind = Variant(variant)
+    requests = []
+    for pdf_dir in pdf_dirs:
+        requests.extend(pdf_requests(sorted(Path(pdf_dir).glob("*.pdf")), kind))
+    if scan_dir is not None:
+        requests.extend(scan_requests(scan_dir, kind, default_dpi))
+    if not requests:
+        raise click.ClickException("нечего набивать: укажите --pdf-dir и/или --scan-dir")
+    stats = prefill_page_cache(requests, SuryaCache(cache_root), work_dir, jobs=jobs)
+    click.echo(
+        f"Страниц {stats.requested}: уже в кэше {stats.cached}, размечено {stats.done} "
+        f"(обрезано лимитом токенов {stats.truncated}), не удалось {stats.failed} -> {cache_root / variant}"
+    )
+
+
 @main.command("prefill-surya")
 @click.option("--cache", "cache_root", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--variant", required=True, type=click.Choice(VARIANTS))
