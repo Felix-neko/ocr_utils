@@ -55,6 +55,15 @@ CLEAN_ROOT="/mnt/hotstore/scan_processing/mts/pack2_background_blurred"
 BLURRED_DIR="$CLEAN_ROOT/blurred"
 CLEAN_DEBUG_DIR="$CLEAN_ROOT/debug"
 
+# Заострённые копии из Capture One. Он выгружает их плоско ({выпуск}{полоса}.jpg), их раскладывают
+# руками в ту же схему {год}/{выпуск}/полоса, что у blurred: имя — как у очищенной полосы, только .jpg.
+SHARPENED_DIR="$CLEAN_ROOT/sharpened"
+
+# Промежуточные PDF под FineReader — тоже на SSD, по паку одной папкой (Hot Folder берёт папку целиком).
+PDF_ROOT="/mnt/hotstore/scan_processing/mts/pack2_pdf"
+FULL_PDF_DIR="$PDF_ROOT/full_intermediate_pdfs"
+PICS_ONLY_PDF_DIR="$PDF_ROOT/intermediate_pdfs_pages_with_pics_only"
+
 # Должен лежать ВНУТРИ IMAGES_DIR из docker/.env (или совпадать с ним), иначе cvat_server
 # не увидит картинок: задачи заводятся из смонтированного share, по сети файлы не передаются.
 # Общий с паком-1: to-cvat сам кладёт превью в подпапку $PACK_NAME и заводит отдельный проект.

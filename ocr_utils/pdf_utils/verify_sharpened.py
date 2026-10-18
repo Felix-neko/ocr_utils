@@ -204,11 +204,14 @@ def load_pages(db_path: Path, pack_name: str, originals_dir: Path, sharpened_dir
     with open_db(db_path, create=False)() as session:
         pack = require_pack(session, pack_name)
         for _year, _issue, page in iter_pages(pack):
-            rel = page.sharpened_text_pic_rel_path or Path(page.source_rel_path).with_suffix(".jpg").as_posix()
+            # Очищенный файл (с отпечатком в имени), если его записал прогон очистки; иначе исходное
+            # имя — как в intermediate_pdfs.load_plans, чтобы сверялись ровно те файлы, что пойдут в PDF.
+            base = page.cleaned_rel_path or page.source_rel_path
+            rel = page.sharpened_text_pic_rel_path or Path(base).with_suffix(".jpg").as_posix()
             pages.append(
                 PageCheck(
-                    rel_path=page.source_rel_path,
-                    original=originals_dir / page.source_rel_path,
+                    rel_path=base,
+                    original=originals_dir / base,
                     sharpened=sharpened_dir / rel,
                     width=int(page.width or 0),
                     height=int(page.height or 0),
