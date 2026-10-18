@@ -151,13 +151,16 @@ def flags_from_db(db_path: Path, pack_name: str) -> dict[str, PageFlags]:
         pack_name: Имя пака в базе (``packs.name``); нет такого — ``LookupError`` с перечнем паков.
 
     Returns:
-        ``{page_key: PageFlags}`` по всем полосам пака; пак без полос — ``LookupError``.
+        ``{page_key: PageFlags}`` по всем полосам пака; пак без полос — ``LookupError``. У полосы,
+        очищенной ``scan_cleanup`` (``cleaned_rel_path``, имя с отпечатком ``0030_2R.e7eb772f.tif``),
+        ключей два — исходный и очищенный: на входе может лежать как выгрузка Capture One под исходным
+        именем, так и сама очищенная полоса.
     """
     factory = open_db(db_path, create=False)
     with factory() as session:
         pack = require_pack(session, pack_name)  # LookupError с перечнем паков, если имя не то
         # Только нужные колонки, а не целые Page: полос в паке 12 тыс., а колонок у полосы за 40.
-        columns = [Page.source_rel_path, Page.is_toc, Page.is_year_index]
+        columns = [Page.source_rel_path, Page.cleaned_rel_path, Page.is_toc, Page.is_year_index]
         present = {column["name"] for column in inspect(session.get_bind()).get_columns(Page.__tablename__)}
         has_veto = "force_is_not_toc" in present
         if has_veto:
@@ -171,9 +174,13 @@ def flags_from_db(db_path: Path, pack_name: str) -> dict[str, PageFlags]:
         rows = session.execute(query).all()
     if not rows:
         raise LookupError(f"в базе {db_path} у пака {pack_name!r} нет полос")
-    return {
-        page_key(row[0]): PageFlags(bool(row[1]), bool(row[2]), bool(row[3]) if has_veto else False) for row in rows
-    }
+    flags: dict[str, PageFlags] = {}
+    for row in rows:
+        page_flags = PageFlags(bool(row[2]), bool(row[3]), bool(row[4]) if has_veto else False)
+        flags[page_key(row[0])] = page_flags
+        if row[1]:
+            flags[page_key(row[1])] = page_flags
+    return flags
 
 
 def flags_from_lists(lists_dir: Path) -> dict[str, PageFlags]:

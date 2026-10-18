@@ -20,6 +20,7 @@ from ocr_utils.external_ocr_services.boundary import (
     decide_boundary,
     doubt_reason,
     parse_verdicts,
+    source_image,
     strip_of,
     text_line_bands,
 )
@@ -299,3 +300,18 @@ def test_run_pipeline_checks_boundaries_once_per_issue(tmp_path):
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.boundary_requests == 0 and not [p for p in fake.payloads if "seams" in p["messages"][0]["content"]]
     assert "были направлены на смотр." in (tmp_path / "issues2" / "1966" / "1966_03.md").read_text(encoding="utf-8")
+
+
+def test_source_image_with_fingerprint_in_name(tmp_path):
+    """Полоса пака-2 с отпечатком в имени (``0060_2R.b3fab8a6.tif``) находится и по своему пути, и по ``.json``."""
+    issue = tmp_path / "1977/01"
+    issue.mkdir(parents=True)
+    Image.new("L", (4, 4)).save(issue / "0060_2R.b3fab8a6.tif")
+    Image.new("L", (4, 4)).save(issue / "0070_1L.jpg")
+    assert source_image(tmp_path, Path("1977/01/0060_2R.b3fab8a6.tif")) == issue / "0060_2R.b3fab8a6.tif"
+    assert source_image(tmp_path, Path("1977/01/0060_2R.b3fab8a6.json")) == issue / "0060_2R.b3fab8a6.tif"
+    assert source_image(tmp_path, Path("1977/01/0070_1L.json")) == issue / "0070_1L.jpg"
+    assert source_image(tmp_path, Path("1977/01/0060_2R.json")) == issue / "0060_2R.b3fab8a6.tif"
+    assert source_image(tmp_path, Path("1977/01/0080_1L.tif")) is None
+    Image.new("L", (4, 4)).save(issue / "0060_2R.ffffffff.tif")  # два отпечатка одной полосы — не угадываем
+    assert source_image(tmp_path, Path("1977/01/0060_2R.json")) is None

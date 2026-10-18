@@ -15,6 +15,7 @@ from ocr_utils.external_ocr_services import models as registry
 from ocr_utils.external_ocr_services.assemble import assemble_issue, issue_pages, list_issues, log_assembly, write_issue
 from ocr_utils.external_ocr_services.boundary import BoundaryChecker, CheckerStats, JoinKind
 from ocr_utils.external_ocr_services.heading_check import HeadingChecker
+from ocr_utils.external_ocr_services import fidelity
 from ocr_utils.external_ocr_services.client import DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, OpenRouterClient, api_key_from
 from ocr_utils.external_ocr_services.models import Reasoning
 from ocr_utils.external_ocr_services.ocr import DEFAULT_MAX_TOKENS, RunOptions, output_paths, read_meta
@@ -189,6 +190,19 @@ def main(log_level: str) -> None:
     help="При сборке спрашивать модель (текстом, без картинок) о статьях, оставшихся без `#` после сверки с оглавлением.",
 )
 @click.option(
+    "--check-fidelity/--no-check-fidelity",
+    default=True,
+    show_default=True,
+    help="После прогона сверить ответы с tesseract тех же полос (fidelity.csv): ловит пересказ вместо чтения.",
+)
+@click.option(
+    "--fidelity-jobs",
+    type=int,
+    default=16,
+    show_default=True,
+    help="Воркеров tesseract при сверке (CPU, по полосе на воркер).",
+)
+@click.option(
     "--on-missed-toc",
     type=click.Choice([mode.value for mode in OnMissedToc]),
     default=OnMissedToc.REDO.value,
@@ -234,6 +248,8 @@ def run(
     assemble: bool,
     check_boundaries: bool,
     check_headings: bool,
+    check_fidelity: bool,
+    fidelity_jobs: int,
     on_missed_toc: str,
     redo_scope: str,
     api_key: str | None,
@@ -325,6 +341,12 @@ def run(
         click.echo("В БАЗЕ ОГЛАВЛЕНИЕ, МОДЕЛЬ — НЕТ (см. demoted_toc.txt): " + "; ".join(stats.demoted_toc))
     if stats.redone_issues:
         click.echo("Перераспознаны: " + ", ".join(stats.redone_issues))
+    # Сверка с tesseract: валидный JSON ещё не значит, что полоса прочитана (пересказ у чужого провайдера)
+    if check_fidelity:
+        rows = fidelity.check_pages(pages_dir, in_dir, fidelity_jobs, only_year, only_issue)
+        summary = fidelity.summarize(rows)
+        logger.info("%s", summary)
+        click.echo(summary.replace("сверка с tesseract", "Сверка с tesseract", 1))
 
 
 @main.command("assemble")
@@ -494,6 +516,33 @@ def normalize_command(pages_dir: Path, only_year: str | None, only_issue: str | 
             paths.md.write_text(to_markdown(result), encoding="utf-8")
         logger.info("%s: полосы переразобраны", key)
     click.echo(f"Полос переразобрано: {pages}, из них изменилось: {changed} (выпусков {len(keys)}).")
+
+
+@main.command("fidelity")
+@click.option(
+    "--pages-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Папка полос прогона (.md и .meta.json); сюда же пишется fidelity.csv.",
+)
+@click.option(
+    "--in-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Вход прогона — те же картинки, что видела модель (путь полосы берётся из .meta.json).",
+)
+@click.option("--jobs", type=int, default=16, show_default=True, help="Воркеров tesseract (CPU, по полосе на воркер).")
+@click.option("--only-year", default=None, help="Только этот годовой комплект.")
+@click.option("--only-issue", default=None, help="Только этот выпуск (имя папки).")
+@click.option("--log-level", default="INFO", show_default=True)
+def fidelity_command(
+    pages_dir: Path, in_dir: Path, jobs: int, only_year: str | None, only_issue: str | None, log_level: str
+) -> None:
+    """Сверить готовые ответы модели с tesseract тех же полос: fidelity.csv, худшие сверху."""
+    _setup_logging(None, log_level)
+    rows = fidelity.check_pages(pages_dir, in_dir, jobs, only_year, only_issue)
+    click.echo(fidelity.summarize(rows).replace("сверка с tesseract", "Сверка с tesseract", 1))
+    click.echo(f"Отчёт: {pages_dir / fidelity.REPORT_NAME}")
 
 
 @main.command("models")

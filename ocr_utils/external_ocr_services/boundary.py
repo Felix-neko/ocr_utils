@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import re
@@ -374,15 +375,31 @@ def strip_of(path: Path, at_bottom: bool, quality: int = DEFAULT_QUALITY, lines:
 def source_image(in_dir: Path, rel: Path) -> Path | None:
     """Файл полосы на входе по её относительному пути с любым суффиксом (``.json`` из out-dir тоже годится).
 
+    Суффикс картинки дописывается к имени без последнего суффикса, а не подменяет «последний суффикс»
+    через ``with_suffix``: у очищенных полос пака-2 в имени отпечаток (``0060_2R.b3fab8a6.tif``), и
+    ``with_suffix`` принял бы ``.b3fab8a6`` за суффикс — файл не находился, стык не проверялся.
+    Отдельная сборка (``assemble``) знает полосу по ``.json`` выхода, где отпечатка нет (``0060_2R.json``):
+    тогда берётся единственный файл ``0060_2R.<отпечаток><суффикс>``; несколько таких — неоднозначно, ``None``.
+
     Args:
         in_dir: Корень входа.
         rel: Путь полосы относительно корня.
+
+    Returns:
+        Путь к файлу полосы или ``None``, если ни с одним суффиксом из ``IMAGE_SUFFIXES`` его нет.
     """
     base = in_dir / rel.with_suffix("")
     for suffix in IMAGE_SUFFIXES:
-        candidate = base.with_suffix(suffix)
+        candidate = base.parent / f"{base.name}{suffix}"
         if candidate.is_file():
             return candidate
+    # Имя без отпечатка: ищем «имя.<что угодно><суффикс картинки>», принимаем только единственное совпадение
+    if base.parent.is_dir():
+        fingerprinted = [
+            path for path in base.parent.glob(f"{glob.escape(base.name)}.*") if path.suffix.lower() in IMAGE_SUFFIXES
+        ]
+        if len(fingerprinted) == 1:
+            return fingerprinted[0]
     return None
 
 

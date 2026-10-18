@@ -80,6 +80,19 @@ def test_flags_from_db_match_jpg_input_and_veto_wins(tmp_path):
         flags_from_db(db, "другой")
 
 
+def test_flags_from_db_match_cleaned_input(tmp_path):
+    """Вход — очищенные полосы с отпечатком в имени (пак-2: ``0030_2R.e7eb772f.tif``): флаги находятся и по нему."""
+    db = _db_with_flags(tmp_path)
+    factory = open_db(db, create=False)
+    with factory() as session:
+        page = require_pack(session, "пак-1").year_packages[0].issues[0].pages[0]
+        page.cleaned_rel_path = "1966/03/IMG_0104_2R.e7eb772f.tif"
+        session.commit()
+    table = flags_from_db(db, "пак-1")
+    assert flags_for(Path("1966/03/IMG_0104_2R.e7eb772f.tif"), table).toc_kind == "contents"
+    assert flags_for(Path("1966/03/IMG_0104_2R.jpg"), table).toc_kind == "contents"
+
+
 def test_flags_from_db_does_not_write(tmp_path):
     """Чтение флагов не трогает файл базы: ни create_all, ни дописывания колонок, ни commit."""
     db = _db_with_flags(tmp_path)

@@ -103,7 +103,7 @@ def build_payload(spec: ModelSpec, tokens: list[str], max_tokens: int = 300) -> 
     }
     provider: dict = {}
     if spec.provider_order:
-        provider["order"], provider["allow_fallbacks"] = list(spec.provider_order), True
+        provider["order"], provider["allow_fallbacks"] = list(spec.provider_order), spec.allow_fallbacks
     if spec.provider_ignore:
         provider["ignore"] = list(spec.provider_ignore)
     if provider:

@@ -462,7 +462,9 @@ def test_payload_deepseek_tiles_and_source_year(tmp_path):
     tiles = prepare_tiles(tmp_path / "in" / ISSUE / "IMG_0002.jpg", max_src_tile=300, max_model_tile=200)
     job = PageJob(Path(ISSUE) / "IMG_0002.jpg", "page", "none", "1966", ("Р",), ({"title": "Т", "authors": []},), "h")
     payload = build_payload(spec, tiles, RunOptions(source="журнал «МТС», {year}"), job, spec.json_mode)
-    assert payload["response_format"] == {"type": "json_object"} and payload["provider"]["order"] == ["deepseek"]
+    assert payload["response_format"] == {"type": "json_object"}
+    # Только родной провайдер, без отката: чужая копия модели (OpenInference, пак-2) пересказывала текст
+    assert payload["provider"] == {"order": ["deepseek"], "allow_fallbacks": False, "ignore": ["relace"]}
     parts = payload["messages"][1]["content"]
     assert "4 overlapping tiles: 2 column(s) × 2 row(s)" in parts[0]["text"]
     assert [p["type"] for p in parts[1:]] == ["image_url"] * 4 and parts[1]["image_url"]["detail"] == "high"

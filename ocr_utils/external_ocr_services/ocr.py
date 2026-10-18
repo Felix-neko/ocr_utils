@@ -308,8 +308,9 @@ def prompts_for(job: PageJob, tiles: list[PreparedImage], options: RunOptions) -
 
 
 def provider_field(spec: ModelSpec) -> dict[str, Any]:
-    """Маршрутизация OpenRouter для payload: предпочтительные провайдеры по порядку (с откатом на
-    остальных) и чёрный список — квантованные копии модели читают хуже.
+    """Маршрутизация OpenRouter для payload: предпочтительные провайдеры по порядку, откат на остальных
+    (только если модель его разрешает, ``ModelSpec.allow_fallbacks``) и чёрный список — квантованные
+    копии модели читают хуже.
 
     Args:
         spec: Модель из реестра.
@@ -321,7 +322,7 @@ def provider_field(spec: ModelSpec) -> dict[str, Any]:
     provider: dict[str, Any] = {}
     if spec.provider_order:
         provider["order"] = list(spec.provider_order)
-        provider["allow_fallbacks"] = True
+        provider["allow_fallbacks"] = spec.allow_fallbacks
     if spec.provider_ignore:
         provider["ignore"] = list(spec.provider_ignore)
     return provider
