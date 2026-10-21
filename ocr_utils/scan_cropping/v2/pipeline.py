@@ -1,4 +1,4 @@
-"""Конвейер v2 по папке кадров: пальцы (GPU) → фон и книга (пул) → SAM 3 (GPU) → бумага и страницы (пул) → surya по выпрямленному кадру (GPU) → защита, copy back, закрас до прямоугольника (пул)."""
+"""Конвейер v2 по папке кадров: пальцы (GPU) → фон и книга (пул) → SAM 3 и SAM 2 (GPU) → вето фона, бумага и страницы (пул) → surya по выпрямленному кадру (GPU) → защита, copy back, закрас до прямоугольника (пул)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import threadpoolctl
 from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suffix, write_image
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK, compensate_levels
 from ocr_utils.scan_cropping.v2.background import BG_SCALE, bg_flood, hand_mask
+from ocr_utils.scan_cropping.v2.bg_veto import SAM2_CACHE_VERSION, veto_book
 from ocr_utils.scan_cropping.v2.book import book_close_open, content_hulls
 from ocr_utils.scan_cropping.v2.colour_pages import colour_pages_flat, colour_pages_growth
 from ocr_utils.scan_cropping.v2.content_guard import protect_content
@@ -113,6 +114,8 @@ class RunParams:
             калибровочного кадра): кайма кожи у края ядра не возвращается с оригинала; 0 — без припуска.
         colour_pages: Правила для целиком цветных страниц (``colour_pages``): рост бумаги у края по палитре страницы
             вверх и вниз, защита контента при любой позе.
+        bg_veto: Вето фона (``bg_veto``): фон ``flood`` отдаётся книге, где SAM 3 видит страницу, а SAM 2 по точкам
+            коврика — не фон (рукописный номер, логотип, линейка у края листа не уводят фон на страницу).
     """
 
     input_dir: Path
@@ -146,6 +149,7 @@ class RunParams:
     save_before_shadow: bool = False
     copy_back_core_grow_mm: float = CORE_GROW_MM
     colour_pages: bool = True
+    bg_veto: bool = True
 
 
 @dataclass(frozen=True)
@@ -221,6 +225,16 @@ class WorkPaths:
     def pages(self) -> Path:
         """Страницы кадра: трапеции, признаки и класс положения (json)."""
         return self.root / "pages.json"
+
+    @property
+    def sam2_bg(self) -> Path:
+        """Фон SAM 2 по точкам коврика на масштабе сегментации (npz) — вход вето фона."""
+        return self.root / "sam2_bg.npz"
+
+    @property
+    def book_veto(self) -> Path:
+        """Маски шага «фон и книга», пересобранные по фону-вето (npz, те же ключи, что ``book.npz``)."""
+        return self.root / "book_veto.npz"
 
     @property
     def masks(self) -> Path:
@@ -441,6 +455,24 @@ def book_ready(work: WorkPaths, params: RunParams) -> bool:
         return "ink" in data.files
 
 
+def sam2_ready(work: WorkPaths, params: RunParams) -> bool:
+    """Готов ли в кэше фон SAM 2 нужной версии (шаг нужен только при вето фона).
+
+    Args:
+        work: Файлы кэша кадра.
+        params: Параметры прогона.
+
+    Returns:
+        True — шаг можно не считать.
+    """
+    if not params.bg_veto:
+        return True
+    if params.redo or not work.sam2_bg.exists():
+        return False
+    with np.load(work.sam2_bg) as data:
+        return "version" in data.files and int(data["version"]) == SAM2_CACHE_VERSION
+
+
 def sam3_ready(work: WorkPaths, params: RunParams) -> bool:
     """Готов ли в кэше шаг SAM 3 (с вторым проходом по кадру без краски, если он нужен).
 
@@ -486,6 +518,58 @@ def gpu_sam3(job: FrameJob, predictor, params: RunParams) -> None:
     # Страницы и их трапеции после нового SAM 3 могут быть другими, а surya считается по кадру, выпрямленному по ним.
     work.layout.unlink(missing_ok=True)
     log.info("%s: SAM 3 %.1f с, страниц %d", job.key, time.perf_counter() - t0, int(inst.max()))
+
+
+def gpu_sam2_bg(job: FrameJob, sam2, params: RunParams) -> None:
+    """Фон SAM 2 по точкам коврика одного кадра → кэш (вход вето фона).
+
+    Args:
+        job: Кадр.
+        sam2: ``bg_veto.Sam2Background``.
+        params: Параметры прогона.
+    """
+    work = WorkPaths(params.work_dir / job.key)
+    img = read_bgr(work.seg)
+    content = np.load(work.book)["content"]
+    t0 = time.perf_counter()
+    bg = sam2(img, content)
+    np.savez_compressed(work.sam2_bg, bg=bg, version=np.int32(SAM2_CACHE_VERSION))
+    log.info("%s: SAM 2 фон %.1f с, доля кадра %.3f", job.key, time.perf_counter() - t0, bg.mean())
+
+
+def frame_book(work: WorkPaths, params: RunParams, img: np.ndarray, sam3: dict) -> dict:
+    """Маски шага «фон и книга» для бумаги: по фону-вето (пересобираются и кладутся в ``book_veto.npz``) или как есть.
+
+    Args:
+        work: Файлы кэша кадра.
+        params: Параметры прогона.
+        img: Кадр масштаба сегментации.
+        sam3: Выход SAM 3 (нужна сырая маска ``raw``).
+
+    Returns:
+        Словарь масок ``content``, ``bg``, ``book``, ``hulls`` (и ``ink``).
+    """
+    book = dict(np.load(work.book))
+    if not params.bg_veto:
+        return book
+    vetoed = veto_book(img, book, sam3["raw"], np.load(work.sam2_bg)["bg"])
+    np.savez_compressed(work.book_veto, **vetoed)
+    log.info("%s: вето фона вернуло книге %.1f мм²", work.root.name,
+             (vetoed["book"] & ~book["book"]).sum() / (REF_PX_PER_MM * BG_SCALE) ** 2)  # fmt: skip
+    return vetoed
+
+
+def read_book(work: WorkPaths, params: RunParams) -> dict:
+    """Маски шага «фон и книга», которыми считалась бумага кадра (с вето фона — из ``book_veto.npz``).
+
+    Args:
+        work: Файлы кэша кадра.
+        params: Параметры прогона.
+
+    Returns:
+        Словарь масок.
+    """
+    return dict(np.load(work.book_veto if params.bg_veto else work.book))
 
 
 # --- Шаг 4, CPU: бумага, copy back, закрас до прямоугольника ------------------------------------------------------
@@ -673,8 +757,8 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
     job, params = args
     work = WorkPaths(params.work_dir / job.key)
     img = read_bgr(work.seg)
-    book = dict(np.load(work.book))
     sam3 = dict(np.load(work.sam3))
+    book = frame_book(work, params, img, sam3)
     if not params.ink_fill:
         sam3.pop("raw_noink", None)
     masks = frame_paper(img, book, sam3, params.scale.seg_px(params.refine_depth_mm))
@@ -885,7 +969,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
 
     work = WorkPaths(params.work_dir / job.key)
     img = read_bgr(work.seg)
-    book = dict(np.load(work.book))
+    book = read_book(work, params)
     sam3 = dict(np.load(work.sam3))
     # Маски бумаги — с шага «бумага и страницы».
     with np.load(work.masks) as data:
@@ -1103,18 +1187,20 @@ def write_summary_row(path: Path, row: FrameStats) -> None:
 class FrameStream:
     """Кадры в работе: фоны, страницы и финалы в пуле, SAM 3 и surya в главном процессе, сводка по мере готовности."""
 
-    def __init__(self, pool: ProcessPoolExecutor, models, predictor, params: RunParams) -> None:
+    def __init__(self, pool: ProcessPoolExecutor, models, predictor, sam2, params: RunParams) -> None:
         """Пустой поток.
 
         Args:
             pool: Пул CPU-шагов.
             models: ``GpuModels`` с surya layout.
             predictor: SAM 3 (``paper.load_sam3``).
+            sam2: Фон SAM 2 для вето (``bg_veto.Sam2Background``) или None без вето.
             params: Параметры прогона.
         """
         self.pool = pool
         self.models = models
         self.predictor = predictor
+        self.sam2 = sam2
         self.params = params
         self.summary = params.work_dir / "summary.csv"
         self.books: dict[Future, FrameJob] = {}
@@ -1139,7 +1225,7 @@ class FrameStream:
                  row.height, row.fill_share, row.blocks_back)  # fmt: skip
 
     def drain(self, block: bool) -> None:
-        """Разобрать готовое: фоны → SAM 3 (GPU) → страницы в пул; страницы → surya (GPU) → финал в пул; финалы → сводка.
+        """Разобрать готовое: фоны → SAM 3 и SAM 2 (GPU) → страницы в пул; страницы → surya (GPU) → финал в пул; финалы → сводка.
 
         Args:
             block: Ждать хотя бы один готовый шаг (иначе — только уже готовые).
@@ -1153,10 +1239,13 @@ class FrameStream:
                 job = self.books.pop(fut)
                 try:
                     fut.result()
-                    if not sam3_ready(WorkPaths(self.params.work_dir / job.key), self.params):
+                    work = WorkPaths(self.params.work_dir / job.key)
+                    if not sam3_ready(work, self.params):
                         gpu_sam3(job, self.predictor, self.params)
+                    if not sam2_ready(work, self.params):
+                        gpu_sam2_bg(job, self.sam2, self.params)
                 except Exception as exc:
-                    log.exception("%s: ошибка фона или SAM 3", job.key)
+                    log.exception("%s: ошибка фона, SAM 3 или SAM 2", job.key)
                     self.record(FrameStats(job.key, "error", message=repr(exc)))
                     continue
                 self.pages[self.pool.submit(cpu_pages, (job, self.params))] = job
@@ -1179,9 +1268,9 @@ class FrameStream:
 def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
     """Прогон v2 по списку кадров потоком: кадр проходит все шаги, итог и оверлей появляются по мере готовности.
 
-    Все модели (``GpuModels`` и SAM 3) грузятся один раз и живут весь прогон: пик видеопамяти ~7.4 ГБ (замер
-    2026-10-12 на RTX 5060 Ti 16 ГБ). GPU-шаги идут в главном процессе по кадрам: пальцы кадра *i*, SAM 3 для
-    кадров, у которых пул уже посчитал фон, surya для кадров, у которых готовы бумага и трапеции; CPU-шаги (фон и
+    Все модели (``GpuModels``, SAM 3 и при вето фона SAM 2) грузятся один раз и живут весь прогон: пик видеопамяти
+    ~7.4 ГБ без SAM 2 (замер 2026-10-12 на RTX 5060 Ti 16 ГБ). GPU-шаги идут в главном процессе по кадрам: пальцы
+    кадра *i*, SAM 3 и SAM 2 для кадров, у которых пул уже посчитал фон, surya для кадров, у которых готовы бумага и трапеции; CPU-шаги (фон и
     книга, бумага и страницы, финал) — в пуле, пока GPU занят следующим кадром. В работе не больше ``2 × jobs`` кадров. Готовые шаги берутся из кэша (кроме ``redo``).
 
     Args:
@@ -1192,6 +1281,7 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
         Строки сводки по кадрам (дописываются и в ``work_dir/summary.csv`` по мере готовности).
     """
     from ocr_utils.scan_cropping.gpu_models import GpuModels
+    from ocr_utils.scan_cropping.v2.bg_veto import Sam2Background
     from ocr_utils.scan_cropping.v2.paper import load_sam3
 
     jobs = [FrameJob(f, f.relative_to(params.input_dir)) for f in files]
@@ -1206,7 +1296,9 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
         ProcessPoolExecutor(params.jobs, mp_context=ctx, initializer=init_worker) as pool,
         GpuModels(with_lama=True, with_layout=True) as models,
     ):
-        stream = FrameStream(pool, models, load_sam3(), params)
+        # SAM 2.1 Hiera-L для вето фона: +~1 ГБ видеопамяти к ~7.4 ГБ остальных моделей.
+        sam2 = Sam2Background() if params.bg_veto else None
+        stream = FrameStream(pool, models, load_sam3(), sam2, params)
         for job in jobs:
             while stream.busy >= in_flight:
                 stream.drain(block=True)
