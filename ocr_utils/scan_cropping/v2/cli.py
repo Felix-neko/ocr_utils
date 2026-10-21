@@ -16,6 +16,7 @@ import click
 from ocr_utils.scan_cropping.cropping import CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
+from ocr_utils.scan_cropping.v2.spread_lines import SpineMethod
 from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
 from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT
@@ -76,7 +77,17 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 @click.option("--cache", "--work-dir", "work_dir", type=click.Path(file_okay=False, path_type=Path), required=True,
               help="Папка кэша шагов по кадрам: маски, сводка; повторный прогон берёт готовое.")  # fmt: skip
 @click.option("--debug", "--debug-dir", "debug_dir", type=click.Path(file_okay=False, path_type=Path), default=None,
-              help="Папка оверлеев (JPEG); не задана — без оверлеев.")  # fmt: skip
+              help="Папка оверлеев (JPEG), по подпапке на тип: main/, shadow/, surya/ (и шаги при --debug-steps); "
+                   "не задана — без оверлеев.")  # fmt: skip
+@click.option("--debug-steps", is_flag=True,
+              help="С --debug: ещё картинки шагов сегментации бумаги, каждая в свою подпапку (01_book — фон и книга, "
+                   "02_sam3, 03_snap — plain и доводка края, 04_glue — склейка и уточнение, 05_sides — стороны и "
+                   "защита, 06_pages — трапеции).")  # fmt: skip
+@click.option("--spine-method", type=click.Choice([m.value for m in SpineMethod if m is not SpineMethod.FOLD]),
+              default=SpineMethod.AUTO.value, show_default=True,
+              help="Способ прямой-разделителя страниц на оверлеях (только диагностика): quad_mid — середины трапеций, "
+                   "gap_mid — середина между кромками масок, gap_mid_run — то же по сплошному участку маски, "
+                   "auto — gap_mid, а при наклоне дальше 1° от quad_mid — quad_mid.")  # fmt: skip
 @click.option("--save-fingers/--no-save-fingers", default=False, show_default=True,
               help="Оставлять в --cache кадр без пальцев (clean.png, ~18 МБ на кадр).")  # fmt: skip
 @click.option("--recursive", is_flag=True, help="Обходить подпапки (структура повторяется в выходе).")
@@ -163,6 +174,8 @@ def main(
     output_dir: Path,
     work_dir: Path,
     debug_dir: Path | None,
+    debug_steps: bool,
+    spine_method: str,
     recursive: bool,
     skip_if_exists: bool,
     redo: bool,
@@ -204,6 +217,8 @@ def main(
         output_dir=output_dir,
         work_dir=work_dir,
         debug_dir=debug_dir,
+        debug_steps=debug_steps,
+        spine_method=SpineMethod(spine_method),
         scale=scale,
         fill=FillMethod(fill),
         fill_seam_mm=fill_seam_mm,

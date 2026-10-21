@@ -39,11 +39,20 @@ from ocr_utils.scan_cropping.v2.glue_refine import REFINE_DEPTH, refine_colour
 from ocr_utils.scan_cropping.v2.glyphs import content_mask
 from ocr_utils.scan_cropping.v2.ink_fill import fill_bold_ink, touching_ink
 from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp_for_layout
+from ocr_utils.scan_cropping.v2.overlay import OverlayTag, overlay_path
 from ocr_utils.scan_cropping.v2.page_pose import PageQuad, page_quads
 from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, fill_page_pockets, postprocess_plain
 from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX
 from ocr_utils.scan_cropping.v2.side_fit import regularize_sides, snap_sheet_edges
+from ocr_utils.scan_cropping.v2.spread_lines import (
+    SpineMethod,
+    SpreadLines,
+    finger_hands,
+    auto_source,
+    spine_candidates,
+    spread_lines,
+)
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +74,6 @@ DEFAULT_JOBS = 16
 LAYOUT_VERSION = 4
 # Версии ``layout.json``, блоки которых годны в дело.
 LAYOUT_READABLE = (3, 4)
-# Подпапка ``--debug`` для картинок «вход surya: выпрямленный кадр с рамками».
-SURYA_INPUT_DIR = "surya_input"
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,10 @@ class RunParams:
             LaMa продолжает тень пальца с бумаги у края зоны, copy back возвращает её с оригинала.
         save_before_shadow: Сохранять в кэш кадра итог до осветления тени и маски входа карты (``before_shadow.png``,
             ``shadow_masks.npz``, ~40 МБ на кадр) — для стенда ``research/finger_repaint edge``.
+        debug_steps: При ``debug_dir`` рисовать ещё картинки шагов сегментации бумаги, каждую в свою подпапку
+            (``overlay.draw_steps``: ``01_book`` … ``07_lines``).
+        spine_method: Способ прямой-разделителя страниц на оверлеях (``spread_lines.SpineMethod``, кроме ``FOLD``);
+            прямые разворота — только диагностика, итог кадра от них не зависит.
         copy_back_core_grow_mm: Припуск ядра пальца при copy back, мм бумаги (``copy_back.CORE_GROW_PX`` = 4 px
             калибровочного кадра): кайма кожи у края ядра не возвращается с оригинала; 0 — без припуска.
         colour_pages: Правила для целиком цветных страниц (``colour_pages``): рост бумаги у края по палитре страницы
@@ -147,6 +158,8 @@ class RunParams:
     save_fingers: bool = False
     finger_shadow: bool = False
     save_before_shadow: bool = False
+    debug_steps: bool = False
+    spine_method: SpineMethod = SpineMethod.AUTO
     copy_back_core_grow_mm: float = CORE_GROW_MM
     colour_pages: bool = True
     bg_veto: bool = True
@@ -840,7 +853,7 @@ def gpu_layout(job: FrameJob, models, params: RunParams) -> None:
 def write_layout_debug(
     job: FrameJob, params: RunParams, canvas: np.ndarray, polys: list[np.ndarray], labels: list[str]
 ) -> None:
-    """Выпрямленный кадр с рамками surya и их типами (как их видит сеть) → ``debug/surya_input/<кадр>.jpg``, ширина
+    """Выпрямленный кадр с рамками surya и их типами (как их видит сеть) → ``debug/surya/<кадр>_surya.jpg``, ширина
     1600 px.
 
     Args:
@@ -863,8 +876,8 @@ def write_layout_debug(
                      [LegendEntry("блок surya на выпрямленном кадре", COLOUR_SURYA),
                       LegendEntry("тип блока surya (Text — текст, SectionHeader — заголовок, Picture — картинка…)",
                                   COLOUR_SURYA_LABEL, alpha=LABEL_ALPHA)])  # fmt: skip
-    # Отдельная папка рядом с оверлеями, структура подпапок входа повторяется.
-    path = params.debug_dir / SURYA_INPUT_DIR / job.rel.with_suffix(".jpg")
+    # Своя подпапка типа картинки, структура подпапок входа повторяется.
+    path = overlay_path(params.debug_dir, job.rel, OverlayTag.SURYA)
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), picture, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
@@ -965,7 +978,13 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     Returns:
         Строка сводки.
     """
-    from ocr_utils.scan_cropping.v2.overlay import OverlayLayers, draw_finger_shadow, draw_overlay
+    from ocr_utils.scan_cropping.v2.overlay import (
+        OverlayLayers,
+        StepInputs,
+        draw_finger_shadow,
+        draw_overlay,
+        draw_steps,
+    )
 
     work = WorkPaths(params.work_dir / job.key)
     img = read_bgr(work.seg)
@@ -1062,10 +1081,13 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_image(out_path, out, imwrite_params(out_path.suffix), params.force_dpi)
     if params.debug_dir is not None:
-        dbg = params.debug_dir / job.rel.with_suffix(".jpg")
+        dbg = overlay_path(params.debug_dir, job.rel, OverlayTag.MAIN)
         dbg.parent.mkdir(parents=True, exist_ok=True)
         shadow_area = None if shadow is None else shadow_on_frame(shadow.area, box, shape)
-        layers = OverlayLayers(masks, protected, fingers, returned, polys, pages, box, pad, labels, shadow_area)
+        lines = frame_spread_lines(
+            pages, book["book"], zone_seg, paint_on_seg(fingers, img.shape[:2]), params.spine_method
+        )
+        layers = OverlayLayers(masks, protected, fingers, returned, polys, pages, box, pad, labels, shadow_area, lines)
         surya = "по выпрямленному кадру" if layout_keystone(work.layout) else "по кадру"
         picture = draw_overlay(original, book, layers, out,
                                f"{job.rel} — v2, закрас до прямоугольника: {params.fill.value}, surya {surya}")  # fmt: skip
@@ -1076,7 +1098,16 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
             roi = draw_finger_shadow(before_shadow, shadow, paint[cut], fingers["core"][cut], params.scale.px_per_mm,
                                      f"{job.rel} — тень пальца: зона поиска и карта осветления")  # fmt: skip
             if roi is not None:
-                cv2.imwrite(str(dbg.with_name(f"{dbg.stem}_shadow.jpg")), roi, [cv2.IMWRITE_JPEG_QUALITY, 88])
+                shadow_path = overlay_path(params.debug_dir, job.rel, OverlayTag.SHADOW)
+                shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(shadow_path), roi, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        if params.debug_steps:
+            # Шаги сегментации бумаги — по маскам кэша; маски книги до вето — из ``book.npz``.
+            steps = StepInputs(img, dict(np.load(work.book)), book, sam3, masks, protected, pages, lines)
+            for tag, step in draw_steps(steps, str(job.rel)).items():
+                step_path = overlay_path(params.debug_dir, job.rel, tag)
+                step_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(step_path), step, [cv2.IMWRITE_JPEG_QUALITY, 88])
     if not params.save_fingers:
         # Кадр без пальцев нужен только шагам этого кадра; в кэше не храним (по умолчанию).
         work.clean.unlink(missing_ok=True)
@@ -1104,6 +1135,31 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
         seconds=time.perf_counter() - t0,
         **shadow_stats(shadow, params.scale.px_per_mm),
     )
+
+
+def frame_spread_lines(
+    pages: list[PageQuad], book: np.ndarray, zone: np.ndarray, paint: np.ndarray, method: SpineMethod
+) -> SpreadLines | None:
+    """Прямые разворота кадра для оверлеев: разделитель способом ``method`` и ограничители внешних краёв страниц.
+
+    Args:
+        pages: Страницы кадра слева направо.
+        book: Грубая маска книги масштаба сегментации.
+        zone: Книга без рук (``book_zone``) того же масштаба: кожа — ``book & ~zone``, руки — её компоненты у пальцев.
+        paint: Зона закраса пальцев на масштабе сегментации.
+        method: Способ разделителя; не построился — через середины трапеций (``QUAD_MID``).
+
+    Returns:
+        Прямые или None (страниц с трапецией не две).
+    """
+    two = [p for p in pages if p.quad is not None]
+    if len(two) != 2:
+        return None
+    candidates = spine_candidates(two)
+    chosen = method if method in candidates else SpineMethod.QUAD_MID
+    # У AUTO в подписи — способ, который за ним стоит на этом кадре.
+    label = auto_source(candidates) if chosen is SpineMethod.AUTO else chosen
+    return spread_lines(two, candidates[chosen], label, book, finger_hands(book & ~zone, paint))
 
 
 def shadow_on_frame(area: np.ndarray, box: tuple[int, int, int, int], shape: tuple[int, int]) -> np.ndarray:

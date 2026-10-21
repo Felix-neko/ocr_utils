@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -13,6 +15,7 @@ from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, _font,
 from ocr_utils.scan_cropping.finger_removal.text_protection import polygons_to_mask
 from ocr_utils.scan_cropping.v2.finger_shadow import REF_RING_MM, SHADOW_REACH_MM, FingerShadow
 from ocr_utils.scan_cropping.v2.page_pose import PagePose, PageQuad
+from ocr_utils.scan_cropping.v2.spread_lines import EdgeKind, Line, SpreadLines
 
 # Цвета (BGR, палитра проекта ``/draw-overlay``).
 COLOUR_PAINT = (0, 165, 255)  # зона закраса пальца — оранжевый
@@ -57,6 +60,51 @@ CAPTION_SIZE = 18
 AREA_ALPHA = 0.45
 # Ширина итоговой картинки оверлея, px.
 OVERLAY_WIDTH = 2600
+# Ширина картинки шага сегментации (``--debug-steps``), px.
+STEP_WIDTH = 1800
+# Цвета экземпляров-страниц SAM 3 по номеру метки (по кругу).
+INSTANCE_COLOURS = ((0, 150, 0), (220, 90, 20), (0, 165, 255), (180, 105, 255), (200, 60, 200), (140, 140, 0))
+COLOUR_BG = (120, 120, 120)  # фон (коврик, заливка от рамки кадра) — серый
+COLOUR_HULLS = (200, 140, 60)  # оболочки своей печати — вспомогательный (``stages.COLOUR_HINT``)
+COLOUR_SPINE = (255, 0, 140)  # прямая-разделитель страниц — фиолетовый
+COLOUR_BOUND = (0, 255, 255)  # ограничитель внешнего края страницы — жёлтый
+COLOUR_BOOK_LINE = (255, 170, 90)  # прямая края книги и её точки — светло-синий (тон грубой маски книги)
+COLOUR_DROPPED = (0, 0, 220)  # точки края книги, отброшенные (у рамки, рука, палец) — красный
+# Толщина прямых разворота на холсте масштаба сегментации, px.
+LINE_PX = 3
+
+
+class OverlayTag(StrEnum):
+    """Тип отладочной картинки v2: своя подпапка ``--debug`` и постфикс имени — ``<тег>/<подпапки>/<кадр>_<тег>.jpg``."""
+
+    # Основной оверлей: «кадр с разметкой | итог».
+    MAIN = "main"
+    # Тень пальца: зона поиска и карта осветления (только при ``--finger-shadow``).
+    SHADOW = "shadow"
+    # Вход surya: выпрямленный кадр с рамками блоков.
+    SURYA = "surya"
+    # Шаги сегментации бумаги (только при ``--debug-steps``), номер — порядок шага.
+    BOOK = "01_book"  # фон, оболочки печати, грубая маска книги, вето фона
+    SAM3 = "02_sam3"  # экземпляры-страницы SAM 3 (и второй проход по кадру без крупной краски)
+    SNAP = "03_snap"  # SAM 3 plain и доводка края до фона
+    GLUE = "04_glue"  # склейка страниц, уточнение склейки, карманы
+    SIDES = "05_sides"  # второй проход SAM 3, кромка листа, палитра, выравнивание сторон, защита контента
+    PAGES = "06_pages"  # итоговая бумага и трапеции страниц
+    LINES = "07_lines"  # прямые разворота: края книги, разделитель страниц, ограничители внешних краёв
+
+
+def overlay_path(debug_dir: Path, rel: Path, tag: OverlayTag) -> Path:
+    """Путь отладочной картинки кадра в папке ``--debug``.
+
+    Args:
+        debug_dir: Корень отладочных картинок прогона (``--debug``).
+        rel: Путь кадра относительно входной папки (подпапки повторяются внутри папки типа).
+        tag: Тип картинки — имя подпапки и постфикс имени файла.
+
+    Returns:
+        ``debug_dir/<тег>/<подпапки>/<кадр>_<тег>.jpg``.
+    """
+    return debug_dir / tag.value / rel.parent / f"{rel.stem}_{tag.value}.jpg"
 
 
 def _resize(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -100,6 +148,7 @@ class OverlayLayers:
         pad: Припуск блоков surya (защита контента и copy back), px кадра (по X, по Y): контур зоны с припусками.
         labels: Типы блоков surya по порядку ``polys`` или None (кэш ``layout.json`` версии 3 — без подписей).
         shadow_area: Зона поиска тени пальца (bool) размера кадра или None (``--no-finger-shadow``).
+        lines: Прямые разворота (масштаб сегментации) или None (не две страницы).
     """
 
     masks: object
@@ -112,6 +161,89 @@ class OverlayLayers:
     pad: tuple[int, int] = (0, 0)
     labels: list[str] | None = None
     shadow_area: np.ndarray | None = None
+    lines: SpreadLines | None = None
+
+
+def _draw_line(canvas: np.ndarray, line: Line, colour: tuple[int, int, int], width: int, dashed: bool) -> None:
+    """Отрезок прямой разворота по её пролёту, сплошной или пунктиром.
+
+    Args:
+        canvas: Холст масштаба сегментации (меняется на месте — локальный холст оверлея).
+        line: Прямая.
+        colour: Цвет BGR.
+        width: Толщина, px.
+        dashed: Пунктир (виртуальный ограничитель).
+    """
+    a, b = line.ends()
+    if dashed:
+        # Открытый отрезок пунктиром: штрих и пробел вдоль него (замкнутый ``_dashed_poly`` прошёл бы его дважды).
+        length = float(np.linalg.norm(b - a))
+        for t0 in np.arange(0.0, length, DASH_PX + GAP_PX):
+            p0, p1 = a + (b - a) * (t0 / length), a + (b - a) * (min(t0 + DASH_PX, length) / length)
+            cv2.line(
+                canvas, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)), colour, width, cv2.LINE_AA
+            )
+    else:
+        cv2.line(canvas, tuple(np.round(a).astype(int)), tuple(np.round(b).astype(int)), colour, width, cv2.LINE_AA)
+
+
+def _draw_spread_lines(canvas: np.ndarray, lines: SpreadLines, points: bool) -> None:
+    """Прямые разворота: края книги (тонко), разделитель, ограничители (виртуальный — пунктиром).
+
+    Args:
+        canvas: Холст масштаба сегментации (меняется на месте).
+        lines: Прямые разворота.
+        points: Рисовать ли точки края книги — вошедшие в прямую и отброшенные (картинка шага ``07_lines``).
+    """
+    for edge in (lines.book_left, lines.book_right):
+        if points:
+            for pts, colour in ((edge.points, COLOUR_BOOK_LINE), (edge.dropped, COLOUR_DROPPED)):
+                for x, y in np.round(pts).astype(int):
+                    cv2.circle(canvas, (x, y), 1, colour, -1)
+        if edge.line is not None:
+            _draw_line(canvas, edge.line, COLOUR_BOOK_LINE, 1, dashed=not edge.visible)
+    _draw_line(canvas, lines.spine, COLOUR_SPINE, LINE_PX, dashed=False)
+    for bound, kind in ((lines.left, lines.left_kind), (lines.right, lines.right_kind)):
+        if bound is not None:
+            _draw_line(canvas, bound, COLOUR_BOUND, LINE_PX, dashed=kind is EdgeKind.VIRTUAL)
+
+
+def _line_captions(picture: np.ndarray, lines: SpreadLines, scale: float) -> np.ndarray:
+    """Подписи наклонов прямых разворота у их нижних концов (шрифт DejaVu, белая подложка).
+
+    Args:
+        picture: Картинка BGR.
+        lines: Прямые разворота (масштаб сегментации).
+        scale: Масштаб картинки относительно масштаба сегментации.
+
+    Returns:
+        Картинка BGR с подписями.
+    """
+    image = Image.fromarray(cv2.cvtColor(picture, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image)
+    font = _font(CAPTION_SIZE)
+    kind_name = {EdgeKind.BOOK: "по книге", EdgeKind.VIRTUAL: "виртуальный", EdgeKind.NONE: "нет"}
+    items = [(lines.spine, f"разделитель ({lines.method.value}) {lines.spine.tilt_deg:+.2f}°", COLOUR_SPINE)]
+    for bound, kind in ((lines.left, lines.left_kind), (lines.right, lines.right_kind)):
+        if bound is not None:
+            items.append((bound, f"{kind_name[kind]} {bound.tilt_deg:+.2f}°", COLOUR_BOUND))
+    for line, text, colour in items:
+        x, y = line.ends()[1] * scale
+        box = draw.textbbox((0, 0), text, font=font)
+        org = (int(min(max(x - (box[2] - box[0]) / 2, 0), picture.shape[1] - (box[2] - box[0]) - 1)), int(y) + 6)
+        draw.rectangle(draw.textbbox(org, text, font=font), fill=(255, 255, 255))
+        b, g, r = colour
+        # Жёлтый на белом не читается — подпись ограничителя тёмным тоном.
+        fill = (r, g, b) if colour != COLOUR_BOUND else (150, 120, 0)
+        draw.text(org, text, font=font, fill=fill)
+    return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+
+
+LINES_LEGEND = [
+    LegendEntry("прямая-разделитель страниц", COLOUR_SPINE),
+    LegendEntry("ограничитель внешнего края страницы: сплошной — по краю книги, пунктир — виртуальный", COLOUR_BOUND),
+    LegendEntry("прямая края книги: сплошная — край в кадре, пунктир — за кадром", COLOUR_BOOK_LINE),
+]
 
 
 def _dashed_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, int], width: int) -> None:
@@ -288,6 +420,8 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
         x0, y0, x1, y1 = layers.box
         cv2.rectangle(canvas, (int(x0 * sx), int(y0 * sy)), (int(x1 * sx), int(y1 * sy)), COLOUR_BOX, 2)
     _draw_pages(canvas, layers.pages)
+    if layers.lines is not None:
+        _draw_spread_lines(canvas, layers.lines, points=False)
     # Итог справа той же высоты, белый зазор между.
     rs = h / result.shape[0]
     right = cv2.resize(result, (max(1, int(result.shape[1] * rs)), h), interpolation=cv2.INTER_AREA)
@@ -295,6 +429,8 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
     s = OVERLAY_WIDTH / pair.shape[1]
     pair = cv2.resize(pair, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
     pair = _page_captions(pair, layers.pages, s)
+    if layers.lines is not None:
+        pair = _line_captions(pair, layers.lines, s)
     # Типы блоков surya — у рамок без припусков (после обратного переноса с выпрямленного кадра), на итоговом масштабе.
     to_pair = h / frame.shape[0] * s
     pair = block_labels(pair, [np.asarray(p, np.float32) * to_pair for p in layers.polys], layers.labels)
@@ -354,12 +490,274 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
         LegendEntry("прямоугольник вырезки", COLOUR_BOX),
         LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
         LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+        *LINES_LEGEND,
     ]
     sub = (
         "слева — кадр с разметкой шагов (у трапеций: ш — ширина к соседней, св — свет, з — заполнение, к — сход "
         "сторон), справа — итог"
     )
     return framed(pair, [title, sub], legend)
+
+
+@dataclass(frozen=True)
+class StepInputs:
+    """Всё, по чему рисуются картинки шагов сегментации кадра (масштаб сегментации).
+
+    Поля:
+        img: Кадр без пальцев (``seg.png``), BGR.
+        book_raw: Маски шага «фон и книга» до вето фона (``book.npz``: ``content``, ``bg``, ``book``, ``hulls``).
+        book: Маски, которыми считалась бумага (после вето фона или те же ``book_raw``).
+        sam3: Выход SAM 3 (``raw``, ``inst``; при втором проходе — ``raw_noink``, ``inst_noink``).
+        masks: ``pipeline.PaperMasks`` — бумага по шагам.
+        protected: Добавлено защитой контента (bool).
+        pages: Страницы с трапециями и классом положения.
+        lines: Прямые разворота или None (не две страницы).
+    """
+
+    img: np.ndarray
+    book_raw: dict
+    book: dict
+    sam3: dict
+    masks: object
+    protected: np.ndarray
+    pages: list[PageQuad]
+    lines: SpreadLines | None = None
+
+
+def _area(entry: str, colour: tuple[int, int, int]) -> LegendEntry:
+    """Строка легенды для полупрозрачной области цвета ``colour`` (прозрачность ``AREA_ALPHA``)."""
+    return LegendEntry(entry, colour, alpha=AREA_ALPHA, style=SampleStyle.BOX)
+
+
+def _fill_areas(canvas: np.ndarray, areas: list[tuple[np.ndarray | None, tuple[int, int, int]]]) -> np.ndarray:
+    """Полупрозрачные области по порядку (поздняя перекрывает раннюю) поверх копии холста.
+
+    Args:
+        canvas: Холст BGR.
+        areas: Пары ``(маска bool или None, цвет)``; None пропускается.
+
+    Returns:
+        Новый холст BGR.
+    """
+    out = canvas.copy()
+    layer = canvas.copy()
+    for mask, colour in areas:
+        if mask is not None:
+            layer[mask] = colour
+    cv2.addWeighted(layer, AREA_ALPHA, out, 1 - AREA_ALPHA, 0, out)
+    return out
+
+
+def _step_frame(canvas: np.ndarray, title: str, sub: str, legend: list[LegendEntry]) -> np.ndarray:
+    """Холст шага → ширина ``STEP_WIDTH``, шапка и легенда в полях.
+
+    Args:
+        canvas: Холст масштаба сегментации с разметкой.
+        title: Первая строка шапки (кадр, шаг).
+        sub: Вторая строка шапки (что на картинке, числа шага).
+        legend: Легенда.
+
+    Returns:
+        Картинка BGR.
+    """
+    s = STEP_WIDTH / canvas.shape[1]
+    small = cv2.resize(canvas, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    return framed(small, [title, sub], legend)
+
+
+def _share(mask: np.ndarray, of: np.ndarray) -> str:
+    """Площадь маски в процентах от площади ``of`` (строка для шапки)."""
+    return f"{100 * mask.sum() / max(int(of.sum()), 1):.2f} %"
+
+
+def draw_steps(inputs: StepInputs, title: str) -> dict[OverlayTag, np.ndarray]:
+    """Картинки шагов сегментации бумаги кадра: по одной на шаг, каждая — в свою подпапку ``--debug``.
+
+    Шаги и что на них: 01 — фон, оболочки печати, грубая маска книги и что поменяло вето фона; 02 — экземпляры-страницы
+    SAM 3 (второй проход — контуром); 03 — SAM 3 ``plain`` и доводка края до фона; 04 — склейка страниц, срезанное
+    уточнением, карманы; 05 — добавки второго прохода, выравнивание сторон, палитра, защита контента; 06 — итоговая
+    бумага и трапеции страниц. Подложка — кадр без пальцев на масштабе сегментации.
+
+    Args:
+        inputs: Маски шагов кадра.
+        title: Начало шапки (кадр).
+
+    Returns:
+        Словарь ``тег → картинка BGR``.
+    """
+    img, book, raw_book, sam3, masks = inputs.img, inputs.book, inputs.book_raw, inputs.sam3, inputs.masks
+    out: dict[OverlayTag, np.ndarray] = {}
+
+    # 01: фон, оболочки печати, книга; вето фона — что оно вернуло книге и что убрало.
+    vetoed = book["book"] & ~raw_book["book"]
+    unvetoed = raw_book["book"] & ~book["book"]
+    canvas = _fill_areas(img, [(book["bg"], COLOUR_BG), (vetoed, COLOUR_ADDED), (unvetoed, COLOUR_CUT)])
+    _contour(canvas, book["hulls"], COLOUR_HULLS, 1)
+    _contour(canvas, book["book"], COLOUR_BOOK, 2)
+    out[OverlayTag.BOOK] = _step_frame(
+        canvas,
+        f"{title} — шаг 01: фон и грубая маска книги",
+        f"фон {_share(book['bg'], np.ones_like(book['bg']))} кадра; вето вернуло книге {_share(vetoed, book['book'])}"
+        f", убрало {_share(unvetoed, book['book'])} книги",
+        [
+            _area("фон (заливка от рамки кадра, после вето)", COLOUR_BG),
+            _area("вето фона: возвращено книге (SAM 3 видит страницу, SAM 2 — не фон)", COLOUR_ADDED),
+            _area("вето фона: убрано из книги", COLOUR_CUT),
+            LegendEntry("оболочки своей печати", COLOUR_HULLS),
+            LegendEntry("грубая маска книги (не фон)", COLOUR_BOOK),
+        ],
+    )
+
+    # 02: экземпляры-страницы SAM 3 цветом по номеру; второй проход — контуром.
+    inst = sam3["inst"]
+    labels = [int(v) for v in np.unique(inst) if v > 0]
+    canvas = _fill_areas(img, [(inst == v, INSTANCE_COLOURS[(v - 1) % len(INSTANCE_COLOURS)]) for v in labels])
+    _contour(canvas, sam3["raw"], COLOUR_PLAIN, 1)
+    legend = [
+        _area(f"экземпляр-страница SAM 3 № {v}", INSTANCE_COLOURS[(v - 1) % len(INSTANCE_COLOURS)]) for v in labels
+    ]
+    legend.append(LegendEntry("сырая маска SAM 3 (объединение экземпляров)", COLOUR_PLAIN))
+    sub = f"экземпляров-страниц: {len(labels)}"
+    if "inst_noink" in sam3:
+        noink = [int(v) for v in np.unique(sam3["inst_noink"]) if v > 0]
+        for v in noink:
+            _contour(canvas, sam3["inst_noink"] == v, COLOUR_INK_ADDED, 2)
+        legend.append(LegendEntry("экземпляр второго прохода SAM 3 (кадр без крупной краски)", COLOUR_INK_ADDED))
+        sub += f"; во втором проходе: {len(noink)}"
+    out[OverlayTag.SAM3] = _step_frame(canvas, f"{title} — шаг 02: SAM 3", sub, legend)
+
+    # 03: plain (постобработка SAM 3 внутри книги) и доводка края до фона.
+    snap_added = masks.snapped & ~masks.plain
+    snap_cut = masks.plain & ~masks.snapped
+    canvas = _fill_areas(img, [(masks.plain, COLOUR_PAPER), (snap_added, COLOUR_ADDED), (snap_cut, COLOUR_CUT)])
+    _contour(canvas, book["book"], COLOUR_BOOK, 1)
+    out[OverlayTag.SNAP] = _step_frame(
+        canvas,
+        f"{title} — шаг 03: SAM 3 plain и доводка края до фона (snap_bg)",
+        f"доводка добавила {_share(snap_added, masks.plain)}, убрала {_share(snap_cut, masks.plain)} plain",
+        [
+            _area("бумага SAM 3 plain", COLOUR_PAPER),
+            _area("добавлено доводкой края до фона", COLOUR_ADDED),
+            _area("убрано доводкой края", COLOUR_CUT),
+            LegendEntry("грубая маска книги", COLOUR_BOOK),
+        ],
+    )
+
+    # 04: склейка страниц (мост между экземплярами), уточнение склейки по цвету, карманы.
+    glue_added = masks.glued & ~masks.snapped
+    pocket = masks.pocket_added
+    canvas = _fill_areas(img, [(glue_added, COLOUR_ADDED), (masks.cut, COLOUR_CUT), (pocket, COLOUR_POCKET)])
+    _contour(canvas, masks.snapped, COLOUR_PLAIN, 1)
+    refined = (masks.glued & ~masks.cut) | (pocket if pocket is not None else False)
+    _contour(canvas, refined, COLOUR_PAPER, 2)
+    sub = f"склейка добавила {_share(glue_added, masks.snapped)}, уточнение срезало {_share(masks.cut, masks.glued)}"
+    if pocket is not None:
+        sub += f", карманы {_share(pocket, masks.snapped)}"
+    out[OverlayTag.GLUE] = _step_frame(
+        canvas,
+        f"{title} — шаг 04: склейка страниц, уточнение склейки, карманы",
+        sub,
+        [
+            _area("добавлено склейкой страниц (hull bridge)", COLOUR_ADDED),
+            _area("срезано уточнением склейки по цвету (не бумага)", COLOUR_CUT),
+            _area("добавлено как карман, листок или вклейка", COLOUR_POCKET),
+            LegendEntry("бумага после доводки края (вход шага)", COLOUR_PLAIN),
+            LegendEntry("бумага после уточнения и карманов (выход шага)", COLOUR_PAPER),
+        ],
+    )
+
+    # 05: второй проход SAM 3, кромка листа и выравнивание сторон, палитра цветных страниц, защита контента.
+    canvas = _fill_areas(
+        img,
+        [
+            (masks.ink_added, COLOUR_INK_ADDED),
+            (masks.side_added, COLOUR_SIDE_ADDED),
+            (masks.side_cut, COLOUR_SIDE_CUT),
+            (masks.palette_added, COLOUR_PALETTE),
+            (inputs.protected, COLOUR_PROTECT),
+        ],
+    )
+    _contour(canvas, refined, COLOUR_PLAIN, 1)
+    _contour(canvas, masks.paper | inputs.protected, COLOUR_PAPER, 2)
+    out[OverlayTag.SIDES] = _step_frame(
+        canvas,
+        f"{title} — шаг 05: второй проход SAM 3, стороны листа, защита контента",
+        f"второй проход {_share(masks.ink_added, masks.paper)}, стороны +{_share(masks.side_added, masks.paper)} "
+        f"−{_share(masks.side_cut, masks.paper)}, защита {_share(inputs.protected, masks.paper)} итоговой бумаги",
+        [
+            _area("добавлено вторым проходом SAM 3 (кадр без крупной краски)", COLOUR_INK_ADDED),
+            _area("залито кромкой листа и выравниванием стороны (яма)", COLOUR_SIDE_ADDED),
+            _area("срезано выравниванием стороны (выброс)", COLOUR_SIDE_CUT),
+            _area("добавлено у края цветной страницы по палитре", COLOUR_PALETTE),
+            _area("добавлено защитой контента (surya плоских страниц)", COLOUR_PROTECT),
+            LegendEntry("бумага после шага 04 (вход шага)", COLOUR_PLAIN),
+            LegendEntry("итоговая бумага (с защитой)", COLOUR_PAPER),
+        ],
+    )
+
+    # 06: итоговая бумага и трапеции страниц с подписями признаков.
+    canvas = _fill_areas(img, [(masks.paper | inputs.protected, COLOUR_PAPER)])
+    _draw_pages(canvas, inputs.pages)
+    # Подписи трапеций — на уменьшенном холсте, до приклейки шапки и легенды.
+    s = STEP_WIDTH / canvas.shape[1]
+    small = _page_captions(cv2.resize(canvas, None, fx=s, fy=s, interpolation=cv2.INTER_AREA), inputs.pages, s)
+    picture = framed(
+        small,
+        [
+            f"{title} — шаг 06: итоговая бумага и трапеции страниц",
+            "у трапеций: ш — ширина к соседней, св — свет, з — заполнение, к — сход сторон",
+        ],
+        [
+            _area("итоговая бумага (с защитой)", COLOUR_PAPER),
+            LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
+            LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+        ],
+    )
+    out[OverlayTag.PAGES] = picture
+    if inputs.lines is not None:
+        out[OverlayTag.LINES] = draw_lines_step(img, inputs.pages, inputs.lines, book["book"], title)
+    return out
+
+
+def _edge_place(edge) -> str:
+    """Подпись видимости края книги: «в кадре» или «за кадром» с долей строк у рамки."""
+    return "в кадре" if edge.visible else f"за кадром ({100 * edge.border_share:.0f} % строк у рамки)"
+
+
+def draw_lines_step(
+    img: np.ndarray, pages: list[PageQuad], lines: SpreadLines, book: np.ndarray, title: str
+) -> np.ndarray:
+    """Картинка шага ``07_lines``: края книги с точками, разделитель страниц, ограничители, трапеции — для сверки.
+
+    Args:
+        img: Кадр масштаба сегментации, BGR.
+        pages: Страницы с трапециями.
+        lines: Прямые разворота.
+        book: Грубая маска книги (контур).
+        title: Начало шапки (кадр).
+
+    Returns:
+        Картинка BGR.
+    """
+    canvas = img.copy()
+    _contour(canvas, book, COLOUR_BOOK, 1)
+    _draw_pages(canvas, pages)
+    _draw_spread_lines(canvas, lines, points=True)
+    s = STEP_WIDTH / canvas.shape[1]
+    small = _line_captions(cv2.resize(canvas, None, fx=s, fy=s, interpolation=cv2.INTER_AREA), lines, s)
+
+    sub = (f"край книги слева {_edge_place(lines.book_left)}, справа {_edge_place(lines.book_right)}; наклоны: книга "
+           + " / ".join("—" if e.line is None else f"{e.line.tilt_deg:+.2f}°" for e in (lines.book_left, lines.book_right))
+           + f", разделитель {lines.spine.tilt_deg:+.2f}°")  # fmt: skip
+    legend = [
+        *LINES_LEGEND,
+        LegendEntry("точки края книги, по которым строится прямая", COLOUR_BOOK_LINE),
+        LegendEntry("точки края книги отброшены: у рамки кадра, рядом рука или палец", COLOUR_DROPPED),
+        LegendEntry("грубая маска книги", COLOUR_BOOK),
+        LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
+        LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+    ]
+    return framed(small, [f"{title} — шаг 07: прямые разворота", sub], legend)
 
 
 # Карта осветления на картинке тени: шкала прибавки, уровни (насыщение цвета) и наименьшая видимая прибавка.
