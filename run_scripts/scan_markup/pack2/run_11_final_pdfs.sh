@@ -25,6 +25,10 @@ set -euo pipefail
 set -m
 trap 'kill -- -$$ 2>/dev/null' EXIT INT TERM
 # common.sh пака: пути PDF, BLURRED_DIR, DB_REVIEWED, детектор геометрии; он же переходит в корень репо.
+# ПОЛЯ ПРОМЕЖУТОЧНОЙ PDF. Сборщик берёт их из базы (Issue.full_intermediate_pdf_margin_*_mm пака-2
+# записаны intermediate_pdfs: 12.192 / 6.096 мм); --margin-x-mm / --margin-y-mm ниже — только запас для
+# выпусков без полей в базе. Поле каждой страницы меряется по её образу (номинал или на MCU 8 меньше).
+
 source "$(dirname "$0")/common.sh"
 
 # Анализ — чистый CPU (tesseract): 16 воркеров минус резерв ядер под родителя (surya, запись).

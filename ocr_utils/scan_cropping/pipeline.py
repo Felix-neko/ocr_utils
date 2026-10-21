@@ -30,6 +30,7 @@ from tqdm import tqdm
 
 from ocr_utils.scan_cropping.background_fill import (
     BG_FILL_AVERAGE,
+    BG_FILL_EROSION_PX,
     CROP_FILL_REPLICATE,
     book_mean_color,
     fill_outside_mask,
@@ -46,6 +47,8 @@ from ocr_utils.scan_cropping.finger_removal.finger_shadow import correct_finger_
 from ocr_utils.scan_cropping.finger_removal.removal import (
     DROP_INNER_FINGER_CORES,
     FINGER_DILATE_PX,
+    FINGER_FEATHER,
+    FINGER_PADDING,
     FINGER_ZONE_LIGHT_INCREMENT,
     remove_fingers,
 )
@@ -76,12 +79,21 @@ from ocr_utils.timing import log_timing
 logger = logging.getLogger(__name__)
 
 
+# Разрешение, при котором названы пиксельные умолчания v1, которые раньше не выносились в CLI (эрозия книги 100 px,
+# контекст LaMa 64 px, растушёвка 9 px, коррекция тени пальца): по комментариям ``gpu_models`` LaMa v1 настраивалась
+# «на нативных 450 DPI» (досканы-1 1970-07). Из него же — умолчания опций CLI в мм (``v1/cli.py``).
+V1_REFERENCE_DPI = 450.0
+
+
 @dataclass
 class CropParams:
     """Все настройки прогона (значения опций CLI в одном месте).
 
     Собирается один раз в ``cli.main`` и дальше только читается, поэтому
     :func:`process_frame` не тащит два десятка отдельных аргументов.
+
+    Размеры здесь — в ПИКСЕЛЯХ КАДРА: CLI принимает их в мм бумаги и переводит по ``--dpi``
+    (``dpi``). Умолчания полей — пиксели при ``V1_REFERENCE_DPI``.
     """
 
     input_dir: Path
@@ -127,6 +139,14 @@ class CropParams:
     # Радиус смыкания силуэта разворота, пикс.; None — по размеру кадра
     page_close_px: Optional[int] = None
 
+    # Разрешение бумаги на кадре, px/дюйм (``--dpi``): по нему CLI перевёл размеры из мм; здесь — для
+    # пересчёта коррекции тени пальца, чьи числа названы в px при ``V1_REFERENCE_DPI``.
+    dpi: float = 0.0
+    # Эрозия маски книги перед средним цветом заливки, контекст LaMa вокруг пальца и растушёвка шва, px кадра.
+    bg_fill_erosion_px: int = BG_FILL_EROSION_PX
+    finger_padding_px: int = FINGER_PADDING
+    finger_feather_px: int = FINGER_FEATHER
+
 
 def process_frame(path: Path, params: CropParams, models) -> None:
     """Обрабатывает один кадр: детекция → закраска пальца → кроп → запись.
@@ -166,7 +186,7 @@ def process_frame(path: Path, params: CropParams, models) -> None:
     layout_polys: Optional[list] = None
     if params.remove_fingers:
         with log_timing("remove_fingers", path.name):
-            (bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info, finger_mask_predilate, layout_polys) = (
+            bgr, finger_mask, lama_roi_bboxes, finger_boxes, finger_info, finger_mask_predilate, layout_polys = (
                 remove_fingers(
                     bgr,
                     models,
@@ -180,6 +200,8 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                     layout_pad_px=params.layout_pad_px,
                     lama_roi_max_side=params.lama_roi_max_side,
                     log_name=path.name,
+                    padding_px=params.finger_padding_px,
+                    feather_px=params.finger_feather_px,
                 )
             )
         if int(np.count_nonzero(finger_mask)) > 0:
@@ -192,7 +214,9 @@ def process_frame(path: Path, params: CropParams, models) -> None:
     # Коррекция теневой зоны вокруг пальца (после зарисовки, до кропа/уровней)
     if params.shadow_method != "none" and finger_mask is not None:
         with log_timing("correct_finger_shadow", path.name):
-            bgr = correct_finger_shadow(bgr, finger_mask, mask, params.shadow_method, models)
+            # Числа коррекции тени названы в px при V1_REFERENCE_DPI — пересчёт по разрешению кадра.
+            dpi_scale = params.dpi / V1_REFERENCE_DPI if params.dpi else 1.0
+            bgr = correct_finger_shadow(bgr, finger_mask, mask, params.shadow_method, models, dpi_scale=dpi_scale)
 
     with log_timing("min_area_rotated_bbox", path.name):
         geom = min_area_rotated_bbox(mask)  # B1/B2 строим по E1
@@ -265,7 +289,7 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                 # fill_outside_mask здесь НЕ нужен: crop_pixel_exact заполняет всю
                 # зону вне E2 сам — в осях crop-зоны, продолжая линию корешка прямо
                 # (в fill_outside_mask этих осей нет, и Вороной её загибает).
-                fade_color = book_mean_color(bgr, copy_mask)
+                fade_color = book_mean_color(bgr, copy_mask, erosion_px=params.bg_fill_erosion_px)
                 crop = crop_pixel_exact(
                     bgr,
                     cx,
@@ -282,7 +306,11 @@ def process_frame(path: Path, params: CropParams, models) -> None:
                 # Копируем только E2 ∩ B2: всё в B2 вне E2 заливаем цветом края
                 with log_timing(f"fill_outside_mask[{params.bg_fill_method}]", path.name):
                     bgr_for_crop = fill_outside_mask(
-                        bgr, copy_mask, method=params.bg_fill_method, blur_px=params.bg_fill_blur_px
+                        bgr,
+                        copy_mask,
+                        method=params.bg_fill_method,
+                        blur_px=params.bg_fill_blur_px,
+                        erosion_px=params.bg_fill_erosion_px,
                     )
                 crop = crop_rotated(bgr_for_crop, cx, cy, angle, crop_ext, params.upscale)
         # Уровни — уже по вырезанному кадру: он весь состоит из книги и продлённого

@@ -9,7 +9,7 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import polygons_to_m
 from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PagePose, PageQuad, page_owner
 from ocr_utils.scan_cropping.v2.trapezoid import quad_mask
 
-# Припуск блоков surya при защите — общий с copy back: ``copy_back.LAYOUT_PAD_PX`` (``--layout-pad-px``).
+# Припуск блоков surya при защите — общий с copy back: ``copy_back.LAYOUT_PAD_PX`` (``--layout-pad-mm``).
 # Запас трапеции плоской страницы для ограничения защиты, мм (``protect_content(..., limit_to_quads=True)``). Рамка
 # рисунка surya бывает шире страницы и захватывает торец блока и зону пальца у края (РИСК 1991/05 IMG_0591: логотип у
 # нижнего края — в итог ушла полоса торца). Пока ВЫКЛЮЧЕНО по решению пользователя (2026-10-12): торец в итоге не

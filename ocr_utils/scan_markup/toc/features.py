@@ -293,13 +293,27 @@ def text_features(all_words: Sequence[Word], width: int) -> dict[str, float | in
 # --- полоса целиком -----------------------------------------------------------------
 
 
-def read_gray(path: Path, default_dpi: int = 600, work_dpi: int = WORK_DPI) -> np.ndarray:
-    """Серая копия полосы в ``work_dpi``. Оригинал на 600 dpi уменьшается вчетверо."""
+def read_gray(path: Path, default_dpi: int | None = None, work_dpi: int = WORK_DPI) -> np.ndarray:
+    """Серая копия полосы в ``work_dpi``. Оригинал на 600 dpi уменьшается вчетверо, на 450 — втрое.
+
+    Args:
+        path: Файл полосы.
+        default_dpi: Разрешение, если тега нет или он неправдоподобен; ``None`` — тогда ошибка.
+        work_dpi: Разрешение копии.
+
+    Returns:
+        Серая копия в ``work_dpi``.
+
+    Raises:
+        ValueError: Файл не читается или разрешение неизвестно (нет тега и нет ``default_dpi``).
+    """
     gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         raise ValueError("не читается как изображение")
     dpi = read_dpi(path, default=None)
     dpi = int(dpi) if dpi and dpi >= 72 else default_dpi
+    if dpi is None:
+        raise ValueError("нет тега разрешения, а --default-dpi не задан")
     scale = work_dpi / dpi
     if scale < 0.999:
         height, width = gray.shape[:2]
@@ -324,7 +338,7 @@ def page_features(
     idx_from_end: int,
     layout_cache_dir: Path | None,
     want_thumbnail: bool = False,
-    default_dpi: int = 600,
+    default_dpi: int | None = None,
 ) -> PageFeatures:
     """Все признаки полосы. Исключения не выпускает — кладёт их в ``error``."""
     features = PageFeatures(rel_path, order_index, idx_from_end)

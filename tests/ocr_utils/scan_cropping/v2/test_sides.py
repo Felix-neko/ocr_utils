@@ -148,7 +148,6 @@ def test_hole_closed_before_fill_untouched():
     assert not r.paper[300:340, 300:340].any()
 
 
-
 def colour_page() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Цветная страница: оранжевая плашка, кремовое поле 15 мм слева, тень кромки листа, за ней белый картон.
 

@@ -210,7 +210,7 @@ def analyse(
     tasks: Sequence[tuple[Path, str]],
     detectors: Sequence[Detector],
     workers: int,
-    default_dpi: int = 600,
+    default_dpi: int | None = None,
     gpu_side: int = 1536,
     gpu_batch: int = 16,
     cache_root: Path | None = None,

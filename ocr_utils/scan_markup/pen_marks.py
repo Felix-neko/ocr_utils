@@ -188,7 +188,9 @@ def fix_page(
             rgb = np.asarray(image.convert("RGB"))
         dpi = int(dpi_tag[0]) if dpi_tag else None
         if dpi is None:
-            logger.warning("У %s нет тега разрешения — считаю размеры при %d dpi", rel_path, REFERENCE_DPI)
+            # Размеры маски названы при REFERENCE_DPI и пересчитываются по тегу; без тега пересчитать
+            # не по чему, а молча взять 600 dpi на полосе 450 dpi — раздуть маску на треть.
+            return FixResult(rel_path, None, 0, "нет тега разрешения — полоса не тронута")
 
         bgr = np.ascontiguousarray(rgb[..., ::-1])
         fixed, area = remove_pen_marks(bgr, dpi, weights, chroma_thr)

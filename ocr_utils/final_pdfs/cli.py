@@ -11,6 +11,7 @@ import logging
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -32,17 +33,13 @@ from ocr_utils.final_pdfs.assemble import (
 )
 from ocr_utils.final_pdfs.pictures import DEFAULT_DESCREEN_SIGMA_MM, DEFAULT_JPEG_QUALITY, DEFAULT_PICTURE_DPI
 from ocr_utils.final_pdfs.plan import IssuePlan, load_plans
-from ocr_utils.final_pdfs.sources import IssuePair, margins_px, pair_issue_pdfs
+from ocr_utils.final_pdfs.sources import IssuePair, pair_issue_pdfs
 from ocr_utils.geometry_regression.quality.scoring import DEFAULT_TOTAL
 from ocr_utils.geometry_regression.scoring import DEFAULT_MIN_GAIN, DEFAULT_RATIO
 from ocr_utils.text_layer_fix.rewrite import DEFAULT_FONT_PATH
 
 logger = logging.getLogger("ocr_utils.final_pdfs")
 
-# Поля промежуточной PDF пака-1: 12 и 6 мм из intermediate_pdfs, округлённые вверх до MCU JPEG
-# (16 px при 600 dpi) — фактически 288 и 144 px. Сверяются на каждой странице с иллюстрациями.
-DEFAULT_MARGIN_X_MM = 12.192
-DEFAULT_MARGIN_Y_MM = 6.096
 
 # Анализ — tesseract по ячейкам и зонам, чистый CPU: 16 воркеров минус резерв под родителя.
 # Сборка — запись PDF и разжатие 20-мегапиксельных JPEG: упор в диск, воркеров меньше.
@@ -90,6 +87,25 @@ def _pool(jobs: int) -> "ProcessPoolExecutor | None":
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+
+def _with_margins(plan: IssuePlan, margin_x_mm: float | None, margin_y_mm: float | None) -> IssuePlan:
+    """Дополнить поля выпуска из опций, если их нет в базе.
+
+    Args:
+        plan: План выпуска (поля — из базы или ``None``).
+        margin_x_mm: Поле слева и справа из ``--margin-x-mm`` или ``None``.
+        margin_y_mm: Поле сверху и снизу из ``--margin-y-mm`` или ``None``.
+
+    Returns:
+        План с полями: из базы, если они там есть, иначе из опций (могут остаться ``None`` —
+        тогда сборка выпуска упадёт на первой странице с иллюстрациями с понятной ошибкой).
+    """
+    return replace(
+        plan,
+        margin_x_mm=plan.margin_x_mm if plan.margin_x_mm is not None else margin_x_mm,
+        margin_y_mm=plan.margin_y_mm if plan.margin_y_mm is not None else margin_y_mm,
     )
 
 
@@ -250,12 +266,17 @@ def main(log_level: str) -> None:
 )
 @click.option(
     "--margin-x-mm",
-    default=DEFAULT_MARGIN_X_MM,
-    show_default=True,
+    default=None,
     type=float,
-    help="поле промежуточной PDF слева и справа",
+    help="поле промежуточной PDF слева и справа, мм — только для выпусков, у которых его нет в базе "
+    "(Issue.full_intermediate_pdf_margin_*_mm пишет intermediate_pdfs); пак-1 собран до этих колонок: 12.192",
 )
-@click.option("--margin-y-mm", default=DEFAULT_MARGIN_Y_MM, show_default=True, type=float, help="поле сверху и снизу")
+@click.option(
+    "--margin-y-mm",
+    default=None,
+    type=float,
+    help="поле сверху и снизу, мм — только для выпусков без полей в базе; пак-1: 6.096",
+)
 @click.option("--only-year", default=None)
 @click.option("--only-issue", default=None)
 @click.option(
@@ -364,6 +385,8 @@ def run(
 ) -> None:
     """Собрать финальные PDF выпусков (анализ → surya → сборка)."""
     plans = load_plans(db, pack_name, only_year=only_year, only_issue=only_issue)
+    # Поля промежуточной PDF — из базы у каждого выпуска; опции только дополняют пропуски.
+    plans = [_with_margins(plan, margin_x_mm, margin_y_mm) for plan in plans]
     if not plans:
         raise click.ClickException("в базе нет выпусков под фильтр")
     pairs, failures = pair_all(geo_dir, nogeo_dir, plans)
@@ -410,7 +433,6 @@ def run(
         analysis=analysis,
         out_dir=out_dir,
         pictures_dir=pictures_dir,
-        margins=margins_px(margin_x_mm, margin_y_mm, plans[0].pages[0].dpi),
         picture_dpi=picture_dpi,
         jpeg_quality=jpeg_quality,
         descreen_sigma_mm=descreen_sigma_mm,

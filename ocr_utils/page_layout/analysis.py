@@ -27,8 +27,8 @@ from typing import Iterable
 
 import numpy as np
 
-from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.page_layout import WORK_DPI
+from ocr_utils.units import mm2_to_px2, mm_to_px
 from ocr_utils.page_layout.geometry import Box, LooseRule, TableBox
 from ocr_utils.page_layout.image import PageImage
 from ocr_utils.page_layout.line_art.detector import (
@@ -64,9 +64,11 @@ from ocr_utils.page_layout.raster.regions import (
     LINEART_MAX_DOT_FRAC,
     LINEART_PICTURE_MIN_FRAC,
     SAFETY_MIN_FRAC,
+    RASTER_WORK_DPI,
     SOURCE_LINEART,
-    SURYA_LINEART_P99_PX,
+    SURYA_LINEART_P99_MM2,
     find_raster_boxes,
+    to_work_box,
 )
 from ocr_utils.page_layout.raster.tone import (
     LINEART_ENTROPY_THR,
@@ -116,7 +118,8 @@ class LayoutOptions:
     min_region_frac: float = MIN_REGION_FRAC
     full_page_frac: float = FULL_PAGE_FRAC
     lineart_ink_frac: float = LINEART_FULL_PAGE_INK_FRAC
-    lineart_p99: int = SURYA_LINEART_P99_PX
+    # p99 площади пятна, с которой блок surya — штрих, в мм² бумаги (в px² — по dpi полосы).
+    lineart_p99_mm2: float = SURYA_LINEART_P99_MM2
     safety_min_frac: float = SAFETY_MIN_FRAC
     lineart_picture_min_frac: float = LINEART_PICTURE_MIN_FRAC
     full_page_color_frac: float = FULL_PAGE_COLOR_FRAC
@@ -129,10 +132,11 @@ class LayoutOptions:
     lineart_screen_peak: float = LINEART_SCREEN_PEAK_THR
     stamp_ink_contrast: float = STAMP_INK_CONTRAST_THR
     lineart_max_dot_frac: float = LINEART_MAX_DOT_FRAC
-    # None — пересчитанное от DPI (см. raster.dots.params_for_dpi).
-    merge_gap: int | None = None
+    # None — пересчитанное от DPI (см. raster.dots.params_for_dpi). Заданные — в мм бумаги,
+    # в пиксели переводятся по dpi полосы в ``screen_params`` и ``_finish_raster``.
+    merge_gap_mm: float | None = None
     min_region_side_px: int | None = None
-    cell_px: int | None = None
+    cell_mm: float | None = None
     dot_frac_thr: float | None = None
     dot_max_area_px: int | None = None
     cell_max_area_px: int | None = None
@@ -145,9 +149,17 @@ class LayoutOptions:
     allowed_rotations: tuple[int, ...] = ROTATIONS
 
     def screen_params(self, dpi: int) -> ScreenParams:
+        """Пороги растра, пересчитанные на разрешение полосы, с поправками из опций.
+
+        Args:
+            dpi: Родное разрешение полосы.
+
+        Returns:
+            ``ScreenParams`` в пикселях полного кадра этой полосы.
+        """
         return params_for_dpi(
             dpi,
-            cell_px=self.cell_px,
+            cell_px=None if self.cell_mm is None else mm_to_px(self.cell_mm, dpi),
             dot_frac_thr=self.dot_frac_thr,
             dot_max_area_px=self.dot_max_area_px,
             cell_max_area_px=self.cell_max_area_px,
@@ -249,8 +261,16 @@ class PageLayout:
 
     @property
     def raster_dpi(self) -> int:
-        """Разрешение копии растрового детектора: строго 1/``HALFTONE_DOWNSCALE`` полного кадра."""
-        return max(1, int(round(self.image.dpi / HALFTONE_DOWNSCALE)))
+        """Разрешение копии растрового детектора: фиксированные ``RASTER_WORK_DPI``, не доля кадра.
+
+        Копия не крупнее полного кадра: у полосы ниже 150 dpi работаем по ней самой.
+        """
+        return min(RASTER_WORK_DPI, self.image.dpi)
+
+    @property
+    def raster_scale(self) -> float:
+        """Во сколько раз полный кадр крупнее копии растрового детектора (4 при 600 dpi, 3 при 450)."""
+        return self.image.dpi / self.raster_dpi
 
     def table_findings(self) -> list[TableBox]:
         """Находки детектора таблиц всех видов (таблица / схема / рисунок) в РОДНЫХ пикселях.
@@ -476,14 +496,15 @@ class PageLayout:
             work_gray,
             (image.height, image.width),
             prep.params,
+            self.raster_scale,
+            mm2_to_px2(options.lineart_p99_mm2, image.dpi),
             surya_boxes=surya_boxes,
             order_index=self.order_index if self.order_index is not None else 1,
             first_page_is_cover=options.first_page_is_cover,
             min_region_frac=options.min_region_frac,
-            merge_gap=options.merge_gap,
+            merge_gap=None if options.merge_gap_mm is None else mm_to_px(options.merge_gap_mm, image.dpi),
             min_side=options.min_region_side_px,
             lineart_ink_frac=options.lineart_ink_frac,
-            lineart_p99=options.lineart_p99,
             safety_min_frac=options.safety_min_frac,
             page_chroma_spread=page_chroma_spread,
             chroma_spread_thr=options.chroma_spread_thr,
@@ -500,7 +521,7 @@ class PageLayout:
         )
         if findings.cover:
             self.is_cover = True
-        pics, stamps = classify_raster(findings, work, paper, image.width, image.height, options)
+        pics, stamps = classify_raster(findings, work, self.raster_scale, paper, image.width, image.height, options)
         self.raster_pics, self.stamp_suspects = pics, stamps
 
 
@@ -548,7 +569,7 @@ def _table_region(table: TableBox, native: float, image: PageImage) -> Region:
 
 
 def classify_raster(
-    findings, work: np.ndarray, paper, width: int, height: int, options: LayoutOptions
+    findings, work: np.ndarray, work_scale: float, paper, width: int, height: int, options: LayoutOptions
 ) -> tuple[list[Region], list[Region]]:
     """Красит найденные растровые области и отделяет подозрения на печать.
 
@@ -561,7 +582,9 @@ def classify_raster(
 
     Args:
         findings: Ответ ``find_raster_boxes`` (рамки в родных пикселях).
-        work: Цветная копия 1/4 (по ней меряется цвет: разброс хроматичности на ней разделяет так же).
+        work: Цветная копия ``RASTER_WORK_DPI`` (по ней меряется цвет: разброс хроматичности на ней
+            разделяет так же).
+        work_scale: Во сколько раз полный кадр крупнее ``work``.
         paper: Цвет бумаги по копии.
         width: Ширина полного кадра.
         height: Высота полного кадра.
@@ -575,11 +598,10 @@ def classify_raster(
     if not findings.findings:
         return pics, stamps
     work_h, work_w = work.shape[:2]
-    scale = HALFTONE_DOWNSCALE
     for finding in findings.findings:
-        x1, y1 = finding.box[0] // scale, finding.box[1] // scale
-        x2 = min(max(x1 + 1, -(-finding.box[2] // scale)), work_w)
-        y2 = min(max(y1 + 1, -(-finding.box[3] // scale)), work_h)
+        x1, y1, x2, y2 = to_work_box(finding.box, work_scale)
+        x2 = min(max(x1 + 1, x2), work_w)
+        y2 = min(max(y1 + 1, y2), work_h)
         color = classify(
             work[y1:y2, x1:x2],
             paper,

@@ -70,7 +70,11 @@ def hints_of(
     payload = load_page(cache_path(cache_dir, pdf_name, page_index))
     if payload is None:
         return base
-    scale = dpi / float(payload.get("raster_dpi") or 600.0)
+    raster_dpi = payload.get("raster_dpi")
+    if not raster_dpi:
+        # Без разрешения образа рамки кэша не перевести в пиксели копии; молча считать 600 dpi нельзя.
+        return base
+    scale = dpi / float(raster_dpi)
     inked = _ink_mask(work)
     cells, barriers = _cells_of(payload, scale, inked, dpi)
     free = _free_zones(payload, scale, dpi)

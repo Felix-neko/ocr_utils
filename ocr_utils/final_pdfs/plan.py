@@ -39,19 +39,25 @@ def load_plans(
         страницы в обеих PDF FineReader.
 
     Raises:
-        ValueError: У полосы нет размеров кадра (не было ``detect``).
+        ValueError: У полосы нет размеров кадра или dpi (не было ``detect``).
     """
     factory = open_db(db_path, create=False)
     with factory() as session:
         pack = require_pack(session, pack_name)
         issues = session.execute(
-            select(YearPackage.name, Issue.id, Issue.name)
+            select(
+                YearPackage.name,
+                Issue.id,
+                Issue.name,
+                Issue.full_intermediate_pdf_margin_left_mm,
+                Issue.full_intermediate_pdf_margin_top_mm,
+            )
             .join(Issue, Issue.year_package_id == YearPackage.id)
             .where(YearPackage.pack_id == pack.id)
             .order_by(YearPackage.name, Issue.name)
         ).all()
         plans: list[IssuePlan] = []
-        for year_name, issue_id, issue_name in issues:
+        for year_name, issue_id, issue_name, margin_x_mm, margin_y_mm in issues:
             if only_year is not None and year_name != only_year:
                 continue
             if only_issue is not None and issue_name != only_issue:
@@ -87,6 +93,10 @@ def load_plans(
             ):
                 if not width or not height:
                     raise ValueError(f"{source_rel}: нет размеров кадра, сначала нужен detect")
+                if not dpi:
+                    # По dpi поля промежуточной PDF и рамки иллюстраций переводятся в пиксели и пункты;
+                    # молча взять 600 на полосе 450 dpi — сдвинуть всё на треть.
+                    raise ValueError(f"{source_rel}: в базе нет dpi полосы, сначала нужен detect")
                 pictures = tuple(pictures_by_page.get(page_id, ()))
                 if sharpened_rel is None:
                     # Заострённая копия отличается от очищенной полосы только расширением
@@ -99,7 +109,7 @@ def load_plans(
                         sharpened_rel_path=sharpened_rel,
                         width=int(width),
                         height=int(height),
-                        dpi=int(dpi or 600),
+                        dpi=int(dpi),
                         pictures=pictures,
                         full_pdf_page_idx=index,
                         pages_with_pics_only_pdf_page_idx=None,
@@ -107,7 +117,14 @@ def load_plans(
                     )
                 )
             plans.append(
-                IssuePlan(issue_id=int(issue_id), year_name=year_name, issue_name=issue_name, pages=tuple(pages))
+                IssuePlan(
+                    issue_id=int(issue_id),
+                    year_name=year_name,
+                    issue_name=issue_name,
+                    pages=tuple(pages),
+                    margin_x_mm=None if margin_x_mm is None else float(margin_x_mm),
+                    margin_y_mm=None if margin_y_mm is None else float(margin_y_mm),
+                )
             )
     return plans
 

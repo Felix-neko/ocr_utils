@@ -24,6 +24,10 @@ from ocr_utils.external_ocr_services.pipeline import (
 )
 from ocr_utils.external_ocr_services.schema import PageResult
 from ocr_utils.external_ocr_services.tiling import prepare_tiles
+from ocr_utils.units import px_to_mm
+
+# Синтетические полосы теста — без тега dpi; считаем их полосами 600 dpi (как пак-1).
+DPI = 600
 
 ISSUE = "1966/03"
 PAGES = ("IMG_0001.jpg", "IMG_0002.jpg", "IMG_0003.jpg", "IMG_0004.jpg")
@@ -98,7 +102,7 @@ def _make_pages(root: Path):
     for name in PAGES:
         path = root / ISSUE / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        Image.new("L", (400, 600), 230).save(path)
+        Image.new("L", (400, 600), 230).save(path, dpi=(600, 600))
 
 
 def _flags(toc=("IMG_0001",), veto=()):
@@ -114,7 +118,12 @@ def _params(tmp_path, **kwargs):
     """Параметры прогона: полосы в ``out`` (как папка полос), md выпусков — в ``issues``."""
     kwargs.setdefault("issues_dir", tmp_path / "issues")
     return PipelineParams(
-        tmp_path / "in", tmp_path / "out", RunOptions(debug_dir=tmp_path / "dbg"), _flags(), jobs=2, **kwargs
+        tmp_path / "in",
+        tmp_path / "out",
+        RunOptions(debug_dir=tmp_path / "dbg", default_dpi=DPI),
+        _flags(),
+        jobs=2,
+        **kwargs,
     )
 
 
@@ -232,7 +241,7 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognizes(tmp_path, redo_scope):
     # Полоса IMG_0002 делается выше остальных: при шаге сетки 700 px только она уходит двумя тайлами,
     # и фейк узнаёт её по фразе про тайлы в пользовательском промпте — так ответ не зависит от
     # порядка запросов в пуле потоков.
-    Image.new("L", (400, 900), 230).save(tmp_path / "in" / ISSUE / "IMG_0002.jpg")
+    Image.new("L", (400, 900), 230).save(tmp_path / "in" / ISSUE / "IMG_0002.jpg", dpi=(600, 600))
     fake = FakeClient(lambda p: None)
     marker = "2 overlapping tiles"
 
@@ -248,7 +257,7 @@ def test_missed_toc_redo_rebuilds_lists_and_rerecognizes(tmp_path, redo_scope):
 
     fake.reply = reply
     params = _params(tmp_path, on_missed_toc="redo", redo_scope=redo_scope)
-    params.options.max_src_tile = 700
+    params.options.max_src_tile_mm = px_to_mm(700, DPI)
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     assert stats.redone_issues == [ISSUE] and stats.missed
     # 1 toc + 3 page + 1 toc (найденная) + 2 page заново = 7 запросов; первая toc-полоса переиспользована.
@@ -273,8 +282,8 @@ def test_missed_toc_redo_structured_keeps_plain_pages(tmp_path):
     _make_pages(tmp_path / "in")
     # Полосы различаются числом тайлов: IMG_0002 (2 тайла) — найденное оглавление, IMG_0004 (3 тайла) —
     # сплошной текст без заголовков и тегов; IMG_0003 (1 тайл) — с заголовком.
-    Image.new("L", (400, 900), 230).save(tmp_path / "in" / ISSUE / "IMG_0002.jpg")
-    Image.new("L", (400, 2000), 230).save(tmp_path / "in" / ISSUE / "IMG_0004.jpg")
+    Image.new("L", (400, 900), 230).save(tmp_path / "in" / ISSUE / "IMG_0002.jpg", dpi=(600, 600))
+    Image.new("L", (400, 2000), 230).save(tmp_path / "in" / ISSUE / "IMG_0004.jpg", dpi=(600, 600))
     fake = FakeClient(lambda p: None)
 
     def reply(payload):
@@ -291,7 +300,7 @@ def test_missed_toc_redo_structured_keeps_plain_pages(tmp_path):
 
     fake.reply = reply
     params = _params(tmp_path, on_missed_toc="redo")  # умолчание — structured
-    params.options.max_src_tile = 700
+    params.options.max_src_tile_mm = px_to_mm(700, DPI)
     stats = run_pipeline(fake, resolve("deepseek-v41-flash"), params)
     # 1 toc + 3 page + 1 toc (найденная) + 1 page заново (IMG_0003 с `#`) = 6; с диска — toc-полоса
     # из базы и оставленная IMG_0004.
@@ -459,7 +468,12 @@ def test_schema_rejected_falls_back_and_reasoning_removed(tmp_path):
 def test_payload_deepseek_tiles_and_source_year(tmp_path):
     _make_pages(tmp_path / "in")
     spec = resolve("deepseek-v41-flash")
-    tiles = prepare_tiles(tmp_path / "in" / ISSUE / "IMG_0002.jpg", max_src_tile=300, max_model_tile=200)
+    tiles = prepare_tiles(
+        tmp_path / "in" / ISSUE / "IMG_0002.jpg",
+        max_src_tile_mm=px_to_mm(300, DPI),
+        max_model_tile=200,
+        default_dpi=DPI,
+    )
     job = PageJob(Path(ISSUE) / "IMG_0002.jpg", "page", "none", "1966", ("Р",), ({"title": "Т", "authors": []},), "h")
     payload = build_payload(spec, tiles, RunOptions(source="журнал «МТС», {year}"), job, spec.json_mode)
     assert payload["response_format"] == {"type": "json_object"}

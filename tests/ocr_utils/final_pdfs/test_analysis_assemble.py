@@ -63,9 +63,7 @@ def test_assemble_places_pictures_and_verifies(pack) -> None:
     params = _analysis(pack)
     for job in chunk_jobs(plan, pair, params):
         analyse_chunk(job)
-    assemble = AssembleParams(
-        analysis=params, out_dir=tmp_path / "final", pictures_dir=blurred, margins=MARGINS, preview_pages=1
-    )
+    assemble = AssembleParams(analysis=params, out_dir=tmp_path / "final", pictures_dir=blurred, preview_pages=1)
     result = assemble_issue(plan, pair, assemble)
     assert result.status == "ok", result.reason
     assert Path(result.out_path) == tmp_path / "final" / "1970" / "1970_01.pdf"
@@ -120,7 +118,7 @@ def test_assemble_refuses_shifted_pages(pack) -> None:
         doc.save(str(shifted))
     shutil.copy(shifted, pair.nogeo)
     result = assemble_issue(
-        plan, pair, AssembleParams(analysis=params, out_dir=tmp_path / "final", pictures_dir=blurred, margins=MARGINS)
+        plan, pair, AssembleParams(analysis=params, out_dir=tmp_path / "final", pictures_dir=blurred)
     )
     assert result.status == "error" and "порядок страниц" in result.reason
     assert not (tmp_path / "final" / "1970" / "1970_01.pdf").exists()
@@ -160,12 +158,8 @@ def test_assemble_applies_text_layer_edits(layer_pdf, tmp_path) -> None:
     path = page_json_path(params, plan, 0)
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(payload, ensure_ascii=False))
-    from ocr_utils.final_pdfs.sources import Margins
-
     result = assemble_issue(
-        plan,
-        pair,
-        AssembleParams(analysis=params, out_dir=tmp_path / "final", pictures_dir=tmp_path, margins=Margins(0, 0)),
+        plan, pair, AssembleParams(analysis=params, out_dir=tmp_path / "final", pictures_dir=tmp_path)
     )
     assert result.status == "ok", result.reason
     record = result.records[0]

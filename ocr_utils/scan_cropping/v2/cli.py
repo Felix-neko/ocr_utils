@@ -3,7 +3,7 @@
 Здесь только click: объявление опций, их разбор и сборка :class:`pipeline.RunParams`.
 
     uv run python -m ocr_utils.scan_cropping.v2 \\
-        --input-dir IN --output OUT --cache CACHE --debug DBG --fill telea --px-per-mm 13.8
+        --input-dir IN --output OUT --cache CACHE --debug DBG --fill telea --dpi 450
 """
 
 from __future__ import annotations
@@ -13,22 +13,30 @@ from pathlib import Path
 
 import click
 
-from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX, CROP_FILL_FADE
+from ocr_utils.scan_cropping.cropping import CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
-from ocr_utils.scan_cropping.v2.copy_back import CORE_GROW_PX, LAYOUT_PAD_PX
 from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
-from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT, TIGHT_DILATE_PX
-from ocr_utils.scan_cropping.v2.glue_refine import REFINE_DEPTH
-from ocr_utils.scan_cropping.v2.pipeline import DEFAULT_JOBS, RunParams, run_batch, visible_frames
+from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT
+from ocr_utils.scan_cropping.v2.pipeline import (
+    CORE_GROW_MM,
+    CROP_FILL_BLUR_MM,
+    DEFAULT_JOBS,
+    FINGER_DILATE_MM,
+    LAYOUT_PAD_MM,
+    REFINE_DEPTH_MM,
+    RunParams,
+    run_batch,
+    visible_frames,
+)
 from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
 
 log = logging.getLogger(__name__)
 
 
-def parse_pad(value: str) -> tuple[int, int]:
-    """Разбор припуска ``"N"`` или ``"X,Y"``.
+def parse_pad(value: str) -> tuple[float, float]:
+    """Разбор пары ``"N"`` или ``"X,Y"`` (припуск в мм, высветление в уровнях).
 
     Args:
         value: Строка опции.
@@ -36,8 +44,28 @@ def parse_pad(value: str) -> tuple[int, int]:
     Returns:
         ``(по X, по Y)``.
     """
-    parts = [int(v) for v in value.split(",")]
+    parts = [float(v) for v in value.split(",")]
     return (parts[0], parts[0]) if len(parts) == 1 else (parts[0], parts[1])
+
+
+def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
+    """Масштабы прогона по ``--px-per-mm`` или ``--dpi`` (не обоим сразу).
+
+    Args:
+        px_per_mm: Плотность кадра, px/мм бумаги, или None.
+        dpi: Разрешение бумаги на кадре, px/дюйм, или None.
+
+    Returns:
+        :class:`Scale`; ни одна опция не задана — калибровочная плотность ``REF_PX_PER_MM``.
+
+    Raises:
+        click.UsageError: Заданы обе опции.
+    """
+    if px_per_mm is not None and dpi is not None:
+        raise click.UsageError("--px-per-mm и --dpi задают одно и то же — нужна одна из них")
+    if dpi is not None:
+        return Scale.from_dpi(dpi)
+    return Scale(REF_PX_PER_MM if px_per_mm is None else px_per_mm)
 
 
 @click.command()
@@ -57,9 +85,12 @@ def parse_pad(value: str) -> tuple[int, int]:
 @click.option(
     "--jobs", default=DEFAULT_JOBS, show_default=True, help="Число CPU-воркеров (GPU-шаги — в главном процессе)."
 )
-@click.option("--px-per-mm", default=REF_PX_PER_MM, show_default=True,
-              help="Плотность кадра, px/мм бумаги; по умолчанию — калибровочные кадры подшивок МТО 1990 (пак-6). "
-                   "Мерить заранее и задавать в run-скрипте.")  # fmt: skip
+@click.option("--px-per-mm", type=float, default=None,
+              help=f"Плотность кадра, px/мм бумаги; без неё и без --dpi — {REF_PX_PER_MM} (калибровочные кадры "
+                   "подшивок МТО 1990, пак-6). Мерить заранее и задавать в run-скрипте.")  # fmt: skip
+@click.option("--dpi", type=float, default=None,
+              help="То же, что --px-per-mm, в px на дюйм бумаги (450 у новых паков: 17.72 px/мм). Все размеры в мм "
+                   "переводятся в пиксели по этой плотности.")  # fmt: skip
 @click.option("--fill", type=click.Choice([m.value for m in FillMethod]), default=FillMethod.PULL_PUSH_SEAM.value,
               show_default=True,
               help="Закрас до прямоугольника: pull_push_seam (pull-push от чистой бумаги у края, без печатей и края "
@@ -68,17 +99,17 @@ def parse_pad(value: str) -> tuple[int, int]:
 @click.option("--fill-seam-mm", default=SEAM_MM, show_default=True,
               help="pull_push_seam: ширина рампы от цвета каймы листа к закрасу, мм (3 — заметно резче, 8 — шлейф "
                    "+8 %; research/border_fill).")  # fmt: skip
-@click.option("--crop-fill-blur-px", default=CROP_FILL_BLUR_PX, show_default=True,
-              help="replicate: наибольшая σ размытия заливки, px.")  # fmt: skip
+@click.option("--crop-fill-blur-mm", default=CROP_FILL_BLUR_MM, show_default=True,
+              help="replicate: наибольшая σ размытия заливки, мм бумаги (48 px при 13.8 px/мм).")  # fmt: skip
 @click.option("--crop-fill-fade", default=CROP_FILL_FADE, show_default=True,
               help="replicate: доля выцветания к среднему цвету книги на самом дальнем пикселе.")  # fmt: skip
 @click.option("--lama-hole-max-px", default=LAMA_HOLE_MAX_PX, show_default=True,
               help="Предел длинной стороны рамки дыры в масштабе LaMa, px; 0 — прежнее ужатие ROI до 512 px.")  # fmt: skip
-@click.option("--finger-dilate-px", default=TIGHT_DILATE_PX, show_default=True,
-              help="Припуск зоны закраса пальца, px калибровочного кадра (пересчитывается по --px-per-mm).")  # fmt: skip
-@click.option("--layout-pad-px", default=f"{LAYOUT_PAD_PX[0]},{LAYOUT_PAD_PX[1]}", show_default=True,
-              help="Припуск блоков surya, px калибровочного кадра (пересчитывается по --px-per-mm): N или X,Y. Один "
-                   "и тот же для copy back в зоне пальца и для защиты контента от вырезки.")  # fmt: skip
+@click.option("--finger-dilate-mm", default=FINGER_DILATE_MM, show_default=True,
+              help="Припуск зоны закраса пальца, мм бумаги (40 px при 13.8 px/мм).")  # fmt: skip
+@click.option("--layout-pad-mm", default=f"{LAYOUT_PAD_MM[0]:g},{LAYOUT_PAD_MM[1]:g}", show_default=True,
+              help="Припуск блоков surya, мм бумаги: N или X,Y (18,36 px при 13.8 px/мм). Один и тот же для copy back "
+                   "в зоне пальца и для защиты контента от вырезки.")  # fmt: skip
 @click.option("--finger-zone-light-increment", default=f"{LIGHT_INCREMENT[0]:g},{LIGHT_INCREMENT[1]:g}",
               show_default=True,
               help="Высветление зоны пальца перед LaMa, как в v1: N или «слева,справа» уровней; 0 — без.")  # fmt: skip
@@ -100,8 +131,8 @@ def parse_pad(value: str) -> tuple[int, int]:
 @click.option("--ink-fill/--no-ink-fill", default=True, show_default=True,
               help="Второй проход SAM 3 по кадру без крупной краски (рамки, линейки, плашки закрашены цветом бумаги); "
                    "бумага — объединение двух проходов.")  # fmt: skip
-@click.option("--refine-depth", default=REFINE_DEPTH, show_default=True,
-              help="Глубина уточнения склейки от фона, px масштаба сегментации (35 ≈ 5 мм).")  # fmt: skip
+@click.option("--refine-depth-mm", default=REFINE_DEPTH_MM, show_default=True,
+              help="Глубина уточнения склейки от фона, мм бумаги (35 px масштаба сегментации).")  # fmt: skip
 @click.option("--compensate-levels", is_flag=True, help="Растянуть уровни итога по перцентилям.")
 @click.option("--levels-max-black", default=LEVELS_MAX_BLACK, show_default=True,
               help="Потолок чёрной точки растяжки уровней, 0..255: пустой разворот без краски не растягивается "
@@ -110,9 +141,9 @@ def parse_pad(value: str) -> tuple[int, int]:
               help="После copy back и уровней осветлять тень пальца на бумаге по карте: зона ядро + 15 мм в книге, "
                    "опора — pull-push по кольцу бумаги, прибавка (research/finger_repaint). С ним высветление зоны "
                    "пальца перед LaMa не нужно: --finger-zone-light-increment 0.")  # fmt: skip
-@click.option("--copy-back-core-grow-px", default=CORE_GROW_PX, show_default=True,
-              help="Припуск ядра пальца при copy back, px калибровочного кадра: кайма кожи у края ядра SAM 3 не "
-                   "возвращается с оригинала; 0 — без припуска.")  # fmt: skip
+@click.option("--copy-back-core-grow-mm", default=CORE_GROW_MM, show_default=True,
+              help="Припуск ядра пальца при copy back, мм бумаги (4 px при 13.8 px/мм): кайма кожи у края ядра SAM 3 "
+                   "не возвращается с оригинала; 0 — без припуска.")  # fmt: skip
 @click.option("--colour-pages/--no-colour-pages", default=True, show_default=True,
               help="Правила для целиком цветных страниц: рост бумаги у края по палитре страницы вверх и вниз, защита "
                    "контента при любой позе.")  # fmt: skip
@@ -133,14 +164,15 @@ def main(
     redo: bool,
     jobs: int,
     save_fingers: bool,
-    px_per_mm: float,
+    px_per_mm: float | None,
+    dpi: float | None,
     fill: str,
     fill_seam_mm: float,
-    crop_fill_blur_px: float,
+    crop_fill_blur_mm: float,
     crop_fill_fade: float,
     lama_hole_max_px: int,
-    finger_dilate_px: int,
-    layout_pad_px: str,
+    finger_dilate_mm: float,
+    layout_pad_mm: str,
     finger_zone_light_increment: str,
     ink_fill: bool,
     fit_sides: bool,
@@ -148,12 +180,12 @@ def main(
     snap_sides: bool,
     copy_back_over_fingers: bool,
     fill_before_copy_back: bool,
-    refine_depth: int,
+    refine_depth_mm: float,
     compensate_levels: bool,
     levels_max_black: int,
     finger_shadow: bool,
     save_before_shadow: bool,
-    copy_back_core_grow_px: int,
+    copy_back_core_grow_mm: float,
     colour_pages: bool,
     output_format: str | None,
     force_dpi: int | None,
@@ -161,18 +193,20 @@ def main(
 ) -> None:
     """Вырезка разворотов v2: пальцы (LaMa, inkback) → фон → SAM 3 → склейка страниц → закрас до прямоугольника."""
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    scale = frame_scale(px_per_mm, dpi)
     params = RunParams(
         input_dir=input_dir,
         output_dir=output_dir,
         work_dir=work_dir,
         debug_dir=debug_dir,
-        scale=Scale(px_per_mm),
+        scale=scale,
         fill=FillMethod(fill),
         fill_seam_mm=fill_seam_mm,
-        replicate=ReplicateParams(crop_fill_blur_px, crop_fill_fade),
+        # Прежняя заливка v1 считает σ в px кадра — переводим из мм по плотности кадра.
+        replicate=ReplicateParams(scale.mm_px_float(crop_fill_blur_mm), crop_fill_fade),
         hole_max_px=lama_hole_max_px or None,
-        finger_dilate_px=finger_dilate_px,
-        layout_pad_px=parse_pad(layout_pad_px),
+        finger_dilate_mm=finger_dilate_mm,
+        layout_pad_mm=parse_pad(layout_pad_mm),
         light_increment=tuple(float(v) for v in parse_pad(finger_zone_light_increment)),
         ink_fill=ink_fill,
         fit_sides=fit_sides,
@@ -180,12 +214,12 @@ def main(
         snap_sides=snap_sides,
         copy_back_over_fingers=copy_back_over_fingers,
         fill_before_copy_back=fill_before_copy_back,
-        refine_depth=refine_depth,
+        refine_depth_mm=refine_depth_mm,
         compensate_levels=compensate_levels,
         levels_max_black=levels_max_black,
         finger_shadow=finger_shadow,
         save_before_shadow=save_before_shadow,
-        copy_back_core_grow_px=copy_back_core_grow_px,
+        copy_back_core_grow_mm=copy_back_core_grow_mm,
         colour_pages=colour_pages,
         output_format=output_format,
         force_dpi=force_dpi,
@@ -195,7 +229,13 @@ def main(
         save_fingers=save_fingers,
     )
     files = visible_frames(collect_images(input_dir, recursive), input_dir)
-    log.info("кадров: %d; масштаб сегментации %.3f, закрас до прямоугольника: %s", len(files), params.scale.seg, fill)
+    log.info(
+        "кадров: %d; %.2f px/мм, масштаб сегментации %.3f, закрас до прямоугольника: %s",
+        len(files),
+        params.scale.px_per_mm,
+        params.scale.seg,
+        fill,
+    )
     stats = run_batch(files, params)
     bad = [s for s in stats if s.status != "ok"]
     log.info("готово: %d кадров, не ok: %d %s", len(stats), len(bad), [(s.key, s.status) for s in bad])

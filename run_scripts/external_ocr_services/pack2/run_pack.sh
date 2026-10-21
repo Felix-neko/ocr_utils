@@ -33,7 +33,7 @@ uv run python -m ocr_utils.external_ocr_services run \
     --db "$DB_REVIEWED" \
     --pack-name "$PACK_NAME" \
     --source "$EXTERNAL_OCR_SOURCE" \
-    --max-src-tile-size "$MAX_SRC_TILE_SIZE" \
+    --max-src-tile-mm "$MAX_SRC_TILE_MM" \
     --jobs "$JOBS" \
     --skip-done \
     "$@"

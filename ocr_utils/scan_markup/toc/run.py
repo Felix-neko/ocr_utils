@@ -62,7 +62,8 @@ class TocParams:
     # Контактные листы НАЙДЕННОГО: <found_dir>/содержание/<год>_<выпуск>.jpg и
     # <found_dir>/указатели/<год>_<выпуск>.jpg (последние — только у выпусков с указателем).
     found_dir: Path | None = None
-    default_dpi: int = 600
+    # Разрешение полос без тега; None — такая полоса уходит в ошибки (молча 600 dpi нельзя).
+    default_dpi: int | None = None
     progress: bool = True
 
 
@@ -107,7 +108,7 @@ class _Job:
     idx_from_end: int
     layout_cache_dir: Path | None
     want_thumbnail: bool
-    default_dpi: int
+    default_dpi: int | None
 
 
 def _init_worker() -> None:

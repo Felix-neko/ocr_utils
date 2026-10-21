@@ -98,9 +98,9 @@ def _common(func):
         help="через запятую; 'list' — реестр",
     )(func)
     func = click.option("--jobs", default=DEFAULT_JOBS, show_default=True, type=int, help="процессов на CPU-этап")(func)
-    func = click.option("--source-dpi", default=600, show_default=True, type=int, help="разрешение исходника без тега")(
-        func
-    )
+    func = click.option(
+        "--source-dpi", default=None, type=int, help="разрешение исходника без тега; без опции файл без тега — ошибка"
+    )(func)
     func = click.option("--gpu-side", default=1536, show_default=True, type=int, help="длинная сторона копии на GPU")(
         func
     )

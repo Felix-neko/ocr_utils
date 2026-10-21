@@ -48,9 +48,6 @@ ORIENTATION_DETECTORS = ("ink_axis", "profile", "osd")
 # Поворот применяется только при такой сводной уверенности и без спора детекторов о стороне.
 ROTATE_MIN_CONFIDENCE = 0.6
 
-# Разрешение сканов пака-1 без тега.
-DEFAULT_DPI = 600
-
 
 @dataclass(frozen=True)
 class PageTask:
@@ -62,12 +59,15 @@ class PageTask:
         page: Номер страницы PDF с нуля; ``None`` — ``path`` это картинка полосы.
         variant: Вариант картинки (``image.Variant``): заострённая копия или PDF FineReader с коррекцией
             геометрии / без неё — от него ключ кэша surya.
+        default_dpi: Разрешение картинки без тега (``--default-dpi``); ``None`` — полоса без тега
+            разрешения считается ошибкой, а не молча 600 dpi (у паков 450 dpi все мм-пороги уехали бы).
     """
 
     name: str
     path: Path
     page: int | None = None
     variant: Variant = Variant.SHARPENED
+    default_dpi: int | None = None
 
 
 def page_key(name: str) -> str:
@@ -96,7 +96,7 @@ def load_image(task: PageTask, rotate: int = 0) -> PageImage:
 
         image = PageImage.from_pdf_page(fitz.open(str(task.path)), task.page, task.variant, task.name)
     else:
-        image = PageImage.from_file(task.path, task.variant, task.name, default_dpi=DEFAULT_DPI)
+        image = PageImage.from_file(task.path, task.variant, task.name, default_dpi=task.default_dpi)
     if rotate == 0:
         return image
     turned = rotate_cw(image.bgr_at(image.dpi), rotate)
@@ -286,7 +286,6 @@ def init_worker() -> None:
 
 
 __all__ = [
-    "DEFAULT_DPI",
     "ORIENTATION_DETECTORS",
     "PageTask",
     "RegionKind",

@@ -30,10 +30,10 @@ from ocr_utils.inpainting.backends import BACKEND_SD, SdParams, make_filler
 from ocr_utils.inpainting.grouping import group_masks
 from ocr_utils.scan_cleanup.inpaint import (
     DEFAULT_LAMA_HOLE_MAX_PX,
-    FEATHER_PX,
+    FEATHER_MM,
     GROUP_ROI_SCALE,
-    GROUP_MIN_DILATE_PX,
-    ROI_PADDING,
+    GROUP_MIN_DILATE_MM,
+    ROI_PADDING_MM,
     page_masks,
     zone_kinds,
 )
@@ -43,6 +43,7 @@ from ocr_utils.scan_cleanup.protect import analysis_roi, build_protect
 from ocr_utils.scan_cleanup.smoothing import SmoothOptions, smooth_page
 from ocr_utils.scan_cleanup.source import PageMarkup, load_markup
 from ocr_utils.db.models import MASK_KINDS
+from ocr_utils.units import mm_to_px
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +66,13 @@ class CompareMasksParams:
     sample: int = 0
     methods: "tuple[str, ...]" = ("otsu", "sauvola")
     sauvola_ks: "tuple[float, ...]" = (0.10,)
-    dilate_pxs: "tuple[float, ...]" = (15.0, 25.0, 35.0)
-    blur_pxs: "tuple[float, ...]" = (60.0, 120.0, 240.0)
+    # Радиусы в мм бумаги: 15/25/35 и 60/120/240 px при 600 dpi.
+    dilate_mms: "tuple[float, ...]" = (0.635, 1.058, 1.482)
+    blur_mms: "tuple[float, ...]" = (2.54, 5.08, 10.16)
     ink_levels: "tuple[float | None, ...]" = (INK_LEVEL,)
     show_removed: bool = False
-    crop_side: int = 1200
+    # Сторона врезки 1:1 в мм бумаги: 1200 px при 600 dpi.
+    crop_side_mm: float = 50.8
     crops: int = 3
     montage_cols: int = 4
     jobs: int = 8
@@ -92,7 +95,7 @@ class CompareInpaintParams:
     group_dilate_fracs: "tuple[float, ...]" = (1.0 / 3.0,)
     roi_scales: "tuple[float, ...]" = (GROUP_ROI_SCALE,)
     lama_holes: "tuple[int, ...]" = (DEFAULT_LAMA_HOLE_MAX_PX,)
-    group_min_dilate_px: int = GROUP_MIN_DILATE_PX
+    group_min_dilate_mm: float = GROUP_MIN_DILATE_MM
     montage_cols: int = 4
     sd: SdParams = field(default_factory=SdParams)
     prompts: PromptSet = field(default_factory=PromptSet)
@@ -200,7 +203,7 @@ def mask_variants(params: CompareMasksParams) -> "list[tuple[str, SmoothOptions]
     """Декартово произведение повторяемых опций: (имя варианта, настройки)."""
     out = []
     for method, k, dilate, blur, ink in itertools.product(
-        params.methods, params.sauvola_ks, params.dilate_pxs, params.blur_pxs, params.ink_levels
+        params.methods, params.sauvola_ks, params.dilate_mms, params.blur_mms, params.ink_levels
     ):
         # Для Оцу параметр k не значит ничего — не плодим одинаковые варианты.
         if method != METHOD_SAUVOLA and k != params.sauvola_ks[0]:
@@ -209,7 +212,7 @@ def mask_variants(params: CompareMasksParams) -> "list[tuple[str, SmoothOptions]
         name = (
             f"{method}" + (f"_k{k:g}" if method == METHOD_SAUVOLA else "") + f"_dil{dilate:g}_blur{blur:g}_ink{ink_tag}"
         )
-        out.append((name, SmoothOptions(method=method, sauvola_k=k, dilate_px=dilate, blur_px=blur, ink_level=ink)))
+        out.append((name, SmoothOptions(method=method, sauvola_k=k, dilate_mm=dilate, blur_mm=blur, ink_level=ink)))
     return out
 
 
@@ -247,10 +250,12 @@ def compare_masks_page(markup: PageMarkup, params: CompareMasksParams) -> str:
     page_dir = params.out_dir / Path(markup.rel_path).with_suffix("")
     _write(page_dir / "source.jpg", downscale(src, PREVIEW_SIDE))
 
+    if not markup.dpi:
+        return f"{markup.rel_path}: в базе нет dpi полосы"
     variants = mask_variants(params)
     results = []
     for name, opts in variants:
-        res = smooth_page(src, gray, protect if rects else None, roi, opts)
+        res = smooth_page(src, gray, protect if rects else None, roi, opts, markup.dpi)
         results.append((name, res))
         _write(page_dir / name / "result.jpg", downscale(res.image, PREVIEW_SIDE))
         _write(
@@ -261,8 +266,9 @@ def compare_masks_page(markup: PageMarkup, params: CompareMasksParams) -> str:
     # Врезки выбираются по ПЕРВОМУ варианту и одинаковы для всех: сравнивать надо
     # одно и то же место, иначе разница вариантов путается с разницей мест.
     reference = results[0][1].m_primary
-    windows = pick_crops(reference, params.crop_side, params.crops)
-    side = min(params.crop_side, *gray.shape)
+    crop_side = mm_to_px(params.crop_side_mm, markup.dpi)
+    windows = pick_crops(reference, crop_side, params.crops)
+    side = min(crop_side, *gray.shape)
     for i, (x, y) in enumerate(windows):
         # Врезки идут 1:1: ради них всё и затевалось, уменьшать их нельзя.
         tiles = [label(src[y : y + side, x : x + side], "source")]
@@ -273,7 +279,7 @@ def compare_masks_page(markup: PageMarkup, params: CompareMasksParams) -> str:
         # Разница считается от ПЕРВОГО варианта: он и есть точка отсчёта в сетке.
         base = results[0][1].m_primary
         for name, res in results[1:]:
-            for i, tile in enumerate(diff_tiles(gray, base, res.m_primary, params.crop_side, params.crops)):
+            for i, tile in enumerate(diff_tiles(gray, base, res.m_primary, crop_side, params.crops)):
                 _write(page_dir / name / f"removed_{i}.jpg", tile)
 
     covered = ", ".join(f"{name} {100 * (res.m_dilated > 0).mean():.0f}%" for name, res in results)
@@ -386,13 +392,18 @@ def run_compare_inpaint(params: CompareInpaintParams) -> str:
             masks = page_masks(markup, kinds)
             if not masks:
                 continue
+            if not markup.dpi:
+                lines.append(f"{markup.rel_path}: в базе нет dpi полосы")
+                continue
+            # Размеры закраса — в мм бумаги, в пиксели по dpi полосы.
+            min_dilate_px = mm_to_px(params.group_min_dilate_mm, markup.dpi, minimum=0)
+            padding = mm_to_px(ROI_PADDING_MM, markup.dpi, minimum=0)
+            feather = mm_to_px(FEATHER_MM, markup.dpi, minimum=0)
             union = np.zeros((markup.height, markup.width), np.uint8)
             for mask in masks.values():
                 union = cv2.bitwise_or(union, mask)
 
-            for i, zone in enumerate(
-                group_masks(union, params.group_dilate_fracs[0], min_dilate_px=params.group_min_dilate_px)
-            ):
+            for i, zone in enumerate(group_masks(union, params.group_dilate_fracs[0], min_dilate_px=min_dilate_px)):
                 kinds_here = zone_kinds(zone, masks)
                 zone_label = "+".join(kinds_here) or "zone"
                 main_kind = kinds_here[0] if kinds_here else ""
@@ -414,16 +425,16 @@ def run_compare_inpaint(params: CompareInpaintParams) -> str:
                         rgb,
                         zone,
                         filler,
-                        groups=partial(group_masks, dilate_frac=frac, min_dilate_px=params.group_min_dilate_px),
-                        padding=ROI_PADDING,
-                        feather=FEATHER_PX,
+                        groups=partial(group_masks, dilate_frac=frac, min_dilate_px=min_dilate_px),
+                        padding=padding,
+                        feather=feather,
                         roi_scale=scale,
                     )
                     per_variant.append((name, cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)))
 
                 # Врезка режется по ОБЩЕМУ ROI зоны, а не по ROI варианта: у вариантов
                 # с разной группировкой ROI разные, а сравнивать надо одно и то же место.
-                x1, y1, x2, y2 = roi_bounds(zone, ROI_PADDING, params.roi_scales[0], src.shape[:2])
+                x1, y1, x2, y2 = roi_bounds(zone, padding, params.roi_scales[0], src.shape[:2])
                 tiles = [label(src[y1:y2, x1:x2], f"before {zone_label}")]
                 tiles += [label(img[y1:y2, x1:x2], name) for name, img in per_variant]
                 _write(page_dir / f"zone_{i}_{zone_label}.jpg", _grid(tiles, params.montage_cols))

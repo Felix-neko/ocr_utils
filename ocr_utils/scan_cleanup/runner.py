@@ -24,7 +24,7 @@ import csv
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -146,6 +146,15 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
         report.reason = "не читается"
         return report
     dpi = read_dpi(src_path)
+    # Разрешение, по которому размеры закраса и размытия (мм) переводятся в пиксели: из базы,
+    # а если там пусто — из тега файла. Без него полосу не трогаем: молча 600 dpi нельзя.
+    page_dpi = markup.dpi or dpi
+    if not page_dpi:
+        report.status = "error"
+        report.reason = "нет dpi ни в базе, ни в теге файла"
+        return report
+    if not markup.dpi:
+        markup = replace(markup, dpi=int(page_dpi))
     before = bgr.copy() if params.debug_dir else None
 
     inpaint_report = None
@@ -164,7 +173,8 @@ def process_page(markup: PageMarkup, params: CleanupParams, models=None) -> Page
         report.status = "copied"
         report.reason = f"полосная иллюстрация ({full_page.kind})"
     elif params.do_smooth:
-        res = smooth_page(bgr, gray, protect if rects else None, analysis_roi(gray.shape, markup), params.smooth)
+        roi = analysis_roi(gray.shape, markup)
+        res = smooth_page(bgr, gray, protect if rects else None, roi, params.smooth, int(page_dpi))
         result, m_primary, m_dilated = res.image, res.m_primary, res.m_dilated
         report.dilate_px, report.blur_px = res.dilate_px, res.blur_px
         if res.skip_reason:

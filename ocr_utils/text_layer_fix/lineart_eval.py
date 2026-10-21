@@ -20,6 +20,7 @@ import fitz
 import numpy as np
 
 from ocr_utils.pdf_utils.intermediate_pdfs import DEFAULT_MARGIN_X_MM, DEFAULT_MARGIN_Y_MM
+from ocr_utils.pdf_utils.padding import JPEG_MAX_MCU_SIZE, align_padding_up
 from ocr_utils.page_layout.image import Variant
 from ocr_utils.page_layout.surya.blocks import LayoutBlocks
 from ocr_utils.page_layout.surya.cache import SuryaCache, scan_cache_name
@@ -54,15 +55,39 @@ class TruthPage:
     boxes: tuple[Box, ...]
 
 
+def intermediate_margins_px(
+    dpi: float, margin_x_mm: float | None = None, margin_y_mm: float | None = None
+) -> tuple[int, int]:
+    """Поля полной промежуточной PDF в пикселях полосы.
+
+    Args:
+        dpi: Разрешение полосы.
+        margin_x_mm: Поле слева и справа из базы (``Issue.full_intermediate_pdf_margin_left_mm``) или ``None``.
+        margin_y_mm: Поле сверху и снизу из базы или ``None``.
+
+    Returns:
+        ``(поле по X, поле по Y)``. Из базы — как записано; без неё — умолчания ``intermediate_pdfs``
+        (12 и 6 мм), округлённые вверх до MCU 4:2:0, как их вставляет сборщик промежуточных PDF
+        (288 и 144 px при 600 dpi, а не 283 и 142).
+    """
+    if margin_x_mm is not None and margin_y_mm is not None:
+        return int(round(margin_x_mm * dpi / 25.4)), int(round(margin_y_mm * dpi / 25.4))
+    return (
+        align_padding_up(mm_to_px(DEFAULT_MARGIN_X_MM, dpi), JPEG_MAX_MCU_SIZE),
+        align_padding_up(mm_to_px(DEFAULT_MARGIN_Y_MM, dpi), JPEG_MAX_MCU_SIZE),
+    )
+
+
 def truth_pages(
-    markup_db: Path, index: dict, dpi: int = 600, kinds: tuple[str, ...] = ("line_art_schema",)
+    markup_db: Path, index: dict, kinds: tuple[str, ...] = ("line_art_schema",)
 ) -> dict[tuple[str, int], TruthPage]:
     """Области заданных видов из базы по страницам no-geo PDF (эталон line art либо растр-исключения).
+
+    Поля промежуточной PDF переводятся в пиксели по dpi каждой полосы из базы.
 
     Args:
         markup_db: База разметки (только чтение).
         index: ``(год, выпуск, полоса) → PageRef`` из :func:`pages.page_index_map`.
-        dpi: Разрешение сканов (поля переводятся в пиксели по нему).
         kinds: Виды ``rect_regions``; по умолчанию — эталон line art.
 
     Returns:
@@ -73,7 +98,8 @@ def truth_pages(
     rows = connection.execute(
         f"""
         select y.year, i.name, p.source_file_name, p.source_rel_path, p.width, p.height, coalesce(p.rotate_cw, 0),
-               r.x1, r.y1, r.x2, r.y2
+               r.x1, r.y1, r.x2, r.y2, p.dpi,
+               i.full_intermediate_pdf_margin_left_mm, i.full_intermediate_pdf_margin_top_mm
         from rect_regions r join pages p on p.id = r.page_id
         join issues i on i.id = p.issue_id join year_packages y on y.id = i.year_package_id
         where r.kind in ({marks})
@@ -81,12 +107,13 @@ def truth_pages(
         kinds,
     ).fetchall()
     connection.close()
-    dx, dy = mm_to_px(DEFAULT_MARGIN_X_MM, dpi), mm_to_px(DEFAULT_MARGIN_Y_MM, dpi)
     grouped: dict[tuple[str, int], dict] = {}
-    for year, issue, file_name, rel_path, width, height, rotate, x1, y1, x2, y2 in rows:
+    for row in rows:
+        year, issue, file_name, rel_path, width, height, rotate, x1, y1, x2, y2, dpi, margin_x, margin_y = row
         ref = index.get((str(year), str(issue), Path(file_name).stem))
-        if ref is None:
+        if ref is None or not dpi:
             continue
+        dx, dy = intermediate_margins_px(dpi, margin_x, margin_y)
         box = (int(x1), int(y1), int(x2), int(y2))
         if rotate:
             box = rotate_box(box, int(width), int(height), int(rotate))
@@ -153,7 +180,7 @@ def source_boxes(
     result["ink"] = [Box(*b).clipped(width, height) for b in findings.boxes]
     surya: list[Box] = []
     if cached is not None and scan_size is not None:
-        dx, dy = mm_to_px(DEFAULT_MARGIN_X_MM, dpi), mm_to_px(DEFAULT_MARGIN_Y_MM, dpi)
+        dx, dy = intermediate_margins_px(dpi)
         layout = cached.scaled_to(scan_size[0], scan_size[1])
         surya = [b.box.shifted(dx, dy).clipped(width, height) for b in layout.blocks if b.label in FIGURE_LABELS]
     result["surya"] = surya

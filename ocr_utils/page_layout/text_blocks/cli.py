@@ -367,9 +367,8 @@ def stages(
         # Заострённая копия пака приводится к RENDER_DPI так же, как в разборе пака (pack_analysis).
         from ocr_utils.page_layout.image import PageImage
         from ocr_utils.page_layout.image import Variant as ImageVariant
-        from ocr_utils.page_layout.pack_analysis.stages import DEFAULT_DPI
 
-        image = PageImage.from_file(sharpened_dir / f"{key}.jpg", ImageVariant.SHARPENED, key, default_dpi=DEFAULT_DPI)
+        image = PageImage.from_file(sharpened_dir / f"{key}.jpg", ImageVariant.SHARPENED, key, default_dpi=None)
         gray300 = image.gray_at(RENDER_DPI)
         name, number = key.replace("/", "_"), 0
     elif pdf is not None and page is not None:

@@ -468,6 +468,8 @@ def union_box(regions: ScreenRegions, labels: list[int]) -> tuple[int, int, int,
 # Высота строки основного текста этого журнала около 55 px, заголовков и таблиц — до 120.
 LEADER_LAG_LO_PX = 20
 LEADER_LAG_HI_PX = 140
+# Меньше стольких пикселей точек в области (при 600 dpi) — признаки отточий не считаются.
+LEADER_MIN_DOT_PX = 200
 
 
 def leader_dot_features(dot_mask: np.ndarray, box: tuple[int, int, int, int], dpi_scale: float = 1.0) -> tuple:
@@ -500,7 +502,9 @@ def leader_dot_features(dot_mask: np.ndarray, box: tuple[int, int, int, int], dp
         return 0.0, 0.0
 
     rows = sub.sum(axis=1).astype(np.float32)
-    if rows.sum() < 200:  # точек слишком мало, судить не по чему
+    # Точек слишком мало, судить не по чему. Порог — площадь точек в px² полного кадра,
+    # названная при 600 dpi и пересчитанная квадратом масштаба.
+    if rows.sum() < LEADER_MIN_DOT_PX * dpi_scale * dpi_scale:
         return 0.0, 0.0
 
     empty_rows = float((rows == 0).mean())

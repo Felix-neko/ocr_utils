@@ -21,15 +21,13 @@ from ocr_utils.background_smoothing.processing import (
     DEFAULT_THRESHOLD_BIAS,
     MASK_METHODS,
     METHOD_SAUVOLA,
-    MIN_GLYPH_AREA,
-    SURE_GLYPH_AREA,
 )
-from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL, PAPER_BLUR_PX, PAPER_DILATE_PX
+from ocr_utils.paper import AUTO_INK_LEVEL, INK_LEVEL, PAPER_BLUR_MM, PAPER_DILATE_MM
 from ocr_utils.inpainting.backends import BACKEND_LAMA, BACKENDS, DEFAULT_SD_MODEL, SdParams
 from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC
 from ocr_utils.scan_cleanup.inpaint import (
     DEFAULT_LAMA_HOLE_MAX_PX,
-    GROUP_MIN_DILATE_PX,
+    GROUP_MIN_DILATE_MM,
     GROUP_ROI_SCALE,
     InpaintOptions,
 )
@@ -37,7 +35,13 @@ from ocr_utils.scan_cleanup.prompts import PROMPT_COLOUR, PROMPT_HALFTONE, PROMP
 from ocr_utils.scan_cleanup.prompts import NEGATIVE_COMMON, PromptSet
 from ocr_utils.scan_cleanup.protect import ProtectOptions
 from ocr_utils.scan_cleanup.runner import CleanupParams, run_cleanup, summary
-from ocr_utils.scan_cleanup.smoothing import DEFAULT_DILATE_PX, SmoothOptions
+from ocr_utils.scan_cleanup.smoothing import (
+    DEFAULT_DILATE_MM,
+    MIN_GLYPH_AREA_MM2,
+    SAUVOLA_WINDOW_MM,
+    SURE_GLYPH_AREA_MM2,
+    SmoothOptions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,13 +143,13 @@ def main() -> None:
     "--backend", default=BACKEND_LAMA, show_default=True, type=click.Choice(BACKENDS), help="Чем закрашивать."
 )
 @click.option(
-    "--group-min-dilate-px",
-    default=GROUP_MIN_DILATE_PX,
+    "--group-min-dilate-mm",
+    default=GROUP_MIN_DILATE_MM,
     show_default=True,
-    type=int,
+    type=float,
     help=(
-        "Нижняя граница припуска ПРИ ГРУППИРОВКЕ, пикс. В сеть маска идёт без припуска: "
-        "закрашивается ровно обведённое."
+        "Нижняя граница припуска ПРИ ГРУППИРОВКЕ, мм бумаги (16 px при 600 dpi). В сеть маска идёт "
+        "без припуска: закрашивается ровно обведённое."
     ),
 )
 @click.option(
@@ -174,45 +178,52 @@ def main() -> None:
 )
 @click.option("--threshold-bias", default=DEFAULT_THRESHOLD_BIAS, show_default=True, type=float)
 @click.option("--sauvola-k", default=DEFAULT_SAUVOLA_K, show_default=True, type=float)
-@click.option("--sauvola-window", default=None, type=int)
 @click.option(
-    "--min-glyph-area",
-    default=MIN_GLYPH_AREA,
+    "--sauvola-window-mm",
+    default=SAUVOLA_WINDOW_MM,
     show_default=True,
-    type=int,
+    type=float,
+    help="Окно Саволы, мм бумаги (101 px при 600 dpi): порядка двух-трёх высот строки.",
+)
+@click.option(
+    "--min-glyph-area-mm2",
+    default=MIN_GLYPH_AREA_MM2,
+    show_default=True,
+    type=float,
     help=(
-        "Минимальная площадь связной области первичной маски, пикс. Мельче — остаётся, только "
-        "если примыкает к прошедшему глобальный порог или лежит рядом с подтверждённой "
-        "областью (см. despeckle). 0 — не чистить вовсе."
+        "Минимальная площадь связной области первичной маски, мм² (34 px² при 600 dpi). Мельче — "
+        "остаётся, только если примыкает к прошедшему глобальный порог или лежит рядом с "
+        "подтверждённой областью (см. despeckle). 0 — не чистить вовсе."
     ),
 )
 @click.option(
-    "--paper-dilate-px",
-    default=PAPER_DILATE_PX,
+    "--paper-dilate-mm",
+    default=PAPER_DILATE_MM,
     show_default=True,
-    type=int,
+    type=float,
     help=(
-        "Радиус раздутия светлого при оценке уровня бумаги, пикс. Должен перекрывать толщину "
-        "штриха. В пикселях, а не долей кадра: в паке встречаются обрезанные страницы, и доля "
-        "от их высоты дала бы втрое меньшее окно на том же наборе."
+        "Радиус раздутия светлого при оценке уровня бумаги, мм (15 px при 600 dpi). Должен "
+        "перекрывать толщину штриха. В мм бумаги, а не долей кадра: в паке встречаются обрезанные "
+        "страницы, и доля от их высоты дала бы втрое меньшее окно на том же наборе."
     ),
 )
 @click.option(
-    "--paper-blur-px",
-    default=PAPER_BLUR_PX,
+    "--paper-blur-mm",
+    default=PAPER_BLUR_MM,
     show_default=True,
-    type=int,
-    help="Сторона окна размытия при оценке уровня бумаги, пикс.: крупнее буквы, мельче неровности света.",
+    type=float,
+    help="Сторона окна размытия при оценке уровня бумаги, мм (150 px при 600 dpi): крупнее буквы, "
+    "мельче неровности света.",
 )
 @click.option(
-    "--sure-glyph-area",
-    default=SURE_GLYPH_AREA,
+    "--sure-glyph-area-mm2",
+    default=SURE_GLYPH_AREA_MM2,
     show_default=True,
-    type=int,
+    type=float,
     help=(
-        "Площадь, с которой область подтверждается САМА ПО СЕБЕ, без оглядки на отражение. "
-        "Без неё правило вырождается в «крупная И тёмная», и бледная линейка таблицы в тысячи "
-        "пикселей удаляется целиком."
+        "Площадь, с которой область подтверждается САМА ПО СЕБЕ, без оглядки на отражение, мм² "
+        "(500 px² при 600 dpi). Без неё правило вырождается в «крупная И тёмная», и бледная "
+        "линейка таблицы в тысячи пикселей удаляется целиком."
     ),
 )
 @click.option(
@@ -240,9 +251,13 @@ def main() -> None:
     "Здесь растр размечен руками, и предохранитель даёт только ложные срабатывания.",
 )
 @click.option(
-    "--dilate-px", default=DEFAULT_DILATE_PX, show_default=True, type=float, help="Радиус защитного припуска, пикс."
+    "--dilate-mm",
+    default=DEFAULT_DILATE_MM,
+    show_default=True,
+    type=float,
+    help="Радиус защитного припуска, мм бумаги (25 px при 600 dpi).",
 )
-@click.option("--blur-px", default=None, type=float, help="Радиус размытия, пикс. Не задан — dilate-px x blur-mult.")
+@click.option("--blur-mm", default=None, type=float, help="Радиус размытия, мм бумаги. Не задан — припуск x blur-mult.")
 @click.option("--blur-mult", default=DEFAULT_BLUR_MULT, show_default=True, type=float)
 @click.option("--blur-mode", default=BLUR_MODE_MASKED, show_default=True, type=click.Choice(BLUR_MODES))
 @click.option(
@@ -295,23 +310,23 @@ def run_command(
     do_inpaint,
     do_smooth,
     backend,
-    group_min_dilate_px,
+    group_min_dilate_mm,
     group_dilate_frac,
     roi_scale,
     lama_hole_max_px,
     method,
     threshold_bias,
     sauvola_k,
-    sauvola_window,
-    min_glyph_area,
+    sauvola_window_mm,
+    min_glyph_area_mm2,
     ink_level,
-    sure_glyph_area,
-    paper_dilate_px,
-    paper_blur_px,
+    sure_glyph_area_mm2,
+    paper_dilate_mm,
+    paper_blur_mm,
     trust_strong,
     halftone_guard,
-    dilate_px,
-    blur_px,
+    dilate_mm,
+    blur_mm,
     blur_mult,
     blur_mode,
     protect_stamp_suspect,
@@ -347,7 +362,7 @@ def run_command(
         report_csv=report_csv,
         inpaint=InpaintOptions(
             backend=backend,
-            group_min_dilate_px=group_min_dilate_px,
+            group_min_dilate_mm=group_min_dilate_mm,
             group_dilate_frac=group_dilate_frac,
             roi_scale=roi_scale,
             lama_hole_max_px=lama_hole_max_px,
@@ -358,16 +373,16 @@ def run_command(
             method=method.lower(),
             threshold_bias=threshold_bias,
             sauvola_k=sauvola_k,
-            sauvola_window=sauvola_window,
-            min_glyph_area=min_glyph_area,
+            sauvola_window_mm=sauvola_window_mm,
+            min_glyph_area_mm2=min_glyph_area_mm2,
             ink_level=ink_level,
-            sure_glyph_area=sure_glyph_area,
-            paper_dilate_px=paper_dilate_px,
-            paper_blur_px=paper_blur_px,
+            sure_glyph_area_mm2=sure_glyph_area_mm2,
+            paper_dilate_mm=paper_dilate_mm,
+            paper_blur_mm=paper_blur_mm,
             trust_strong=trust_strong,
             halftone_guard=halftone_guard,
-            dilate_px=dilate_px,
-            blur_px=blur_px,
+            dilate_mm=dilate_mm,
+            blur_mm=blur_mm,
             blur_mult=blur_mult,
             blur_mode=blur_mode,
         ),
@@ -387,8 +402,24 @@ def run_command(
 @click.option("--out-dir", required=True, type=DIR_OUT, help="Куда складывать сравнение.")
 @click.option("--method", "methods", multiple=True, default=("otsu", "sauvola"), show_default=True)
 @click.option("--sauvola-k", "sauvola_ks", multiple=True, type=float, default=(DEFAULT_SAUVOLA_K,), show_default=True)
-@click.option("--dilate-px", "dilate_pxs", multiple=True, type=float, default=(15.0, 25.0, 35.0), show_default=True)
-@click.option("--blur-px", "blur_pxs", multiple=True, type=float, default=(60.0, 120.0, 240.0), show_default=True)
+@click.option(
+    "--dilate-mm",
+    "dilate_mms",
+    multiple=True,
+    type=float,
+    default=(0.635, 1.058, 1.482),
+    show_default=True,
+    help="Радиусы припуска, мм (15/25/35 px при 600 dpi); можно повторять.",
+)
+@click.option(
+    "--blur-mm",
+    "blur_mms",
+    multiple=True,
+    type=float,
+    default=(2.54, 5.08, 10.16),
+    show_default=True,
+    help="Радиусы размытия, мм (60/120/240 px при 600 dpi); можно повторять.",
+)
 @click.option(
     "--ink-level",
     "ink_levels",
@@ -403,7 +434,9 @@ def run_command(
 @click.option(
     "--sample", default=0, type=int, help="Взять столько полос случайно (детерминированно), если не задан --page."
 )
-@click.option("--crop-side", default=1200, show_default=True, type=int, help="Сторона врезки 1:1, пикс.")
+@click.option(
+    "--crop-side-mm", default=50.8, show_default=True, type=float, help="Сторона врезки 1:1, мм (1200 px при 600 dpi)."
+)
 @click.option("--crops", default=3, show_default=True, type=int, help="Сколько врезок на полосу.")
 @click.option(
     "--montage-cols",
@@ -426,12 +459,12 @@ def compare_masks_command(
     out_dir,
     methods,
     sauvola_ks,
-    dilate_pxs,
-    blur_pxs,
+    dilate_mms,
+    blur_mms,
     ink_levels,
     show_removed,
     sample,
-    crop_side,
+    crop_side_mm,
     crops,
     montage_cols,
     jobs,
@@ -453,11 +486,11 @@ def compare_masks_command(
         sample=sample,
         methods=tuple(m.lower() for m in methods),
         sauvola_ks=tuple(sauvola_ks),
-        dilate_pxs=tuple(dilate_pxs),
-        blur_pxs=tuple(blur_pxs),
+        dilate_mms=tuple(dilate_mms),
+        blur_mms=tuple(blur_mms),
         ink_levels=tuple(parse_ink_level(v) for v in ink_levels),
         show_removed=show_removed,
-        crop_side=crop_side,
+        crop_side_mm=crop_side_mm,
         crops=crops,
         montage_cols=montage_cols,
         jobs=jobs,
@@ -473,13 +506,13 @@ def compare_masks_command(
 @click.option("--kind", "kinds", multiple=True, default=(), help="Виды разметки; по умолчанию все три.")
 @click.option("--sample", default=30, show_default=True, type=int, help="Сколько полос с масками взять.")
 @click.option(
-    "--group-min-dilate-px",
-    default=GROUP_MIN_DILATE_PX,
+    "--group-min-dilate-mm",
+    default=GROUP_MIN_DILATE_MM,
     show_default=True,
-    type=int,
+    type=float,
     help=(
-        "Нижняя граница припуска ПРИ ГРУППИРОВКЕ, пикс. В сеть маска идёт без припуска: "
-        "закрашивается ровно обведённое."
+        "Нижняя граница припуска ПРИ ГРУППИРОВКЕ, мм бумаги (16 px при 600 dpi). В сеть маска идёт "
+        "без припуска: закрашивается ровно обведённое."
     ),
 )
 @click.option(
@@ -523,7 +556,7 @@ def compare_inpaint_command(
     group_dilate_fracs,
     roi_scales,
     lama_holes,
-    group_min_dilate_px,
+    group_min_dilate_mm,
     montage_cols,
 ) -> None:
     """Закрашивает выборку полос всеми бэкендами и вариантами и складывает результаты рядом."""
@@ -546,7 +579,7 @@ def compare_inpaint_command(
         group_dilate_fracs=tuple(group_dilate_fracs),
         roi_scales=tuple(roi_scales),
         lama_holes=tuple(lama_holes),
-        group_min_dilate_px=group_min_dilate_px,
+        group_min_dilate_mm=group_min_dilate_mm,
         montage_cols=montage_cols,
         sd=SdParams(model=sd_model, steps=sd_steps, guidance=sd_guidance, size=sd_size, seed=sd_seed),
         prompts=_prompt_set(sd_prompt_paper, sd_prompt_colour, sd_prompt_halftone, sd_prompt_other, sd_negative),

@@ -39,7 +39,7 @@ def _small_radii():
     """Радиусы под маленький синтетический кадр (400x600, а не 3500x6100)."""
     from ocr_utils.scan_cleanup.smoothing import SmoothOptions
 
-    return SmoothOptions(dilate_px=4.0, blur_px=16.0)
+    return SmoothOptions(dilate_mm=0.1693, blur_mm=0.6773)
 
 
 def page(pack, name: str):

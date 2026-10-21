@@ -19,13 +19,14 @@ import cv2
 import numpy as np
 
 from ocr_utils.background_smoothing.processing import HALFTONE_OPEN_PX, global_threshold
-from ocr_utils.page_layout.raster.boxes import MIN_REGION_SIDE_PX
 
-# Ядро смыкания маски краски на копии 1/4. То же значение и по той же причине, что
+# Ядро смыкания маски краски на копии 150 dpi (``regions.RASTER_WORK_DPI``; px этой копии, от dpi
+# скана не зависят). То же значение и по той же причине, что
 # ``background_smoothing.layout.RASTER_CLOSE_PX``: сводит разрывы одной плашки в одно пятно.
 INK_CLOSE_PX = 31
 
-# Минимальная площадь пятна краски на копии 1/4, ниже которой это не плашка, а крапина.
+# Минимальная площадь пятна краски на копии 150 dpi (``regions.RASTER_WORK_DPI``), ниже которой
+# это не плашка, а крапина.
 INK_MIN_AREA_PX = 900
 
 # Признак «это обложка, а не полоса с чертежом» — почти полное отсутствие текста. Замер по
@@ -45,12 +46,12 @@ COVER_MIN_INK_FRAC = 0.05
 
 
 def ink_components(gray: np.ndarray, min_area: int = INK_MIN_AREA_PX) -> tuple[list[tuple], float]:
-    """Крупные сплошные пятна краски на копии 1/4 и доля «текстовой» краски вокруг них.
+    """Крупные сплошные пятна краски на копии 150 dpi и доля «текстовой» краски вокруг них.
 
     Плашка обложки в средние тона не попадает вовсе (замер: плашка обложки 1966/03 —
     серого 74..79 при нижней границе средних тонов 100), поэтому ищется всё, что темнее
     бумаги. Текст отсеивается размыканием: штрих основного текста при 600 dpi — единицы
-    точек копии 1/4, плашка остаётся целиком.
+    точек копии 150 dpi, плашка остаётся целиком.
 
     Вторым значением возвращается доля краски, которую размыкание УБРАЛО, — то есть оценка
     того, много ли на полосе текста. По ней :func:`is_cover_page` отличает обложку от
@@ -105,7 +106,7 @@ def cover_decision(
     max_text_frac: float = COVER_MAX_TEXT_FRAC,
     min_ink_frac: float = COVER_MIN_INK_FRAC,
 ) -> bool:
-    """Считать ли эту полосу обложкой целиком. ``work_gray`` — серая копия 1/4.
+    """Считать ли эту полосу обложкой целиком. ``work_gray`` — серая копия 150 dpi.
 
     Полоса не первая в выпуске — не обложка, и пиксели даже не смотрим. Первая полоса при
     ``first_page_is_cover`` объявляется обложкой сразу; без флага решает эвристика сплошной
@@ -124,7 +125,7 @@ def cover_decision(
 def lineart_ink_frac(work_gray: np.ndarray) -> float:
     """Доля площади полосы, занятая краской. Признак «полоса — сплошной рисунок».
 
-    Считается по той же копии 1/4 и тем же порогом бумаги, что у :func:`ink_components`, но
+    Считается по той же копии 150 dpi и тем же порогом бумаги, что у :func:`ink_components`, но
     БЕЗ размыкания: у штрихового рисунка вся краска и есть содержимое, и убирать из неё
     тонкие штрихи — значит стереть сам рисунок. Отдельно от ``dots``, потому что вопрос
     другой: не «полутоновая ли это печать», а «занят ли рисунком весь кадр».
@@ -132,6 +133,16 @@ def lineart_ink_frac(work_gray: np.ndarray) -> float:
     return float(np.count_nonzero(work_gray < global_threshold(work_gray))) / float(work_gray.size)
 
 
-def lineart_side_ok(width: int, height: int) -> bool:
-    """Не выродилась ли полоса в лоскут — страховка от кадра-полоски."""
-    return width >= MIN_REGION_SIDE_PX and height >= MIN_REGION_SIDE_PX
+def lineart_side_ok(width: int, height: int, min_side_px: int) -> bool:
+    """Не выродилась ли полоса в лоскут — страховка от кадра-полоски.
+
+    Args:
+        width: Ширина полного кадра, px.
+        height: Высота полного кадра, px.
+        min_side_px: Наименьшая сторона области в px полного кадра — ``ScreenParams.min_region_side_px``
+            (``MIN_REGION_SIDE_PX`` при 600 dpi, пересчитанный на dpi полосы).
+
+    Returns:
+        ``True``, если обе стороны не меньше ``min_side_px``.
+    """
+    return width >= min_side_px and height >= min_side_px

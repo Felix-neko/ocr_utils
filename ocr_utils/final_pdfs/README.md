@@ -8,7 +8,7 @@ uv run python -m ocr_utils.final_pdfs run \
     --geo-dir <PDF с коррекцией> --nogeo-dir <PDF без коррекции> --out-dir <финальные> \
     --pictures-dir <blurred/> --db pack1_reviewed.sqlite --pack-name пак-1 --work-dir <рабочий> \
     --geometry-run-dir <прогон детектора геометрии> [--only-year Г --only-issue НН] \
-    [--picture-dpi 300 --jpeg-quality 75 --descreen-sigma-mm 0.05 --margin-x-mm 12.192 --margin-y-mm 6.096] \
+    [--picture-dpi 300 --jpeg-quality 75 --descreen-sigma-mm 0.05] [--margin-x-mm 12.192 --margin-y-mm 6.096] \
     [--no-second-opinion] [--no-text-layer] [--redo] [--preview-pages N] [--no-assemble]
 ```
 
@@ -58,5 +58,10 @@ PDF с верным числом страниц не пересчитывают�
 | `assemble.py` | стадия C: `assemble_issue`, сверка, `pages.csv`/`summary.csv` |
 | `cli.py` | команда `run`, пулы, сводка |
 
-Умолчания для пака-1 (`pictures.py`): 300 dpi, JPEG 75, σ = 0.05 мм; поля 12.192 / 6.096 мм
-(`cli.py`). Порог «образ FineReader под иллюстрацией» — 80 % площади образа внутри рамки.
+Умолчания для пака-1 (`pictures.py`): 300 dpi, JPEG 75, σ = 0.05 мм.
+
+Поля промежуточной PDF берутся из базы (`Issue.full_intermediate_pdf_margin_*_mm`, их пишет
+`pdf_utils.intermediate_pdfs`) для каждого выпуска; `--margin-x-mm` / `--margin-y-mm` нужны только выпускам без
+полей в базе (пак-1 собран до этих колонок: 12.192 / 6.096 мм — 288 / 144 px при 600 dpi). Поле каждой страницы
+меряется по её образу no-geo PDF (`sources.page_margins`): номинал выпуска в px её dpi или на MCU 8 меньше — так
+сборка верна и для полос 450 dpi (12 мм → 224 или 216 px), и для выпусков со смешанным dpi. Порог «образ FineReader под иллюстрацией» — 80 % площади образа внутри рамки.

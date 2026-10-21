@@ -5,8 +5,12 @@
 в :func:`ocr_utils.scan_cropping.pipeline.run_batch`.
 
     uv run python -m ocr_utils.scan_cropping.v1 \\
-        --input-dir IN --output-dir OUT --debug-dir DBG \\
-        --left-margin -150 --top-margin -150 --right-margin -150 --bottom-margin -150
+        --input-dir IN --output-dir OUT --debug-dir DBG --dpi 450 \\
+        --left-margin-mm -8.5 --top-margin-mm -8.5 --right-margin-mm -8.5 --bottom-margin-mm -8.5
+
+РАЗМЕРЫ — В ММ БУМАГИ. Кадры с камеры тега разрешения не несут, поэтому ``--dpi`` (сколько пикселей
+кадра приходится на дюйм бумаги) обязателен: по нему все ``*-mm`` переводятся в пиксели кадра.
+Умолчания — прежние пиксельные умолчания v1, названные при ``V1_REFERENCE_DPI`` (450 dpi).
 """
 
 import logging
@@ -17,6 +21,7 @@ import click
 
 from ocr_utils.scan_cropping.background_fill import (
     BG_FILL_AVERAGE,
+    BG_FILL_EROSION_PX,
     BG_FILL_METHODS,
     CROP_FILL_METHODS,
     CROP_FILL_REPLICATE,
@@ -33,6 +38,8 @@ from ocr_utils.scan_cropping.finger_removal.finger_shadow import SHADOW_METHODS,
 from ocr_utils.scan_cropping.finger_removal.removal import (
     DROP_INNER_FINGER_CORES,
     FINGER_DILATE_PX,
+    FINGER_FEATHER,
+    FINGER_PADDING,
     FINGER_ZONE_LIGHT_INCREMENT,
 )
 from ocr_utils.scan_cropping.finger_removal.text_protection import (
@@ -43,7 +50,24 @@ from ocr_utils.scan_cropping.finger_removal.text_protection import (
 from ocr_utils.scan_cropping.geometry import EXTRA_EROSION_PX
 from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE, GpuModels
 from ocr_utils.scan_cropping.image_io import collect_images
-from ocr_utils.scan_cropping.pipeline import CropParams, run_batch
+from ocr_utils.scan_cropping.pipeline import V1_REFERENCE_DPI, CropParams, run_batch
+from ocr_utils.units import MM_PER_INCH, px_to_mm
+
+# Умолчания опций в мм бумаги: прежние пиксельные умолчания v1 при V1_REFERENCE_DPI (450 dpi). Run-скрипты
+# паков задают свои числа явно — пересчитанные из прежних пикселей по разрешению своего пака.
+EXTRA_EROSION_MM = round(px_to_mm(EXTRA_EROSION_PX, V1_REFERENCE_DPI), 4)  # 80 px → 4.5156 мм
+CROP_FILL_BLUR_MM = round(px_to_mm(CROP_FILL_BLUR_PX, V1_REFERENCE_DPI), 6)  # 48 px → 2.709333 мм
+FINGER_DILATE_MM = round(px_to_mm(FINGER_DILATE_PX, V1_REFERENCE_DPI), 4)  # 40 px → 2.2578 мм
+LAYOUT_PAD_MM = round(px_to_mm(DEFAULT_LAYOUT_PAD_PX, V1_REFERENCE_DPI), 4)  # 12 px → 0.6773 мм
+DETECT_PAD_TB_MM = round(px_to_mm(250, V1_REFERENCE_DPI), 4)  # 250 px → 14.1111 мм
+# Радиус смыкания силуэта: свип на 23 кадрах 450 dpi (45 px) и 36 кадрах 300 dpi (30 px) — это 2.54 мм в обоих
+# случаях (``page_detection.PAGE_CLOSE_FRAC``: прежде считался долей кадра, но доля зависит от того, как кадрирована
+# съёмка, а межстрочный интервал — нет).
+PAGE_CLOSE_MM = 2.54
+# Неизменяемые из CLI размеры: эрозия книги перед средним цветом, контекст LaMa и растушёвка шва (450 dpi).
+BG_FILL_EROSION_MM = round(px_to_mm(BG_FILL_EROSION_PX, V1_REFERENCE_DPI), 4)  # 100 px → 5.6444 мм
+FINGER_PADDING_MM = round(px_to_mm(FINGER_PADDING, V1_REFERENCE_DPI), 4)  # 64 px → 3.6124 мм
+FINGER_FEATHER_MM = round(px_to_mm(FINGER_FEATHER, V1_REFERENCE_DPI), 4)  # 9 px → 0.508 мм
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -63,18 +87,44 @@ def _parse_light_increment(ctx, param, value: str) -> "tuple[float, float]":
     raise click.BadParameter("ожидается число ('20') или пара 'слева,справа' ('15,30')")
 
 
-def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
-    """Парсит ``--layout-pad-px``: 'N' → (N, N), 'X,Y' → (X, Y) (запас по X и по Y)."""
+def _parse_layout_pad(ctx, param, value) -> "tuple[float, float]":
+    """Парсит ``--layout-pad-mm``: 'N' → (N, N), 'X,Y' → (X, Y) (запас по X и по Y, мм)."""
     parts = [p.strip() for p in str(value).split(",")]
     try:
         if len(parts) == 1:
-            v = int(parts[0])
+            v = float(parts[0])
             return (v, v)
         if len(parts) == 2:
-            return (int(parts[0]), int(parts[1]))
+            return (float(parts[0]), float(parts[1]))
     except ValueError:
         pass
-    raise click.BadParameter("ожидается число ('12') или пара 'по_x,по_y' ('12,24')")
+    raise click.BadParameter("ожидается число ('0.68') или пара 'по_x,по_y' ('0.68,4.06')")
+
+
+def _px(mm: float, dpi: float) -> int:
+    """Миллиметры бумаги → целые пиксели кадра со знаком (отрицательный припуск — сужение зоны).
+
+    Args:
+        mm: Длина на бумаге, мм (может быть отрицательной).
+        dpi: Разрешение бумаги на кадре, px/дюйм.
+
+    Returns:
+        Длина в пикселях кадра, округлённая к ближайшему.
+    """
+    return int(round(mm * dpi / MM_PER_INCH))
+
+
+def _px_float(mm: float, dpi: float) -> float:
+    """Миллиметры бумаги → пиксели кадра без округления (для сигм размытия).
+
+    Args:
+        mm: Длина на бумаге, мм.
+        dpi: Разрешение бумаги на кадре, px/дюйм.
+
+    Returns:
+        Длина в пикселях кадра.
+    """
+    return mm * dpi / MM_PER_INCH
 
 
 @click.command()
@@ -96,10 +146,21 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     default=None,
     help="Если задана — сюда кадр с оверлеями (граница/min-bbox/crop-зона)",
 )
-@click.option("--left-margin", default=0, show_default=True, help="Припуск crop-зоны слева, пикс. (>0 шире, <0 уже)")
-@click.option("--top-margin", default=0, show_default=True, help="Припуск crop-зоны сверху, пикс. (>0 шире, <0 уже)")
-@click.option("--right-margin", default=0, show_default=True, help="Припуск crop-зоны справа, пикс. (>0 шире, <0 уже)")
-@click.option("--bottom-margin", default=0, show_default=True, help="Припуск crop-зоны снизу, пикс. (>0 шире, <0 уже)")
+@click.option(
+    "--dpi",
+    type=float,
+    required=True,
+    help="Разрешение бумаги на кадре, px/дюйм (300, 450…): по нему размеры в мм переводятся в пиксели кадра. "
+    "Мерить заранее и задавать в run-скрипте; тега разрешения у кадров с камеры нет",
+)
+@click.option("--left-margin-mm", default=0.0, show_default=True, help="Припуск crop-зоны слева, мм (>0 шире, <0 уже)")
+@click.option("--top-margin-mm", default=0.0, show_default=True, help="Припуск crop-зоны сверху, мм (>0 шире, <0 уже)")
+@click.option(
+    "--right-margin-mm", default=0.0, show_default=True, help="Припуск crop-зоны справа, мм (>0 шире, <0 уже)"
+)
+@click.option(
+    "--bottom-margin-mm", default=0.0, show_default=True, help="Припуск crop-зоны снизу, мм (>0 шире, <0 уже)"
+)
 @click.option("--recursive", is_flag=True, default=False, help="Рекурсивно обходить подкаталоги в поисках картинок")
 @click.option(
     "--skip-if-exists/--no-skip-if-exists",
@@ -124,10 +185,10 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     help="Растягивать уровни по перцентилям внутри маски страницы (минус эрозия)",
 )
 @click.option(
-    "--extra-erosion-px",
-    default=EXTRA_EROSION_PX,
+    "--extra-erosion-mm",
+    default=EXTRA_EROSION_MM,
     show_default=True,
-    help="Доп. обрезка краёв силуэта книги перед копированием, пикс. (диляция на extra + "
+    help="Доп. обрезка краёв силуэта книги перед копированием, мм (диляция на extra + "
     "эрозия на 2*extra → срезает тёмные фрагменты обложки в углах; 0 — выкл.)",
 )
 @click.option(
@@ -146,7 +207,7 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     "выпрямленный прямоугольник (интерполяция всего кадра; на скромном разрешении и большом "
     "угле слегка мылит); pixel-exact — скопировать crop-зону пиксель-в-пиксель в минимальный "
     "осевой холст, книга остаётся наклонённой (выпрямлять снаружи, напр. в ScanTailor), "
-    "«уши» по углам заполняются заливкой (см. --crop-fill-blur-px / --crop-fill-fade). "
+    "«уши» по углам заполняются заливкой (см. --crop-fill-blur-mm / --crop-fill-fade). "
     "В режиме pixel-exact --upscale не применяется (он бы вернул интерполяцию)",
 )
 @click.option(
@@ -160,11 +221,11 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     "точки границы зоны: у углов расходится веером и загибает такие линии",
 )
 @click.option(
-    "--crop-fill-blur-px",
-    default=CROP_FILL_BLUR_PX,
+    "--crop-fill-blur-mm",
+    default=CROP_FILL_BLUR_MM,
     type=float,
     show_default=True,
-    help="Макс. σ размытия заливки «ушей» (--crop-mode=pixel-exact): у границы crop-зоны "
+    help="Макс. σ размытия заливки «ушей» (--crop-mode=pixel-exact), мм: у границы crop-зоны "
     "размытия нет, вдали растёт до этого значения; 0 — не размывать",
 )
 @click.option(
@@ -183,10 +244,10 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     help="Детектировать и закрашивать пальцы (finger_removal) перед детекцией книги/кропом",
 )
 @click.option(
-    "--finger-dilate-px",
-    default=FINGER_DILATE_PX,
+    "--finger-dilate-mm",
+    default=FINGER_DILATE_MM,
     show_default=True,
-    help="Дилатация маски пальца, пикс. (шире — надёжнее докрашивает полутона на краю силуэта)",
+    help="Дилатация маски пальца, мм (шире — надёжнее докрашивает полутона на краю силуэта)",
 )
 @click.option(
     "--finger-zone-light-increment",
@@ -255,13 +316,13 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     "с зоной закраски блоки обратно с оригинала (лучше вычищает тень между блоками)",
 )
 @click.option(
-    "--layout-pad-px",
-    default=str(DEFAULT_LAYOUT_PAD_PX),
+    "--layout-pad-mm",
+    default=f"{LAYOUT_PAD_MM:g}",
     show_default=True,
     callback=_parse_layout_pad,
-    help="Запас вокруг блока layout, пикс. (--protect-text-layout): Surya обводит блок впритык, "
-    "и без запаса закраска подъедает край строки. Число ('12') — одинаково по обеим осям, пара "
-    "'по_x,по_y' ('12,24') — раздельно. Больше запас — целее контент, но хуже вычищается тень у "
+    help="Запас вокруг блока layout, мм (--protect-text-layout): Surya обводит блок впритык, "
+    "и без запаса закраска подъедает край строки. Число ('0.68') — одинаково по обеим осям, пара "
+    "'по_x,по_y' ('0.68,4.06') — раздельно. Больше запас — целее контент, но хуже вычищается тень у "
     "самого блока; 0 — строго по границе блока",
 )
 @click.option(
@@ -280,34 +341,34 @@ def _parse_layout_pad(ctx, param, value) -> "tuple[int, int]":
     help="Способ заливки внешней зоны (в углы повёрнутого кропа за краем страницы): "
     "average — один усреднённый цвет по всей странице (старый); nearest — цвет ближайшей "
     "точки границы зоны копирования (Вороной): учитывает неравномерный свет и цветную "
-    "обложку, можно сгладить через --bg-fill-blur-px",
+    "обложку, можно сгладить через --bg-fill-blur-mm",
 )
 @click.option(
-    "--bg-fill-blur-px",
+    "--bg-fill-blur-mm",
     type=float,
     default=0.0,
     show_default=True,
-    help="Размытие зоны заливки (только для локальных методов заливки): 0 — выкл; иначе σ "
+    help="Размытие зоны заливки (только для локальных методов заливки), мм: 0 — выкл; иначе σ "
     "растёт от 0 у границы зоны копирования до этого значения вдали. Зона копирования не "
     "затрагивается",
 )
 @click.option(
-    "--detect-pad-tb-px",
-    type=int,
-    default=250,
+    "--detect-pad-tb-mm",
+    type=float,
+    default=DETECT_PAD_TB_MM,
     show_default=True,
-    help="Перед детекцией разворота добавить чёрную рамку сверху и снизу на N пикселей (маска "
+    help="Перед детекцией разворота добавить чёрную рамку сверху и снизу на N мм (маска "
     "возвращается в координатах кадра, рамка срезается обратно). Помогает на снимках, где книга "
     "занимает кадр целиком по вертикали и детектится «вся область как разворот»: чёрная рамка "
     "даёт SAM тёмную границу и отодвигает боксы от краёв. 0 — выкл",
 )
 @click.option(
-    "--page-close-px",
-    type=int,
-    default=None,
+    "--page-close-mm",
+    type=float,
+    default=PAGE_CLOSE_MM,
     show_default=True,
-    help="Радиус смыкания силуэта разворота, пикс. По умолчанию считается по размеру кадра "
-    "(≈30 px при 300 DPI, ≈45 px при 450 DPI). Смыкание собирает страницу обратно, когда SAM "
+    help="Радиус смыкания силуэта разворота, мм (30 px при 300 DPI, 45 px при 450 DPI). Смыкание собирает "
+    "страницу обратно, когда SAM "
     "вернул силуэт не листа, а напечатанного текста (маска идёт по глифам), поэтому радиус "
     "должен перекрывать межстрочный интервал и растёт вместе с разрешением съёмки. Мало — верх "
     "страницы выпадает из маски и затирается заливкой при кропе; много — лишнего не съедает, "
@@ -324,22 +385,23 @@ def main(
     input_dir: Path,
     output_dir: Path,
     debug_dir: Optional[Path],
-    left_margin: int,
-    top_margin: int,
-    right_margin: int,
-    bottom_margin: int,
+    dpi: float,
+    left_margin_mm: float,
+    top_margin_mm: float,
+    right_margin_mm: float,
+    bottom_margin_mm: float,
     recursive: bool,
     skip_if_exists: bool,
     output_format: Optional[str],
     do_compensate_levels: bool,
-    extra_erosion_px: int,
+    extra_erosion_mm: float,
     upscale: Optional[float],
     crop_mode: str,
     crop_fill_method: str,
-    crop_fill_blur_px: float,
+    crop_fill_blur_mm: float,
     crop_fill_fade: float,
     do_remove_fingers: bool,
-    finger_dilate_px: int,
+    finger_dilate_mm: float,
     finger_zone_light_increment: "tuple[float, float]",
     lama_roi_max_side: int,
     force_dpi: Optional[int],
@@ -347,12 +409,12 @@ def main(
     drop_inner_finger_cores: bool,
     protect_text_layout: bool,
     text_protect_mode: str,
-    layout_pad_px: "tuple[int, int]",
+    layout_pad_mm: "tuple[float, float]",
     shadow_method: str,
     bg_fill_method: str,
-    bg_fill_blur_px: float,
-    detect_pad_tb_px: int,
-    page_close_px: Optional[int],
+    bg_fill_blur_mm: float,
+    detect_pad_tb_mm: float,
+    page_close_mm: float,
     log_level: str,
 ) -> None:
     """Находит разворот и вырезает crop-зону в OUTPUT_DIR (способ — см. --crop-mode)."""
@@ -361,12 +423,22 @@ def main(
     if debug_dir is not None:
         debug_dir.mkdir(parents=True, exist_ok=True)
 
+    # Все размеры — из мм бумаги в пиксели кадра по --dpi.
+    margins = tuple(_px(v, dpi) for v in (left_margin_mm, top_margin_mm, right_margin_mm, bottom_margin_mm))
+    extra_erosion_px = max(0, _px(extra_erosion_mm, dpi))
+    crop_fill_blur_px = _px_float(crop_fill_blur_mm, dpi)
+    finger_dilate_px = max(0, _px(finger_dilate_mm, dpi))
+    layout_pad_px = (max(0, _px(layout_pad_mm[0], dpi)), max(0, _px(layout_pad_mm[1], dpi)))
+    bg_fill_blur_px = _px_float(bg_fill_blur_mm, dpi)
+    detect_pad_tb_px = max(0, _px(detect_pad_tb_mm, dpi))
+    page_close_px = max(0, _px(page_close_mm, dpi))
+
     params = CropParams(
         input_dir=input_dir,
         output_dir=output_dir,
         debug_dir=debug_dir,
         # Припуски crop-зоны: (left, top, right, bottom) — по одному на сторону
-        margins=(left_margin, top_margin, right_margin, bottom_margin),
+        margins=margins,
         recursive=recursive,
         skip_if_exists=skip_if_exists,
         output_format=output_format,
@@ -392,6 +464,10 @@ def main(
         layout_pad_px=layout_pad_px,
         detect_pad_tb_px=detect_pad_tb_px,
         page_close_px=page_close_px,
+        dpi=dpi,
+        bg_fill_erosion_px=max(1, _px(BG_FILL_EROSION_MM, dpi)),
+        finger_padding_px=max(0, _px(FINGER_PADDING_MM, dpi)),
+        finger_feather_px=max(0, _px(FINGER_FEATHER_MM, dpi)),
     )
 
     files = collect_images(input_dir, recursive)
@@ -407,21 +483,19 @@ def main(
     # времени старта).
     with GpuModels(with_layout=protect_text_layout, shadow_variant=shadow_variant(shadow_method)) as models:
         logger.info(
-            "Файлов: %d | устройство: %s | margins: left=%d top=%d right=%d bottom=%d | recursive: %s | "
+            "Файлов: %d | устройство: %s | dpi: %g | margins px: left=%d top=%d right=%d bottom=%d | recursive: %s | "
             "skip-if-exists: %s | "
-            "output-format: %s | compensate-levels: %s | extra-erosion-px=%d | upscale: %s | "
+            "output-format: %s | compensate-levels: %s | extra-erosion=%d px | upscale: %s | "
             "crop-mode: %s (fill=%s, fill-blur-px=%g, fill-fade=%g) | "
             "remove-fingers: %s (dilate-px=%d, light-increment=слева=%g,справа=%g, drop-inner-finger-cores=%s) | "
             "lama-roi-max-side: %s | force-dpi: %s | "
             "max-asymmetric-dilation-ratio: %g | protect-text-layout: %s (mode=%s, pad-px=x=%d,y=%d) | "
-            "shadow-method: %s | bg-fill-method: %s (blur-px=%g) | detect-pad-tb-px: %d | "
-            "page-close-px: %s",
+            "shadow-method: %s | bg-fill-method: %s (blur=%g px) | detect-pad-tb: %d px | "
+            "page-close: %s px",
             len(files),
             models.device,
-            left_margin,
-            top_margin,
-            right_margin,
-            bottom_margin,
+            dpi,
+            *margins,
             recursive,
             skip_if_exists,
             output_format or "как у входа",
@@ -448,7 +522,7 @@ def main(
             bg_fill_method,
             bg_fill_blur_px,
             detect_pad_tb_px,
-            page_close_px if page_close_px is not None else "по размеру кадра",
+            page_close_px,
         )
         run_batch(files, params, models)
 

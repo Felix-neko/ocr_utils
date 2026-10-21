@@ -3,8 +3,9 @@
 Зачем тайлы. DeepSeek ужимает любую картинку до ~1300 px по стороне (1024 токенов), и целая
 полоса 6000 px превращается в ≈128 dpi — на плотных полосах модель теряет текст. Стенд
 (``research/external_ocr_models``) резал полосу на N горизонтальных кусков; здесь вместо N —
-сетка по ``max_src_tile``: шаг сетки в пикселях ИСХОДНИКА, число столбцов и строк —
-``ceil(сторона / шаг)``. Так обычная полоса пака-1 (3000–4500 × 5000–6700 при 600 dpi) даёт 1×2,
+сетка по ``max_src_tile_mm``: шаг сетки в мм БУМАГИ (в пиксели исходника — по тегу dpi полосы),
+число столбцов и строк — ``ceil(сторона / шаг)``. Так обычная полоса пака-1 (3000–4500 × 5000–6700
+при 600 dpi, шаг 190.5 мм = 4500 px) даёт 1×2,
 полоса, повёрнутая на 90°, — 2×1, а склеенный разворот (6444×5336) — 2×2, и всё это одним
 параметром, без знания о том, что за кадр перед нами.
 
@@ -28,9 +29,12 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-# Шаг сетки в пикселях исходника — для пака-1 при 600 dpi (замер по базе: ширина полос
-# 2998–4499, высота 4961–6692, разворот 6444×5336).
-DEFAULT_MAX_SRC_TILE = 4500
+from ocr_utils.units import mm_to_px
+
+# Шаг сетки в мм бумаги: 4500 px при 600 dpi (замер по базе пака-1: ширина полос 2998–4499,
+# высота 4961–6692, разворот 6444×5336). В мм, а не в пикселях: при 450 dpi тот же шаг в 4500 px
+# превратил бы обычную полосу из 1×2 в 1×1, и модель увидела бы её с разрешением около 220 dpi.
+DEFAULT_MAX_SRC_TILE_MM = 190.5
 # Длинная сторона тайла после уменьшения, px.
 DEFAULT_MAX_MODEL_TILE = 2200
 DEFAULT_QUALITY = 85
@@ -131,7 +135,7 @@ def grid_shape(width: int, height: int, max_src_tile: int) -> tuple[int, int]:
     Args:
         width: Ширина исходника, px.
         height: Высота исходника, px.
-        max_src_tile: Шаг сетки в пикселях исходника (``--max-src-tile-size``).
+        max_src_tile: Шаг сетки в пикселях исходника (``--max-src-tile-mm`` по dpi полосы).
 
     Returns:
         ``(столбцов, строк)``, каждое не меньше 1.
@@ -205,28 +209,59 @@ def encode(
     return PreparedImage(buffer.getvalue(), image.width, image.height, box)
 
 
+def image_dpi(image: Image.Image, default_dpi: int | None = None) -> int:
+    """Разрешение полосы по тегу файла, иначе ``default_dpi``.
+
+    Args:
+        image: Открытая картинка.
+        default_dpi: Разрешение, если тега нет или он неправдоподобен (меньше 72).
+
+    Returns:
+        Разрешение, точек на дюйм.
+
+    Raises:
+        ValueError: Тега нет, а ``default_dpi`` не задан: шаг сетки в мм не перевести в пиксели,
+            а молча взять 600 dpi на полосе 450 dpi — получить не ту сетку.
+    """
+    tag = image.info.get("dpi")
+    if tag:
+        try:
+            value = int(round(float(tag[0])))
+        except (TypeError, ValueError):
+            value = 0
+        if value >= 72:
+            return value
+    if default_dpi is None:
+        raise ValueError("нет тега разрешения, а --default-dpi не задан")
+    return default_dpi
+
+
 def prepare_tiles(
     path: Path,
-    max_src_tile: int = DEFAULT_MAX_SRC_TILE,
+    max_src_tile_mm: float = DEFAULT_MAX_SRC_TILE_MM,
     max_model_tile: int = DEFAULT_MAX_MODEL_TILE,
     quality: int = DEFAULT_QUALITY,
     grayscale: bool = True,
     overlap: float = TILE_OVERLAP,
+    default_dpi: int | None = None,
 ) -> list[PreparedImage]:
     """Полоса с диска -> тайлы к отправке, в порядке чтения.
 
     Args:
         path: Файл полосы.
-        max_src_tile: Шаг сетки в пикселях исходника (``--max-src-tile-size``).
-        max_model_tile: Длинная сторона тайла после уменьшения (``--max-model-tile-size``).
+        max_src_tile_mm: Шаг сетки в мм бумаги (``--max-src-tile-mm``); в пиксели — по dpi полосы.
+        max_model_tile: Длинная сторона тайла после уменьшения, px (``--max-model-tile-size``) —
+            предел модели, а не размер на бумаге.
         quality: Качество JPEG тайла (``--quality``).
         grayscale: Обесцвечивать ли тайлы.
         overlap: Перекрытие соседних тайлов, доля стороны кадра.
+        default_dpi: Разрешение полосы без тега (``--default-dpi``); ``None`` — такая полоса даёт ошибку.
 
     Returns:
         Готовые к отправке тайлы (JPEG-байты и место в сетке) в порядке чтения.
     """
     image = load(path)
+    max_src_tile = mm_to_px(max_src_tile_mm, image_dpi(image, default_dpi))
     boxes = grid(image.width, image.height, max_src_tile, overlap)
     if len(boxes) == 1:  # один тайл — без лишнего crop всей картинки
         return [encode(image, boxes[0], max_model_tile, quality, grayscale)]

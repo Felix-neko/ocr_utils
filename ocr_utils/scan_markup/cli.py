@@ -40,7 +40,7 @@ from ocr_utils.page_layout.raster.regions import (
     LEADER_TONE_SPREAD_THR,
     LINEART_PICTURE_MIN_FRAC,
     SAFETY_MIN_FRAC,
-    SURYA_LINEART_P99_PX,
+    SURYA_LINEART_P99_MM2,
 )
 from ocr_utils.scan_markup.detection.run import DetectParams, run_detect
 from ocr_utils.scan_markup.geometry import CVAT_DPI
@@ -236,11 +236,11 @@ def main() -> None:
     "метрике, не нашлось (ч/б доходят до 0.293 при цветных от 0.092).",
 )
 @click.option(
-    "--cell-px",
+    "--cell-mm",
     default=None,
-    type=int,
-    help="Сторона клетки детектора точек в пикселях полосы; по умолчанию 128 при 600 dpi, "
-    "пересчитанные на её разрешение.",
+    type=float,
+    help="Сторона клетки детектора точек в мм бумаги (в пиксели — по dpi полосы); по умолчанию "
+    "5.42 мм (128 px при 600 dpi).",
 )
 @click.option(
     "--dot-frac-thr",
@@ -256,13 +256,14 @@ def main() -> None:
     "по умолчанию 3. Считается по клеткам ДО морфологии.",
 )
 @click.option(
-    "--surya-lineart-p99",
-    "lineart_p99",
-    default=SURYA_LINEART_P99_PX,
+    "--surya-lineart-p99-mm2",
+    "lineart_p99_mm2",
+    default=SURYA_LINEART_P99_MM2,
     show_default=True,
-    type=int,
-    help="p99 площади пятна краски, с которой блок Surya считается ШТРИХОВЫМ рисунком, а не "
-    "растром. Замер: фотографии 100..4439, штрих 4761..550783. Проверяется только у блоков, "
+    type=float,
+    help="p99 площади пятна краски в мм² бумаги, с которой блок Surya считается ШТРИХОВЫМ "
+    "рисунком, а не растром (в px² — по dpi полосы). Замер при 600 dpi: фотографии 100..4439 px², "
+    "штрих 4761..550783 px²; 8.244 мм² = 4600 px² при 600 dpi. Проверяется только у блоков, "
     "под которыми не нашлось растровых клеток.",
 )
 @click.option(
@@ -376,10 +377,10 @@ def main() -> None:
     help="Минимальная доля площади полосы для растровой области.",
 )
 @click.option(
-    "--merge-gap",
+    "--merge-gap-mm",
     default=None,
-    type=int,
-    help="Зазор слияния областей в пикселях полосы; по умолчанию 48 при 600 dpi, " "пересчитанные на её разрешение.",
+    type=float,
+    help="Зазор слияния областей в мм бумаги (в пиксели — по dpi полосы); по умолчанию 2.03 мм " "(48 px при 600 dpi).",
 )
 @click.option(
     "--full-page-frac",
@@ -545,10 +546,12 @@ def mark_covers_command(db_path: Path, pack_name: str, log_level: str, **kwargs)
 @click.option("--chroma-spread-thr", default=CHROMA_SPREAD_THR, show_default=True, type=float)
 @click.option("--chroma-self-frac-thr", default=CHROMA_SELF_FRAC_THR, show_default=True, type=float)
 @click.option("--min-region-frac", default=MIN_REGION_FRAC, show_default=True, type=float)
-@click.option("--cell-px", default=None, type=int)
+@click.option("--cell-mm", default=None, type=float)
 @click.option("--dot-frac-thr", default=None, type=float)
 @click.option("--min-cells", default=None, type=int)
-@click.option("--surya-lineart-p99", "lineart_p99", default=SURYA_LINEART_P99_PX, show_default=True, type=int)
+@click.option(
+    "--surya-lineart-p99-mm2", "lineart_p99_mm2", default=SURYA_LINEART_P99_MM2, show_default=True, type=float
+)
 @click.option("--safety-min-frac", default=SAFETY_MIN_FRAC, show_default=True, type=float)
 @click.option("--lineart-picture-min-frac", default=LINEART_PICTURE_MIN_FRAC, show_default=True, type=float)
 @click.option("--full-page-color-frac", default=FULL_PAGE_COLOR_FRAC, show_default=True, type=float)
@@ -1043,7 +1046,12 @@ def copy_regions_command(db_path: Path, out_db_path: Path, pack_name: str, kinds
     type=click.Path(file_okay=False, path_type=Path),
     help="Контактные листы НАЙДЕННОГО по выпускам: подпапка «содержание» и отдельно «указатели».",
 )
-@click.option("--default-dpi", default=600, show_default=True, type=int, help="Если у файла нет тега разрешения.")
+@click.option(
+    "--default-dpi",
+    default=None,
+    type=int,
+    help="Если у файла нет тега разрешения; без опции такая полоса уходит в ошибки.",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def toc_command(
     pack_dir: Path,
@@ -1061,7 +1069,7 @@ def toc_command(
     labels_path: Path | None,
     debug_dir: Path | None,
     found_dir: Path | None,
-    default_dpi: int,
+    default_dpi: int | None,
     log_level: str,
 ) -> None:
     """Найти полосы оглавления (Содержание выпуска и указатель за год) и записать в базу.

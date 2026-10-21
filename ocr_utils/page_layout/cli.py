@@ -302,6 +302,13 @@ def analyze_command(
     "фильтром сора голосованием CRAFT + pero (карты — GPU); выступы, оставшиеся по итогу, помечаются недостоверными "
     "всегда (reports/edge_guard.md).",
 )
+@click.option(
+    "--default-dpi",
+    default=None,
+    type=int,
+    help="Разрешение заострённых копий без тега; по умолчанию копия без тега — ошибка (молча 600 dpi нельзя: "
+    "у паков 450 dpi все размеры в мм уехали бы на треть).",
+)
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
 def analyze_pack_command(
     sharpened_dir: Path | None,
@@ -323,6 +330,7 @@ def analyze_pack_command(
     gutter_mode: str,
     blocks_mode: str,
     edge_craft: bool,
+    default_dpi: int | None,
     log_level: str,
 ) -> None:
     """Разбор пака стадиями: ориентация → растр → таблицы → line art с DeepSeek → текстовые блоки; оверлеи по классам."""
@@ -356,6 +364,7 @@ def analyze_pack_command(
         variant=Variant(variant_name) if pdf_dir is not None else Variant.SHARPENED,
         no_raster=no_raster,
         overlay=OverlayMode(overlay_name),
+        default_dpi=default_dpi,
     )
 
 

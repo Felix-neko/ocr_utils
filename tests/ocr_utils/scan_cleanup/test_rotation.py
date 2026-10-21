@@ -31,7 +31,7 @@ def params(pack, tmp_path):
         pack_name=pack_name,
         pack_dir=pack_dir,
         out_dir=tmp_path / "out",
-        smooth=SmoothOptions(dilate_px=4.0, blur_px=16.0),
+        smooth=SmoothOptions(dilate_mm=0.1693, blur_mm=0.6773),
     )
 
 

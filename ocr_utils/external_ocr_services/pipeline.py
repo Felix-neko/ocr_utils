@@ -855,13 +855,13 @@ def run_pipeline(client: OpenRouterClient, spec: ModelSpec, params: PipelinePara
     )
     started = time.monotonic()
     logger.info(
-        "%s (%s): выпусков %d, полос %d, потоков %d, тайл %d px → %d px",
+        "%s (%s): выпусков %d, полос %d, потоков %d, тайл %.1f мм → %d px",
         spec.name,
         spec.openrouter_id,
         len(groups),
         len(rels),
         params.jobs,
-        params.options.max_src_tile,
+        params.options.max_src_tile_mm,
         params.options.max_model_tile,
     )
     if params.assemble and params.issues_dir is None:

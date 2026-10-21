@@ -20,7 +20,7 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
-from ocr_utils.page_layout.image import Variant
+from ocr_utils.page_layout.image import Variant, read_image_dpi
 from ocr_utils.page_layout.line_art.deepseek.runner import run_worker
 from ocr_utils.page_layout.pack_analysis.final import OverlayMode, final_page, reblock_page, render_for_maps
 from ocr_utils.page_layout.pack_analysis.raster_db import load_raster, same_raster
@@ -44,18 +44,24 @@ logger = logging.getLogger(__name__)
 
 
 
-def list_tasks(root: Path, pages_file: Path | None = None, limit: int | None = None) -> list[PageTask]:
+def list_tasks(
+    root: Path, pages_file: Path | None = None, limit: int | None = None, default_dpi: int | None = None
+) -> list[PageTask]:
     """Полосы пака: ``<root>/<год>/<выпуск>/<полоса>.jpg`` по порядку.
 
     Args:
         root: Корень заострённых копий.
         pages_file: Файл с именами полос «год/выпуск/полоса» по строке — только они.
         limit: Только первые N (после отбора).
+        default_dpi: Разрешение копий без тега; ``None`` — копия без тега даёт ошибку.
 
     Returns:
         Задания.
     """
-    tasks = [PageTask(str(p.relative_to(root).with_suffix("")), p) for p in sorted(root.rglob("*.jpg"))]
+    tasks = [
+        PageTask(str(p.relative_to(root).with_suffix("")), p, default_dpi=default_dpi)
+        for p in sorted(root.rglob("*.jpg"))
+    ]
     if pages_file is not None:
         wanted = {line.strip() for line in pages_file.read_text().splitlines() if line.strip()}
         tasks = [t for t in tasks if t.name in wanted]
@@ -228,6 +234,53 @@ def _copy_jsonl(source: Path, target: Path, ids: set[str]) -> None:
             handle.write("\n".join(lines) + "\n")
 
 
+def same_source(task: PageTask, record_path: Path) -> bool:
+    """Записан ли JSON стадии кандидатов по той же картинке, что лежит сейчас: dpi и размеры.
+
+    Пропуск готовых полос по одному имени опасен, когда под тем же именем лежит пересканированная
+    полоса другого разрешения (450 dpi вместо 600): её разбор взялся бы из чужого JSON, и все рамки
+    съехали бы на треть. Размеры сравниваются без учёта порядка — JSON пишется после поворота.
+
+    Args:
+        task: Полоса. У страницы PDF сверки нет: страница файла не меняется под тем же именем.
+        record_path: ``work/pages/<ключ>.json``.
+
+    Returns:
+        ``True``, если JSON есть и совпадает с картинкой (или это страница PDF).
+    """
+    if not record_path.is_file():
+        return False
+    if task.page is not None:
+        return True
+    from PIL import Image as PILImage
+
+    try:
+        record = json.loads(record_path.read_text())
+        with PILImage.open(task.path) as image:
+            size = image.size
+    except (OSError, ValueError):
+        return False
+    dpi = read_image_dpi(task.path) or task.default_dpi
+    return record.get("dpi") == dpi and sorted(record.get("size", [])) == sorted(size)
+
+
+def _stale(work_pages: Path, out_pages: Path, key: str) -> bool:
+    """Нужно ли пересчитать итог полосы: итога нет или кандидаты полосы новее его.
+
+    Args:
+        work_pages: ``work/pages`` — JSON стадии кандидатов.
+        out_pages: ``<выход>/pages`` — итоговые JSON.
+        key: Ключ полосы (:func:`page_key`).
+
+    Returns:
+        ``True``, если итог надо пересчитать.
+    """
+    final = out_pages / f"{key}.json"
+    if not final.is_file():
+        return True
+    return (work_pages / f"{key}.json").stat().st_mtime > final.stat().st_mtime
+
+
 def stage_candidates(
     tasks, orientation, cache_root: Path, work: Path, jobs: int, raster: dict[str, list[dict]] | None = None
 ) -> None:
@@ -236,7 +289,7 @@ def stage_candidates(
     ``raster`` — растр полос из базы (:func:`raster_db.load_raster`); задан — детектор растра не
     запускается, полоса без записи в словаре считается полосой без растра.
     """
-    todo = [t for t in tasks if not (work / "pages" / f"{page_key(t.name)}.json").is_file()]
+    todo = [t for t in tasks if not same_source(t, work / "pages" / f"{page_key(t.name)}.json")]
     logger.info("Кандидаты: полос %d, к обработке %d", len(tasks), len(todo))
     if todo:
         rotations = [orientation[t.name]["rotate_cw"] if orientation[t.name]["apply"] else 0 for t in todo]
@@ -326,7 +379,8 @@ def stage_final(
     # Слова первого прохода — для проверки «пометка на полях» у кандидатов без второго прохода.
     words = read_jsonl_map(work / "deepseek" / "pass1" / "ocr.jsonl")
     ready = [t for t in tasks if (work / "pages" / f"{page_key(t.name)}.json").is_file()]
-    todo = ready if redo else [t for t in ready if not (out / "pages" / f"{page_key(t.name)}.json").is_file()]
+    # Итог устарел, если кандидаты полосы пересчитаны после него (например, полоса пересканирована).
+    todo = ready if redo else [t for t in ready if _stale(work / "pages", out / "pages", page_key(t.name))]
     logger.info("Итог: полос %d, к обработке %d", len(ready), len(todo))
     payloads = []
     for task in todo:
@@ -523,6 +577,7 @@ def run(
     variant: Variant = Variant.SHARPENED,
     no_raster: bool = False,
     overlay: OverlayMode = OverlayMode.ALL,
+    default_dpi: int | None = None,
 ) -> None:
     """Весь разбор по стадиям.
 
@@ -550,13 +605,14 @@ def run(
         no_raster: Детектор растра не запускать и растра не брать: полосы считаются без растра (бинарные PDF
             FineReader — растр там всё равно бинаризован).
         overlay: Писать ли оверлеи полос (``NONE`` — только JSON и сайдкары).
+        default_dpi: Разрешение заострённых копий без тега; ``None`` — копия без тега даёт ошибку.
     """
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
     if pdf_dir is not None:
         tasks = list_pdf_tasks(pdf_dir, variant, pages_file, limit)
     elif sharpened is not None:
-        tasks = list_tasks(sharpened, pages_file, limit)
+        tasks = list_tasks(sharpened, pages_file, limit, default_dpi)
     else:
         raise ValueError("нужен корень заострённых копий или каталог PDF")
     if detect_orientation:

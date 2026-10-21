@@ -34,32 +34,41 @@ import numpy as np
 
 from ocr_utils.inpainting.apply import inpaint_by_groups, single_group
 from ocr_utils.inpainting.backends import BACKEND_LAMA, SdParams, make_filler
-from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC, MIN_ZONE_AREA, group_masks
+from ocr_utils.inpainting.grouping import DEFAULT_GROUP_DILATE_FRAC, group_masks
 from ocr_utils.scan_cleanup.prompts import PromptSet, prompt_chooser
 from ocr_utils.scan_cleanup.source import PageMarkup, decode_mask_rows
 from ocr_utils.db.models import MASK_KINDS
+from ocr_utils.units import mm2_to_px2, mm_to_px
 
 logger = logging.getLogger(__name__)
 
-# Нижняя граница припуска при ГРУППИРОВКЕ, пикс. Правило «раздуть на 1/3 своего
+# РАЗМЕРЫ — В ММ БУМАГИ, в пиксели переводятся по dpi полосы из базы; в комментариях — прежние
+# пиксели при 600 dpi (пак-1), которые эти мм дают ровно.
+
+# Нижняя граница припуска при ГРУППИРОВКЕ: 16 px при 600 dpi. Правило «раздуть на 1/3 своего
 # размера» у мелких областей вырождается: треть от пяти пикселей — это полтора, и две
 # соседние крошки не склеятся. Шестнадцать — примерно два делителя уменьшения: разметку
-# рисовали на копии 1/8, и её край и без того известен лишь с точностью до 8 px, так
-# что области, разделённые таким зазором, разумно считать одной.
+# рисовали на копии 75 dpi (1/8 при 600 dpi, 1/6 при 450), и её край и без того известен лишь
+# с точностью до делителя (0.34 мм), так что области, разделённые таким зазором, разумно
+# считать одной.
 #
 # ЭТО ТОЛЬКО ДЛЯ РЕШЕНИЯ О СЛИЯНИИ. В сеть маска идёт БЕЗ припуска: закрашивается ровно
 # то, что обвёл человек. Он и так обводит с запасом (видно по любой маске в CVAT: кисть
 # заходит далеко за края оттиска), а лишний припуск съедал бы соседнее содержимое.
-GROUP_MIN_DILATE_PX = 16
+GROUP_MIN_DILATE_MM = 0.677
 
 # Во сколько раз ROI больше рамки группы — «примерно 2x по ширине и по высоте».
 GROUP_ROI_SCALE = 2.0
 
-# Контекстное поле вокруг рамки группы до растяжения, пикс.
-ROI_PADDING = 64
+# Контекстное поле вокруг рамки группы до растяжения: 64 px при 600 dpi.
+ROI_PADDING_MM = 2.709
 
-# Ширина растушёвки шва при вклейке, пикс. (уходит внутрь маски).
-FEATHER_PX = 9
+# Ширина растушёвки шва при вклейке (уходит внутрь маски): 9 px при 600 dpi.
+FEATHER_MM = 0.381
+
+# Мельче этой площади область разметки — шум растеризации маски: 20 px² при 600 dpi
+# (``inpainting.grouping.MIN_ZONE_AREA``).
+MIN_ZONE_AREA_MM2 = 0.0358
 
 # Предел размера ДЫРЫ в масштабе сети, пикс. Здесь ограничивается именно дыра, а не
 # длинная сторона ROI (``LAMA_ROI_MAX_SIDE``, как на пальцах): предел по ROI даёт на
@@ -77,11 +86,13 @@ class InpaintOptions:
     backend: str = BACKEND_LAMA
     kinds: "tuple[str, ...]" = field(default=MASK_KINDS)
     group_dilate_frac: float = DEFAULT_GROUP_DILATE_FRAC
-    group_min_dilate_px: int = GROUP_MIN_DILATE_PX
-    min_zone_area: int = MIN_ZONE_AREA
+    # Размеры — в мм бумаги (в пиксели — по dpi полосы); 0 у припуска — нижней границы нет.
+    group_min_dilate_mm: float = GROUP_MIN_DILATE_MM
+    min_zone_area_mm2: float = MIN_ZONE_AREA_MM2
     roi_scale: float = GROUP_ROI_SCALE
-    roi_padding: int = ROI_PADDING
-    feather: int = FEATHER_PX
+    roi_padding_mm: float = ROI_PADDING_MM
+    feather_mm: float = FEATHER_MM
+    # Предел сети, а не размер на бумаге — в пикселях масштаба сети.
     lama_hole_max_px: int = DEFAULT_LAMA_HOLE_MAX_PX
     sd: SdParams = field(default_factory=SdParams)
     prompts: PromptSet = field(default_factory=PromptSet)
@@ -156,6 +167,18 @@ def inpaint_page(
 
     Работа идёт в RGB (сети ждут именно его), на входе и выходе — BGR, как во всём
     остальном пайплайне.
+
+    Args:
+        bgr: Полоса BGR.
+        markup: Разметка полосы из базы; её ``dpi`` переводит размеры ``opts`` в пиксели.
+        opts: Настройки; ``None`` — умолчания.
+        models: Модели закраса.
+
+    Returns:
+        ``(кадр BGR, отчёт)``.
+
+    Raises:
+        ValueError: У полосы с масками в базе нет dpi — размеры не перевести в пиксели.
     """
     opts = opts or InpaintOptions()
     report = InpaintReport()
@@ -171,9 +194,15 @@ def inpaint_page(
     for mask in masks.values():
         union = cv2.bitwise_or(union, mask)
 
+    if not markup.dpi:
+        raise ValueError(f"{markup.rel_path}: в базе нет dpi полосы — размеры закраса не перевести в пиксели")
+    dpi = markup.dpi
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     zones = group_masks(
-        union, opts.group_dilate_frac, min_dilate_px=opts.group_min_dilate_px, min_area=opts.min_zone_area
+        union,
+        opts.group_dilate_frac,
+        min_dilate_px=mm_to_px(opts.group_min_dilate_mm, dpi, minimum=0),
+        min_area=mm2_to_px2(opts.min_zone_area_mm2, dpi, minimum=0),
     )
     for zone in zones:
         kinds = zone_kinds(zone, masks)
@@ -191,8 +220,8 @@ def inpaint_page(
             zone,
             filler,
             groups=single_group,
-            padding=opts.roi_padding,
-            feather=opts.feather,
+            padding=mm_to_px(opts.roi_padding_mm, dpi, minimum=0),
+            feather=mm_to_px(opts.feather_mm, dpi, minimum=0),
             roi_scale=opts.roi_scale,
         )
         report.rois.extend((label, roi) for roi in rois)

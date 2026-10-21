@@ -9,17 +9,37 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM, fill_pull_push
-from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM
-from ocr_utils.scan_cropping.background_fill import CROP_FILL_REPLICATE, book_mean_color, voronoi_fill
+from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
+from ocr_utils.scan_cropping.background_fill import (
+    BG_FILL_EROSION_PX,
+    CROP_FILL_REPLICATE,
+    book_mean_color,
+    voronoi_fill,
+)
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX, CROP_FILL_FADE, crop_pixel_exact
 from ocr_utils.scan_cropping.page_detection import WORK_SIDE
 
-# Масштаб, на котором считается заливка Telea (на полном кадре она медленная); вклейка — только в не-бумагу.
+# Масштаб, на котором считается заливка Telea и pull-push (на полном кадре они медленные), на калибровочном кадре
+# (13.8 px/мм); на кадре другой плотности копия приводится к той же плотности (:func:`fill_factor`), чтобы радиус
+# Telea и счётчики пикселей копии значили одно и то же на бумаге. Вклейка — только в не-бумагу.
 FILL_SCALE = 0.25
-# Радиус Telea на уменьшенной копии, px.
+# Радиус Telea на уменьшенной копии, px (копия калибровочной плотности: 9 px ≈ 2.6 мм).
 TELEA_RADIUS = 9
-# Запас вокруг выемок, которые дозаливаются в replicate: опорная бумага берётся не ближе этого, px кадра.
+# Запас вокруг выемок, которые дозаливаются в replicate: опорная бумага берётся не ближе этого, px калибровочного
+# кадра (0.43 мм); на кадре другой плотности пересчитывается через ``Scale.frame_px``.
 HOLE_MARGIN_PX = 6
+
+
+def fill_factor(px_per_mm: float) -> float:
+    """Масштаб копии закраса относительно кадра: ¼ на калибровочном кадре, та же плотность копии на любом другом.
+
+    Args:
+        px_per_mm: Плотность кадра, px/мм.
+
+    Returns:
+        Множитель для ``cv2.resize`` (при 13.8 px/мм — ровно ``FILL_SCALE``).
+    """
+    return FILL_SCALE * (REF_PX_PER_MM / px_per_mm)
 
 
 class FillMethod(str, Enum):
@@ -52,12 +72,13 @@ class ReplicateParams:
     fade: float = CROP_FILL_FADE
 
 
-def fill_non_paper(bgr: np.ndarray, paper: np.ndarray) -> np.ndarray:
+def fill_non_paper(bgr: np.ndarray, paper: np.ndarray, px_per_mm: float = REF_PX_PER_MM) -> np.ndarray:
     """Дорисовывает не-бумагу цветом соседней бумаги (Telea на уменьшенной копии, вклейка только вне листа).
 
     Args:
         bgr: Картинка BGR.
         paper: Булева маска бумаги того же размера.
+        px_per_mm: Плотность картинки, px/мм: копия для Telea приводится к ¼ калибровочной плотности.
 
     Returns:
         Картинка BGR, где пиксели бумаги не тронуты.
@@ -65,7 +86,8 @@ def fill_non_paper(bgr: np.ndarray, paper: np.ndarray) -> np.ndarray:
     if paper.all():
         return bgr
     h, w = paper.shape
-    small = cv2.resize(bgr, None, fx=FILL_SCALE, fy=FILL_SCALE, interpolation=cv2.INTER_AREA)
+    factor = fill_factor(px_per_mm)
+    small = cv2.resize(bgr, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
     hole = cv2.resize(
         (~paper).astype(np.uint8) * 255, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_NEAREST
     )
@@ -96,12 +118,13 @@ def fill_non_paper_pull_push(
     if paper.all():
         return bgr
     h, w = paper.shape
-    small = cv2.resize(bgr, None, fx=FILL_SCALE, fy=FILL_SCALE, interpolation=cv2.INTER_AREA)
+    factor = fill_factor(px_per_mm)
+    small = cv2.resize(bgr, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
     size = (small.shape[1], small.shape[0])
     # Бумага на ¼ копии — только вписанные пиксели: краевые смешаны с фоном.
     paper_small = cv2.resize(paper.astype(np.float32), size, interpolation=cv2.INTER_AREA) >= 0.99
-    spine = None if spine_x is None else spine_x * FILL_SCALE
-    filled = fill_pull_push(small, paper_small, px_per_mm * FILL_SCALE, spine, seam_mm)
+    spine = None if spine_x is None else spine_x * factor
+    filled = fill_pull_push(small, paper_small, px_per_mm * factor, spine, seam_mm)
     big = cv2.resize(filled, (w, h), interpolation=cv2.INTER_CUBIC)
     out = bgr.copy()
     out[~paper] = big[~paper]
@@ -142,7 +165,8 @@ def fill_to_rectangle(
         replicate: Параметры прежней заливки (только для ``REPLICATE``).
         box: Рамка вырезки ``(x0, y0, x1, y1)``; None — осевая рамка ``paper``. Рамка шире бумаги нужна, когда
             вырезка охватывает и защиту контента, а закрашивать надо от точного края бумаги.
-        px_per_mm: Плотность кадра, px/мм (для ``PULL_PUSH``; по умолчанию — калибровочная).
+        px_per_mm: Плотность кадра, px/мм (копия закраса, запас выемок и эрозия книги в ``REPLICATE``; по умолчанию —
+            калибровочная).
         spine_x: Абсцисса стыка страниц в координатах кадра или None (для ``PULL_PUSH``).
         seam_mm: Ширина мягкого шва, мм (только для ``PULL_PUSH_SEAM``).
 
@@ -155,7 +179,7 @@ def fill_to_rectangle(
         return None
     x0, y0, x1, y1 = box
     if method == FillMethod.TELEA:
-        return fill_non_paper(bgr[y0:y1, x0:x1], paper[y0:y1, x0:x1])
+        return fill_non_paper(bgr[y0:y1, x0:x1], paper[y0:y1, x0:x1], px_per_mm)
     if method in (FillMethod.PULL_PUSH, FillMethod.PULL_PUSH_SEAM):
         spine = None if spine_x is None else spine_x - x0
         seam = seam_mm if method == FillMethod.PULL_PUSH_SEAM else 0.0
@@ -163,19 +187,21 @@ def fill_to_rectangle(
     # Прежняя заливка: рамка без поворота (угол 0, центр в начале координат — ext задаётся прямо в px кадра);
     # известным считается только бумага внутри рамки, всё остальное продлевается от её края.
     mask = paper.astype(np.uint8) * 255
+    scale = Scale(px_per_mm)
     out = crop_pixel_exact(
         bgr,
         0.0,
         0.0,
         0.0,
         (x0, y0, x1, y1),
-        fade_color=book_mean_color(bgr, mask),
+        # Эрозия маски книги перед средним цветом — px калибровочного кадра, пересчитанные по плотности.
+        fade_color=book_mean_color(bgr, mask, erosion_px=scale.frame_px(BG_FILL_EROSION_PX)),
         blur_px=replicate.blur_px,
         fade_strength=replicate.fade,
         fill_method=CROP_FILL_REPLICATE,
         content_mask=mask,
     )
-    return fill_enclosed(out, paper[y0:y1, x0:x1])
+    return fill_enclosed(out, paper[y0:y1, x0:x1], px_per_mm)
 
 
 def fill_then_overlay(
@@ -221,7 +247,7 @@ def fill_then_overlay(
     return out
 
 
-def fill_enclosed(img: np.ndarray, paper: np.ndarray) -> np.ndarray:
+def fill_enclosed(img: np.ndarray, paper: np.ndarray, px_per_mm: float = REF_PX_PER_MM) -> np.ndarray:
     """Дозаливка выемок не-бумаги, которые прежняя заливка v1 оставляет исходными пикселями.
 
     ``clamp_to_edge`` продлевает край по столбцу только за первую и последнюю бумагу столбца: пиксель не-бумаги между
@@ -232,6 +258,7 @@ def fill_enclosed(img: np.ndarray, paper: np.ndarray) -> np.ndarray:
     Args:
         img: Прямоугольник BGR после ``crop_pixel_exact``.
         paper: Маска бумаги того же размера.
+        px_per_mm: Плотность кадра, px/мм (по ней пересчитывается запас ``HOLE_MARGIN_PX``).
 
     Returns:
         Прямоугольник BGR; бумага и уже залитое не тронуты.
@@ -246,7 +273,8 @@ def fill_enclosed(img: np.ndarray, paper: np.ndarray) -> np.ndarray:
     if not holes.any():
         return img
     # Опора — всё, кроме выемок с запасом: на уменьшенной копии край выемки смешан с пальцем.
-    near = cv2.dilate(holes.astype(np.uint8), np.ones((2 * HOLE_MARGIN_PX + 1,) * 2, np.uint8)) > 0
+    margin = Scale(px_per_mm).frame_px(HOLE_MARGIN_PX)
+    near = cv2.dilate(holes.astype(np.uint8), np.ones((2 * margin + 1,) * 2, np.uint8)) > 0
     filled = voronoi_fill(img, (~near).astype(np.uint8) * 255, WORK_SIDE)
     out = img.copy()
     out[holes] = filled[holes]

@@ -61,12 +61,12 @@ def test_mask_variants_skip_meaningless_k_for_otsu():
         out_dir=None,
         methods=("otsu", "sauvola"),
         sauvola_ks=(0.06, 0.10),
-        dilate_pxs=(15.0,),
-        blur_pxs=(60.0,),
+        dilate_mms=(0.635,),
+        blur_mms=(2.54,),
     )
     names = [name for name, _ in mask_variants(params)]
     assert names == [
-        "otsu_dil15_blur60_ink0.65",
-        "sauvola_k0.06_dil15_blur60_ink0.65",
-        "sauvola_k0.1_dil15_blur60_ink0.65",
+        "otsu_dil0.635_blur2.54_ink0.65",
+        "sauvola_k0.06_dil0.635_blur2.54_ink0.65",
+        "sauvola_k0.1_dil0.635_blur2.54_ink0.65",
     ]

@@ -41,16 +41,17 @@
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
 import cv2
 
-from ocr_utils.background_smoothing.processing import HALFTONE_DOWNSCALE
 from ocr_utils.page_layout.raster import cover as cover_module
 from ocr_utils.page_layout.raster.boxes import FULL_PAGE_FRAC, MIN_REGION_FRAC, keep_significant, merge_boxes
 from ocr_utils.page_layout.raster.color_kind import CHROMA_SPREAD_THR
+from ocr_utils.units import mm_to_px
 from ocr_utils.page_layout.raster.tone import (
     LINEART_ENTROPY_THR,
     LINEART_MID_FRAC_THR,
@@ -90,7 +91,17 @@ logger = logging.getLogger(__name__)
 # точки растра слиплись, и стоит трёх лишних прямоугольников из тридцати одной полосы со
 # штрихом. Лишний прямоугольник разметчик снимает в CVAT одним щелчком, потерянную
 # фотографию он не увидит вовсе.
-SURYA_LINEART_P99_PX = 4600
+#
+# Площадь задана в мм² бумаги и переводится в px² по родному dpi полосы: 4600 px² при 600 dpi
+# (замер выше — на паке-1) = 8.244 мм². Пятна считаются по ПОЛНОМУ кадру, поэтому порог в px
+# при 450 dpi обязан быть меньше (2588 px²), иначе штрих на новых паках уйдёт в растр.
+SURYA_LINEART_P99_MM2 = 8.244
+
+# Разрешение копии, по которой работают детектор обложки, рост и подрезка рамки до бумаги,
+# размах тона и цвет областей. Фиксированный dpi, а не доля кадра: раньше это была копия
+# 1/4, то есть 150 dpi у пака-1 (600 dpi), но 112 dpi у полос 450 dpi — и все размеры копии
+# (ядра обложки, шаг роста) молча становились на треть крупнее на бумаге.
+RASTER_WORK_DPI = 150
 
 # Доля площади полосы, начиная с которой область детектора точек остаётся БЕЗ подтверждения
 # Surya. Мотивировка и числа — в докстринге модуля.
@@ -169,7 +180,8 @@ LEADER_TONE_DIVISOR = 20
 # Фотография отличается от бумаги тоном по всей площади, включая светлые участки, а подпись
 # под ней — тонкий текст на белом, и средняя яркость полоски там почти бумажная, так что
 # рост на подписи останавливается. Замер: рамка встаёт ровно по краю снимка на трёх полосах.
-GROW_STEP_PX = 64
+# Шаг — 64 px при 600 dpi (16 px копии 150 dpi).
+GROW_STEP_MM = 2.709
 # Подрезка того, что клеточная сетка добавила СВЕРХ блока Surya. Край области округляется
 # наружу до целой клетки (128 px при 600 dpi, около 5 мм), и в этот последний ряд попадает
 # подпись под фотографией: замер по 1974/03 IMG_0140_1L — низ фотографии 3365, низ блока
@@ -240,6 +252,8 @@ def find_raster_boxes(
     work_gray: np.ndarray,
     shape: tuple[int, int],
     params: ScreenParams,
+    work_scale: float,
+    lineart_p99: int,
     surya_boxes: list[tuple[int, int, int, int]] | None = None,
     order_index: int = 0,
     first_page_is_cover: bool = False,
@@ -247,7 +261,6 @@ def find_raster_boxes(
     merge_gap: int | None = None,
     min_side: int | None = None,
     lineart_ink_frac: float = LINEART_FULL_PAGE_INK_FRAC,
-    lineart_p99: int = SURYA_LINEART_P99_PX,
     safety_min_frac: float = SAFETY_MIN_FRAC,
     page_chroma_spread: float | None = None,
     chroma_spread_thr: float = CHROMA_SPREAD_THR,
@@ -264,8 +277,11 @@ def find_raster_boxes(
 ) -> RasterFindings:
     """Растровые области полосы. Все координаты — в пикселях ОРИГИНАЛА.
 
-    ``shape`` — размеры ПОЛНОГО кадра ``(height, width)``; ``work_gray`` — его копия 1/4
-    (нужна только детектору обложки и признаку сплошного рисунка). ``surya_boxes`` — сырые
+    ``shape`` — размеры ПОЛНОГО кадра ``(height, width)``; ``work_gray`` — его копия
+    ``RASTER_WORK_DPI`` (детектор обложки, рост и подрезка рамки, размах тона, признак сплошного
+    рисунка); ``work_scale`` — во сколько раз полный кадр крупнее этой копии (4 при 600 dpi, 3 при
+    450). ``lineart_p99`` — порог p99 площади пятна в px² ПОЛНОГО кадра, пересчитанный из
+    ``SURYA_LINEART_P99_MM2`` по dpi полосы. ``surya_boxes`` — сырые
     блоки ``Picture``, уже поднятые до координат оригинала, либо ``None``, если Surya не
     гонялась: тогда работают одни пиксели, и это законный режим для прогона без GPU.
     """
@@ -302,7 +318,7 @@ def find_raster_boxes(
             claimed.update(labels)
             cells = union_box(regions, labels)
             box = block if cells is None else _union(block, cells)
-            box = shrink_to_paper(work_gray, box, block, grow_paper_margin)
+            box = shrink_to_paper(work_gray, box, block, work_scale, grow_paper_margin)
             findings.append(Finding(box, SOURCE_SCREEN, dot_frac=dot_fraction(regions.maps, box)))
             continue
 
@@ -322,9 +338,9 @@ def find_raster_boxes(
             continue
         empty_rows, periodicity = regions.leader.get(label, (0.0, 0.0))
         looks_lined = empty_rows >= leader_empty_rows_thr and periodicity >= leader_periodicity_thr
-        if looks_lined and tone_spread(work_gray, box, params) < leader_tone_spread_thr:
+        if looks_lined and tone_spread(work_gray, box, params, work_scale) < leader_tone_spread_thr:
             continue  # отточия в таблице, а не растровая печать: и строение, и тон против
-        box = grow_to_paper(work_gray, box, (height, width), grow_paper_margin)
+        box = grow_to_paper(work_gray, box, (height, width), work_scale, grow_paper_margin)
         findings.append(Finding(box, SOURCE_SCREEN, dot_frac=dot_fraction(regions.maps, box)))
 
     findings = _merge_findings(findings, merge_gap, width, height, min_region_frac, min_side)
@@ -341,7 +357,8 @@ def find_raster_boxes(
     # На полосе не нашлось ничего. Остался единственный случай, ради которого стоит смотреть
     # дальше: сплошной рисунок во весь кадр. Цветность проверит вызывающий — здесь нет ни
     # цвета полосы, ни цвета бумаги.
-    if cover_module.lineart_side_ok(width, height) and cover_module.lineart_ink_frac(work_gray) >= lineart_ink_frac:
+    side_ok = cover_module.lineart_side_ok(width, height, params.min_region_side_px)
+    if side_ok and cover_module.lineart_ink_frac(work_gray) >= lineart_ink_frac:
         return RasterFindings(
             [Finding(cover_module.cover_region(width, height), SOURCE_LINEART, True, has_cells=False)]
         )
@@ -383,17 +400,61 @@ def _mark_line_art(
     return findings
 
 
-def tone_spread(work_gray: np.ndarray, box: tuple[int, int, int, int], params: ScreenParams) -> float:
+def to_work_box(box: tuple[int, int, int, int], work_scale: float) -> tuple[int, int, int, int]:
+    """Рамка полного кадра → рамка копии ``RASTER_WORK_DPI``: левый верх вниз, правый низ вверх.
+
+    При целом ``work_scale`` (4 у 600 dpi, 3 у 450, 2 у 300) совпадает с прежними ``v // 4`` и
+    ``-(-v // 4)`` бит в бит.
+
+    Args:
+        box: ``(x1, y1, x2, y2)`` в пикселях полного кадра.
+        work_scale: Во сколько раз полный кадр крупнее копии.
+
+    Returns:
+        ``(x1, y1, x2, y2)`` в пикселях копии, накрывающая исходную рамку целиком.
+    """
+    return (
+        math.floor(box[0] / work_scale),
+        math.floor(box[1] / work_scale),
+        math.ceil(box[2] / work_scale),
+        math.ceil(box[3] / work_scale),
+    )
+
+
+def from_work(value: int, work_scale: float) -> int:
+    """Координата копии ``RASTER_WORK_DPI`` → координата полного кадра.
+
+    Args:
+        value: Координата в пикселях копии.
+        work_scale: Во сколько раз полный кадр крупнее копии.
+
+    Returns:
+        Координата в пикселях полного кадра (при целом ``work_scale`` — точное произведение).
+    """
+    return int(round(value * work_scale))
+
+
+def tone_spread(
+    work_gray: np.ndarray, box: tuple[int, int, int, int], params: ScreenParams, work_scale: float
+) -> float:
     """Размах яркостей области после сильного уменьшения: ``p95 - p5``. Мотивировка выше.
 
-    Считается по копии 1/``HALFTONE_DOWNSCALE``, которая и так есть в родителе; делитель
+    Считается по копии ``RASTER_WORK_DPI``, которая и так есть в родителе; делитель
     масштабируется от разрешения полосы, чтобы «около 7.5 dpi» означало одно и то же на
     паках 300, 450 и 600 dpi.
+
+    Args:
+        work_gray: Серая копия полосы в ``RASTER_WORK_DPI``.
+        box: Рамка области в пикселях полного кадра.
+        params: Пороги растра, пересчитанные на dpi полосы (по ``cell_px`` берётся масштаб делителя).
+        work_scale: Во сколько раз полный кадр крупнее копии.
+
+    Returns:
+        ``p95 - p5`` яркостей уменьшенной вырезки; ``inf``, если вырезка пуста.
     """
     scale = params.cell_px / CELL_PX
     divisor = max(1, round(LEADER_TONE_DIVISOR * scale))
-    x1, y1 = box[0] // HALFTONE_DOWNSCALE, box[1] // HALFTONE_DOWNSCALE
-    x2, y2 = -(-box[2] // HALFTONE_DOWNSCALE), -(-box[3] // HALFTONE_DOWNSCALE)
+    x1, y1, x2, y2 = to_work_box(box, work_scale)
     crop = work_gray[y1:y2, x1:x2]
     if crop.size < 16:
         return float("inf")  # судить не по чему — не мешаем области остаться
@@ -408,14 +469,27 @@ def shrink_to_paper(
     work_gray: np.ndarray,
     box: tuple[int, int, int, int],
     floor: tuple[int, int, int, int],
+    work_scale: float,
     margin: int = GROW_PAPER_MARGIN,
-    step_px: int = GROW_STEP_PX,
+    step_mm: float = GROW_STEP_MM,
     max_steps: int = GROW_MAX_STEPS,
 ) -> tuple[int, int, int, int]:
     """Убирает с краёв рамки бумагу, но не заходит внутрь ``floor``. Мотивировка выше.
 
     ``floor`` — блок Surya: подрезать глубже него нельзя, иначе вернётся срезание светлых
     краёв фотографии, ради борьбы с которым и делалось объединение.
+
+    Args:
+        work_gray: Серая копия полосы в ``RASTER_WORK_DPI``.
+        box: Рамка в пикселях полного кадра.
+        floor: Блок Surya в пикселях полного кадра — глубже него не подрезаем.
+        work_scale: Во сколько раз полный кадр крупнее копии.
+        margin: На сколько уровней серого полоска должна быть не темнее бумаги, чтобы считаться бумагой.
+        step_mm: Шаг подрезки на бумаге, мм.
+        max_steps: Предел числа шагов.
+
+    Returns:
+        Подрезанная рамка в пикселях полного кадра.
     """
     if margin <= 0:
         return box
@@ -424,9 +498,10 @@ def shrink_to_paper(
         return box
 
     paper = float(np.percentile(work_gray, GROW_PAPER_PERCENTILE))
-    step = max(1, step_px // HALFTONE_DOWNSCALE)
-    x1, y1, x2, y2 = (v // HALFTONE_DOWNSCALE for v in box)
-    f0, f1, f2, f3 = (v // HALFTONE_DOWNSCALE for v in floor)
+    step = mm_to_px(step_mm, RASTER_WORK_DPI)
+    # Обе рамки — вниз до целого пикселя копии (как прежнее ``v // 4``), без округления наружу.
+    x1, y1, x2, y2 = (math.floor(v / work_scale) for v in box)
+    f0, f1, f2, f3 = (math.floor(v / work_scale) for v in floor)
 
     def paperish(strip: np.ndarray) -> bool:
         return strip.size > 0 and float(strip.mean()) >= paper - margin
@@ -448,22 +523,34 @@ def shrink_to_paper(
         if not moved:
             break
 
-    scale = HALFTONE_DOWNSCALE
-    return x1 * scale, y1 * scale, x2 * scale, y2 * scale
+    return from_work(x1, work_scale), from_work(y1, work_scale), from_work(x2, work_scale), from_work(y2, work_scale)
 
 
 def grow_to_paper(
     work_gray: np.ndarray,
     box: tuple[int, int, int, int],
     shape: tuple[int, int],
+    work_scale: float,
     margin: int = GROW_PAPER_MARGIN,
-    step_px: int = GROW_STEP_PX,
+    step_mm: float = GROW_STEP_MM,
     max_steps: int = GROW_MAX_STEPS,
 ) -> tuple[int, int, int, int]:
     """Расширяет рамку, пока прилегающая полоска заметно темнее бумаги. Мотивировка выше.
 
-    Считается по копии 1/``HALFTONE_DOWNSCALE`` — полного кадра здесь нет и быть не должно,
+    Считается по копии ``RASTER_WORK_DPI`` — полного кадра здесь нет и быть не должно,
     а для сравнения средней яркости полоски разрешения копии хватает с запасом.
+
+    Args:
+        work_gray: Серая копия полосы в ``RASTER_WORK_DPI``.
+        box: Рамка в пикселях полного кадра.
+        shape: ``(высота, ширина)`` полного кадра — граница роста.
+        work_scale: Во сколько раз полный кадр крупнее копии.
+        margin: На сколько уровней серого полоска должна быть темнее бумаги, чтобы рамка росла.
+        step_mm: Шаг роста на бумаге, мм.
+        max_steps: Предел числа шагов.
+
+    Returns:
+        Расширенная рамка в пикселях полного кадра.
     """
     height, width = shape
     work_h, work_w = work_gray.shape[:2]
@@ -471,13 +558,9 @@ def grow_to_paper(
         return box
 
     paper = float(np.percentile(work_gray, GROW_PAPER_PERCENTILE))
-    step = max(1, step_px // HALFTONE_DOWNSCALE)
-    x1, y1, x2, y2 = (
-        max(0, box[0] // HALFTONE_DOWNSCALE),
-        max(0, box[1] // HALFTONE_DOWNSCALE),
-        min(work_w, -(-box[2] // HALFTONE_DOWNSCALE)),
-        min(work_h, -(-box[3] // HALFTONE_DOWNSCALE)),
-    )
+    step = mm_to_px(step_mm, RASTER_WORK_DPI)
+    wx1, wy1, wx2, wy2 = to_work_box(box, work_scale)
+    x1, y1, x2, y2 = max(0, wx1), max(0, wy1), min(work_w, wx2), min(work_h, wy2)
     if x2 - x1 < 1 or y2 - y1 < 1:
         return box
 
@@ -501,8 +584,12 @@ def grow_to_paper(
         if not moved:
             break
 
-    scale = HALFTONE_DOWNSCALE
-    return max(0, x1 * scale), max(0, y1 * scale), min(x2 * scale, width), min(y2 * scale, height)
+    return (
+        max(0, from_work(x1, work_scale)),
+        max(0, from_work(y1, work_scale)),
+        min(from_work(x2, work_scale), width),
+        min(from_work(y2, work_scale), height),
+    )
 
 
 def _fill_colour_page(

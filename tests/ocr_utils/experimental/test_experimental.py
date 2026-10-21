@@ -28,7 +28,7 @@ def test_strip_boxes_cover_frame_in_order_with_overlap():
 
 def test_prepare_strips_scales_by_width_and_describe_reports_rows(tmp_path):
     path = tmp_path / "page.jpg"
-    Image.new("L", (3452, 6096), 255).save(path)
+    Image.new("L", (3452, 6096), 255).save(path, dpi=(600, 600))
     tiles = prepare_strips(path, 5, max_model_tile=2200)
     assert len(tiles) == 5 and all(t.width == 2200 for t in tiles) and all(t.height <= 900 for t in tiles), [
         t.height for t in tiles
@@ -73,7 +73,7 @@ def test_hints_from_gutter_csv_by_side_and_score(tmp_path):
 def test_hinted_prompts_replace_default_note_only_when_hint_exists(tmp_path):
     hints = hints_from_gutter_csv(_gutter_csv(tmp_path))
     hinted = HintedPrompts(hints)
-    Image.new("L", (400, 600), 255).save(tmp_path / "IMG_0006_L.jpg")
+    Image.new("L", (400, 600), 255).save(tmp_path / "IMG_0006_L.jpg", dpi=(600, 600))
     tiles = prepare_strips(tmp_path / "IMG_0006_L.jpg", 2)
     system, user = hinted(PageJob(Path("IMG_0006_L.jpg")), tiles, RunOptions())
     assert hints["IMG_0006_L"] in user and DEFAULT_DAMAGE_NOTE not in user and "2 overlapping tiles" in user

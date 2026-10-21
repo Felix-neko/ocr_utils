@@ -27,6 +27,8 @@ source run_scripts/scan_cropping/common.sh
 INPUT_DIR="$PACK6_ROOT/РИСК/1991/05 есть фотографии по страницам"
 OUT_ROOT="$SCAN_CROPPING_V2_ROOT/risk_1991_05"
 PX_PER_MM=13.8
+# Размеры ниже — в мм бумаги, пересчитаны из прежних px при 13.8 px/мм: σ заливки 32 px = 2.318841 мм,
+# припуск блоков surya 18,72 px = 1.3043,5.2174 мм.
 LAMA_HOLE_MAX_PX=300
 JOBS=16
 
@@ -40,9 +42,9 @@ for FILL in telea replicate; do
         --px-per-mm "$PX_PER_MM" \
         --lama-hole-max-px "$LAMA_HOLE_MAX_PX" \
         --fill "$FILL" \
-        --crop-fill-blur-px 32 \
+        --crop-fill-blur-mm 2.318841 \
         --crop-fill-fade 0.0 \
-        --layout-pad-px 18,72 \
+        --layout-pad-mm 1.3043,5.2174 \
         --jobs "$JOBS" \
         --log-level INFO
 done

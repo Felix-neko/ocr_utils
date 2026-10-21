@@ -5,8 +5,16 @@ import pytest
 
 from pathlib import Path
 
-from ocr_utils.final_pdfs.plan import PageSource, SourceReason, decide_source, final_pdf_name, final_pdf_path
-from ocr_utils.final_pdfs.sources import Margins, margins_px, pair_issue_pdfs, verify_page_geometry
+from ocr_utils.final_pdfs.plan import (
+    IssuePlan,
+    PagePlan,
+    PageSource,
+    SourceReason,
+    decide_source,
+    final_pdf_name,
+    final_pdf_path,
+)
+from ocr_utils.final_pdfs.sources import Margins, margins_px, nominal_margins, page_margins, pair_issue_pdfs
 from tests.ocr_utils.final_pdfs.conftest import MARGINS
 
 
@@ -45,14 +53,31 @@ def test_pair_refuses_page_count_mismatch(pack) -> None:
         pair_issue_pdfs(tmp_path / "nowhere", pair.nogeo.parent, plan)
 
 
-def test_verify_page_geometry(pack) -> None:
+def test_page_margins(pack) -> None:
     _, _, plan, pair, _ = pack
+    # Поля выпуска читаются из базы (их пишет intermediate_pdfs) и переводятся по dpi полосы.
+    assert nominal_margins(plan, plan.pages[0]) == MARGINS
     with fitz.open(str(pair.nogeo)) as nogeo, fitz.open(str(pair.geo)) as geo:
         for index in range(4):
-            verify_page_geometry(nogeo[index], plan.pages[index], MARGINS)
+            assert page_margins(nogeo[index], plan.pages[index], MARGINS) == MARGINS
         # Страница с коррекцией на 10 px уже — под полосу не подходит.
         with pytest.raises(ValueError, match="порядок страниц"):
-            verify_page_geometry(geo[1], plan.pages[1], MARGINS)
+            page_margins(geo[1], plan.pages[1], MARGINS)
         # Чужая полоса (повёрнутая) на месте прямой — тоже.
         with pytest.raises(ValueError):
-            verify_page_geometry(nogeo[1], plan.pages[3], MARGINS)
+            page_margins(nogeo[1], plan.pages[3], MARGINS)
+        # Поле на MCU 8 меньше номинала (полоса без субдискретизации цветности) — законно.
+        wider = Margins(MARGINS.x_px + 8, MARGINS.y_px + 8)
+        assert page_margins(nogeo[0], plan.pages[0], wider) == MARGINS
+        # А на 4 px меньше — нет: так поле не выравнивается ни при каком MCU.
+        with pytest.raises(ValueError):
+            page_margins(nogeo[0], plan.pages[0], Margins(MARGINS.x_px + 4, MARGINS.y_px))
+
+
+def test_nominal_margins_follow_page_dpi() -> None:
+    """Поле в мм даёт свои пиксели при каждом dpi: 12.192 мм — 288 px при 600 и 216 px при 450."""
+    page = PagePlan(1, "a.tif", "a.jpg", 400, 600, 450, (), 0, None)
+    plan = IssuePlan(1, "1980", "01", (page,), margin_x_mm=12.192, margin_y_mm=6.096)
+    assert nominal_margins(plan, page) == Margins(216, 108)
+    with pytest.raises(ValueError, match="--margin-x-mm"):
+        nominal_margins(IssuePlan(1, "1980", "01", (page,)), page)

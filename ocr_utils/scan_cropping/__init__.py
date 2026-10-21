@@ -50,19 +50,21 @@ ROI-рамка контекста, переданного в LaMa.
     ``crop_rotated`` / ``crop_pixel_exact``). Для ``pixel-exact`` заполнение зоны вне
     книги настраивается через ``--crop-fill-method`` (``replicate`` — продлить край по
     нормали к сторонам crop-зоны, ``voronoi`` — цвет ближайшей точки границы),
-    ``--crop-fill-blur-px`` и ``--crop-fill-fade``. В этом режиме ``--bg-fill-*`` не
+    ``--crop-fill-blur-mm`` и ``--crop-fill-fade``. В этом режиме ``--bg-fill-*`` не
     участвуют: заливку целиком делает ``crop_pixel_exact``.
   - ``--remove-fingers/--no-remove-fingers`` (включено по умолчанию) — перед
     детекцией разворота и кропом детектирует и закрашивает через LaMa палец,
     придерживающий страницу (``ocr_utils.scan_cropping.finger_removal``), чтобы он не искажал
     силуэт/bbox страницы и не попадал в финальный кроп.
-  - ``--finger-dilate-px`` — дилатация маски пальца перед закраской, пикс.
-    (по умолчанию ``FINGER_DILATE_PX``).
-  - ``--extra-erosion-px`` — доп. обрезка краёв силуэта книги перед копированием,
-    пикс. (E2 = диляция на extra + эрозия на 2*extra от E1); срезает тёмные куски
-    обложки в углах crop-зоны (по умолчанию ``EXTRA_EROSION_PX``; 0 — выкл.).
+  - ``--dpi`` (обязательна) — сколько пикселей кадра на дюйм бумаги: все размеры v1 задаются в мм
+    бумаги (``*-mm``) и переводятся в пиксели кадра по ней.
+  - ``--finger-dilate-mm`` — дилатация маски пальца перед закраской, мм
+    (по умолчанию ``FINGER_DILATE_PX`` при 450 dpi).
+  - ``--extra-erosion-mm`` — доп. обрезка краёв силуэта книги перед копированием,
+    мм (E2 = диляция на extra + эрозия на 2*extra от E1); срезает тёмные куски
+    обложки в углах crop-зоны (по умолчанию ``EXTRA_EROSION_PX`` при 450 dpi; 0 — выкл.).
 
     uv run python -m ocr_utils.scan_cropping.v1 \\
-        --input-dir IN --output-dir OUT --debug-dir DBG \\
-        --left-margin -150 --top-margin -150 --right-margin -150 --bottom-margin -150
+        --input-dir IN --output-dir OUT --debug-dir DBG --dpi 450 \\
+        --left-margin-mm -8.5 --top-margin-mm -8.5 --right-margin-mm -8.5 --bottom-margin-mm -8.5
 """

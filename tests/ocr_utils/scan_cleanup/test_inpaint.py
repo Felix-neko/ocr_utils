@@ -44,7 +44,7 @@ def markup_with(*boxes_kinds) -> PageMarkup:
 
 def run(markup, **kw):
     models = StubModels()
-    opts = InpaintOptions(group_min_dilate_px=kw.pop("group_min_dilate_px", 0), **kw)
+    opts = InpaintOptions(group_min_dilate_mm=kw.pop("group_min_dilate_mm", 0.0), **kw)
     out, report = inpaint_page(text_page(), markup, opts, models)
     return out, report, models
 
@@ -142,7 +142,7 @@ def test_hole_limit_reaches_the_network(monkeypatch):
 def test_network_gets_the_mask_without_any_dilation():
     """В сеть уходит ровно обведённое: припуск группировки маску не раздувает.
 
-    ``group_min_dilate_px`` участвует ТОЛЬКО в проверке пересечения раздутых рамок
+    ``group_min_dilate_mm`` участвует ТОЛЬКО в проверке пересечения раздутых рамок
     (``grouping.expand_box``); маски групп собираются из карты меток исходной,
     нераздутой маски.
     """
@@ -155,7 +155,7 @@ def test_network_gets_the_mask_without_any_dilation():
     drawn = decode_mask_rows(markup.masks, W, H)
 
     models = StubModels()
-    out, report = inpaint_page(text_page(), markup, InpaintOptions(group_min_dilate_px=40), models)
+    out, report = inpaint_page(text_page(), markup, InpaintOptions(group_min_dilate_mm=1.6933), models)
 
     assert report.zones == 1, "припуск 40 px должен слить их в одну операцию"
     for kind, mask in report.masks.items():

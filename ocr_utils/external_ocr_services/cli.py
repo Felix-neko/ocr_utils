@@ -23,7 +23,7 @@ from ocr_utils.external_ocr_services.render import to_markdown
 from ocr_utils.external_ocr_services.schema import ParseError, Stage, parse_json_text
 from ocr_utils.external_ocr_services.pages import flags_from_db, flags_from_lists
 from ocr_utils.external_ocr_services.pipeline import OnMissedToc, PipelineParams, RedoScope, run_pipeline
-from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE, DEFAULT_QUALITY
+from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE_MM, DEFAULT_QUALITY
 
 logger = logging.getLogger("ocr_utils.external_ocr_services")
 
@@ -108,11 +108,18 @@ def main(log_level: str) -> None:
     help="Имя модели из реестра (см. models).",
 )
 @click.option(
-    "--max-src-tile-size",
-    type=int,
-    default=DEFAULT_MAX_SRC_TILE,
+    "--max-src-tile-mm",
+    type=float,
+    default=DEFAULT_MAX_SRC_TILE_MM,
     show_default=True,
-    help="Шаг сетки тайлов в пикселях исходника (пак-1, 600 dpi: обычная полоса 1×2, разворот 2×2).",
+    help="Шаг сетки тайлов в мм бумаги, в пиксели — по тегу dpi полосы (190.5 мм = 4500 px при 600 dpi: "
+    "обычная полоса 1×2, разворот 2×2).",
+)
+@click.option(
+    "--default-dpi",
+    type=int,
+    default=None,
+    help="Разрешение полос без тега dpi; без опции такая полоса уходит в ошибки.",
 )
 @click.option(
     "--max-model-tile-size",
@@ -228,7 +235,8 @@ def run(
     pack_name: str | None,
     toc_lists: Path | None,
     model_name: str,
-    max_src_tile_size: int,
+    max_src_tile_mm: float,
+    default_dpi: int | None,
     max_model_tile_size: int,
     quality: int,
     source: str,
@@ -281,7 +289,8 @@ def run(
 
     # Всё, что относится к одному запросу: тайлы, модель, второй проход, отладочный выход.
     options = RunOptions(
-        max_src_tile=max_src_tile_size,
+        max_src_tile_mm=max_src_tile_mm,
+        default_dpi=default_dpi,
         max_model_tile=max_model_tile_size,
         quality=quality,
         reasoning=Reasoning(reasoning) if reasoning is not None else None,

@@ -38,6 +38,6 @@ VALIDATE_ARGS=(
     # detection/dots.py и detection/color_kind.py, там же замеры, по которым они выбраны.
     # --chroma-spread-thr 8.0
     # --dot-frac-thr 0.88
-    # --cell-px 128
+    # --cell-mm 5.419  # 128 px при 600 dpi
 )
 uv run python -m ocr_utils.scan_markup validate "${VALIDATE_ARGS[@]}"

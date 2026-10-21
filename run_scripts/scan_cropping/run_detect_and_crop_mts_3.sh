@@ -4,6 +4,10 @@
 # детекция разворота → поворот → кроп с припусками, апскейл ×2, компенсация
 # уровней, сохранение в PNG. Debug-оверлеи (JPEG) — рядом, в отдельной папке.
 #
+# РАЗМЕРЫ — В ММ БУМАГИ (2026-10-19): прежние пиксели пересчитаны при --dpi 450 (то же, что --force-dpi:
+# при этом разрешении мм дают ровно прежние пиксели). Неизменяемые из CLI умолчания v1 (эрозия книги,
+# контекст LaMa, растушёвка) названы при 450 dpi.
+
 set -euo pipefail
 
 # Скрипт лежит в run_scripts/<подсистема>/, а пути внутри отсчитываются от корня
@@ -25,26 +29,27 @@ uv run python -m ocr_utils.scan_cropping.v1 \
     --output-dir "$OUTPUT_DIR" \
     --debug-dir "$DEBUG_DIR" \
     --recursive \
-    --top-margin -180 \
-    --bottom-margin -270 \
-    --left-margin -360 \
-    --right-margin -360 \
+    --top-margin-mm -10.16 \
+    --bottom-margin-mm -15.24 \
+    --left-margin-mm -20.32 \
+    --right-margin-mm -20.32 \
     --output-format tiff \
     --force-dpi=450 \
+    --dpi=450 \
     --compensate-levels \
-    --finger-dilate-px=90 \
+    --finger-dilate-mm=5.08 \
     --max-asymmetric-dilation-ratio=2. \
     --finger-zone-light-increment=20,20 \
-    --extra-erosion-px=120 \
+    --extra-erosion-mm=6.7733 \
     --protect-text-layout \
     --text-protect-mode=copy-back-layout-zones \
-    --layout-pad-px=18,72 \
+    --layout-pad-mm=1.016,4.064 \
     --bg-fill-method=nearest \
-    --bg-fill-blur-px=16 \
+    --bg-fill-blur-mm=0.903111 \
     --log-level=INFO \
     --remove-fingers \
     --crop-mode=pixel-exact \
     --crop-fill-method=replicate \
-    --crop-fill-blur-px=32 \
+    --crop-fill-blur-mm=1.806222 \
     --crop-fill-fade=0.0 \
 

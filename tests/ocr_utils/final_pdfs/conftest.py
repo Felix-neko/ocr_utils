@@ -20,6 +20,7 @@ from ocr_utils.db.session import open_db
 from ocr_utils.final_pdfs.plan import load_plans
 from ocr_utils.final_pdfs.sources import IssuePair, Margins
 from ocr_utils.scan_markup.scan_tree import ScannedIssue, ScannedPage, ScannedYear
+from ocr_utils.units import px_to_mm
 from tests.ocr_utils.text_layer_fix.synthetic import finereader_like_pdf
 
 PACK_NAME = "пак-тест"
@@ -125,7 +126,15 @@ def pack(tmp_path):
     db_path = tmp_path / "markup.sqlite"
     with open_db(db_path)() as session:
         pack_row = upsert_pack(session, PACK_NAME, blurred, tree)
-        rows = {p.source_file_name: p for p in pack_row.year_packages[0].issues[0].pages}
+        issue = pack_row.year_packages[0].issues[0]
+        # Поля промежуточной PDF выпуска — как их пишет intermediate_pdfs: в мм по dpi полос.
+        issue.full_intermediate_pdf_margin_left_mm = issue.full_intermediate_pdf_margin_right_mm = px_to_mm(
+            MARGINS.x_px, DPI
+        )
+        issue.full_intermediate_pdf_margin_top_mm = issue.full_intermediate_pdf_margin_bottom_mm = px_to_mm(
+            MARGINS.y_px, DPI
+        )
+        rows = {p.source_file_name: p for p in issue.pages}
         for name, page in rows.items():
             pictures, rotate = PAGES[name]
             page.width, page.height, page.dpi, page.divisor, page.rotate_cw = W, H, DPI, 8, rotate

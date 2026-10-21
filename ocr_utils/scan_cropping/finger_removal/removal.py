@@ -54,6 +54,7 @@ FINGER_EDGE_FRAC = 0.04
 # поведение: keep_border_components по уже раздутой маске.
 DROP_INNER_FINGER_CORES = True
 FINGER_PADDING = 64  # контекст вокруг маски пальца для LaMa, пикс. (см. inpainting/roi.py)
+FINGER_FEATHER = 9  # растушёвка шва вклейки LaMa, пикс. (уходит внутрь маски)
 # ROI для LaMa увеличивается в FINGER_ROI_SCALE раз от центра (после padding) —
 # без этого LaMa не видит достаточно кромки/фона и заливает дыру доминирующим
 # цветом (см. inpainting/roi.py, коммит "Сделали хороший закрас с помощью lama").
@@ -130,6 +131,8 @@ def remove_fingers(
     protect_mask: Optional[np.ndarray] = None,
     protect_core_margin_px: int = PROTECT_CORE_MARGIN_PX,
     inpaint: bool = True,
+    padding_px: int = FINGER_PADDING,
+    feather_px: int = FINGER_FEATHER,
 ) -> tuple[np.ndarray, np.ndarray, Optional[list], Optional[np.ndarray], str, Optional[np.ndarray], Optional[list]]:
     """Детектирует и закрашивает пальцы (finger_removal.masking + GpuModels.inpaint) в BGR-кадре.
 
@@ -179,6 +182,9 @@ def remove_fingers(
     ``inpaint=False`` — только маски: зона закраса и ядро пальца строятся как обычно, но LaMa не запускается и
     возвращается исходный ``bgr``. Нужно тем, кто красит сам по своему контексту (``scan_cropping.v2.fingers``),
     чтобы не тратить лишний проход сети.
+
+    ``padding_px`` и ``feather_px`` — контекст вокруг маски для LaMa и растушёвка шва вклейки, px кадра: вызывающий
+    переводит их из мм по разрешению кадра (``scan_cropping.v1`` — по ``--dpi``).
     """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     with log_timing("build_finger_mask", log_name):
@@ -246,7 +252,7 @@ def remove_fingers(
                 if after == 0:
                     return bgr, mask, None, yolo_boxes, info, predilate, layout_polys
 
-    roi_bboxes = roi_bounds_list(mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE)
+    roi_bboxes = roi_bounds_list(mask, padding=padding_px, roi_scale=FINGER_ROI_SCALE)
     if not inpaint:
         # Только маски: закрас сделает вызывающий.
         return bgr, mask, roi_bboxes, yolo_boxes, info, predilate, layout_polys
@@ -254,7 +260,12 @@ def remove_fingers(
         rgb_bright = brighten_finger_zone(rgb, mask, light_increment, 2 * dilate_px)
     with log_timing("lama_inpaint", log_name):
         rgb_clean = models.inpaint(
-            rgb_bright, mask, padding=FINGER_PADDING, roi_scale=FINGER_ROI_SCALE, roi_max_side=lama_roi_max_side
+            rgb_bright,
+            mask,
+            padding=padding_px,
+            feather=feather_px,
+            roi_scale=FINGER_ROI_SCALE,
+            roi_max_side=lama_roi_max_side,
         )
 
     # Копирование блоков обратно — строго ПОСЛЕ закраски и с ИСХОДНОГО (неосветлённого)

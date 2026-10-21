@@ -53,7 +53,7 @@ from ocr_utils.external_ocr_services.schema import (
 )
 from ocr_utils.external_ocr_services.tiling import (
     DEFAULT_MAX_MODEL_TILE,
-    DEFAULT_MAX_SRC_TILE,
+    DEFAULT_MAX_SRC_TILE_MM,
     DEFAULT_QUALITY,
     GridSummary,
     PreparedImage,
@@ -105,10 +105,12 @@ def is_format_echo(text: str) -> bool:
 class RunOptions:
     """Настройки прогона, общие для всех полос: тайлы, модель, второй проход, отладочный выход."""
 
-    # Сетка тайлов: сторона исходника делится на ceil(сторона / max_src_tile) частей с перекрытием,
-    # каждый тайл ужимается до max_model_tile по большей стороне. Обычная полоса пака-1 → 2 тайла,
-    # склеенный разворот → 4. Подробности и умолчания — в tiling.py.
-    max_src_tile: int = DEFAULT_MAX_SRC_TILE
+    # Сетка тайлов: сторона исходника делится на ceil(сторона / шаг) частей с перекрытием, шаг —
+    # max_src_tile_mm бумаги в пикселях полосы (по её тегу dpi или default_dpi); каждый тайл
+    # ужимается до max_model_tile по большей стороне. Обычная полоса пака-1 → 2 тайла, склеенный
+    # разворот → 4. Подробности и умолчания — в tiling.py.
+    max_src_tile_mm: float = DEFAULT_MAX_SRC_TILE_MM
+    default_dpi: int | None = None
     max_model_tile: int = DEFAULT_MAX_MODEL_TILE
     quality: int = DEFAULT_QUALITY  # JPEG-качество тайлов в запросе
     reasoning: Reasoning | None = None  # переопределение уровня из реестра (``--reasoning``)
@@ -749,7 +751,7 @@ def recognize_page(
         "openrouter_id": spec.openrouter_id,
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "prompt_version": PROMPT_VERSION,
-        "max_src_tile": options.max_src_tile,
+        "max_src_tile_mm": options.max_src_tile_mm,
         "max_model_tile": options.max_model_tile,
         "reasoning": options.reasoning or spec.reasoning,
         "error": None,
@@ -758,7 +760,9 @@ def recognize_page(
     started = time.monotonic()
     # Тайлы режутся здесь, в потоке пула: декодирование и JPEG-сжатие — единственная CPU-работа.
     try:
-        tiles = prepare_tiles(in_path, options.max_src_tile, options.max_model_tile, options.quality)
+        tiles = prepare_tiles(
+            in_path, options.max_src_tile_mm, options.max_model_tile, options.quality, default_dpi=options.default_dpi
+        )
     except Exception as error:  # битый файл — не повод ронять прогон
         meta["error"] = f"картинка: {error}"
         write_meta(paths.meta, meta)

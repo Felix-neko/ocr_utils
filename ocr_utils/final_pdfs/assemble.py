@@ -32,7 +32,7 @@ from ocr_utils.final_pdfs.pictures import (
     render_pictures,
 )
 from ocr_utils.final_pdfs.plan import IssuePlan, PageSource, final_pdf_path
-from ocr_utils.final_pdfs.sources import IssuePair, Margins, verify_page_geometry
+from ocr_utils.final_pdfs.sources import IssuePair, nominal_margins, page_margins
 from ocr_utils.text_layer_fix.fixer import PageEdits, apply_page_edits, has_edits, plan_page_edits, verify_saved
 from ocr_utils.text_layer_fix.rewrite import DEFAULT_FONT_PATH, InsertFont
 
@@ -49,7 +49,6 @@ class AssembleParams:
     analysis: AnalysisParams
     out_dir: Path
     pictures_dir: Path  # очищенные полосы (blurred/), раскладка {год}/{выпуск}/полоса.tif
-    margins: Margins
     picture_dpi: int = DEFAULT_PICTURE_DPI
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     descreen_sigma_mm: float = DEFAULT_DESCREEN_SIGMA_MM
@@ -202,7 +201,8 @@ def _build(
             if page_plan.pictures:
                 if source is not PageSource.NOGEO:
                     raise RuntimeError(f"с.{index + 1}: растр, а источник {source.value}")
-                verify_page_geometry(nogeo[index], page_plan, params.margins)
+                # Поля — по образу самой страницы (dpi и MCU у полос разные), со сверкой с номиналом выпуска.
+                margins = page_margins(nogeo[index], page_plan, nominal_margins(plan, page_plan))
                 pictures = render_pictures(
                     params.pictures_dir / page_plan.original_rel_path,
                     page_plan,
@@ -210,9 +210,9 @@ def _build(
                     params.jpeg_quality,
                     params.descreen_sigma_mm,
                 )
-                rects = [placement_rect(p.rect_px, params.margins, page_plan.dpi) for p in pictures]
+                rects = [placement_rect(p.rect_px, margins, page_plan.dpi) for p in pictures]
                 if any(p.full_page for p in pictures):
-                    work.crop = placement_rect((0, 0, *page_plan.file_size), params.margins, page_plan.dpi)
+                    work.crop = placement_rect((0, 0, *page_plan.file_size), margins, page_plan.dpi)
             # 1. Текстовый слой — на нетронутой странице-источнике план, на копии применение.
             if not payload.get("error") and (has_edits(payload) or work.crop is not None):
                 try:

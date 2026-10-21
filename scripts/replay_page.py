@@ -58,7 +58,7 @@ from ocr_utils.external_ocr_services.ocr import PageJob, RunOptions, recognize_p
 from ocr_utils.external_ocr_services.pages import list_pages  # noqa: E402
 from ocr_utils.external_ocr_services.schema import DamageTag, TocKind  # noqa: E402
 from ocr_utils.external_ocr_services.toc import from_dict as toc_from_dict, prompt_lists, toc_hash  # noqa: E402
-from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE  # noqa: E402
+from ocr_utils.external_ocr_services.tiling import DEFAULT_MAX_MODEL_TILE, DEFAULT_MAX_SRC_TILE_MM  # noqa: E402
 
 logger = logging.getLogger("replay_page")
 
@@ -164,7 +164,7 @@ def use_strips(rows: int) -> None:
     logger.info("тайлы: %d горизонтальных полос вместо сетки", rows)
 
 
-def _strips_like_tiles(rows: int, path: Path, max_src_tile: int, max_model_tile: int, quality: int):
+def _strips_like_tiles(rows: int, path: Path, max_src_tile_mm: float, max_model_tile: int, quality: int, **_ignored):
     """Сигнатура ``tiling.prepare_tiles`` → ``strips.prepare_strips`` (шаг сетки игнорируется)."""
     return strips.prepare_strips(path, rows, max_model_tile, quality)
 
@@ -199,7 +199,7 @@ def main() -> None:
 )
 @click.option("--model", "model_name", default=registry.DEFAULT_MODEL, show_default=True)
 @click.option("--source", default="", help="Описание издания в системный промпт.")
-@click.option("--max-src-tile-size", type=int, default=DEFAULT_MAX_SRC_TILE, show_default=True)
+@click.option("--max-src-tile-mm", type=float, default=DEFAULT_MAX_SRC_TILE_MM, show_default=True)
 @click.option("--max-model-tile-size", type=int, default=DEFAULT_MAX_MODEL_TILE, show_default=True)
 @click.option("--jobs", type=int, default=4, show_default=True, help="Параллельных запросов (сеть, не CPU).")
 @click.option("--api-key", default=None, help="Ключ OpenRouter; по умолчанию $OPENROUTER_API_KEY.")
@@ -232,7 +232,7 @@ def run_command(
     prompts_dir: Path | None,
     model_name: str,
     source: str,
-    max_src_tile_size: int,
+    max_src_tile_mm: float,
     max_model_tile_size: int,
     jobs: int,
     api_key: str | None,
@@ -265,7 +265,7 @@ def run_command(
         run_dir = out_dir / f"run{index}"
         # Сырые ответы, промпты и тайлы — только у первого повтора: тайлы весят как вход.
         options = RunOptions(
-            max_src_tile=max_src_tile_size,
+            max_src_tile_mm=max_src_tile_mm,
             max_model_tile=max_model_tile_size,
             source=source,
             debug_dir=out_dir / "debug" if index == 1 else None,

@@ -286,11 +286,10 @@ def compare_page(key: str, sharpened_dir: Path, out_dir: Path) -> tuple[str, Axi
         ``(ключ, меры прежней оси, меры второй оси)``.
     """
     from ocr_utils.page_layout.image import PageImage, Variant
-    from ocr_utils.page_layout.pack_analysis.stages import DEFAULT_DPI
     from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
     from ocr_utils.page_layout.text_blocks.page import analyse_gray
 
-    image = PageImage.from_file(sharpened_dir / f"{key}.jpg", Variant.SHARPENED, key, default_dpi=DEFAULT_DPI)
+    image = PageImage.from_file(sharpened_dir / f"{key}.jpg", Variant.SHARPENED, key, default_dpi=None)
     gray300 = image.gray_at(RENDER_DPI)
     analysis = analyse_gray(gray300, InkEngine(), name=key.replace("/", "_"))
     write_pictures(analysis, gray300, out_dir / "картинки")

@@ -18,7 +18,7 @@ uv run python -m ocr_utils.external_ocr_services run \
     --db ~/Projects/mts_markup/pack1_reviewed.sqlite --pack-name пак-1 \
     --only-year 1966 --only-issue 03 \
     --source "журнал «Материально-техническое снабжение», Москва, 1966–1976" \
-    [--max-src-tile-size 4500] [--max-model-tile-size 2200] [--jobs 4] [--skip-done]
+    [--max-src-tile-mm 190.5] [--default-dpi N] [--max-model-tile-size 2200] [--jobs 4] [--skip-done]
     [--on-missed-toc redo|ask|skip] [--redo-scope structured|all] [--pages список.txt]
     [--second-pass] [--second-pass-transcript] [--no-assemble]
 
@@ -49,7 +49,8 @@ uv run python -m ocr_utils.external_ocr_services balance   # баланс клю
 | `--db`, `--pack-name` | база разметки (обычно `DB_REVIEWED`): флаги оглавления `is_toc` / `is_year_index` и вето `force_is_not_toc`; читается через ORM `ocr_utils.db` с `open_db(create=False)` — без создания таблиц и дописывания колонок, одним `select`, ничего не пишется |
 | `--toc-lists` | запасной вход без базы: корень списков `<год>/<выпуск>/toc_pages.txt` от `scan_markup toc-pages` |
 | `--model` | имя из реестра (`models.py`); умолчание `deepseek-v41-flash` |
-| `--max-src-tile-size` | шаг сетки тайлов в пикселях исходника (пак-1: 4500 — обычная полоса 1×2, разворот 2×2) |
+| `--max-src-tile-mm` | шаг сетки тайлов в мм бумаги, в пиксели — по тегу dpi полосы (190.5 мм = 4500 px при 600 dpi, 3375 при 450: обычная полоса 1×2, разворот 2×2) |
+| `--default-dpi` | разрешение полос без тега dpi; без опции такая полоса уходит в ошибки |
 | `--max-model-tile-size`, `--quality` | длинная сторона тайла после уменьшения (2200) и качество JPEG (85) |
 | `--source` | описание издания в системный промпт; `{year}` заменяется годом выпуска, но лучше без него — см. «Стоимость и кэш префикса» |
 | `--second-pass/--no-second-pass` | второй проход по полосам с `is_damaged` (по умолчанию **выключен** — см. «Второй проход») |
@@ -716,7 +717,7 @@ A/B версий промпта — `scripts/replay_page.py`: N повторов
 
 ## Картинка
 
-Сетка тайлов по `--max-src-tile-size` (шаг в пикселях исходника): `ceil(сторона / шаг)` столбцов
+Сетка тайлов по `--max-src-tile-mm` (шаг в мм бумаги, в пикселях исходника — по тегу dpi полосы): `ceil(сторона / шаг)` столбцов
 и строк, перекрытие 8 % стороны сверх шага, обход по столбцам (весь левый столбец, потом правый).
 Для пака-1 при 4500: обычная полоса 1×2, повёрнутая на 90° 2×1, склеенный разворот
 (`1967/10/IMG_0041`, 6444×5336) 2×2. Каждый тайл уменьшается до `--max-model-tile-size` по

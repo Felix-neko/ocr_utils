@@ -5,7 +5,15 @@ import base64
 import pytest
 from PIL import Image
 
-from ocr_utils.external_ocr_services.tiling import TILE_OVERLAP, describe, grid, grid_shape, prepare_tiles
+from ocr_utils.external_ocr_services.tiling import (
+    DEFAULT_MAX_SRC_TILE_MM,
+    TILE_OVERLAP,
+    describe,
+    grid,
+    grid_shape,
+    prepare_tiles,
+)
+from ocr_utils.units import mm_to_px, px_to_mm
 
 
 @pytest.mark.parametrize(
@@ -40,8 +48,8 @@ def test_no_overlap_on_axis_with_single_tile():
 
 def test_prepare_tiles_downscales_and_keeps_boxes(tmp_path):
     path = tmp_path / "IMG_0001_1L.jpg"
-    Image.new("RGB", (1000, 3000), (200, 190, 170)).save(path, quality=90)
-    tiles = prepare_tiles(path, max_src_tile=2000, max_model_tile=600)
+    Image.new("RGB", (1000, 3000), (200, 190, 170)).save(path, quality=90, dpi=(600, 600))
+    tiles = prepare_tiles(path, max_src_tile_mm=px_to_mm(2000, 600), max_model_tile=600)
     assert [(t.box.col, t.box.row) for t in tiles] == [(0, 0), (0, 1)]
     assert all(max(t.width, t.height) == 600 for t in tiles)
     assert tiles[0].data_url().startswith("data:image/jpeg;base64,")
@@ -53,6 +61,31 @@ def test_prepare_tiles_downscales_and_keeps_boxes(tmp_path):
 
 def test_small_image_single_tile_not_upscaled(tmp_path):
     path = tmp_path / "small.png"
-    Image.new("L", (300, 400), 230).save(path)
-    (tile,) = prepare_tiles(path, max_src_tile=4500, max_model_tile=2200)
+    Image.new("L", (300, 400), 230).save(path, dpi=(600, 600))
+    (tile,) = prepare_tiles(path, max_model_tile=2200)
     assert (tile.width, tile.height) == (300, 400) and tile.box.size == (300, 400)
+
+
+def test_src_tile_step_is_paper_size_not_pixels():
+    """Шаг сетки задан в мм бумаги: при 600 dpi — прежние 4500 px, при 450 — 3375 px.
+
+    Обычная полоса пака-1 (≈ 3450×6000 при 600 dpi) режется 1×2; та же полоса в 450 dpi
+    (≈ 2588×4500) обязана резаться так же, а не уйти в модель одним куском.
+    """
+    assert mm_to_px(DEFAULT_MAX_SRC_TILE_MM, 600) == 4500
+    assert mm_to_px(DEFAULT_MAX_SRC_TILE_MM, 450) == 3375
+    assert grid_shape(3450, 6000, mm_to_px(DEFAULT_MAX_SRC_TILE_MM, 600)) == (1, 2)
+    assert grid_shape(2588, 4500, mm_to_px(DEFAULT_MAX_SRC_TILE_MM, 450)) == (1, 2)
+
+
+def test_prepare_tiles_reads_dpi_from_tag_and_rejects_untagged(tmp_path):
+    """Без тега dpi и без ``default_dpi`` полоса не режется: молча считать её 600 dpi нельзя."""
+    path = tmp_path / "IMG_0002_1L.jpg"
+    Image.new("L", (2588, 4500), 230).save(path, dpi=(450, 450))
+    assert [(t.box.col, t.box.row) for t in prepare_tiles(path, max_model_tile=600)] == [(0, 0), (0, 1)]
+
+    untagged = tmp_path / "untagged.png"
+    Image.new("L", (2588, 4500), 230).save(untagged)
+    with pytest.raises(ValueError):
+        prepare_tiles(untagged, max_model_tile=600)
+    assert len(prepare_tiles(untagged, max_model_tile=600, default_dpi=450)) == 2

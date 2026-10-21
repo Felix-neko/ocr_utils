@@ -6,18 +6,35 @@ import pytest
 
 from ocr_utils.page_layout.raster.dots import params_for_dpi, screen_regions
 from ocr_utils.page_layout.raster.tone import tone_maps
-from ocr_utils.page_layout.raster.regions import LINEART_MAX_DOT_FRAC, SOURCE_LINEART, SOURCE_SCREEN, find_raster_boxes
+from ocr_utils.page_layout.raster.regions import (
+    LINEART_MAX_DOT_FRAC,
+    RASTER_WORK_DPI,
+    SOURCE_LINEART,
+    SOURCE_SCREEN,
+    SURYA_LINEART_P99_MM2,
+    find_raster_boxes,
+)
+from ocr_utils.units import mm2_to_px2
 from tests.ocr_utils.scan_markup import synthetic
 
 SIZE = (1800, 1200)  # полоса 300 dpi
 DPI = 300
+# Копия растрового детектора — 150 dpi, то есть вдвое меньше полосы 300 dpi.
+WORK_SCALE = DPI / RASTER_WORK_DPI
+LINEART_P99 = mm2_to_px2(SURYA_LINEART_P99_MM2, DPI)
+
+
+def _work_copy(page: np.ndarray) -> np.ndarray:
+    """Копия полосы в ``RASTER_WORK_DPI`` — та, что подаётся find_raster_boxes."""
+    size = (round(page.shape[1] / WORK_SCALE), round(page.shape[0] / WORK_SCALE))
+    return cv2.resize(page, size, interpolation=cv2.INTER_AREA)
 
 
 def _analyse(page: np.ndarray):
-    """Пиксельный разбор полосы плюс её копия 1/4 — то, что видит find_raster_boxes."""
+    """Пиксельный разбор полосы плюс её копия 150 dpi — то, что видит find_raster_boxes."""
     params = params_for_dpi(DPI)
     regions, stats, centroids = screen_regions(page, params)
-    work = cv2.resize(page, (page.shape[1] // 4, page.shape[0] // 4), interpolation=cv2.INTER_AREA)
+    work = _work_copy(page)
     return regions, stats, centroids, work, params
 
 
@@ -25,7 +42,17 @@ def _find(page: np.ndarray, surya_boxes, **kwargs):
     regions, stats, centroids, work, params = _analyse(page)
     kwargs.setdefault("tone", tone_maps(page, params))
     return find_raster_boxes(
-        regions, stats, centroids, work, page.shape[:2], params, surya_boxes=surya_boxes, order_index=1, **kwargs
+        regions,
+        stats,
+        centroids,
+        work,
+        page.shape[:2],
+        params,
+        WORK_SCALE,
+        LINEART_P99,
+        surya_boxes=surya_boxes,
+        order_index=1,
+        **kwargs,
     )
 
 
@@ -263,10 +290,30 @@ def test_colour_page_becomes_one_full_page_region() -> None:
 
     # Цвет полосы приходит извне: сама сборка областей ни цвета, ни бумаги не знает.
     grey = find_raster_boxes(
-        regions, stats, centroids, work, page.shape[:2], params, blocks, order_index=1, page_chroma_spread=4.5
+        regions,
+        stats,
+        centroids,
+        work,
+        page.shape[:2],
+        params,
+        WORK_SCALE,
+        LINEART_P99,
+        blocks,
+        order_index=1,
+        page_chroma_spread=4.5,
     )
     colour = find_raster_boxes(
-        regions, stats, centroids, work, page.shape[:2], params, blocks, order_index=1, page_chroma_spread=30.0
+        regions,
+        stats,
+        centroids,
+        work,
+        page.shape[:2],
+        params,
+        WORK_SCALE,
+        LINEART_P99,
+        blocks,
+        order_index=1,
+        page_chroma_spread=30.0,
     )
 
     assert len(grey.findings) == 2, "ч/б полоса обязана остаться с двумя областями"
@@ -288,6 +335,8 @@ def test_colour_page_with_one_small_area_is_not_filled() -> None:
         work,
         page.shape[:2],
         params,
+        WORK_SCALE,
+        LINEART_P99,
         [(140, 140, 710, 610)],
         order_index=1,
         page_chroma_spread=30.0,
@@ -346,10 +395,12 @@ def test_safety_box_grows_to_the_edge_of_the_picture() -> None:
     x1, y1, x2, y2 = findings.findings[0].box
 
     # Рост идёт шагом GROW_STEP_PX, поэтому совпадение с краем — с точностью до шага.
-    from ocr_utils.page_layout.raster.regions import GROW_STEP_PX
+    from ocr_utils.page_layout.raster.regions import GROW_STEP_MM
+    from ocr_utils.units import mm_to_px
 
-    assert x1 <= photo[0] + GROW_STEP_PX and y1 <= photo[1] + GROW_STEP_PX
-    assert x2 >= photo[2] - GROW_STEP_PX and y2 >= photo[3] - GROW_STEP_PX
+    step = mm_to_px(GROW_STEP_MM, DPI)
+    assert x1 <= photo[0] + step and y1 <= photo[1] + step
+    assert x2 >= photo[2] - step and y2 >= photo[3] - step
     assert y2 < 1260, "рамка не должна дорастать до подписи"
 
     # И рамка действительно выросла: без роста она заметно уже.
@@ -370,17 +421,17 @@ def test_shrink_pulls_the_frame_off_the_paper_but_not_into_the_block() -> None:
 
     photo = (200, 200, 900, 1000)
     page = _page_with_photo(photo)
-    work = cv2.resize(page, (SIZE[1] // 4, SIZE[0] // 4), interpolation=cv2.INTER_AREA)
+    work = _work_copy(page)
 
     loose = (photo[0] - 128, photo[1] - 128, photo[2] + 128, photo[3] + 128)
-    tight = shrink_to_paper(work, loose, photo)
+    tight = shrink_to_paper(work, loose, photo, WORK_SCALE)
     assert _area(tight) < _area(loose), "рамка по бумаге должна подрезаться"
     assert tight[0] <= photo[0] and tight[1] <= photo[1]
     assert tight[2] >= photo[2] and tight[3] >= photo[3]
 
     # Тот же вызов с блоком шире картинки не двигает рамку внутрь блока.
     block = (100, 100, 1100, 1400)
-    assert shrink_to_paper(work, block, block) == block
+    assert shrink_to_paper(work, block, block, WORK_SCALE) == block
 
 
 def test_tone_features_are_recorded_even_when_the_rule_is_silent() -> None:

@@ -339,8 +339,8 @@ def pack6_params(src_root: Path, run_dir: Path) -> "RunParams":
         fill=FillMethod.PULL_PUSH,
         hole_max_px=300,
         light_increment=(20.0, 20.0),
-        layout_pad_px=(18, 36),
-        refine_depth=35,
+        layout_pad_mm=(1.3043, 2.6087),  # 18, 36 px при 13.8 px/мм
+        refine_depth_mm=5.0725,  # 35 px масштаба сегментации
         ink_fill=True,
         keystone_layout=True,
         fit_sides=True,

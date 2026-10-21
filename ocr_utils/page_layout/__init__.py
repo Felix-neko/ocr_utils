@@ -25,17 +25,8 @@
 # линейки и штрих различимы, а один кадр весит мегабайт и без потерь ездит между процессами.
 WORK_DPI = 150
 
-MM_PER_INCH = 25.4
-
-
-def mm_to_px(mm: float, dpi: float) -> int:
-    """Миллиметры бумаги → целые пиксели при данном dpi (не меньше 1)."""
-    return max(1, int(round(mm * dpi / MM_PER_INCH)))
-
-
-def px_to_mm(px: float, dpi: float) -> float:
-    """Пиксели при данном dpi → миллиметры бумаги."""
-    return px * MM_PER_INCH / dpi
+# Пересчёт мм ↔ px живёт в общем ``ocr_utils.units``; здесь — реэкспорт для прежних импортов.
+from ocr_utils.units import MM_PER_INCH, mm_to_px, px_to_mm  # noqa: E402,F401
 
 
 # --- Версии семейств детекторов -------------------------------------------------------------

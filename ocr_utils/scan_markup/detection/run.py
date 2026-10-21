@@ -79,7 +79,7 @@ from ocr_utils.page_layout.raster.regions import (
     LEADER_TONE_SPREAD_THR,
     LINEART_PICTURE_MIN_FRAC,
     SAFETY_MIN_FRAC,
-    SURYA_LINEART_P99_PX,
+    SURYA_LINEART_P99_MM2,
 )
 from ocr_utils.scan_markup.detection.page import PageAnalysis, PageOptions, PageResult, analyse_page, finish_page
 from ocr_utils.scan_markup.hashing import apply_stamp, stat_matches, stat_stamp
@@ -124,12 +124,12 @@ class DetectParams:
     chroma_spread_thr: float = CHROMA_SPREAD_THR
     chroma_self_frac_thr: float | None = CHROMA_SELF_FRAC_THR
     min_region_frac: float = MIN_REGION_FRAC
-    merge_gap: int | None = None
+    merge_gap_mm: float | None = None
     full_page_frac: float = FULL_PAGE_FRAC
-    cell_px: int | None = None
+    cell_mm: float | None = None
     dot_frac_thr: float | None = None
     min_cells: int | None = None
-    lineart_p99: int = SURYA_LINEART_P99_PX
+    lineart_p99_mm2: float = SURYA_LINEART_P99_MM2
     safety_min_frac: float = SAFETY_MIN_FRAC
     lineart_picture_min_frac: float = LINEART_PICTURE_MIN_FRAC
     full_page_color_frac: float = FULL_PAGE_COLOR_FRAC
@@ -162,12 +162,12 @@ class DetectParams:
             chroma_spread_thr=self.chroma_spread_thr,
             chroma_self_frac_thr=self.chroma_self_frac_thr,
             min_region_frac=self.min_region_frac,
-            merge_gap=self.merge_gap,
+            merge_gap_mm=self.merge_gap_mm,
             full_page_frac=self.full_page_frac,
-            cell_px=self.cell_px,
+            cell_mm=self.cell_mm,
             dot_frac_thr=self.dot_frac_thr,
             min_cells=self.min_cells,
-            lineart_p99=self.lineart_p99,
+            lineart_p99_mm2=self.lineart_p99_mm2,
             safety_min_frac=self.safety_min_frac,
             lineart_picture_min_frac=self.lineart_picture_min_frac,
             full_page_color_frac=self.full_page_color_frac,
@@ -663,8 +663,13 @@ def _run_arbiter(session: Session, params: DetectParams, by_rel: "dict[str, Page
 
     for page in tqdm(candidates, desc="арбитр", unit="полоса"):
         path = params.pack_dir / page.source_rel_path
+        if not page.dpi:
+            # Без разрешения размеры детекторов в мм не перевести; подставлять 600 молча нельзя —
+            # у полос 450 dpi все пороги уехали бы на треть.
+            logger.warning("%s: в базе нет dpi полосы — арбитр пропускает её", page.source_rel_path)
+            continue
         try:
-            frame, _ = read_frame(path, page.source_rel_path, default_dpi=page.dpi or 600, allowed=allowed)
+            frame, _ = read_frame(path, page.source_rel_path, default_dpi=page.dpi, allowed=allowed)
         except Exception as error:  # noqa: BLE001
             logger.warning("%s: арбитр не прочитал файл (%s)", page.source_rel_path, error)
             continue

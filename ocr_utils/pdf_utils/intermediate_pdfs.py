@@ -189,6 +189,11 @@ class IssuePlan:
     year_name: str
     issue_name: str
     pages: "tuple[PagePlan, ...]"
+    # Поля полной промежуточной PDF, мм: слева/справа и сверху/снизу (наибольшие из применённых,
+    # ``Issue.full_intermediate_pdf_margin_*_mm``). Читает сборщик финальных PDF; при сборке
+    # промежуточных не нужны — там поля берутся из ``BuildParams``.
+    margin_x_mm: "float | None" = None
+    margin_y_mm: "float | None" = None
 
     @property
     def rel_path(self) -> str:
@@ -471,6 +476,10 @@ def load_plans(
                 for full_index, page in enumerate(issue.pages):
                     if not page.width or not page.height:
                         raise ValueError(f"{page.source_rel_path}: нет размеров кадра, сначала нужен detect")
+                    if not page.dpi:
+                        # По dpi поля в мм переводятся в пиксели и задаётся размер страницы PDF;
+                        # молча взять 600 на полосе 450 dpi — получить страницу на треть мельче.
+                        raise ValueError(f"{page.source_rel_path}: в базе нет dpi полосы, сначала нужен detect")
                     pictures = tuple(
                         PicturePlan(int(r.x1), int(r.y1), int(r.x2), int(r.y2), r.kind)
                         for r in page.rect_regions
@@ -493,7 +502,7 @@ def load_plans(
                             sharpened_rel_path=sharpened,
                             width=int(page.width),
                             height=int(page.height),
-                            dpi=int(page.dpi or 600),
+                            dpi=int(page.dpi),
                             pictures=pictures,
                             full_pdf_page_idx=full_index,
                             pages_with_pics_only_pdf_page_idx=pics_index if pictures else None,

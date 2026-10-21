@@ -17,7 +17,7 @@ import threadpoolctl
 
 from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suffix, write_image
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK, compensate_levels
-from ocr_utils.scan_cropping.v2.background import bg_flood, hand_mask
+from ocr_utils.scan_cropping.v2.background import BG_SCALE, bg_flood, hand_mask
 from ocr_utils.scan_cropping.v2.book import book_close_open, content_hulls
 from ocr_utils.scan_cropping.v2.colour_pages import colour_pages_flat, colour_pages_growth
 from ocr_utils.scan_cropping.v2.content_guard import protect_content
@@ -40,10 +40,19 @@ from ocr_utils.scan_cropping.v2.ink_fill import fill_bold_ink, touching_ink
 from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp_for_layout
 from ocr_utils.scan_cropping.v2.page_pose import PageQuad, page_quads
 from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, fill_page_pockets, postprocess_plain
-from ocr_utils.scan_cropping.v2.scale import Scale
+from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
+from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX
 from ocr_utils.scan_cropping.v2.side_fit import regularize_sides, snap_sheet_edges
 
 log = logging.getLogger(__name__)
+
+# Умолчания опций CLI в мм бумаги: те же припуски, что были заданы в px калибровочного кадра (13.8 px/мм, подшивки
+# МТО 1990) — при этой плотности они дают ровно прежние пиксели, при любой другой (450 dpi = 17.7 px/мм) — те же мм.
+FINGER_DILATE_MM = round(TIGHT_DILATE_PX / REF_PX_PER_MM, 4)  # 40 px → 2.8986 мм
+LAYOUT_PAD_MM = (round(LAYOUT_PAD_PX[0] / REF_PX_PER_MM, 4), round(LAYOUT_PAD_PX[1] / REF_PX_PER_MM, 4))  # 18, 36 px
+CORE_GROW_MM = round(CORE_GROW_PX / REF_PX_PER_MM, 4)  # 4 px → 0.2899 мм
+REFINE_DEPTH_MM = round(REFINE_DEPTH / (REF_PX_PER_MM * BG_SCALE), 4)  # 35 px сегментации (6.9 px/мм) → 5.0725 мм
+CROP_FILL_BLUR_MM = round(CROP_FILL_BLUR_PX / REF_PX_PER_MM, 6)  # replicate: 48 px → 3.478261 мм
 
 # Число CPU-воркеров по умолчанию: 16 физических ядер; на кадр в воркере держится несколько копий полного кадра
 # (~75 МБ каждая), так что память не ограничивает.
@@ -73,8 +82,8 @@ class RunParams:
         fill_seam_mm: Ширина мягкого шва от каймы листа к закрасу, мм (для ``fill=pull_push_seam``).
         replicate: Параметры прежней заливки v1 (для ``fill=replicate``).
         hole_max_px: Предел рамки дыры для LaMa, px; None — прежнее ужатие ROI до 512.
-        finger_dilate_px: Припуск зоны закраса пальца, px калибровочного кадра.
-        layout_pad_px: Припуск блоков surya, px калибровочного кадра (X, Y) — один для copy back и защиты контента.
+        finger_dilate_mm: Припуск зоны закраса пальца, мм бумаги.
+        layout_pad_mm: Припуск блоков surya, мм бумаги (X, Y) — один для copy back и защиты контента.
         light_increment: Высветление зоны пальца перед LaMa, уровни (слева, справа).
         keystone_layout: surya layout по кадру, выпрямленному по трапециям страниц (``keystone``); блоки
             возвращаются обратным преобразованием наклонными четырёхугольниками.
@@ -86,7 +95,7 @@ class RunParams:
             а защиту и copy back класть поверх готового закраса: печать, край обложки и кусок пальца в блоке surya у
             края не становятся опорой Telea и не тянутся шлейфом (МТС 1990/03 IMG_0973).
         ink_fill: Второй проход SAM 3 по кадру без крупной краски (``ink_fill``), бумага — объединение двух проходов.
-        refine_depth: Глубина уточнения склейки от фона, px масштаба сегментации.
+        refine_depth_mm: Глубина уточнения склейки от фона, мм бумаги (в px масштаба сегментации — ``Scale.seg_px``).
         compensate_levels: Растянуть уровни итога.
         levels_max_black: Потолок чёрной точки растяжки, уровни; None — без потолка.
         output_format: Формат итога (``png`` / ``tiff``) или None — как у входа.
@@ -100,8 +109,8 @@ class RunParams:
             LaMa продолжает тень пальца с бумаги у края зоны, copy back возвращает её с оригинала.
         save_before_shadow: Сохранять в кэш кадра итог до осветления тени и маски входа карты (``before_shadow.png``,
             ``shadow_masks.npz``, ~40 МБ на кадр) — для стенда ``research/finger_repaint edge``.
-        copy_back_core_grow_px: Припуск ядра пальца при copy back, px калибровочного кадра (``copy_back.CORE_GROW_PX``):
-            кайма кожи у края ядра не возвращается с оригинала.
+        copy_back_core_grow_mm: Припуск ядра пальца при copy back, мм бумаги (``copy_back.CORE_GROW_PX`` = 4 px
+            калибровочного кадра): кайма кожи у края ядра не возвращается с оригинала; 0 — без припуска.
         colour_pages: Правила для целиком цветных страниц (``colour_pages``): рост бумаги у края по палитре страницы
             вверх и вниз, защита контента при любой позе.
     """
@@ -115,8 +124,8 @@ class RunParams:
     fill_seam_mm: float = SEAM_MM
     replicate: ReplicateParams = field(default_factory=ReplicateParams)
     hole_max_px: int | None = LAMA_HOLE_MAX_PX
-    finger_dilate_px: int = TIGHT_DILATE_PX
-    layout_pad_px: tuple[int, int] = LAYOUT_PAD_PX
+    finger_dilate_mm: float = FINGER_DILATE_MM
+    layout_pad_mm: tuple[float, float] = LAYOUT_PAD_MM
     light_increment: tuple[float, float] = LIGHT_INCREMENT
     ink_fill: bool = True
     fit_sides: bool = True
@@ -124,7 +133,7 @@ class RunParams:
     snap_sides: bool = False
     copy_back_over_fingers: bool = True
     fill_before_copy_back: bool = True
-    refine_depth: int = REFINE_DEPTH
+    refine_depth_mm: float = REFINE_DEPTH_MM
     compensate_levels: bool = False
     levels_max_black: int | None = LEVELS_MAX_BLACK
     output_format: str | None = None
@@ -135,7 +144,7 @@ class RunParams:
     save_fingers: bool = False
     finger_shadow: bool = False
     save_before_shadow: bool = False
-    copy_back_core_grow_px: int = CORE_GROW_PX
+    copy_back_core_grow_mm: float = CORE_GROW_MM
     colour_pages: bool = True
 
 
@@ -362,12 +371,13 @@ def gpu_fingers(job: FrameJob, models, params: RunParams) -> None:
     result = remove_fingers_inkback(
         bgr,
         models,
-        dilate_px=params.scale.frame_px(params.finger_dilate_px),
+        dilate_px=params.scale.mm_px(params.finger_dilate_mm),
         hole_max_px=params.hole_max_px,
         core_band_px=params.scale.frame_px(INK_CORE_BAND_PX),
         glyph_scale=params.scale.glyph,
         light_increment=params.light_increment,
         log_name=job.key,
+        px_per_mm=params.scale.px_per_mm,
     )
     write_png(work.clean, result.clean)
     np.savez_compressed(work.fingers, paint=result.paint > 0, core=result.core > 0)
@@ -667,7 +677,7 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
     sam3 = dict(np.load(work.sam3))
     if not params.ink_fill:
         sam3.pop("raw_noink", None)
-    masks = frame_paper(img, book, sam3, params.refine_depth)
+    masks = frame_paper(img, book, sam3, params.scale.seg_px(params.refine_depth_mm))
     paint_seg = paint_on_seg(np.load(work.fingers), img.shape[:2])
     pages = frame_pages(img, book, sam3, paint_seg, masks)
     if params.fit_sides:
@@ -894,7 +904,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     # защита контента — только блоки плоских страниц.
     pages = frame_pages(img, book, sam3, paint_on_seg(fingers, img.shape[:2]), masks)
     # Припуск блоков — один для защиты контента и copy back: на оверлее рисуется ровно возвращаемая зона.
-    pad = (params.scale.frame_px(params.layout_pad_px[0]), params.scale.frame_px(params.layout_pad_px[1]))
+    pad = (params.scale.mm_px(params.layout_pad_mm[0]), params.scale.mm_px(params.layout_pad_mm[1]))
     # Цветные страницы — защита контента при любой позе: рваная маска делала их «приподнятыми» (IMG_1113).
     guard_pages = colour_pages_flat(img, pages) if params.colour_pages else pages
     protected = protect_content(masks.paper, polys, guard_pages, zone_seg, img.shape[0] / shape[0], pad)
@@ -907,7 +917,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     filled_from = clean
     # Picture и Figure — целиком (ложные пальцы на портретах), остальные блоки — только зона дилатации пальца.
     # Ядро — с припуском: кайма кожи у края ядра SAM 3 не возвращается с оригинала (IMG_1197).
-    core_grow = params.scale.frame_px(params.copy_back_core_grow_px) if params.copy_back_core_grow_px > 0 else 0
+    core_grow = params.scale.mm_px(params.copy_back_core_grow_mm, minimum=0)
     clean, returned, blocks = copy_back_blocks(
         original, clean, polys, paint, to_frame(allowed, shape), pad, labels, fingers["core"], core_grow
     )

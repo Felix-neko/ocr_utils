@@ -41,16 +41,33 @@ MIN_PLAUSIBLE_DPI = 72
 GPU_JPEG_QUALITY = 85
 
 
-def resolve_dpi(image: Image.Image, default_dpi: int) -> int:
-    """Разрешение файла по тегу, с откатом на заданное умолчание."""
+def resolve_dpi(image: Image.Image, default_dpi: int | None) -> int:
+    """Разрешение файла по тегу, с откатом на заданное умолчание.
+
+    Args:
+        image: Открытый файл PIL.
+        default_dpi: Разрешение, если тега нет или он неправдоподобен; ``None`` — тогда ошибка.
+
+    Returns:
+        Разрешение, точек на дюйм.
+
+    Raises:
+        ValueError: Тега нет, а ``default_dpi`` не задан. Молча подставлять 600 нельзя: у полос
+            450 dpi копии 300 и 150 dpi вышли бы на треть мельче, и все пороги детекторов уехали бы.
+    """
     dpi = image.info.get("dpi")
-    if not dpi:
-        return default_dpi
-    try:
-        value = int(round(float(dpi[0])))
-    except (TypeError, ValueError):
-        return default_dpi
-    return value if value >= MIN_PLAUSIBLE_DPI else default_dpi
+    value = None
+    if dpi:
+        try:
+            value = int(round(float(dpi[0])))
+        except (TypeError, ValueError):
+            value = None
+    if value is not None and value >= MIN_PLAUSIBLE_DPI:
+        return value
+    if default_dpi is None:
+        name = getattr(image, "filename", "")
+        raise ValueError(f"{name}: нет осмысленного тега разрешения, а --source-dpi не задан")
+    return default_dpi
 
 
 def _fit(image: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
@@ -61,7 +78,7 @@ def _fit(image: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
 
 
 def read_frame(
-    path: Path, rel_path: str, default_dpi: int = 600, gpu_side: int = 0, allowed: tuple[int, ...] = ROTATIONS
+    path: Path, rel_path: str, default_dpi: int | None = None, gpu_side: int = 0, allowed: tuple[int, ...] = ROTATIONS
 ) -> tuple[Frame, bytes | None]:
     """Кадр под CPU-детекторы плюс, если нужен, JPEG под GPU-детекторы.
 

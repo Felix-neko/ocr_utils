@@ -8,8 +8,13 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.v2.glyphs import GLYPH_SCALE, glyph_protect
+from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
 
-# Припуск зоны закраса вокруг пальца, px кадра (~12.5 px/мм у подшивок МТО 1990). Отсмотр колец 24/48/96 px
+# ЕДИНИЦЫ. Размеры «px кадра» ниже — px КАЛИБРОВОЧНОГО кадра (13.8 px/мм, подшивки МТО 1990): на кадре другой
+# плотности они пересчитываются через ``Scale.frame_px`` (``px_per_mm`` кадра передаётся в функции), то есть
+# заданы фактически в мм бумаги (px / 13.8). Размеры «px ¼ кадра» — на копии, приведённой к калибровочной плотности.
+
+# Припуск зоны закраса вокруг пальца, px калибровочного кадра (2.9 мм). Отсмотр колец 24/48/96 px
 # (2026-10-09): тёмный контур кромки ≤ 5 px от ядра SAM, розовая кайма и блик ≤ 15–20 px, тёплый отсвет кожи на
 # бумаге затухает к ~48 px; краска в зоне возвращается с оригинала, так что 40 px текст не стоит.
 TIGHT_DILATE_PX = 40
@@ -21,11 +26,22 @@ INK_GUARD_PX = 10
 TEXT_BLOCK_GUARD_PX = 3
 # Полоса у ядра пальца, где краска не возвращается (тёмный контур кромки пальца малонасыщен), px кадра.
 INK_CORE_BAND_PX = 16
-# Возврат краски: окно фона бумаги (закрытие и медиана), px кадра; рампа «насколько темнее фона» (уровни серого:
+# Возврат краски: окно фона бумаги (закрытие и медиана), px калибровочного кадра (3.0 и 1.5 мм); рампа «насколько
+# темнее фона» (уровни серого:
 # ниже нижней — не краска, выше верхней — краска целиком); предел насыщенности краски (хрома Lab в 8-битных единицах
 # OpenCV): кожа пальца розовая и не возвращается.
 INK_BG_CLOSE_PX = 41
 INK_BG_MEDIAN_PX = 21
+# Сигма размытия доли краски (без ступенек по краю букв), px калибровочного кадра.
+INK_ALPHA_SIGMA_PX = 0.8
+# Контекст вокруг рамки пальца для LaMa и растушёвка шва вклейки, px калибровочного кадра (4.6 и 0.65 мм) —
+# прежние ``removal.FINGER_PADDING`` и ``gpu_models.inpaint(feather=9)``, теперь с пересчётом по плотности кадра.
+LAMA_PADDING_PX = 64
+LAMA_FEATHER_PX = 9
+# Масштаб копии для Telea в ``text_free_context`` на калибровочном кадре (¼); на кадре другой плотности копия
+# приводится к той же плотности, иначе радиус Telea (px копии) значил бы разное на бумаге.
+TEXT_FREE_SCALE = 0.25
+TEXT_FREE_TELEA_RADIUS = 9
 INK_DARK_RAMP = (10, 35)
 INK_MAX_CHROMA = 16
 # Предел длинной стороны рамки дыры в масштабе LaMa, px (``GpuModels.lama_fill_roi``): дыра больше — окно
@@ -56,7 +72,9 @@ class FingerResult:
     info: str
 
 
-def text_free_context(bgr: np.ndarray, text: np.ndarray, finger: np.ndarray) -> np.ndarray:
+def text_free_context(
+    bgr: np.ndarray, text: np.ndarray, finger: np.ndarray, px_per_mm: float = REF_PX_PER_MM
+) -> np.ndarray:
     """Контекст для LaMa: блоки текста заменены тоном соседней бумаги (Telea на ¼ масштаба), всё остальное как есть.
 
     Палец на тексте LaMa заливает продолжением обрезанных строк, если видит строки рядом с дырой. Здесь строки
@@ -67,20 +85,27 @@ def text_free_context(bgr: np.ndarray, text: np.ndarray, finger: np.ndarray) -> 
         bgr: Кадр BGR.
         text: Маска блоков текста (bool) размера кадра.
         finger: Зона закраса пальца (bool): для Telea она тоже неизвестна, иначе цвет кожи растечётся в бумагу.
+        px_per_mm: Плотность кадра, px/мм: копия для Telea приводится к ¼ калибровочной плотности.
 
     Returns:
         Кадр BGR без текста.
     """
     h, w = text.shape
-    small = cv2.resize(bgr, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
-    hole = cv2.resize((text | finger).astype(np.uint8), (w // 4, h // 4), interpolation=cv2.INTER_NEAREST)
-    filled = cv2.resize(cv2.inpaint(small, hole, 9, cv2.INPAINT_TELEA), (w, h), interpolation=cv2.INTER_CUBIC)
+    # ¼ на калибровочном кадре; на кадре другой плотности — та же плотность копии (при 13.8 px/мм — ровно w // 4).
+    factor = TEXT_FREE_SCALE * (REF_PX_PER_MM / px_per_mm)
+    size = (max(1, int(w * factor)), max(1, int(h * factor)))
+    small = cv2.resize(bgr, size, interpolation=cv2.INTER_AREA)
+    hole = cv2.resize((text | finger).astype(np.uint8), size, interpolation=cv2.INTER_NEAREST)
+    filled = cv2.inpaint(small, hole, TEXT_FREE_TELEA_RADIUS, cv2.INPAINT_TELEA)
+    filled = cv2.resize(filled, (w, h), interpolation=cv2.INTER_CUBIC)
     out = bgr.copy()
     out[text] = filled[text]
     return out
 
 
-def copy_back_ink(filled: np.ndarray, original: np.ndarray, region: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def copy_back_ink(
+    filled: np.ndarray, original: np.ndarray, region: np.ndarray, px_per_mm: float = REF_PX_PER_MM
+) -> tuple[np.ndarray, np.ndarray]:
     """Возвращает с оригинала краску (буквы, линейки) в пределах ``region`` поверх закраса LaMa.
 
     Краска — пиксель заметно темнее локального фона бумаги (серое закрытие окном больше штриха и медиана) и
@@ -91,14 +116,19 @@ def copy_back_ink(filled: np.ndarray, original: np.ndarray, region: np.ndarray) 
         filled: Кадр BGR после LaMa.
         original: Исходный кадр BGR.
         region: Где возвращать (bool): зона закраса ∩ защита глифов.
+        px_per_mm: Плотность кадра, px/мм: по ней пересчитываются окна фона и сигма размытия доли.
 
     Returns:
         ``(кадр BGR, доля оригинала (H, W) float32)``.
     """
+    scale = Scale(px_per_mm)
     gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY).astype(np.float32)
     # Фон бумаги: закрытие убирает буквы, медиана — остатки штрихов.
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (INK_BG_CLOSE_PX, INK_BG_CLOSE_PX))
-    paper = cv2.medianBlur(cv2.morphologyEx(gray.astype(np.uint8), cv2.MORPH_CLOSE, kernel), INK_BG_MEDIAN_PX)
+    close = scale.frame_odd_px(INK_BG_CLOSE_PX)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close, close))
+    paper = cv2.medianBlur(
+        cv2.morphologyEx(gray.astype(np.uint8), cv2.MORPH_CLOSE, kernel), scale.frame_odd_px(INK_BG_MEDIAN_PX)
+    )
     # Насколько пиксель темнее фона — в долю краски по рампе.
     lo, hi = INK_DARK_RAMP
     dark = np.clip((paper.astype(np.float32) - gray - lo) / (hi - lo), 0, 1)
@@ -107,7 +137,7 @@ def copy_back_ink(filled: np.ndarray, original: np.ndarray, region: np.ndarray) 
     chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
     alpha = (dark * (chroma <= INK_MAX_CHROMA) * region).astype(np.float32)
     # Лёгкое размытие доли — без ступенек по краю букв.
-    alpha = cv2.GaussianBlur(alpha, (0, 0), 0.8)[..., None]
+    alpha = cv2.GaussianBlur(alpha, (0, 0), INK_ALPHA_SIGMA_PX * scale.ratio)[..., None]
     out = (filled * (1 - alpha) + original * alpha).astype(np.uint8)
     return out, alpha[..., 0]
 
@@ -122,6 +152,7 @@ def remove_fingers_inkback(
     glyph_scale: float = GLYPH_SCALE,
     light_increment: tuple[float, float] = LIGHT_INCREMENT,
     log_name: str = "",
+    px_per_mm: float = REF_PX_PER_MM,
 ) -> FingerResult:
     """Закрас пальцев кадра в варианте ``inkback`` стенда подшивок.
 
@@ -145,16 +176,13 @@ def remove_fingers_inkback(
         glyph_scale: Масштаб копии для защиты глифов (``Scale.glyph``).
         light_increment: Высветление зоны пальца перед LaMa, уровни (слева, справа); (0, 0) — без высветления.
         log_name: Имя кадра для логов.
+        px_per_mm: Плотность кадра, px/мм: по ней пересчитываются контекст и растушёвка LaMa, окна фона при возврате
+            краски и копия Telea без текста (``dilate_px`` и ``core_band_px`` вызывающий пересчитывает сам).
 
     Returns:
         Кадр без пальцев и маски.
     """
-    from ocr_utils.scan_cropping.finger_removal.removal import (
-        FINGER_PADDING,
-        FINGER_ROI_SCALE,
-        brighten_finger_zone,
-        remove_fingers,
-    )
+    from ocr_utils.scan_cropping.finger_removal.removal import FINGER_ROI_SCALE, brighten_finger_zone, remove_fingers
     from ocr_utils.scan_cropping.gpu_models import LAMA_ROI_MAX_SIDE
 
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -176,11 +204,13 @@ def remove_fingers_inkback(
     # Высветление зоны пальца со спадом наружу (прибавка поровну ко всем каналам — порядок BGR не важен).
     bright = brighten_finger_zone(bgr, paint, tuple(light_increment), 2 * dilate_px)
     # LaMa видит кадр без блоков текста; в итог берётся только зона закраса.
-    context = text_free_context(bright, glyph_protect(rgb, TEXT_BLOCK_GUARD_PX, glyph_scale) > 0, paint > 0)
+    scale = Scale(px_per_mm)
+    context = text_free_context(bright, glyph_protect(rgb, TEXT_BLOCK_GUARD_PX, glyph_scale) > 0, paint > 0, px_per_mm)
     filled = models.inpaint(
         cv2.cvtColor(context, cv2.COLOR_BGR2RGB),
         paint,
-        padding=FINGER_PADDING,
+        padding=scale.frame_px(LAMA_PADDING_PX),
+        feather=scale.frame_px(LAMA_FEATHER_PX),
         roi_scale=FINGER_ROI_SCALE,
         roi_max_side=LAMA_ROI_MAX_SIDE,
         hole_max_px=hole_max_px,
@@ -191,5 +221,5 @@ def remove_fingers_inkback(
     # Краска возвращается в защите глифов, но не у самого ядра пальца (тёмный контур кромки).
     k = 2 * core_band_px + 1
     band = cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
-    clean, _ = copy_back_ink(clean, bgr, (paint > 0) & (protect > 0) & ~band)
+    clean, _ = copy_back_ink(clean, bgr, (paint > 0) & (protect > 0) & ~band, px_per_mm)
     return FingerResult(clean, paint, core, protect, info)

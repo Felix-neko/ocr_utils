@@ -61,10 +61,23 @@ def _blend(orig: np.ndarray, corrected: np.ndarray, alpha: np.ndarray) -> np.nda
     return np.clip(orig.astype(np.float32) * (1.0 - a) + corrected.astype(np.float32) * a, 0, 255).astype(np.uint8)
 
 
-def _illumination(L: np.ndarray, illum_k: int) -> np.ndarray:
-    """Низкочастотная освещённость L: morph-close (убирает тёмный текст) + сглаживание."""
+# Сигма сглаживания освещённости, px кадра при 450 dpi (``scan_cropping.pipeline.V1_REFERENCE_DPI``).
+ILLUM_BLUR_SIGMA = 25.0
+
+
+def _illumination(L: np.ndarray, illum_k: int, blur_sigma: float = ILLUM_BLUR_SIGMA) -> np.ndarray:
+    """Низкочастотная освещённость L: morph-close (убирает тёмный текст) + сглаживание.
+
+    Args:
+        L: Канал яркости.
+        illum_k: Сторона ядра закрытия, px кадра.
+        blur_sigma: Сигма сглаживания, px кадра.
+
+    Returns:
+        Освещённость той же формы.
+    """
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (illum_k, illum_k))
-    return cv2.GaussianBlur(cv2.morphologyEx(L, cv2.MORPH_CLOSE, k), (0, 0), 25)
+    return cv2.GaussianBlur(cv2.morphologyEx(L, cv2.MORPH_CLOSE, k), (0, 0), blur_sigma)
 
 
 def _paper_ref(illum: np.ndarray, book_mask: np.ndarray, band: np.ndarray) -> float:
@@ -84,7 +97,9 @@ def _paper_ref(illum: np.ndarray, book_mask: np.ndarray, band: np.ndarray) -> fl
 # ============================================================
 
 
-def _classic(bgr: np.ndarray, book_mask: np.ndarray, band: np.ndarray, illum_k: int, cap: float) -> np.ndarray:
+def _classic(
+    bgr: np.ndarray, book_mask: np.ndarray, band: np.ndarray, illum_k: int, cap: float, blur_sigma: float
+) -> np.ndarray:
     """Аддитивный подъём дефицита освещённости: L' = L + clip(ref - illum, 0, cap).
 
     Дефицит низкочастотный → бумага и текст поднимаются на одну и ту же локальную величину:
@@ -92,18 +107,20 @@ def _classic(bgr: np.ndarray, book_mask: np.ndarray, band: np.ndarray, illum_k: 
     """
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0].astype(np.float32)
-    illum = _illumination(L, illum_k)
+    illum = _illumination(L, illum_k, blur_sigma)
     ref = _paper_ref(illum, book_mask, band)
     deficit = np.clip(ref - illum, 0, cap)
     lab[:, :, 0] = np.clip(L + deficit, 0, 255).astype(np.uint8)
     return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
-def _retinex(bgr: np.ndarray, book_mask: np.ndarray, band: np.ndarray, illum_k: int, gain_max: float) -> np.ndarray:
+def _retinex(
+    bgr: np.ndarray, book_mask: np.ndarray, band: np.ndarray, illum_k: int, gain_max: float, blur_sigma: float
+) -> np.ndarray:
     """Мультипликативная gain-коррекция (гомоморфная/Retinex): L' = L * clip(ref/illum, 1, gain_max)."""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0].astype(np.float32)
-    illum = np.maximum(_illumination(L, illum_k), 1.0)
+    illum = np.maximum(_illumination(L, illum_k, blur_sigma), 1.0)
     ref = _paper_ref(illum, book_mask, band)
     gain = np.clip(ref / illum, 1.0, gain_max)
     lab[:, :, 0] = np.clip(L * gain, 0, 255).astype(np.uint8)
@@ -136,6 +153,7 @@ def correct_finger_shadow(
     cap: float = 45.0,
     gain_max: float = 1.6,
     max_side: int = 2048,
+    dpi_scale: float = 1.0,
 ) -> np.ndarray:
     """Корректирует теневую зону вокруг пальца выбранным ``method``.
 
@@ -145,16 +163,23 @@ def correct_finger_shadow(
 
     ``models`` (``scan_cropping.gpu_models.GpuModels``) нужен только методам
     ``docshadow-*``; ``classic``/``retinex`` считаются на CPU и обходятся без него.
+
+    Размеры ``dilate_px``, ``feather_sigma``, ``illum_k`` и сигма сглаживания освещённости названы в px кадра
+    при 450 dpi; ``dpi_scale`` — отношение разрешения кадра к 450 (``--dpi`` / 450), на него они умножаются.
+    ``max_side`` — предел сети DocShadow, не размер на бумаге, и не пересчитывается.
     """
     if method == "none" or finger_mask is None or int(np.count_nonzero(finger_mask)) == 0:
         return bgr
-    band, alpha = _shadow_band(finger_mask, book_mask, parse_dilate_px(dilate_px), feather_sigma)
+    dilate = tuple(max(1, int(round(v * dpi_scale))) for v in parse_dilate_px(dilate_px))
+    illum_k = max(3, int(round(illum_k * dpi_scale))) | 1
+    blur_sigma = ILLUM_BLUR_SIGMA * dpi_scale
+    band, alpha = _shadow_band(finger_mask, book_mask, dilate, feather_sigma * dpi_scale)
     if int(np.count_nonzero(band)) == 0:
         return bgr
     if method == "classic":
-        corrected = _classic(bgr, book_mask, band, illum_k, cap)
+        corrected = _classic(bgr, book_mask, band, illum_k, cap, blur_sigma)
     elif method == "retinex":
-        corrected = _retinex(bgr, book_mask, band, illum_k, gain_max)
+        corrected = _retinex(bgr, book_mask, band, illum_k, gain_max, blur_sigma)
     elif method.startswith("docshadow-"):
         corrected = models.remove_shadow(bgr, max_side=max_side)
     else:

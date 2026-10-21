@@ -116,7 +116,7 @@ class Job:
     path: Path
     rel_path: str
     detector_names: tuple[str, ...]
-    default_dpi: int
+    default_dpi: int | None
     gpu_side: int
     turn_cw: int = 0  # синтетический поворот, нужен только команде validate
     allowed: tuple[int, ...] = ROTATIONS
@@ -243,7 +243,7 @@ def analyse(
     tasks: Sequence[tuple[Path, str]],
     detectors: Sequence[Detector],
     workers: int,
-    default_dpi: int = 600,
+    default_dpi: int | None = None,
     gpu_side: int = 1536,
     gpu_batch: int = 32,
     progress: bool = True,
