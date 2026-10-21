@@ -286,6 +286,208 @@ def motion_sheets(
         click.echo(path)
 
 
+def load_midtone(path: Path) -> "MidtoneTiles":
+    """Читает сетку полутонов кадра из npz второго прохода.
+
+    Args:
+        path: Файл ``midtone/<выпуск>/<кадр>.npz``.
+
+    Returns:
+        ``MidtoneTiles``.
+    """
+    from research.spread_defects.motion import MidtoneTiles
+
+    with np.load(path) as data:
+        return MidtoneTiles(**{name: data[name] for name in MidtoneTiles.__dataclass_fields__})
+
+
+def _print_mask_one(path: str, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Плитки полиграфии кадра (растр, цвет) и высота букв среди плиток маски — воркер пула ``motion-zones``.
+
+    Args:
+        path: Файл кадра.
+        mask: bool-сетка плиток, которые проверять.
+
+    Returns:
+        ``print_mask``: сетка плиток полиграфии и сетка высоты букв; при сбое чтения — пустая и NaN (кадр остаётся
+        без отсева).
+    """
+    from research.spread_defects.blur_zones import print_mask
+
+    try:
+        return print_mask(read_rgb(Path(path)), mask)
+    except Exception:  # битый файл не должен ронять прогон
+        return np.zeros(mask.shape, bool), np.full(mask.shape, np.nan, np.float32)
+
+
+@main.command("motion-zones")
+@click.option("--out-root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=OUT_ROOT)
+@click.option(
+    "--jobs",
+    default=8,
+    show_default=True,
+    help="Воркеров отсева полиграфии (читают полный кадр только у кадров с зонами; NTFS-3G — узкое место).",
+)
+def motion_zones(out_root: Path, jobs: int) -> None:
+    """Карта смаза по всему кадру: зоны ореола и двоения — ``motion/zones.csv`` и ``motion/zone_frames.csv``.
+
+    Читает сетки кепстра (``motion/tiles``), полутонов (``midtone/``) и x сгиба из ``glyphs.csv`` (второй проход).
+    Кадры, где нашлись зоны, читаются целиком: плитки растра и цветных плашек убираются из карты, зоны
+    пересчитываются; зоны-заголовки (кегль крупнее набора вокруг, ``heading_ratio``) отбрасываются. ``zones.csv`` — строка на зону; ``zone_frames.csv`` — строка на кадр (число зон, сильнейшая
+    зона, ореол кадра к выпуску, убрано плиток полиграфии), по убыванию ``mid_peak``.
+    """
+    from research.spread_defects.blur_zones import (
+        blur_zones,
+        heading_ratio,
+        is_heading,
+        issue_midtone_level,
+        zone_mask,
+        zone_maps,
+    )
+
+    glyphs = pd.read_csv(out_root / "glyphs.csv", usecols=["key", "issue", "path", "fold_x"])
+    # Проход 1: карты всех кадров без отсева; уровень полутонов — по выпуску.
+    frames = []
+    for issue, group in glyphs.groupby("issue"):
+        loaded = []
+        for r in group.itertuples():
+            stem = Path(r.path).stem
+            tiles_file = out_root / "motion" / "tiles" / issue / f"{stem}.npz"
+            mid_file = out_root / "midtone" / issue / f"{stem}.npz"
+            if tiles_file.exists() and mid_file.exists():
+                loaded.append((r, load_tiles(tiles_file), load_midtone(mid_file)))
+        masks = [zone_mask(mid, r.fold_x) for r, _, mid in loaded]
+        level = issue_midtone_level([mid for _, _, mid in loaded], masks)
+        frames.extend((r, tiles, mid, level) for r, tiles, mid in loaded)
+        click.echo(f"{issue}: кадров {len(loaded)}, уровень полутонов {level:.3f}")
+    first = [zone_maps(tiles, mid, r.fold_x, level) for r, tiles, mid, level in frames]
+    candidates = [n for n, maps in enumerate(first) if blur_zones(maps, frames[n][0].fold_x)]
+    click.echo(f"кадров с зонами до отсева полиграфии: {len(candidates)}")
+
+    # Проход 2: у кандидатов — плитки полиграфии из полного кадра.
+    excluded, heights = {}, {}
+    ctx = get_context("forkserver")
+    with ProcessPoolExecutor(jobs, mp_context=ctx, initializer=_init_worker) as pool:
+        futures = {pool.submit(_print_mask_one, frames[n][0].path, first[n].mask): n for n in candidates}
+        for future in as_completed(futures):
+            excluded[futures[future]], heights[futures[future]] = future.result()
+
+    zone_rows, frame_rows = [], []
+    for n, (r, tiles, mid, level) in enumerate(frames):
+        maps = zone_maps(tiles, mid, r.fold_x, level, excluded.get(n))
+        zones = blur_zones(maps, r.fold_x)
+        # Заголовки: зона с кеглем заметно крупнее набора вокруг на той же полосе — ореол от кегля, не смаз.
+        flags = [n in heights and is_heading(heading_ratio(z, heights[n], r.fold_x)) for z in zones]
+        headings = sum(flags)
+        zones = [z for z, flag in zip(zones, flags) if not flag]
+        base = {"key": r.key, "issue": r.issue, "path": r.path}
+        for number, zone in enumerate(zones, start=1):
+            x0, y0, x1, y1 = zone.box_px()
+            fields = {k: v for k, v in zone.__dict__.items() if k not in ("side", "band")}
+            zone_rows.append(
+                {**base, "zone": number, **fields, "side": zone.side.value, "band": zone.band.value}
+                | {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+            )
+        peak = np.nanmax(maps.mid_rel) if np.isfinite(maps.mid_rel).any() else np.nan
+        frame_rows.append(
+            {
+                **base,
+                "zones": len(zones),
+                "mid_peak": float(peak),
+                "zone_tiles": int(sum(z.tiles for z in zones)),
+                "map_tiles": int(maps.mask.sum()),
+                "print_tiles": int(excluded[n].sum()) if n in excluded else 0,
+                "heading_zones": headings,
+                "frame_rel": maps.frame_rel,
+                "issue_level": level,
+            }
+        )
+    zones_df = pd.DataFrame(zone_rows)
+    frames_df = pd.DataFrame(frame_rows).sort_values("mid_peak", ascending=False)
+    zones_df.to_csv(out_root / "motion" / "zones.csv", index=False)
+    frames_df.to_csv(out_root / "motion" / "zone_frames.csv", index=False)
+    click.echo(f"кадров {len(frames_df)}, с зонами {int((frames_df.zones > 0).sum())}, зон {len(zones_df)}")
+
+
+@main.command("motion-zone-sheets")
+@click.option("--out-root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=OUT_ROOT)
+@click.option(
+    "--min-peak",
+    default=0.0,
+    show_default=True,
+    help="Кадры с ``mid_peak`` не ниже (если без --keys); по умолчанию — все кадры с зонами.",
+)
+@click.option(
+    "--max-frame-rel",
+    default=1.8,
+    show_default=True,
+    help="Пропускать кадры с ореолом всего кадра выше " "(обложки и цветные вклейки: полутона там везде).",
+)
+@click.option(
+    "--keys",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="CSV с колонкой key — взять эти кадры; необязательная колонка label (например, «тяжёлый смаз») идёт в шапку.",
+)
+@click.option("--max-zones", default=4, show_default=True, help="Крупов на кадр (сильнейшие зоны).")
+@click.option("--jobs", default=8, show_default=True, help="Воркеров (чтение JPEG с NTFS-3G — узкое место).")
+@click.option(
+    "--plain-names",
+    is_flag=True,
+    help="Имена файлов как у папок симлинков (``1980_11_IMG_0847.jpg``), без места в рейтинге.",
+)
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
+def motion_zone_sheets(
+    out_root: Path,
+    min_peak: float,
+    max_frame_rel: float,
+    keys: Path | None,
+    max_zones: int,
+    jobs: int,
+    plain_names: bool,
+    out_dir: Path | None,
+) -> None:
+    """Лист на кадр (оверлей): весь кадр с зонами смаза поверх и крупы 1:1 у максимума каждой зоны — для отсмотра."""
+    from research.spread_defects.zone_sheets import render_zone_sheet
+
+    frames = pd.read_csv(out_root / "motion" / "zone_frames.csv")
+    zones = pd.read_csv(out_root / "motion" / "zones.csv")
+    labels = {}
+    if keys:
+        wanted = pd.read_csv(keys)
+        chosen = frames[frames.key.isin(wanted.key)]
+        if "label" in wanted.columns:
+            labels = dict(zip(wanted.key, wanted.label))
+    else:
+        chosen = frames[(frames.mid_peak >= min_peak) & (frames.frame_rel <= max_frame_rel) & (frames.zones > 0)]
+    chosen = chosen.sort_values("mid_peak", ascending=False).reset_index(drop=True)
+    out_dir = out_dir or out_root / "motion" / "zone_sheets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    glyphs = pd.read_csv(out_root / "glyphs.csv", usecols=["key", "fold_x"]).set_index("key").fold_x
+    tasks = []
+    for rank, r in enumerate(chosen.itertuples(), start=1):
+        frame_zones = zones[zones.key == r.key].sort_values("zone").head(max_zones)
+        if plain_names:
+            # Год и номер выпуска без хвоста папки («оплачено…»), как в именах симлинков.
+            name = f"{r.issue[:7].replace('/', '_')}_{Path(r.path).stem}.jpg"
+        else:
+            name = f"{rank:03d}_{r.issue.replace('/', '_').replace(' ', '_')}_{Path(r.path).stem}.jpg"
+        tasks.append(
+            (
+                r._asdict(),
+                frame_zones.to_dict("records"),
+                float(glyphs.get(r.key, np.nan)),
+                out_dir / name,
+                labels.get(r.key),
+            )
+        )
+    ctx = get_context("forkserver")
+    with ProcessPoolExecutor(jobs, mp_context=ctx, initializer=_init_worker) as pool:
+        futures = [pool.submit(render_zone_sheet, *task) for task in tasks]
+        for future in as_completed(futures):
+            click.echo(future.result())
+    click.echo(f"листов {len(tasks)} → {out_dir}")
+
+
 def features_done(out_root: Path, frame: Frame) -> Path:
     """Файл-признак «кадр посчитан общим проходом»: npz корешка (пишется вторым, после смаза).
 
@@ -358,23 +560,24 @@ def pages_path(out_dir: Path, frame: Frame) -> Path:
     return out_dir / "tokens" / frame.issue / (frame.path.stem + ".json")
 
 
-def _pages_one(frame: Frame, out_dir: Path) -> dict:
+def _pages_one(frame: Frame, out_dir: Path, place: str = "header") -> dict:
     """Номера страниц обеих полос кадра из колонтитула (воркер пула): json токенов и строка сводки.
 
     Args:
         frame: Кадр.
         out_dir: Папка прогона.
+        place: Где номер на полосе — значение ``NumberPlace`` (``header`` — верхний колонтитул, ``footer`` — нижний).
 
     Returns:
         Строка: ключ, выпуск, номер кадра, номера левой/правой полосы и их уверенность, x сгиба (полный масштаб).
     """
     import json
 
-    from research.spread_defects.sequence import read_numbers
+    from research.spread_defects.sequence import NumberPlace, read_numbers
 
     row = {"key": frame.key, "issue": frame.issue, "index": frame.index, "path": str(frame.path)}
     try:
-        left, right, tokens, fold_x = read_numbers(read_rgb(frame.path, reduce=2))
+        left, right, tokens, fold_x = read_numbers(read_rgb(frame.path, reduce=2), place=NumberPlace(place))
     except Exception as error:  # битый файл не должен ронять прогон по паку
         return {**row, "error": repr(error)}
     target = pages_path(out_dir, frame)
@@ -399,9 +602,19 @@ def _pages_one(frame: Frame, out_dir: Path) -> dict:
     "--jobs", default=12, show_default=True, help="Воркеров (tesseract однопоточный, чтение — половина кадра)."
 )
 @click.option("--force", is_flag=True, help="Перечитать кадры, у которых json уже есть.")
-def pages(root: Path, only: tuple[str, ...], out_dir: Path, jobs: int, force: bool) -> None:
-    """Номера страниц из колонтитула по всем кадрам пака (tesseract, верхняя полоса); сводка ``frames.csv``."""
-    run_pool(iter_pack(root, only), _pages_one, out_dir, out_dir / "frames.csv", jobs, force, pages_path)
+@click.option(
+    "--place",
+    type=click.Choice(["header", "footer"]),
+    default="header",
+    show_default=True,
+    help="Где номер страницы: в верхнем (header) или нижнем (footer) колонтитуле.",
+)
+def pages(root: Path, only: tuple[str, ...], out_dir: Path, jobs: int, force: bool, place: str) -> None:
+    """Номера страниц из колонтитула по всем кадрам пака (tesseract, верхняя или нижняя полоса); сводка ``frames.csv``."""
+    from functools import partial
+
+    worker = partial(_pages_one, place=place)
+    run_pool(iter_pack(root, only), worker, out_dir, out_dir / "frames.csv", jobs, force, pages_path)
 
 
 @main.command()
@@ -1057,3 +1270,909 @@ def hidden_ds(root: Path, only: tuple[str, ...], out_root: Path, jobs: int, batc
     table["bad_share"] = table[["L_bad_share", "R_bad_share"]].max(axis=1)
     table.sort_values("bad_share", ascending=False).to_csv(out_root / "hidden_ds.csv", index=False)
     click.echo(f"записано {len(table)} → {out_root / 'hidden_ds.csv'}")
+
+
+def copies_done(out_root: Path, frame: Frame) -> Path:
+    """npz сетки признаков ксерокопии кадра: ``<out_root>/copies/<выпуск>/<кадр>.npz``.
+
+    Args:
+        out_root: Корень выхода стенда.
+        frame: Кадр.
+
+    Returns:
+        Путь файла (папка не создаётся).
+    """
+    return out_root / "copies" / frame.issue / (frame.path.stem + ".npz")
+
+
+def _copies_one(frame: Frame, out_root: Path) -> dict:
+    """Признаки ксерокопии по плиткам кадра (воркер пула): npz сетки и сводка по полосам.
+
+    Args:
+        frame: Кадр.
+        out_root: Корень выхода стенда.
+
+    Returns:
+        Строка сводки (``photocopy.side_summary``) с ключом, выпуском, путём и x сгиба; ``error`` при сбое.
+    """
+    from research.spread_defects.gutter import find_fold
+    from research.spread_defects.photocopy import CopyTiles, copy_tiles, side_summary
+
+    row = {"key": frame.key, "issue": frame.issue, "index": frame.index, "path": str(frame.path)}
+    try:
+        rgb = read_rgb(frame.path)
+        fold, _ = find_fold(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32))
+        fold_x = float(np.polyval(fold, rgb.shape[0] / 2))
+        tiles = copy_tiles(rgb)
+    except Exception as error:  # битый файл не должен ронять прогон по паку
+        return {**row, "error": repr(error)}
+    target = copies_done(out_root, frame)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(target, **{n: getattr(tiles, n) for n in CopyTiles.__dataclass_fields__})
+    return {**row, "fold_x": fold_x, **side_summary(tiles, fold_x), "error": ""}
+
+
+@main.command()
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=PACK4_ROOT)
+@click.option("--only", multiple=True, help="Префикс ключа выпуска.")
+@click.option("--out-root", type=click.Path(file_okay=False, path_type=Path), default=OUT_ROOT)
+@click.option("--jobs", default=14, show_default=True, help="Воркеров (диск NTFS-3G — узкое место).")
+@click.option("--force", is_flag=True, help="Пересчитать кадры, уже прошедшие проход.")
+def copies(root: Path, only: tuple[str, ...], out_root: Path, jobs: int, force: bool) -> None:
+    """Признаки ксерокопии по полосам (цвет и зерно бумаги, крап, краска, неровность фона) — ``copies.csv``."""
+    run_pool(iter_pack(root, only), _copies_one, out_root, out_root / "copies.csv", jobs, force, copies_done)
+
+
+def _crops_one(frame: Frame, out_root: Path, fold_x: float) -> tuple[str, dict]:
+    """Вырезки текста полос кадра для эмбеддингов (воркер пула).
+
+    Args:
+        frame: Кадр.
+        out_root: Корень выхода стенда (там сетки ``copies``).
+        fold_x: x сгиба посередине высоты, px.
+
+    Returns:
+        Пара (ключ кадра, словарь сторона → вырезки); пустой словарь при сбое.
+    """
+    from research.spread_defects.copy_embed import side_crops
+
+    try:
+        return frame.key, side_crops(frame, copies_done(out_root, frame), fold_x)
+    except Exception:  # битый кадр не роняет прогон
+        return frame.key, {}
+
+
+@main.command("copies-embed")
+@click.option("--out-root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=OUT_ROOT)
+@click.option("--jobs", default=12, show_default=True, help="Воркеров чтения кадров (GPU — один процесс).")
+def copies_embed(out_root: Path, jobs: int) -> None:
+    """Эмбеддинги DINOv2 по вырезкам текста каждой полосы (после ``copies``) — ``copies_embed.npz``."""
+    from research.spread_defects.copy_embed import Embedder
+
+    frames = pd.read_csv(out_root / "copies.csv")
+    frames = frames[frames.fold_x.notna()]
+    embed = Embedder()
+    keys, sides, vectors = [], [], []
+    started = time.time()
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        futures = [
+            pool.submit(_crops_one, Frame(Path(r.path), r.issue, int(r["index"])), out_root, float(r.fold_x))
+            for _, r in frames.iterrows()
+        ]
+        for n, future in enumerate(as_completed(futures), 1):
+            key, crops = future.result()
+            for side, stack in crops.items():
+                keys.append(key)
+                sides.append(side)
+                vectors.append(embed(stack))
+            if n % 500 == 0:
+                click.echo(f"{n}/{len(futures)}  {n / (time.time() - started):.1f} кадр/с")
+    np.savez_compressed(
+        out_root / "copies_embed.npz", key=np.array(keys), side=np.array(sides), vector=np.stack(vectors)
+    )
+    click.echo(f"полос {len(keys)} → {out_root / 'copies_embed.npz'}")
+
+
+@main.command("copies-rank")
+@click.option(
+    "--out-root",
+    "out_roots",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Корень прогона пака (после ``copies`` и ``copies-embed``); можно несколько.",
+)
+@click.option(
+    "--labels",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=SETS_DIR / "photocopy.csv",
+    show_default=True,
+)
+@click.option("--threshold", default=0.5, show_default=True, help="Порог ядра участка копий.")
+@click.option("--extend", default=0.05, show_default=True, help="Порог расширения участка на соседние полосы.")
+@click.option("--result-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
+def copies_rank(out_roots: tuple[Path, ...], labels: Path, threshold: float, extend: float, result_dir: Path) -> None:
+    """Оценка «ксерокопия» по полосам (DINOv2 + ручные признаки, вне складки по выпускам) и участки копий."""
+    from research.spread_defects.photocopy import copy_regions, labeled_pages, out_of_fold_scores, page_numbers
+
+    pages = labeled_pages(list(out_roots), pd.read_csv(labels))
+    pages["score"] = out_of_fold_scores(pages)
+    numbers = pd.concat([page_numbers(root / "pages").assign(pack=root.name) for root in out_roots])
+    pages = pages.merge(numbers, on=["pack", "key", "side"], how="left")
+    keep = [c for c in pages.columns if not (c.startswith("e") and c[1:].isdigit())]
+    result_dir.mkdir(parents=True, exist_ok=True)
+    pages[keep].sort_values("score", ascending=False).to_csv(result_dir / "copies_scores.csv", index=False)
+    regions = copy_regions(pages, threshold, extend)
+    regions.to_csv(result_dir / "copies_regions.csv", index=False)
+    click.echo(f"полос {len(pages)}, выше порога {(pages.score >= threshold).sum()}, участков {len(regions)}")
+
+
+def _quality_one(task: tuple[str, str, str, float]) -> dict:
+    """Читаемость одной полосы-копии (воркер пула): tesseract + словарь.
+
+    Args:
+        task: (ключ кадра, путь, сторона, x сгиба).
+
+    Returns:
+        Строка: key, side и поля ``TextQuality``; ``error`` при сбое.
+    """
+    from research.spread_defects.photocopy import text_quality
+
+    key, path, side, fold_x = task
+    try:
+        gray = cv2.cvtColor(read_rgb(Path(path)), cv2.COLOR_RGB2GRAY)
+        quality = text_quality(gray, fold_x, side)
+    except Exception as error:  # битый кадр не роняет прогон
+        return {"key": key, "side": side, "error": repr(error)}
+    return {"key": key, "side": side, **quality.__dict__, "error": ""}
+
+
+@main.command("copies-quality")
+@click.option("--result-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option(
+    "--out-root",
+    "out_roots",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Корни прогонов паков (оттуда x сгиба из ``copies.csv``).",
+)
+@click.option("--threshold", default=0.5, show_default=True, help="Брать полосы с оценкой не ниже.")
+@click.option("--labeled", is_flag=True, help="Брать полосы, размеченные копиями (``y``), а не по порогу.")
+@click.option("--jobs", default=14, show_default=True, help="Воркеров (tesseract однопоточный).")
+def copies_quality(result_dir: Path, out_roots: tuple[Path, ...], threshold: float, labeled: bool, jobs: int) -> None:
+    """Читаемость текста на полосах-копиях (tesseract, словарь) — ``copies_quality.csv``."""
+    scores = pd.read_csv(result_dir / "copies_scores.csv")
+    folds = pd.concat([pd.read_csv(r / "copies.csv")[["key", "fold_x"]].assign(pack=r.name) for r in out_roots])
+    chosen = scores[scores.y] if labeled else scores[scores.score >= threshold]
+    todo = chosen.merge(folds, on=["pack", "key"])
+    tasks = [(r.key, r.path, r.side, float(r.fold_x)) for r in todo.itertuples()]
+    click.echo(f"полос {len(tasks)}, воркеров {jobs}")
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        rows = list(pool.map(_quality_one, tasks))
+    quality = todo[["pack", "issue", "key", "side", "page", "score", "speck_iz", "unevenness_iz", "paper_l_iz"]]
+    quality = quality.merge(pd.DataFrame(rows), on=["key", "side"])
+    quality.to_csv(result_dir / "copies_quality.csv", index=False)
+    click.echo(f"записано {len(quality)} → {result_dir / 'copies_quality.csv'}")
+
+
+def _page_glyphs_one(task: tuple[Path, Path, str]) -> pd.DataFrame:
+    """Порча черт по всем буквам кадра (воркер пула): таблица букв, тепловая карта, сводка по полосам.
+
+    Args:
+        task: (путь кадра, папка выхода, подпись кадра для шапки).
+
+    Returns:
+        Сводка ``page_glyphs.side_summary`` с колонкой ``frame``; пустая при сбое.
+    """
+    from ocr_utils.defocus_detection.metrics.dom import gradient_threshold
+    from research.spread_defects.gutter import find_fold
+    from research.spread_defects.lines import find_glyphs
+    from research.spread_defects.page_glyphs import cell_maps, glyph_table, heat_overlay, side_summary
+
+    path, out_dir, label = task
+    try:
+        rgb = read_rgb(path)
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        fold, _ = find_fold(gray)
+        glyphs = find_glyphs(gray)
+        table = glyph_table(gray, glyphs, fold, gradient_threshold(gray.astype(np.uint8)))
+    except Exception as error:  # битый кадр не роняет прогон
+        click.echo(f"сбой {label}: {error!r}")
+        return pd.DataFrame()
+    stem = label.replace("/", "_").replace(" ", "_")
+    table.to_csv(out_dir / f"{stem}.csv", index=False)
+    core, _, cell = cell_maps(table, gray.shape, glyphs.glyph_h)
+    title = [f"{label} — порча черт по всем буквам: медиана доли ядра штриха в клетке {cell} px к медиане полосы"]
+    cv2.imwrite(
+        str(out_dir / f"{stem}_карта.jpg"), heat_overlay(rgb, core, cell, title), [cv2.IMWRITE_JPEG_QUALITY, 88]
+    )
+    summary = side_summary(table)
+    summary.insert(0, "frame", label)
+    return summary
+
+
+@main.command("page-glyphs")
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--frame", "frames", multiple=True, required=True, help="Путь кадра от корня пака; можно несколько.")
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True)
+@click.option("--jobs", default=8, show_default=True, help="Воркеров (кадр ~10 с, память ~1.5 ГБ на воркер).")
+def page_glyphs(root: Path, frames: tuple[str, ...], out_dir: Path, jobs: int) -> None:
+    """Порча черт по всем буквам выбранных кадров (не только у сгиба): таблицы букв, карты, ``summary.csv``."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tasks = [(root / rel, out_dir, rel) for rel in frames]
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        summary = pd.concat(list(pool.map(_page_glyphs_one, tasks)), ignore_index=True)
+    summary.to_csv(out_dir / "summary.csv", index=False)
+    click.echo(summary.to_string(index=False))
+
+
+# --- Постраничная съёмка газеты (ЭГ): уход текста под корешок ----------------------------------------------------
+
+
+def _page_gutter_prepare(task: tuple[Path, Path, Path | None, Path | None]) -> dict:
+    """Подготовка кадра для surya (воркер пула, CPU): линия сгиба, лента у корешка, превью ленты на диск.
+
+    Линия — ``fold_line`` вариантом ``single_page_gutter.FOLD_VARIANT``; рамки строк surya для запрета берутся из
+    кэша ``fold-layout`` (если его нет — линия без рамок).
+
+    Args:
+        task: (путь JPEG-превью кадра, папка для лент, папка кэша ``fold-layout`` или None, папка исходных RAF или
+            None). С RAF лента режется из полного кадра (линия сгиба — по превью, в масштабе кадра), иначе — из превью.
+
+    Returns:
+        ``{"stem", "side", "fold", "fold_col", "image"}``; ``{"stem", "error"}``, если сгиб не найден или кадр
+        не читается.
+    """
+    import json
+
+    from research.spread_defects.fold_line import BoxSource, find_line, parse_variant, select_boxes
+    from research.spread_defects.single_page_gutter import (
+        FOLD_BOXES,
+        FOLD_VARIANT,
+        FOLD_KEEP,
+        STRIP_DEPTH,
+        gutter_strip,
+        page_side,
+        read_preview,
+        read_raw,
+        scale_fold,
+    )
+
+    path, strip_dir, layout_dir, raw_dir = task
+    stem = path.stem
+    try:
+        rgb = read_preview(path)
+        cache = layout_dir / f"{stem}.json" if layout_dir else None
+        boxes = select_boxes(json.loads(cache.read_text()), BoxSource(FOLD_BOXES)) if cache and cache.exists() else None
+        fold = find_line(rgb, parse_variant(FOLD_VARIANT), boxes=boxes).rows
+        if not np.isfinite(fold).all():
+            return {"stem": stem, "error": "сгиб не найден"}
+        side = page_side(stem)
+        if raw_dir is None:
+            strip = gutter_strip(rgb, fold, side)
+        else:
+            full = read_raw(raw_dir / f"{stem}.RAF")
+            k = full.shape[1] / rgb.shape[1]
+            fold = scale_fold(fold, rgb.shape[:2], full.shape[:2])
+            strip = gutter_strip(full, fold, side, depth=int(STRIP_DEPTH * k), keep=FOLD_KEEP * k)
+    except Exception as error:  # битый файл не должен ронять прогон
+        return {"stem": stem, "error": repr(error)}
+    # Лента на диск — для листов отсмотра (половинный масштаб хватает глазу).
+    small = cv2.resize(strip.image, None, fx=0.5 if raw_dir is None else 0.3, fy=0.5 if raw_dir is None else 0.3,
+                       interpolation=cv2.INTER_AREA)  # fmt: skip
+    cv2.imwrite(str(strip_dir / f"{stem}.jpg"), cv2.cvtColor(small, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return {
+        "stem": stem,
+        "side": side.value,
+        "fold": np.round(fold, 1).tolist(),
+        "fold_col": strip.fold_col,
+        "image": strip.image,
+    }
+
+
+@main.command("page-gutter")
+@click.option("--previews", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Папка JPEG-превью кадров (имя кадра.jpg, суффикс _1/_2 — сторона полосы).")  # fmt: skip
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True,
+              help="Выход: ocr_surya/*.json (кэш), strips/*.jpg, features.csv.")  # fmt: skip
+@click.option("--skip", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Файл со списком имён кадров (по одному в строке), которые не читать: строки параллельны сгибу.")  # fmt: skip
+@click.option("--layout-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Кэш fold-layout (layout/<кадр>.json): строки surya — запрет для линии сгиба.")  # fmt: skip
+@click.option("--raw-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Папка исходных RAF: лента у сгиба режется из полного кадра (строка ~58 px вместо ~33 на превью).")  # fmt: skip
+@click.option("--rec-batch", default=64, show_default=True,
+              help="Строк в пачке распознавания surya. На полном RAW — 16: GPU с подключённым экраном снимает долгие "
+                   "вызовы ядра сторожевым таймером (cudaErrorLaunchTimeout на пачке 64, 2026-10-06).")  # fmt: skip
+@click.option("--jobs", default=6, show_default=True, help="Воркеров подготовки кадров (CPU); surya — один на GPU.")
+def page_gutter(
+    previews: Path,
+    out_dir: Path,
+    skip: Path | None,
+    layout_dir: Path | None,
+    raw_dir: Path | None,
+    rec_batch: int,
+    jobs: int,
+) -> None:
+    """Уход текста под корешок на постраничной съёмке газеты: surya по ленте у сгиба (кэш), признаки — features.csv."""
+    import json
+
+    from research.spread_defects.single_page_gutter import Side, gutter_features
+
+    skipped = set(skip.read_text().split()) if skip else set()
+    paths = sorted(p for p in previews.glob("*.jpg") if p.stem not in skipped)
+    cache_dir, strip_dir = out_dir / "ocr_surya", out_dir / "strips"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    strip_dir.mkdir(parents=True, exist_ok=True)
+    todo = [p for p in paths if not (cache_dir / f"{p.stem}.json").exists()]
+    click.echo(f"кадров {len(paths)} (пропущено по списку {len(skipped)}), читать surya {len(todo)}")
+    if todo:
+        from PIL import Image
+        from surya.detection import DetectionPredictor
+        from surya.foundation import FoundationPredictor
+        from surya.recognition import RecognitionPredictor
+
+        recognizer, detector = RecognitionPredictor(FoundationPredictor()), DetectionPredictor()
+        started = time.time()
+        tasks = [(p, strip_dir, layout_dir, raw_dir) for p in todo]
+        with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+            for n, prepared in enumerate(pool.map(_page_gutter_prepare, tasks, chunksize=1), 1):
+                stem = prepared["stem"]
+                record: dict = {"stem": stem}
+                if "error" in prepared:
+                    click.echo(f"{stem}: {prepared['error']}")
+                    record["error"] = prepared["error"]
+                else:
+                    # Партии ограничены: по умолчанию surya занимает всю видеопамять и падает с OOM.
+                    result = recognizer(
+                        [Image.fromarray(prepared["image"])],
+                        det_predictor=detector,
+                        math_mode=False,
+                        recognition_batch_size=rec_batch,
+                        detection_batch_size=2,
+                    )[0]
+                    record.update(
+                        side=prepared["side"],
+                        fold=prepared["fold"],
+                        fold_col=np.round(prepared["fold_col"], 1).tolist(),
+                        size=list(prepared["image"].shape[:2]),
+                        lines=[
+                            {"bbox": [round(float(v), 1) for v in line.bbox], "text": line.text,
+                             "conf": round(float(line.confidence or 0), 3)}  # fmt: skip
+                            for line in result.text_lines
+                        ],
+                    )
+                (cache_dir / f"{stem}.json").write_text(json.dumps(record, ensure_ascii=False))
+                if n % 10 == 0:
+                    rate = n / (time.time() - started)
+                    click.echo(f"{n}/{len(todo)}  {rate:.2f} кадр/с  осталось ~{(len(todo) - n) / rate / 60:.0f} мин")
+    rows = []
+    for p in paths:
+        record = json.loads((cache_dir / f"{p.stem}.json").read_text())
+        row = {"stem": p.stem, "error": record.get("error", "")}
+        if not row["error"]:
+            features = gutter_features(record["lines"], np.asarray(record["fold_col"]), Side(record["side"]))
+            row.update(
+                side=record["side"],
+                lines=features.lines,
+                line_height=round(features.line_height, 1),
+                margin_p10=round(features.margin_p10, 2),
+                margin_median=round(features.margin_median, 2),
+                touch_share=round(features.touch_share, 3),
+                fold_checked=features.fold_checked,
+                fold_unknown=features.fold_unknown,
+                outer_checked=features.outer_checked,
+                outer_unknown=features.outer_unknown,
+                fold_share=round(features.fold_share, 3),
+                outer_share=round(features.outer_share, 3),
+                inner_checked=features.inner_checked,
+                inner_share=round(features.inner_share, 3),
+                excess=round(features.excess, 3),
+                examples=" ".join(features.examples),
+            )
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    table.to_csv(out_dir / "features.csv", index=False)
+    click.echo(f"записано {len(table)} → {out_dir / 'features.csv'}")
+
+
+@main.command("page-gutter-sort")
+@click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Выход ``page-gutter`` (features.csv); сюда же пишутся verdicts.csv и links/.")  # fmt: skip
+@click.option("--raw-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Папка исходных RAF (на них ставятся симлинки; туда ничего не пишется).")  # fmt: skip
+@click.option("--manual", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="CSV отсмотра глазами (stem, verdict, reason): перекрывает решение по признакам.")  # fmt: skip
+@click.option("--loss-share", default=0.16, show_default=True, help="Доля обрубков у сгиба для «есть потеря».")
+@click.option("--normal-share", default=0.05, show_default=True, help="Доля обрубков у сгиба ниже — «в норме».")
+@click.option("--second-features", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="features.csv второго чтения (например, по превью при основном по RAW): доля обрубков, шум и число "
+                   "слов берутся наименьшие из двух — обрубок засчитывается, только если его видят оба чтения, а "
+                   "случайные ошибки чтения у двух прогонов разные.")  # fmt: skip
+def page_gutter_sort(
+    out_dir: Path,
+    raw_dir: Path,
+    manual: Path | None,
+    loss_share: float,
+    normal_share: float,
+    second_features: Path | None,
+) -> None:
+    """Раскладка кадров по трём папкам симлинков: есть потеря / в норме / непонятно (verdicts.csv)."""
+    import shutil
+
+    from research.spread_defects.single_page_gutter import FrameSigns, Verdict, decide
+
+    table = pd.read_csv(out_dir / "features.csv")
+    if second_features is not None:
+        # Согласие двух чтений: меньшая доля обрубков, меньший шум, меньшее число проверенных слов.
+        second = pd.read_csv(second_features).set_index("stem")
+        for column in ("fold_share", "inner_share", "fold_checked"):
+            other = table.stem.map(second[column])
+            table[column] = np.fmin(table[column], other).where(other.notna(), table[column])
+    # Пиксельные признаки у складки (page-gutter-pixels), если посчитаны.
+    pixels_path = out_dir / "pixels.csv"
+    if pixels_path.exists():
+        table = table.merge(pd.read_csv(pixels_path)[["stem", "touching", "gap_median"]], on="stem", how="left")
+    overrides = pd.read_csv(manual).set_index("stem") if manual else pd.DataFrame(columns=["verdict", "reason"])
+    rows = []
+    for raw in sorted(raw_dir.glob("*.RAF")):
+        stem = raw.stem
+        found = table[table.stem == stem]
+        share = float(found.fold_share.iloc[0]) if len(found) else float("nan")
+        if stem in overrides.index:
+            verdict, reason = Verdict(overrides.loc[stem, "verdict"]), f"глазами: {overrides.loc[stem, 'reason']}"
+        elif not len(found):
+            verdict, reason = Verdict.UNCLEAR, "нет признаков"
+        elif isinstance(found.error.iloc[0], str) and found.error.iloc[0]:
+            verdict, reason = Verdict.UNCLEAR, f"сбой разбора: {found.error.iloc[0]}"
+        else:
+            r = found.iloc[0]
+            signs = FrameSigns(
+                fold_checked=int(r.fold_checked),
+                fold_share=float(r.fold_share),
+                inner_share=float(r.inner_share),
+                touch_share=float(r.get("touch_share", float("nan"))),
+                margin_p10=float(r.get("margin_p10", float("nan"))),
+                touching=int(r.get("touching", 0) if pd.notna(r.get("touching", 0)) else 0),
+                gap_median=float(r.get("gap_median", float("nan"))),
+            )
+            verdict, reason = decide(signs, loss_share, normal_share)
+        rows.append({"stem": stem, "verdict": verdict.value, "fold_share": share, "reason": reason, "raw": str(raw)})
+    verdicts = pd.DataFrame(rows)
+    verdicts.to_csv(out_dir / "verdicts.csv", index=False)
+    # Папки пересобираются с нуля: в них только симлинки, исходники не трогаются.
+    links = out_dir / "links"
+    if links.exists():
+        shutil.rmtree(links)
+    for verdict in Verdict:
+        (links / verdict.value).mkdir(parents=True)
+    for row in rows:
+        # Доля обрубков в начале имени — сортировка по силе потери (у отсмотренных без признаков — «na»).
+        prefix = "na" if np.isnan(row["fold_share"]) else f"{row['fold_share']:.2f}"
+        (links / row["verdict"] / f"{prefix}_{Path(row['raw']).name}").symlink_to(row["raw"])
+    click.echo(verdicts.verdict.value_counts().to_string())
+    click.echo(f"→ {links}")
+
+
+def _page_gutter_ds_crops(task: tuple[Path, Path, Path]) -> list[dict]:
+    """Вырезки колонки у сгиба для DeepSeek одного кадра (воркер пула, CPU).
+
+    Args:
+        task: (JPEG-превью кадра, JSON кэша surya кадра, папка вырезок).
+
+    Returns:
+        Задания воркера DeepSeek (пусто, если колонки нет или сгиб не найден).
+    """
+    import json
+
+    from research.spread_defects.single_page_gutter import Side, deepseek_crops, gutter_strip, read_preview
+
+    preview, cache, crop_root = task
+    record = json.loads(cache.read_text())
+    if record.get("error"):
+        return []
+    rgb = read_preview(preview)
+    fold = np.asarray(record["fold"])
+    if len(fold) != rgb.shape[1]:
+        # Кэш surya снят с полного RAW (линия в масштабе кадра): вырезки для сверки делаются только по превью.
+        return []
+    strip = gutter_strip(rgb, fold, Side(record["side"]))
+    return deepseek_crops(strip, record["lines"], record["stem"], crop_root / record["stem"])
+
+
+@main.command("page-gutter-deepseek")
+@click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Выход ``page-gutter`` (previews рядом — см. --previews).")  # fmt: skip
+@click.option("--previews", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--low", default=0.06, show_default=True, help="Нижняя граница пояса доли обрубков surya.")
+@click.option("--high", default=0.30, show_default=True, help="Верхняя граница пояса доли обрубков surya.")
+@click.option("--jobs", default=8, show_default=True, help="Воркеров нарезки (CPU); DeepSeek — один процесс на GPU.")
+def page_gutter_deepseek(out_dir: Path, previews: Path, low: float, high: float, jobs: int) -> None:
+    """Второй читатель DeepSeek-OCR-2 для кадров спорного пояса surya: deepseek.csv (доля обрубков у сгиба)."""
+    from research.spread_defects.deepseek_fold import read_answers, run_deepseek
+    from research.spread_defects.single_page_gutter import Side, deepseek_check
+
+    table = pd.read_csv(out_dir / "features.csv")
+    band = table[(table.fold_share >= low) & (table.fold_share <= high)]
+    click.echo(f"кадров в поясе {low}–{high}: {len(band)}")
+    ds_dir = out_dir / "deepseek"
+    tasks = [(previews / f"{s}.jpg", out_dir / "ocr_surya" / f"{s}.json", ds_dir / "crops") for s in band.stem]
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        all_jobs = [job for frame_jobs in pool.map(_page_gutter_ds_crops, tasks) for job in frame_jobs]
+    click.echo(f"кусков {len(all_jobs)}")
+    run_deepseek(all_jobs, ds_dir)
+    answers = read_answers(ds_dir / "free.jsonl")
+    rows = []
+    for _, r in band.iterrows():
+        check = deepseek_check(answers, r.stem, Side(r.side))
+        share = check.fold_unknown / check.fold_checked if check.fold_checked >= 8 else float("nan")
+        rows.append({"stem": r.stem, "ds_checked": check.fold_checked, "ds_unknown": check.fold_unknown,
+                     "ds_share": round(share, 3), "ds_examples": " ".join(check.examples)})  # fmt: skip
+    pd.DataFrame(rows).to_csv(out_dir / "deepseek.csv", index=False)
+    click.echo(f"записано {len(rows)} → {out_dir / 'deepseek.csv'}")
+
+
+# --- Линия сгиба: разметка ленты у корешка моделями и сравнение вариантов ----------------------------------------
+
+
+@main.command("fold-layout")
+@click.option("--previews", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--stems", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True,
+              help="CSV с колонкой stem (например, эталон линии сгиба).")  # fmt: skip
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True,
+              help="Кэш: layout/<кадр>.json — рамки surya layout, строк surya и блоков DeepSeek в координатах кадра.")  # fmt: skip
+def fold_layout(previews: Path, stems: Path, out_dir: Path) -> None:
+    """Разметка верхней ленты кадров для линии сгиба: surya layout, строки surya, DeepSeek-OCR-2 grounding."""
+    import json
+
+    from PIL import Image
+
+    from research.spread_defects.deepseek_fold import VLLM_ENV
+    from research.spread_defects.fold_line import band_pieces, piece_box_to_frame
+    from research.spread_defects.single_page_gutter import page_side, read_preview
+
+    names = sorted(set(pd.read_csv(stems).stem))
+    cache_dir, piece_dir = out_dir / "layout", out_dir / "layout_pieces"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    piece_dir.mkdir(parents=True, exist_ok=True)
+    todo = [n for n in names if not (cache_dir / f"{n}.json").exists()]
+    click.echo(f"кадров {len(names)}, размечать {len(todo)}")
+    if not todo:
+        return
+    # Куски лент (CPU, мало кадров — без пула).
+    pieces = {n: band_pieces(read_preview(previews / f"{n}.jpg"), page_side(n).value) for n in todo}
+    from surya.detection import DetectionPredictor
+    from surya.foundation import FoundationPredictor
+    from surya.layout import LayoutPredictor
+    from surya.settings import settings
+
+    layout = LayoutPredictor(FoundationPredictor(checkpoint=settings.LAYOUT_MODEL_CHECKPOINT))
+    detector = DetectionPredictor()
+    records: dict[str, dict] = {n: {"surya_layout": [], "surya_lines": [], "ds_blocks": []} for n in todo}
+    jobs = []
+    for name, frame_pieces in pieces.items():
+        images = [Image.fromarray(p.image) for p in frame_pieces]
+        for piece, result in zip(frame_pieces, layout(images)):
+            for box in result.bboxes:
+                records[name]["surya_layout"].append([*piece_box_to_frame(piece, *box.bbox), box.label])
+        for piece, result in zip(frame_pieces, detector(images)):
+            for box in result.bboxes:
+                records[name]["surya_lines"].append([*piece_box_to_frame(piece, *box.bbox), "line"])
+        for k, piece in enumerate(frame_pieces):
+            path = piece_dir / f"{name}_{k}.png"
+            Image.fromarray(piece.image).save(path)
+            jobs.append({"id": f"{name}|{k}", "crop": str(path)})
+    del layout, detector
+    # DeepSeek-OCR-2 grounding (штатный промпт документа) — отдельным процессом в своём окружении vLLM.
+    import subprocess
+
+    import torch
+
+    torch.cuda.empty_cache()
+    jobs_file = out_dir / "layout_jobs.jsonl"
+    jobs_file.write_text("\n".join(json.dumps(j, ensure_ascii=False) for j in jobs) + "\n")
+    worker = (
+        Path(__file__).resolve().parents[2]
+        / "ocr_utils"
+        / "page_layout"
+        / "line_art"
+        / "deepseek"
+        / "vllm_env"
+        / "worker.py"
+    )
+    subprocess.run(
+        ["uv", "run", "--project", str(VLLM_ENV), "python", str(worker), "--jobs", str(jobs_file), "--out-dir",
+         str(out_dir / "layout_ds"), "--prompts", "markdown", "--gpu-memory-utilization", "0.6"],
+        check=True,
+    )  # fmt: skip
+    for line in (out_dir / "layout_ds" / "markdown.jsonl").read_text().splitlines():
+        answer = json.loads(line)
+        name, k = answer["id"].split("|")
+        if name not in records:
+            continue
+        piece = pieces[name][int(k)]
+        for element in answer.get("elements", []):
+            box = (element["x0"], element["y0"], element["x1"], element["y1"])
+            records[name]["ds_blocks"].append([*piece_box_to_frame(piece, *box), element["label"]])
+    for name, record in records.items():
+        (cache_dir / f"{name}.json").write_text(json.dumps(record, ensure_ascii=False))
+    click.echo(f"записано {len(records)} → {cache_dir}")
+
+
+def _fold_variants_one(task: tuple) -> tuple[list[dict], dict]:
+    """Линии вариантов одного кадра (воркер пула): ошибки против эталона, расхождение, оверлеи.
+
+    Args:
+        task: (имя кадра, папка превью, папка кэша разметки, [(вариант, источник рамок)], точки эталона
+            ``[(x, y)]``, папка оверлеев или None).
+
+    Returns:
+        (строки ошибок по точкам эталона, сводка кадра: наибольшее расхождение вариантов и где).
+    """
+    import json
+
+    from research.spread_defects.fold_line import column_levels, find_line, overlay_pieces, select_boxes
+    from research.spread_defects.single_page_gutter import read_preview
+
+    stem, previews, layout_dir, combos, etalon, overlay_dir = task
+    rgb = read_preview(previews / f"{stem}.jpg")
+    levels = column_levels(rgb)
+    cache = layout_dir / f"{stem}.json"
+    record = json.loads(cache.read_text()) if cache.exists() else None
+    lines = []
+    for variant, source in combos:
+        boxes = select_boxes(record, source) if record else None
+        lines.append(
+            (f"{variant.name} | рамки: {source.value}", find_line(rgb, variant, boxes=boxes, levels=levels).rows)
+        )
+    errors = [
+        {"stem": stem, "variant": name, "x": x, "err": float(rows[int(x)] - y)}
+        for name, rows in lines
+        for x, y in etalon
+    ]
+    # Расхождение вариантов: наибольшая по x разность самой нижней и самой верхней линии (в зоне без краёв кадра).
+    stack = np.stack([rows for _, rows in lines])[:, 100:-100]
+    spread = np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)
+    summary = {"stem": stem, "spread_max": float(np.nanmax(spread)), "spread_x": int(np.nanargmax(spread)) + 100}
+    if overlay_dir is not None:
+        palette = [(0, 160, 0), (255, 90, 0), (0, 140, 255), (200, 0, 200), (0, 0, 220)]
+        coloured = [(name, rows, palette[k % len(palette)]) for k, (name, rows) in enumerate(lines)]
+        for k, image in enumerate(overlay_pieces(rgb, stem, coloured, etalon or None)):
+            cv2.imwrite(str(overlay_dir / f"{stem}_{k}.jpg"), image, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return errors, summary
+
+
+@main.command("fold-variants")
+@click.option("--previews", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Папка вариантов линии сгиба (кэш layout/ от fold-layout; сюда пишутся CSV и overlays/).")  # fmt: skip
+@click.option("--stems", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True,
+              help="CSV с колонкой stem.")  # fmt: skip
+@click.option("--combo", "combos", multiple=True, required=True,
+              help="Вариант и источник рамок через «@»: «C+F+2@строки», «A+F+3@нет».")  # fmt: skip
+@click.option("--gt", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Эталон линии (stem, x, y): ошибки вариантов в errors.csv.")  # fmt: skip
+@click.option("--overlays/--no-overlays", default=False, help="Рисовать оверлеи (overlays/<кадр>_<кусок>.jpg).")
+@click.option("--tag", default="run", show_default=True, help="Имя прогона: <tag>_errors.csv, <tag>_spread.csv.")
+@click.option("--jobs", default=16, show_default=True)
+def fold_variants(
+    previews: Path,
+    out_dir: Path,
+    stems: Path,
+    combos: tuple[str, ...],
+    gt: Path | None,
+    overlays: bool,
+    tag: str,
+    jobs: int,
+) -> None:
+    """Сравнение вариантов линии сгиба: ошибки против эталона, расхождение вариантов по кадрам, оверлеи."""
+    from research.spread_defects.fold_line import BoxSource, parse_variant
+
+    parsed = []
+    for combo in combos:
+        name, _, source = combo.partition("@")
+        parsed.append((parse_variant(name), BoxSource(source or "нет")))
+    names = sorted(set(pd.read_csv(stems).stem))
+    etalon = pd.read_csv(gt) if gt else pd.DataFrame(columns=["stem", "x", "y"])
+    overlay_dir = out_dir / "overlays" / tag if overlays else None
+    if overlay_dir is not None:
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+    tasks = [
+        (n, previews, out_dir / "layout", parsed, etalon[etalon.stem == n][["x", "y"]].values.tolist(), overlay_dir)
+        for n in names
+    ]
+    errors, summaries = [], []
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        for frame_errors, summary in pool.map(_fold_variants_one, tasks, chunksize=1):
+            errors += frame_errors
+            summaries.append(summary)
+    pd.DataFrame(summaries).sort_values("spread_max", ascending=False).to_csv(
+        out_dir / f"{tag}_spread.csv", index=False
+    )
+    if errors:
+        table = pd.DataFrame(errors)
+        table.to_csv(out_dir / f"{tag}_errors.csv", index=False)
+        table["abs"] = table.err.abs()
+        frames = table.groupby(["variant", "stem"]).err
+        report = table.groupby("variant").agg(
+            median=("abs", "median"), p90=("abs", lambda a: a.quantile(0.9)), max=("abs", "max")
+        )
+        report["кадров_ниже_8"] = frames.agg(lambda e: (e > 8).any()).groupby("variant").mean()
+        report["кадров_выше_15"] = frames.agg(lambda e: (e < -15).any()).groupby("variant").mean()
+        click.echo(report.round(3).to_string())
+    click.echo(f"кадров {len(names)} → {out_dir}")
+
+
+# --- Пиксельные признаки у складки и оверлеи «линия разреза + буквы» ------------------------------------------------
+
+# Цвета оверлея (BGR): линия сгиба, граница видимой страницы (маска загиба), строки surya, знаки, крайний знак
+# без просвета и с просветом.
+_FOLD_BGR, _VISIBLE_BGR, _LINE_BGR = (0, 0, 220), (0, 140, 255), (150, 150, 150)
+_GLYPH_BGR, _CUT_BGR, _GAP_BGR = (200, 150, 60), (60, 20, 230), (60, 170, 30)
+_SHADOW_BGR = (160, 0, 160)
+
+
+def _cut_overlay(
+    gray: np.ndarray, record: dict, edges: list, keep: float, header: list[str], out_prefix: Path, pieces: int = 4
+) -> None:
+    """Оверлеи ленты у складки: линия сгиба, граница видимой страницы, знаки, крайний знак строки (срезан / просвет).
+
+    Args:
+        gray: Лента (полутон, прямой текст).
+        record: Запись кэша surya кадра (``fold_col``, ``side``).
+        edges: ``LineEdge`` строк, касающихся складки.
+        keep: Запас маски загиба, px.
+        header: Строки шапки.
+        out_prefix: Префикс файлов (``<prefix>_<кусок>.jpg``).
+        pieces: На сколько кусков резать ленту вдоль складки.
+    """
+    from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, framed
+    from research.spread_defects.single_page_gutter import NO_GAP, Side
+
+    side = Side(record["side"])
+    fold_col = np.asarray(record["fold_col"])
+    canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    layer = canvas.copy()
+    for edge in edges:
+        x0, y0, x1, y1 = (int(v) for v in edge.box)
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), _LINE_BGR, 1)
+        for n, (gx0, gy0, gx1, gy1) in enumerate(edge.glyphs):
+            if n == edge.edge:
+                colour = _CUT_BGR if edge.gap < NO_GAP else _GAP_BGR
+                cv2.rectangle(layer, (gx0, gy0), (gx1, gy1), colour, -1)
+            else:
+                cv2.rectangle(layer, (gx0, gy0), (gx1, gy1), _GLYPH_BGR, -1)
+        if np.isfinite(edge.shadow):
+            # Начало тени складки на строке — короткая вертикальная риска.
+            cv2.line(canvas, (int(edge.shadow), y0), (int(edge.shadow), y1), _SHADOW_BGR, 2)
+        if edge.edge >= 0:
+            # Подпись просвета у крайнего знака — со стороны страницы, чтобы не закрывать складку.
+            gx0, gy0, gx1, _ = edge.glyphs[edge.edge]
+            tx = gx0 - 150 if side is Side.LEFT else gx1 + 8
+            cv2.putText(
+                canvas, f"{edge.gap:+.2f}", (max(0, tx), gy0 + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1
+            )
+    canvas = cv2.addWeighted(layer, 0.35, canvas, 0.65, 0)
+    rows = np.arange(len(fold_col))
+    fold_pts = np.stack([fold_col, rows], 1).astype(np.int32)
+    cv2.polylines(canvas, [fold_pts], False, _FOLD_BGR, 2)
+    shift = keep if side is Side.RIGHT else -keep
+    for start in range(0, len(rows), 24):  # пунктир границы видимой страницы
+        seg = fold_pts[start : start + 12].copy()
+        seg[:, 0] = (fold_col[start : start + 12] + shift).astype(np.int32)
+        cv2.polylines(canvas, [seg], False, _VISIBLE_BGR, 2)
+    # Зона у складки: 900 px со стороны страницы.
+    fx = int(np.median(fold_col))
+    xa, xb = (max(0, fx - 900), min(canvas.shape[1], fx + 60)) if side is Side.LEFT else (max(0, fx - 60), fx + 900)
+    legend = [
+        LegendEntry("линия сгиба (разреза)", _FOLD_BGR),
+        LegendEntry("граница видимой страницы (маска загиба)", _VISIBLE_BGR, style=SampleStyle.DASHED),
+        LegendEntry("строка surya", _LINE_BGR),
+        LegendEntry("начало тени складки на строке (граница видимой страницы)", _SHADOW_BGR),
+        LegendEntry("знаки у складки", _GLYPH_BGR, 0.35, SampleStyle.BOX),
+        LegendEntry(
+            f"крайний знак без просвета до тени (< {NO_GAP} высоты строки) — срезан", _CUT_BGR, 0.35, SampleStyle.BOX
+        ),
+        LegendEntry("крайний знак с просветом", _GAP_BGR, 0.35, SampleStyle.BOX),
+    ]
+    step = int(np.ceil(canvas.shape[0] / pieces))
+    for k in range(pieces):
+        part = np.ascontiguousarray(canvas[k * step : (k + 1) * step, xa:xb])
+        image = framed(
+            part, [*header, f"кусок {k + 1}/{pieces} вдоль складки; подписи — просвет в высотах строки"], legend
+        )
+        cv2.imwrite(str(out_prefix.with_name(f"{out_prefix.name}_{k}.jpg")), image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+
+def _pixels_one(task: tuple) -> dict:
+    """Пиксельные признаки кадра (воркер пула): лента из полного RAW, края строк у складки, оверлей по запросу.
+
+    Args:
+        task: (имя кадра, JSON кэша surya, папка RAF, ширина превью, папка оверлеев или None, строки шапки).
+
+    Returns:
+        Строка признаков (``stem`` + поля ``PixelFeatures``) или ``{"stem", "error"}``.
+    """
+    import json
+
+    from research.spread_defects.single_page_gutter import (
+        FOLD_KEEP,
+        STRIP_DEPTH,
+        TOUCH_LINE,
+        Side,
+        fold_column,
+        gutter_strip,
+        line_edge,
+        line_margin,
+        pixel_features,
+        read_raw,
+    )
+
+    stem, cache, raw_dir, preview_width, overlay_dir, header = task
+    record = json.loads(cache.read_text())
+    if record.get("error"):
+        return {"stem": stem, "error": record["error"]}
+    try:
+        full = read_raw(raw_dir / f"{stem}.RAF")
+        k = full.shape[1] / preview_width
+        side = Side(record["side"])
+        keep = FOLD_KEEP * k
+        strip = gutter_strip(full, np.asarray(record["fold"]), side, depth=int(STRIP_DEPTH * k), keep=keep)
+    except Exception as error:  # битый файл не должен ронять прогон
+        return {"stem": stem, "error": repr(error)}
+    gray = cv2.cvtColor(strip.image, cv2.COLOR_RGB2GRAY)
+    lines = [line for line in record["lines"] if len(line["text"].strip()) >= 3]
+    if not lines:
+        return {"stem": stem, "touching": 0}
+    height = float(np.median([line["bbox"][3] - line["bbox"][1] for line in lines]))
+    column = fold_column(lines, strip.fold_col, side, height)
+    touching = [line for line in column if line_margin(line, strip.fold_col, side) < TOUCH_LINE * height]
+    edges = [line_edge(gray, line, strip.fold_col, side, height, keep) for line in touching]
+    features = pixel_features(edges)
+    if overlay_dir is not None:
+        summary = (f"касаются складки {features.touching}, медиана просвета до тени {features.gap_median:+.2f}, "
+                   f"узкий крайний знак {features.narrow_share:.2f}, контраст у складки {features.contrast_median:.2f}")  # fmt: skip
+        _cut_overlay(gray, {**record, "fold_col": strip.fold_col}, edges, keep, [*header, summary], overlay_dir / stem)
+    return {"stem": stem, **{name: getattr(features, name) for name in features.__dataclass_fields__}}
+
+
+@main.command("page-gutter-pixels")
+@click.option("--out-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Выход page-gutter (ocr_surya/ — кэш чтения по RAW, features.csv); пишется pixels.csv.")  # fmt: skip
+@click.option("--raw-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--preview-width", default=4416, show_default=True, help="Ширина превью (линия сгиба снята по нему).")
+@click.option("--overlay-stems", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="CSV с колонкой stem (и необязательными label, note): по этим кадрам — оверлеи overlays_cut/.")  # fmt: skip
+@click.option("--only-overlays", is_flag=True, help="Считать только кадры из --overlay-stems (pixels.csv не писать).")
+@click.option("--jobs", default=12, show_default=True,
+              help="Воркеров (CPU): декодирование RAW ~3 с и ~1 ГБ памяти на кадр.")  # fmt: skip
+def page_gutter_pixels(
+    out_dir: Path, raw_dir: Path, preview_width: int, overlay_stems: Path | None, only_overlays: bool, jobs: int
+) -> None:
+    """Пиксельные признаки у складки (просвет крайнего знака, ширина, затемнение) и оверлеи «линия разреза + буквы»."""
+    cache_dir = out_dir / "ocr_surya"
+    features = pd.read_csv(out_dir / "features.csv").set_index("stem")
+    marked = pd.read_csv(overlay_stems).set_index("stem") if overlay_stems else pd.DataFrame()
+    stems = list(marked.index) if only_overlays else [s for s in features.index if (cache_dir / f"{s}.json").exists()]
+    overlay_dir = out_dir / "overlays_cut"
+    overlay_dir.mkdir(exist_ok=True)
+    tasks = []
+    for stem in stems:
+        header = None
+        if stem in marked.index:
+            label = marked.loc[stem].get("label", "") if "label" in marked.columns else ""
+            share = features.loc[stem, "fold_share"] if stem in features.index else float("nan")
+            header = [f"{stem}: разметка «{label}»; доля незнакомых у сгиба (RAW) {share:.2f}"]
+        tasks.append(
+            (stem, cache_dir / f"{stem}.json", raw_dir, preview_width, overlay_dir if header else None, header)
+        )
+    rows = []
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        for n, row in enumerate(pool.map(_pixels_one, tasks, chunksize=1), 1):
+            rows.append(row)
+            if n % 50 == 0:
+                click.echo(f"{n}/{len(tasks)}")
+    if not only_overlays:
+        pd.DataFrame(rows).to_csv(out_dir / "pixels.csv", index=False)
+    click.echo(f"кадров {len(rows)} → {out_dir / 'pixels.csv' if not only_overlays else overlay_dir}")

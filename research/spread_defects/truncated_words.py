@@ -192,7 +192,13 @@ class EdgeCheck:
         return self.fold_unknown / self.fold_checked - self.outer_unknown / self.outer_checked
 
 
-def check_lines(texts: list[list[str]], side: str, adjacent: list[bool] | None = None) -> EdgeCheck:
+def check_lines(
+    texts: list[list[str]],
+    side: str,
+    adjacent: list[bool] | None = None,
+    lost_hyphen: bool = False,
+    skip_capitalized: bool = False,
+) -> EdgeCheck:
     """Крайние слова строк у сгиба и у дальнего края против словаря, с учётом переносов.
 
     Строки идут сверху вниз в пределах одной колонки (собраны ``lines.side_lines``). Строка левой полосы,
@@ -204,6 +210,12 @@ def check_lines(texts: list[list[str]], side: str, adjacent: list[bool] | None =
         side: ``L``/``R``.
         adjacent: ``adjacent[n]`` — строка ``n + 1`` идёт сразу за строкой ``n`` (переносы склеиваются только
             между такими); None — все соседние строки смежны.
+        lost_hyphen: Незнакомое слово у сгиба считать знакомым, если оно склеивается со смежной строкой в
+            знакомое и без знака переноса (OCR теряет дефис в тени у сгиба: «эконо» + «мического») или с
+            сохранённым дефисом (перенос слова через дефис: «стран-» + «членов»). Обрубок с утраченными буквами так
+            не склеивается.
+        skip_capitalized: Слова с заглавной буквы не проверять: это имена, названия и аббревиатуры, которых нет в
+            словаре, а обрубок у сгиба почти всегда начинается со строчной («изводства», «сооруже»).
 
     Returns:
         ``EdgeCheck``.
@@ -223,6 +235,22 @@ def check_lines(texts: list[list[str]], side: str, adjacent: list[bool] | None =
         else:
             end = row[-1]
         fold_word, outer_word = (start, end) if side == "R" else (end, start)
+        if fold_word and lost_hyphen and not is_known(fold_word.strip("-")):
+            # Перенос слова с дефисом («стран-» + «членов» → «стран-членов»): склейка с сохранением дефиса.
+            if side == "R" and prev_end and prev_end.endswith("-") and is_known(prev_end + row[0]):
+                fold_word = prev_end + row[0]
+            elif side != "R" and next_start and row[-1].endswith("-") and is_known(row[-1] + next_start):
+                fold_word = row[-1] + next_start
+        if fold_word and lost_hyphen and not is_known(fold_word.strip("-")):
+            # Перенос без прочитанного дефиса: склейка с соседней строкой со стороны сгиба.
+            if side == "R" and prev_end and not prev_end.endswith("-") and is_known(prev_end + row[0]):
+                fold_word = prev_end + row[0]
+            elif side != "R" and next_start and not row[-1].endswith("-") and is_known(row[-1] + next_start):
+                fold_word = row[-1] + next_start
+        if skip_capitalized:
+            # Имена и названия словарь не знает — из проверки вон (у обеих сторон строки).
+            fold_word = None if fold_word and fold_word[0].isupper() else fold_word
+            outer_word = None if outer_word and outer_word[0].isupper() else outer_word
         if fold_word:
             fold_checked += 1
             if not is_known(fold_word.strip("-")):

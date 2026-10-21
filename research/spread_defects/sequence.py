@@ -1,8 +1,9 @@
 """Пропуски, дубли и пересъёмки разворотов в выпуске: номера страниц из колонтитула и смещение «номер − 2·порядок кадра».
 
-Номер страницы у журнала стоит в наружном верхнем углу полосы (левая — чётная, правая — нечётная, правая = левая + 1).
-Для каждого кадра читается верхняя полоса tesseract-ом (psm 11, разреженный текст), на каждой стороне сгиба берётся
-самый верхний числовой токен. Затем по выпуску строится «номер левой полосы» ``s`` и смещение ``s − 2·k``, где ``k`` —
+Номер страницы у журнала стоит в наружном верхнем углу полосы (левая — чётная, правая — нечётная, правая = левая + 1);
+у части изданий — в наружном нижнем углу (``NumberPlace.FOOTER``).
+Для каждого кадра читается верхняя (нижняя) полоса tesseract-ом (psm 11, разреженный текст), на каждой стороне сгиба
+берётся самый верхний (нижний) числовой токен. Затем по выпуску строится «номер левой полосы» ``s`` и смещение ``s − 2·k``, где ``k`` —
 порядковый номер кадра в выпуске. Внутри выпуска смещение постоянно; скачок вверх — пропущенные развороты, вниз —
 повтор (дубль или пересъёмка). Кадры без номера (обложка, вкладки, полосы без колонтитула) пропускаются, но
 не ломают ряд: смещение сравнивается с ближайшими пронумерованными соседями.
@@ -21,12 +22,21 @@ from ocr_utils.rotated_text.tables.ocr import tesseract_tsv
 
 # Верхняя полоса кадра, где ищется колонтитул, доли высоты.
 HEADER_TOP, HEADER_BOTTOM = 0.04, 0.30
+# Нижняя полоса кадра для номера внизу полосы, доли высоты (ниже 0.97 — край стола и пальцы).
+FOOTER_TOP, FOOTER_BOTTOM = 0.70, 0.97
 # Минимальная уверенность tesseract для числового токена.
 MIN_CONFIDENCE = 30.0
 # Номер страницы — 1–3 цифры.
 _NUMBER = re.compile(r"\d{1,3}")
 # Токены не выше самого верхнего на столько px (масштаб чтения) считаются той же строкой колонтитула.
 SAME_LINE = 40
+
+
+class NumberPlace(str, Enum):
+    """Где на полосе стоит номер страницы: в верхнем или в нижнем колонтитуле."""
+
+    HEADER = "header"
+    FOOTER = "footer"
 
 
 class Side(str, Enum):
@@ -52,18 +62,21 @@ class NumberToken:
     confidence: float
 
 
-def header_tokens(gray: np.ndarray) -> list[NumberToken]:
-    """Числовые токены верхней полосы кадра.
+def header_tokens(gray: np.ndarray, place: NumberPlace = NumberPlace.HEADER) -> list[NumberToken]:
+    """Числовые токены полосы колонтитула кадра (верхней или нижней).
 
     Args:
         gray: Полутоновый кадр uint8 (масштаб чтения, обычно половина полного).
+        place: Какую полосу читать: верхнюю (``HEADER_TOP..HEADER_BOTTOM``) или нижнюю (``FOOTER_TOP..FOOTER_BOTTOM``).
 
     Returns:
         Токены из 1–3 цифр с уверенностью не ниже ``MIN_CONFIDENCE``; координаты — в px переданного кадра.
     """
     height = gray.shape[0]
-    top = int(HEADER_TOP * height)
-    band = gray[top : int(HEADER_BOTTOM * height)]
+    # Границы полосы чтения в долях высоты кадра — по месту номера.
+    band_top, band_bottom = (HEADER_TOP, HEADER_BOTTOM) if place == NumberPlace.HEADER else (FOOTER_TOP, FOOTER_BOTTOM)
+    top = int(band_top * height)
+    band = gray[top : int(band_bottom * height)]
     tokens = []
     for line in tesseract_tsv(band, lang="rus", psm=11):
         columns = line.split("\t")
@@ -76,13 +89,17 @@ def header_tokens(gray: np.ndarray) -> list[NumberToken]:
     return tokens
 
 
-def page_number(tokens: list[NumberToken], fold_x: float, side: Side) -> NumberToken | None:
-    """Номер страницы одной стороны разворота: самый верхний числовой токен, а среди токенов той же строки — самый наружный.
+def page_number(
+    tokens: list[NumberToken], fold_x: float, side: Side, place: NumberPlace = NumberPlace.HEADER
+) -> NumberToken | None:
+    """Номер страницы одной стороны разворота: крайний к обрезу числовой токен по высоте, а среди токенов той же строки —
+    самый наружный.
 
     Args:
-        tokens: Числовые токены верхней полосы.
+        tokens: Числовые токены полосы колонтитула.
         fold_x: x сгиба в px того же масштаба.
         side: Сторона.
+        place: Верхний колонтитул — берётся самая верхняя строка токенов, нижний — самая нижняя (сноски выше номера).
 
     Returns:
         Токен номера или None, если на стороне нет числовых токенов.
@@ -90,8 +107,12 @@ def page_number(tokens: list[NumberToken], fold_x: float, side: Side) -> NumberT
     own = [t for t in tokens if (t.x < fold_x) == (side == Side.LEFT)]
     if not own:
         return None
-    top = min(t.y for t in own)
-    line = [t for t in own if t.y <= top + SAME_LINE]
+    if place == NumberPlace.HEADER:
+        top = min(t.y for t in own)
+        line = [t for t in own if t.y <= top + SAME_LINE]
+    else:
+        bottom = max(t.y for t in own)
+        line = [t for t in own if t.y >= bottom - SAME_LINE]
     # Номер — в наружном углу: у левой полосы левее всех, у правой — правее всех.
     return min(line, key=lambda t: t.x) if side == Side.LEFT else max(line, key=lambda t: t.x)
 
@@ -291,21 +312,23 @@ def fold_x_of(gray: np.ndarray) -> float:
 
 
 def read_numbers(
-    rgb_half: np.ndarray, fold_x: float | None = None
+    rgb_half: np.ndarray, fold_x: float | None = None, place: NumberPlace = NumberPlace.HEADER
 ) -> tuple[NumberToken | None, NumberToken | None, list[NumberToken], float]:
     """Номера обеих полос кадра.
 
     Args:
         rgb_half: Кадр RGB uint8 в масштабе чтения (половина полного).
         fold_x: x сгиба в масштабе чтения, если уже известен; None — найти здесь.
+        place: Где номер на полосе — в верхнем или нижнем колонтитуле.
 
     Returns:
         (номер левой, номер правой, все числовые токены полосы, x сгиба) — в px масштаба чтения.
     """
     gray = cv2.cvtColor(rgb_half, cv2.COLOR_RGB2GRAY)
     fold_x = fold_x_of(gray) if fold_x is None else fold_x
-    tokens = header_tokens(gray)
-    return page_number(tokens, fold_x, Side.LEFT), page_number(tokens, fold_x, Side.RIGHT), tokens, fold_x
+    tokens = header_tokens(gray, place)
+    left, right = page_number(tokens, fold_x, Side.LEFT, place), page_number(tokens, fold_x, Side.RIGHT, place)
+    return left, right, tokens, fold_x
 
 
 def frame_numbers(candidates: list[set[int]]) -> list[int | None]:
