@@ -248,8 +248,7 @@ BASELINE_BELOW_XH, BASELINE_WINDOW_XH = 0.5, 0.6
 PERO_ROW_BAND_XH = 1.0
 
 
-def component_scores(labels: np.ndarray, stats: np.ndarray, index: int, maps: dict[GlyphEngine, np.ndarray],
-                     row: tuple[float, float]) -> dict[GlyphEngine, float]:  # fmt: skip
+def component_scores(labels: np.ndarray, stats: np.ndarray, index: int, maps: dict[GlyphEngine, np.ndarray],row: tuple[float, float]) -> dict[GlyphEngine, float]:  # fmt: skip
     """Оценки «это символ» одной компоненты каждым детектором.
 
     CRAFT — максимум карты по пикселям компоненты. pero — максимум вероятности базовой линии в столбцах компоненты

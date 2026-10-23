@@ -19,7 +19,6 @@ import numpy as np
 from ocr_utils.page_layout.text_blocks.legacy_linking.baselines import LineField
 from ocr_utils.page_layout.text_blocks.segment import Rule, Scale, X_OVERLAP_SHARE, _crosses, candidates_of
 
-
 # Второй проход: насколько выпрямленная ордината куска может уйти от ординаты цепочки — в долях
 # межстрочного шага и в долях полувысоты самого куска (заглавная буква и слово с выносными
 # элементами законно смещены от центра строки).

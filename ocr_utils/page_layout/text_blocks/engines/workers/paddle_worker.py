@@ -27,7 +27,9 @@ import sys
 import time
 
 # Кэш весов и проверку источника моделей надо задать до импорта paddleocr: paddlex читает их при импорте.
-os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/paddle")
+os.environ.setdefault(
+    "PADDLE_PDX_CACHE_HOME", "/mnt/hotstore/scan_processing/mts_markup/line_axis_engines/models/paddle"
+)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 import numpy as np

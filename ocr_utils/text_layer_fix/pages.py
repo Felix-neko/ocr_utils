@@ -56,13 +56,11 @@ def page_index_map(probe_db: Path) -> dict[tuple[str, str, str], PageRef]:
         Словарь ``(год, выпуск, имя полосы без расширения) → PageRef`` (без ``rotate_cw``).
     """
     connection = sqlite3.connect(f"file:{probe_db}?mode=ro", uri=True)
-    rows = connection.execute(
-        """
+    rows = connection.execute("""
         select y.year, i.name, p.source_file_name, i.full_intermediate_pdf_name, p.full_pdf_page_idx
         from pages p join issues i on i.id = p.issue_id join year_packages y on y.id = i.year_package_id
         where p.full_pdf_page_idx is not null and i.full_intermediate_pdf_name is not null
-        """
-    ).fetchall()
+        """).fetchall()
     connection.close()
     result: dict[tuple[str, str, str], PageRef] = {}
     for year, issue, file_name, pdf_name, index in rows:
@@ -81,12 +79,10 @@ def page_rotations(markup_db: Path) -> dict[tuple[str, str, str], int]:
         Словарь ``(год, выпуск, полоса) → rotate_cw``.
     """
     connection = sqlite3.connect(f"file:{markup_db}?mode=ro", uri=True)
-    rows = connection.execute(
-        """
+    rows = connection.execute("""
         select y.year, i.name, p.source_file_name, coalesce(p.rotate_cw, 0)
         from pages p join issues i on i.id = p.issue_id join year_packages y on y.id = i.year_package_id
-        """
-    ).fetchall()
+        """).fetchall()
     connection.close()
     return {(str(y), str(i), Path(f).stem): int(r) for y, i, f, r in rows}
 

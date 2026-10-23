@@ -38,7 +38,9 @@ def main():
         page = cv2.imread(job["png"], cv2.IMREAD_COLOR)
         maps, ds = parsenet.get_maps_with_optimal_resolution(page)
         # Карта в пониженном разрешении ds — обратно к размеру полосы.
-        full = cv2.resize(np.clip(maps[:, :, BASELINE_CHANNEL], 0, 1), None, fx=ds, fy=ds, interpolation=cv2.INTER_LINEAR)
+        full = cv2.resize(
+            np.clip(maps[:, :, BASELINE_CHANNEL], 0, 1), None, fx=ds, fy=ds, interpolation=cv2.INTER_LINEAR
+        )
         out = np.zeros(page.shape[:2], dtype=np.float32)
         h, w = min(out.shape[0], full.shape[0]), min(out.shape[1], full.shape[1])
         out[:h, :w] = full[:h, :w]

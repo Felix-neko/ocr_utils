@@ -350,8 +350,11 @@ def legend_entries(dilate_extra: tuple[float, ...] = (), hints=None, body_axis: 
     box = SampleStyle.BOX
     entries = [
         LegendEntry("граница блока", COLOUR_ENVELOPE, ENVELOPE_ALPHA),
-        LegendEntry("недостоверный участок стороны (выступ от сора, вынос за колонку)", COLOUR_UNRELIABLE,
-                    style=SampleStyle.DASHED),
+        LegendEntry(
+            "недостоверный участок стороны (выступ от сора, вынос за колонку)",
+            COLOUR_UNRELIABLE,
+            style=SampleStyle.DASHED,
+        ),
         LegendEntry("краска, выброшенная защитой сторон (CRAFT + pero)", COLOUR_DROPPED, style=SampleStyle.BOX),
         LegendEntry("крупная огибающая", COLOUR_COARSE),
         LegendEntry("ось строки (вторая, по базовой линии глифов)" if body_axis else "ось строки", COLOUR_AXIS),

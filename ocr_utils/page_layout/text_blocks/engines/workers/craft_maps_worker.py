@@ -61,7 +61,9 @@ def main():
     started = time.monotonic()
     for job in todo:
         gray = cv2.imread(job["png"], cv2.IMREAD_GRAYSCALE)
-        cv2.imwrite(str(args.out_dir / f"{job['key']}.png"), (region_map(net, gray, device, args.fp16) * 255).astype(np.uint8))
+        cv2.imwrite(
+            str(args.out_dir / f"{job['key']}.png"), (region_map(net, gray, device, args.fp16) * 255).astype(np.uint8)
+        )
     print(f"карт {len(todo)} за {time.monotonic() - started:.1f} с", flush=True)
 
 
