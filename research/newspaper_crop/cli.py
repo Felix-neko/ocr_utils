@@ -345,12 +345,20 @@ def save_zone(out: Path, frame: Frame, zone: Zone, raw: np.ndarray) -> None:
 
 @main.command()
 @click.option("--redo", is_flag=True, help="Пересчитать и уже готовые кадры (по умолчанию — пропускать).")
-def fingers(redo: bool) -> None:
-    """Пальцы по набору стеком scan_cropping (YOLO-World hand → SAM → LaMa): маска и превью с закрасом."""
+@click.option("--keys", default="", help="Только эти кадры (ключи через запятую); с --redo — пересчитать их.")
+@click.option("--guard-px", default=10, show_default=True, help="Зазор у печати, px рабочего масштаба; 0 — без защиты.")
+def fingers(redo: bool, keys: str, guard_px: int) -> None:
+    """Пальцы по набору стеком scan_cropping (YOLO-World hand → SAM → LaMa): маска и превью с закрасом.
+
+    Раздутая маска пальца не заходит на печать с зазором ``guard_px`` (``text_guard.finger_protect``); зона пальца
+    перед LaMa не высветляется (ореол высветления ложился на бумагу и печать вокруг пальца)."""
     from ocr_utils.scan_cropping.finger_removal.removal import remove_fingers
     from ocr_utils.scan_cropping.gpu_models import GpuModels
+    from research.newspaper_crop.text_guard import finger_protect
 
     todo = [f for f in read_sample() if not f.skip]
+    if keys:
+        todo = [f for f in todo if f.key in set(keys.split(","))]
     if not redo:
         todo = [
             f
@@ -360,15 +368,19 @@ def fingers(redo: bool) -> None:
     log.info("пальцы: %d кадров к расчёту", len(todo))
     models = GpuModels(with_lama=True)
     for frame in todo:
-        bgr = cv2.cvtColor(read_preview_rgb(frame), cv2.COLOR_RGB2BGR)
-        cleaned, mask, *_ = remove_fingers(bgr, models, log_name=frame.key)
+        rgb = read_preview_rgb(frame)
+        protect = finger_protect(rgb, guard_px) if guard_px > 0 else None
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        cleaned, mask, _, _, info, *_ = remove_fingers(
+            bgr, models, light_increment=0, log_name=frame.key, protect_mask=protect
+        )
         out_img = OUT_ROOT / "nofinger" / (frame.key + ".jpg")
         out_img.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_img), cleaned, [cv2.IMWRITE_JPEG_QUALITY, 95])
         mpath = finger_mask_path(frame)
         mpath.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(mpath), (mask > 0).astype(np.uint8) * 255)
-        log.info("%s: пальцы %.4f кадра", frame.key, float((mask > 0).mean()))
+        log.info("%s: пальцы %.4f кадра (%s)", frame.key, float((mask > 0).mean()), info)
 
 
 @main.command()
@@ -882,6 +894,151 @@ def tilt_import(run_name: str) -> None:
 
     df = import_task(run_name)
     log.info("эталон: %d сторон, поправлено %d → %s", len(df), int(df.changed.sum()), GT_CSV)
+
+
+@main.command("surface-crops")
+@click.option("--name", default="gt", show_default=True, help="Имя набора в surface/.")
+@click.option("--source", type=click.Choice(["preview", "nofinger"]), default="nofinger", show_default=True)
+def surface_crops(name: str, source: str) -> None:
+    """Участки у сторон кадров эталона наклона с метками «свой лист / чужое», признаки DINOv2 и цвета →
+    ``surface/<name>/`` (``crops.csv``, ``feats.npz``). GPU — последовательно по кадрам."""
+    from research.newspaper_crop.surface_clf import SURFACE_DIR, DinoEmbedder, color_features, frame_crops
+    from research.newspaper_crop.tilt_cvat import GT_CSV
+
+    gt = pd.read_csv(GT_CSV)
+    keys = sorted(gt.key.unique())
+    frames = {f.key: f for f in read_sample(ALL_CSV)}
+    embedder = DinoEmbedder()
+    tables, embs, cols = [], [], []
+    for i, key in enumerate(keys, 1):
+        rgb = read_source_rgb(frames[key], source)
+        table, crops = frame_crops(rgb, key, gt[gt.key == key])
+        tables.append(table)
+        embs.append(embedder.embed(crops))
+        cols.append(color_features(crops))
+        log.info("участки %d/%d %s: %d (чужое %d, свой %d)", i, len(keys), key, len(table),
+                 (table.label == "other").sum(), (table.label == "own").sum())  # fmt: skip
+    out = SURFACE_DIR / name
+    out.mkdir(parents=True, exist_ok=True)
+    pd.concat(tables, ignore_index=True).to_csv(out / "crops.csv", index=False)
+    np.savez_compressed(out / "feats.npz", emb=np.concatenate(embs), col=np.concatenate(cols))
+    log.info("участки → %s", out)
+
+
+@main.command("surface-eval")
+@click.option("--name", default="gt", show_default=True, help="Набор участков в surface/.")
+@click.option("--tau", default=0.5, show_default=True, help="Порог вероятности «чужого».")
+@click.option("--min-share", default=0.2, show_default=True, help="Доля столбцов с «чужим», чтобы сдвигать сторону.")
+def surface_eval(name: str, tau: float, min_share: float) -> None:
+    """Классификатор «свой лист / чужое» вне выборки (по кадрам): AUC участков и ошибка сторон против эталона →
+    ``surface/<name>/{crops_p.csv, sides.csv}``."""
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    from research.newspaper_crop.surface_clf import SURFACE_DIR, evaluate_sides, out_of_fold, relative_features
+    from research.newspaper_crop.tilt_cvat import GT_CSV
+
+    d = SURFACE_DIR / name
+    table = pd.read_csv(d / "crops.csv", keep_default_na=False)
+    feats = np.load(d / "feats.npz")
+    table["p"] = out_of_fold(table, relative_features(table, feats["emb"], feats["col"]))
+    table.to_csv(d / "crops_p.csv", index=False)
+    m = (table.label != "") & (table.depth <= 160)
+    y = (table.label[m] == "other").astype(int)
+    log.info("участки: AUC %.3f, AP %.3f", roc_auc_score(y, table.p[m]), average_precision_score(y, table.p[m]))
+    sides = evaluate_sides(table, pd.read_csv(GT_CSV), tau, min_share)
+    sides.to_csv(d / "sides.csv", index=False)
+    wrong = sides.base > 20
+    log.info(
+        "стороны: неверных %d, исправлено %d; верных %d, испорчено %d; ошибка неверных %.1f → %.1f px",
+        wrong.sum(),
+        ((sides.err <= 20) & wrong).sum(),
+        (~wrong).sum(),
+        ((sides.err > 20) & ~wrong).sum(),
+        sides.base[wrong].mean(),
+        sides.err[wrong].mean(),
+    )
+
+
+def _surface_overlay_one(
+    frame: Frame,
+    crops: pd.DataFrame,
+    gt: pd.DataFrame,
+    sides: pd.DataFrame,
+    out: Path,
+    run_name: str,
+    tau: float,
+    min_share: float,
+) -> str:
+    """Оверлей классификатора одного кадра (воркер пула ``surface-overlays``).
+
+    Args:
+        frame: Кадр.
+        crops: Участки кадра с вероятностями ``p``.
+        gt: Эталон кадра.
+        sides: Ошибки сторон кадра (``side, base, err``) из ``surface-eval``.
+        out: Каталог оверлеев.
+        run_name: Прогон конвейера (``guard/<key>_quad.json`` — трапеция после складки и охвата печати).
+        tau: Порог вероятности «чужого».
+        min_share: Доля столбцов с «чужим», чтобы сдвигать сторону.
+
+    Returns:
+        Строка лога.
+    """
+    from research.newspaper_crop.overlay import surface_overlay
+    from research.newspaper_crop.surface_clf import CROP_ALONG, detected_quad_and_paper, side_boundary
+
+    rgb = read_source_rgb(frame, "nofinger")
+    h, w = rgb.shape[:2]
+    quad, _ = detected_quad_and_paper(frame.key, (h, w))
+    g = RUNS_DIR / run_name / "guard" / (frame.key + "_quad.json")
+    final = np.array(json.loads(g.read_text())["quad_norm"]) * [w, h] if g.exists() else None
+    plain = crops[~crops.ref]
+    bounds = {side: side_boundary(plain[plain.side == side], tau, min_share) for side in plain.side.unique()}
+    # Шапка: ошибка каждой стороны против эталона до и после правки по классификатору.
+    errs = "; ".join(f"{r.side} {r.base:.0f}→{r.err:.0f}" for r in sides.sort_values("side").itertuples())
+    header = [f"{frame.key} — классификатор «свой лист / чужое» (DINOv2, вне выборки по кадрам), τ={tau}",
+              f"ошибка стороны против эталона, px превью (трапеция → классификатор): {errs}"]  # fmt: skip
+    # Крупно — стороны, где ошибка до или после правки больше 20 px.
+    zoom = list(sides[(sides.base > 20) | (sides.err > 20)].side)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    whole, zooms = surface_overlay(bgr, crops, quad, final, gt, bounds, header, CROP_ALONG, zoom)
+    name = frame.key.replace("/", "__")
+    cv2.imwrite(str(out / f"{name}.jpg"), whole, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    for side, pic in zooms.items():
+        cv2.imwrite(str(out / f"{name}_{side}.jpg"), pic, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return f"{frame.key}: крупно {','.join(zoom) or '—'}"
+
+
+@main.command("surface-overlays")
+@click.option("--name", default="gt", show_default=True, help="Набор участков в surface/ (после surface-eval).")
+@click.option("--run", "run_name", default="spine_cut_all", show_default=True, help="Прогон конвейера с guard/.")
+@click.option("--tau", default=0.5, show_default=True, help="Порог вероятности «чужого».")
+@click.option("--min-share", default=0.2, show_default=True, help="Доля столбцов с «чужим», чтобы сдвигать сторону.")
+@click.option("--jobs", default=8, show_default=True, help="Воркеров (CPU).")
+def surface_overlays(name: str, run_name: str, tau: float, min_share: float, jobs: int) -> None:
+    """Оверлеи классификатора по кадрам эталона: участки по вероятности, эталон, граница по классификатору, конвейер;
+    вырезки крупно вдоль сторон с ошибкой > 20 px → ``surface/<name>/overlays/``."""
+    from research.newspaper_crop.surface_clf import SURFACE_DIR
+    from research.newspaper_crop.tilt_cvat import GT_CSV
+
+    d = SURFACE_DIR / name
+    table = pd.read_csv(d / "crops_p.csv", keep_default_na=False)
+    sides = pd.read_csv(d / "sides.csv")
+    gt = pd.read_csv(GT_CSV)
+    out = d / "overlays"
+    out.mkdir(parents=True, exist_ok=True)
+    frames = {f.key: f for f in read_sample(ALL_CSV)}
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=_init_worker) as pool:
+        futures = {}
+        for key, g in table.groupby("key"):
+            args = (frames[key], g, gt[gt.key == key], sides[sides.key == key], out, run_name, tau, min_share)
+            futures[pool.submit(_surface_overlay_one, *args)] = key
+        for fut in as_completed(futures):
+            try:
+                log.info("%s", fut.result())
+            except Exception as exc:  # noqa: BLE001 — сбой кадра не должен ронять прогон
+                log.warning("оверлей %s: %s", futures[fut], exc)
+    log.info("оверлеи → %s", out)
 
 
 if __name__ == "__main__":
