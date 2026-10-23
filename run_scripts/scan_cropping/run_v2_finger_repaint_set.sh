@@ -14,7 +14,11 @@
 set -euo pipefail
 
 set -m
-trap 'kill -- -$$' EXIT INT TERM
+# Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
+# иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd "$(dirname "$0")/../.."
 source run_scripts/scan_cropping/common.sh

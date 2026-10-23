@@ -23,7 +23,11 @@
 
 set -euo pipefail
 set -m
-trap 'kill -- -$$ 2>/dev/null' EXIT INT TERM
+# Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
+# иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # common.sh пака: пути PDF, BLURRED_DIR, DB_REVIEWED, GEOMETRY_RUN_DIR; он же переходит в корень репо.
 # ПОЛЯ ПРОМЕЖУТОЧНОЙ PDF. Сборщик берёт их из базы (Issue.full_intermediate_pdf_margin_*_mm), а
 # --margin-x-mm / --margin-y-mm — только для выпусков без полей в базе. Пак-1 собран до этих колонок,

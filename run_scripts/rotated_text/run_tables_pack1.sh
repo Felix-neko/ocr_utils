@@ -21,7 +21,11 @@ source "$(dirname "$0")/../scan_markup/pack1/common.sh"
 # Снятие ВСЕЙ группы процессов при выходе: пул на forkserver переживает смерть хозяина,
 # и убитый по одному PID прогон оставляет forkserver и воркеров сиротами (см. CLAUDE.md).
 set -m
-trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
+# Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
+# иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 OUT_DIR="/mnt/hotstore/scan_processing/mts/pack1_rotated_tables"
 

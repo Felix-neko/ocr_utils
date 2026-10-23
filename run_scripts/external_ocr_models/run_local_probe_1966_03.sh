@@ -14,7 +14,11 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 set -m
-trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
+# Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
+# иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 PAGES="$(dirname "$0")/probe_pages_1966_03.txt"
 ENGINES=(local-dots-ocr local-deepseek-ocr2 local-marker local-paddleocr-vl)
