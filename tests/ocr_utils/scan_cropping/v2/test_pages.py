@@ -11,16 +11,19 @@ from ocr_utils.scan_cropping.v2.pipeline import LAYOUT_VERSION, read_layout, rea
 from ocr_utils.scan_cropping.v2.trapezoid import fit_enclosing_quad
 
 
-def features(keystone: float = 4.0) -> PageFeatures:
+def features(keystone: float = 4.0, outer_ratio: float = 1.0) -> PageFeatures:
     """Признаки страницы с заданным сходом сторон трапеции.
 
     Args:
         keystone: Сход сторон, °.
+        outer_ratio: Знак схода — внешняя сторона трапеции к стороне у сгиба.
 
     Returns:
         Признаки.
     """
-    return PageFeatures(fill=0.98, keystone=keystone, width_share=1.0, light_share=1.0, finger=0.0, curl=0.5)
+    return PageFeatures(
+        fill=0.98, keystone=keystone, width_share=1.0, light_share=1.0, finger=0.0, curl=0.5, outer_ratio=outer_ratio
+    )
 
 
 def test_trapezoid_vertices():
@@ -41,6 +44,31 @@ def test_poses_single_and_both():
     assert classify_poses([features(25.0), features(4.5)]) == [PagePose.RAISED, PagePose.FLAT]
     assert classify_poses([features(3.7), features(12.9)]) == [PagePose.FLAT, PagePose.RAISED]
     assert classify_poses([features(4.0), features(6.5)]) == [PagePose.FLAT, PagePose.FLAT]
+
+
+def test_poses_sign_of_keystone():
+    """Сильный сход у одной страницы: внешний край длиннее, чем у соседки, — приподнята; короче (≤ 0.95) — опущена.
+
+    Числа — пак-6: МТС 1990/01 IMG_0875 (левая свисает, 0.92 при соседке 0.96), поднятая рукой — 1.03–1.45.
+    """
+    flat = features(3.7, 0.96)
+    assert classify_poses([features(8.0, 0.92), flat]) == [PagePose.LOWERED, PagePose.FLAT]
+    assert classify_poses([flat, features(25.0, 1.2)]) == [PagePose.FLAT, PagePose.RAISED]
+    # Знака нет (обложка, разрезанная на две «страницы»: 0.98 при соседке 1.0) — как раньше, приподнята.
+    assert classify_poses([features(11.0, 0.98), features(3.0, 1.0)]) == [PagePose.RAISED, PagePose.FLAT]
+    # Короче соседки, но не короче порога — тоже без знака.
+    assert classify_poses([features(9.0, 0.97), features(3.0, 0.99)]) == [PagePose.RAISED, PagePose.FLAT]
+
+
+def test_outer_ratio_by_side():
+    """Внешняя сторона — слева у левой страницы, справа у правой; у некрайней и без трапеции — 1."""
+    from ocr_utils.scan_cropping.v2.page_pose import outer_ratio
+
+    # Левая сторона 80 px, правая 100 px (по часовой: верх-лево, верх-право, низ-право, низ-лево).
+    quad = np.array([[0, 10], [100, 0], [100, 100], [0, 90]], np.float64)
+    assert abs(outer_ratio(quad, True) - 0.8) < 1e-6
+    assert abs(outer_ratio(quad, False) - 1.25) < 1e-6
+    assert outer_ratio(quad, None) == 1.0 and outer_ratio(None, True) == 1.0
 
 
 def page(mask: np.ndarray, pose: PagePose) -> PageQuad:
@@ -75,6 +103,25 @@ def test_protect_flat_only_inside_zone():
     assert not added[190:, :].any()  # вне зоны
     assert not added[:, 200:].any()  # приподнятая страница не защищается
     assert not (added & paper).any()
+
+
+def test_protect_lowered_like_flat():
+    """Опущенная страница (внешний край свисает) защищается так же, как плоская."""
+    paper = np.zeros((200, 400), bool)
+    paper[20:180, 20:190] = True
+    paper[20:180, 210:380] = True
+    left, right = paper.copy(), paper.copy()
+    left[:, 200:] = False
+    right[:, :200] = False
+    zone = np.zeros_like(paper)
+    zone[10:190, 10:390] = True
+    block_left = np.array([[40, 160], [180, 160], [180, 199], [40, 199]], np.float32)
+    block_right = np.array([[230, 160], [370, 160], [370, 199], [230, 199]], np.float32)
+    pages = [page(left, PagePose.LOWERED), page(right, PagePose.FLAT)]
+    added = protect_content(paper, [block_left, block_right], pages, zone, 1.0, (1, 1))
+    assert added[180:190, 60:160].all()  # опущенная левая — защищена
+    assert added[180:190, 250:350].all()  # плоская правая — защищена
+    assert not added[190:, :].any()
 
 
 def test_read_layout_versions(tmp_path):

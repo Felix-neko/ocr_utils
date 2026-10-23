@@ -90,6 +90,45 @@ def sam3_overrides(weights: str | Path = SAM3_WEIGHTS, imgsz: int = SAM3_IMGSZ) 
                 save=False, imgsz=imgsz)  # fmt: skip
 
 
+# Растяжение уровней кадра перед SAM 3 (``--sam3-levels``, по умолчанию выключено; стенд ai_slop/stack_edges): бумага —
+# пиксели в оболочках своей печати светлее порога Оцу; чёрная точка — SAM3_LEVELS_PCT[0]-й процентиль бумаги минус
+# SAM3_LEVELS_MARGIN, белая — SAM3_LEVELS_PCT[1]-й плюс запас; растягивается только светлота L (Lab), усиление не больше
+# SAM3_LEVELS_MAX_GAIN (узкий диапазон почти белой бумаги не растягивается в шум).
+SAM3_LEVELS_PCT = (1.0, 99.0)
+SAM3_LEVELS_MARGIN = 8
+SAM3_LEVELS_MAX_GAIN = 4.0
+SAM3_LEVELS_MIN_PAPER_PX = 1000
+
+
+def stretch_paper_levels(bgr: np.ndarray, region: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Кадр с растянутыми по бумаге уровнями светлоты — вход SAM 3.
+
+    Args:
+        bgr: Кадр BGR (масштаб сегментации).
+        region: Где искать бумагу (bool): оболочки своей печати, без них — маска книги.
+
+    Returns:
+        ``(растянутый кадр, чёрная точка, белая точка)``; бумаги мало или диапазон вырожден — кадр как есть и (0, 255).
+    """
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    values = gray[region]
+    if values.size < SAM3_LEVELS_MIN_PAPER_PX:
+        return bgr, 0.0, 255.0
+    # Краска отсекается порогом Оцу по пикселям области: бумага — светлая мода.
+    thr, _ = cv2.threshold(values.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    paper = values[values > thr]
+    if paper.size < SAM3_LEVELS_MIN_PAPER_PX:
+        return bgr, 0.0, 255.0
+    lo, hi = np.percentile(paper, SAM3_LEVELS_PCT)
+    white = min(255.0, float(hi) + SAM3_LEVELS_MARGIN)
+    # Чёрная точка опускается так, чтобы диапазон был не уже 255 / SAM3_LEVELS_MAX_GAIN.
+    black = max(0.0, min(float(lo) - SAM3_LEVELS_MARGIN, white - 255.0 / SAM3_LEVELS_MAX_GAIN))
+    lut = np.clip((np.arange(256) - black) * 255.0 / (white - black), 0, 255).astype(np.uint8)
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    lab[..., 0] = cv2.LUT(lab[..., 0], lut)
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), black, white
+
+
 def load_sam3(weights: str | Path = SAM3_WEIGHTS, imgsz: int = SAM3_IMGSZ):
     """Предиктор SAM 3 по тексту (грузится один раз на прогон).
 

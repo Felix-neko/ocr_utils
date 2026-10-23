@@ -41,11 +41,14 @@ COLOUR_RING = (0, 220, 255)  # кольцо опоры тени на листе 
 COLOUR_RING_OUT = (255, 200, 0)  # кольцо опоры за краем листа, на полосе закраса — голубой
 COLOUR_RING_DROPPED = (200, 0, 200)  # отсеяно из кольца: чужой цвет, тёмный закрас за краем — пурпурный
 COLOUR_PAPER_AS_IS = (80, 200, 80)  # «бумага как есть» B — пиксели, по которым она строится — зелёный
-# Трапеции страниц пунктиром: плоско лежащая — зелёный «принято», приподнятая — розовый (красный занят «срезано»).
-POSE_COLOUR = {PagePose.FLAT: (0, 150, 0), PagePose.RAISED: (180, 105, 255)}
-POSE_NAME = {PagePose.FLAT: "плоско", PagePose.RAISED: "приподнята"}
+# Трапеции страниц пунктиром: плоско лежащая — зелёный «принято», приподнятая — розовый (красный занят «срезано»),
+# опущенная (внешний край свисает, защита контента как у плоской) — бирюзовый.
+POSE_COLOUR = {PagePose.FLAT: (0, 150, 0), PagePose.RAISED: (180, 105, 255), PagePose.LOWERED: (170, 150, 0)}
+POSE_NAME = {PagePose.FLAT: "плоско", PagePose.RAISED: "приподнята", PagePose.LOWERED: "опущена"}
 # Пунктир: штрих и пробел, px холста.
 DASH_PX, GAP_PX = 14, 9
+# Трапеции страниц — точками: шаг и радиус точки, px холста (масштаб сегментации).
+DOT_STEP_PX, DOT_RADIUS_PX = 10, 2
 # Прозрачность пунктира сырых блоков surya (без припусков).
 RAW_BLOCK_ALPHA = 0.5
 # Подписи типов блоков surya: кегль, px итоговой картинки; прозрачность букв и белой обводки под ними.
@@ -69,6 +72,17 @@ COLOUR_HULLS = (200, 140, 60)  # оболочки своей печати — в
 COLOUR_SPINE = (255, 0, 140)  # прямая-разделитель страниц — фиолетовый
 COLOUR_BOUND = (0, 255, 255)  # ограничитель внешнего края страницы — жёлтый
 COLOUR_BOOK_LINE = (255, 170, 90)  # прямая края книги и её точки — светло-синий (тон грубой маски книги)
+# Подгоночные области страниц на шаге 07: прежний сплайн (``page_boundary``) — оранжевый, справочно; новая область
+# (``page_frames``: сплайн с узлами на изгибах, сторона у корешка — по линии корешка) — тёмно-красная.
+COLOUR_OLD_SPLINE = (0, 165, 255)
+COLOUR_FRAME = (0, 0, 160)
+# Полоса-вклейка: маска — полупрозрачная оранжевая область, вспомогательные линии — розовый пунктир, линия корешка —
+# тёмно-фиолетовая сплошная (разделитель v2 рядом — фиолетовый).
+COLOUR_STRIP = (0, 165, 255)
+COLOUR_AUX = (180, 105, 255)
+COLOUR_GUTTER_SPINE = (120, 0, 80)
+STRIP_ALPHA = 0.35
+KNOT_RADIUS = 7
 COLOUR_DROPPED = (0, 0, 220)  # точки края книги, отброшенные (у рамки, рука, палец) — красный
 # Толщина прямых разворота на холсте масштаба сегментации, px.
 LINE_PX = 3
@@ -267,6 +281,23 @@ def _dashed_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, in
             cv2.line(canvas, q0, q1, colour, width, cv2.LINE_AA)
 
 
+def _dotted_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, int], radius: int) -> None:
+    """Замкнутый многоугольник точками (справочная линия: тоньше и тише пунктира).
+
+    Args:
+        canvas: Холст BGR (локальный холст оверлея, меняется на месте).
+        pts: Вершины (N, 2) в px холста.
+        colour: Цвет BGR.
+        radius: Радиус точки, px.
+    """
+    for i in range(len(pts)):
+        a, b = pts[i].astype(float), pts[(i + 1) % len(pts)].astype(float)
+        length = float(np.linalg.norm(b - a))
+        for t0 in np.arange(0.0, length, DOT_STEP_PX):
+            p = a + (b - a) * (t0 / max(length, 1e-9))
+            cv2.circle(canvas, tuple(np.round(p).astype(int)), radius, colour, -1, cv2.LINE_AA)
+
+
 def _draw_blocks(canvas: np.ndarray, polys: list[np.ndarray], scale: float, pad: tuple[int, int]) -> None:
     """Блоки surya: сырые полигоны — полупрозрачным пунктиром, зона с припусками защиты — тонким сплошным контуром.
 
@@ -335,11 +366,11 @@ def _page_caption(page: PageQuad) -> str:
         Строка.
     """
     f = page.features
-    return f"{POSE_NAME[page.pose]} ш{f.width_share:.2f} св{f.light_share:.2f} з{f.fill:.2f} к{f.keystone:.0f}°"
+    return f"{POSE_NAME[page.pose]} ш{f.width_share:.2f} св{f.light_share:.2f} з{f.fill:.2f} к{f.keystone:.0f}° в{f.outer_ratio:.2f}"
 
 
 def _draw_pages(canvas: np.ndarray, pages: list[PageQuad]) -> None:
-    """Трапеции страниц пунктиром цвета класса.
+    """Трапеции страниц тонкими точками цвета класса (справочные: главные теперь — подгоночные рамки сплайнами).
 
     Args:
         canvas: Холст масштаба сегментации (меняется на месте).
@@ -347,7 +378,7 @@ def _draw_pages(canvas: np.ndarray, pages: list[PageQuad]) -> None:
     """
     for page in pages:
         if page.quad is not None:
-            _dashed_poly(canvas, page.quad, POSE_COLOUR[page.pose], 3)
+            _dotted_poly(canvas, page.quad, POSE_COLOUR[page.pose], DOT_RADIUS_PX)
 
 
 def _page_captions(picture: np.ndarray, pages: list[PageQuad], scale: float) -> np.ndarray:
@@ -488,8 +519,9 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
         LegendEntry("бумага SAM 3 (plain)", COLOUR_PLAIN),
         LegendEntry("итоговая бумага (с защитой)", COLOUR_PAPER),
         LegendEntry("прямоугольник вырезки", COLOUR_BOX),
-        LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
-        LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+        LegendEntry("трапеция (точки): страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
+        LegendEntry("трапеция (точки): страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+        LegendEntry("трапеция (точки): страница опущена (внешний край свисает)", POSE_COLOUR[PagePose.LOWERED]),
         *LINES_LEGEND,
     ]
     sub = (
@@ -512,6 +544,8 @@ class StepInputs:
         protected: Добавлено защитой контента (bool).
         pages: Страницы с трапециями и классом положения.
         lines: Прямые разворота или None (не две страницы).
+        fit: Подгонка разворота (``pipeline.SpreadFit``: полоса, линия корешка, прежние рамки и подгоночные области)
+            или None.
     """
 
     img: np.ndarray
@@ -522,6 +556,7 @@ class StepInputs:
     protected: np.ndarray
     pages: list[PageQuad]
     lines: SpreadLines | None = None
+    fit: object | None = None
 
 
 def _area(entry: str, colour: tuple[int, int, int]) -> LegendEntry:
@@ -709,13 +744,14 @@ def draw_steps(inputs: StepInputs, title: str) -> dict[OverlayTag, np.ndarray]:
         ],
         [
             _area("итоговая бумага (с защитой)", COLOUR_PAPER),
-            LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
-            LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+            LegendEntry("трапеция (точки): страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
+            LegendEntry("трапеция (точки): страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+            LegendEntry("трапеция (точки): страница опущена (внешний край свисает)", POSE_COLOUR[PagePose.LOWERED]),
         ],
     )
     out[OverlayTag.PAGES] = picture
     if inputs.lines is not None:
-        out[OverlayTag.LINES] = draw_lines_step(img, inputs.pages, inputs.lines, book["book"], title)
+        out[OverlayTag.LINES] = draw_lines_step(img, inputs.pages, inputs.lines, book["book"], title, inputs.fit)
     return out
 
 
@@ -725,9 +761,10 @@ def _edge_place(edge) -> str:
 
 
 def draw_lines_step(
-    img: np.ndarray, pages: list[PageQuad], lines: SpreadLines, book: np.ndarray, title: str
+    img: np.ndarray, pages: list[PageQuad], lines: SpreadLines, book: np.ndarray, title: str, fit: object | None = None
 ) -> np.ndarray:
-    """Картинка шага ``07_lines``: края книги с точками, разделитель страниц, ограничители, трапеции — для сверки.
+    """Картинка шага ``07_lines``: края книги с точками, разделитель страниц, ограничители, трапеции, полоса-вклейка с
+    вспомогательными линиями, линия корешка и подгоночные области страниц — для сверки.
 
     Args:
         img: Кадр масштаба сегментации, BGR.
@@ -735,29 +772,73 @@ def draw_lines_step(
         lines: Прямые разворота.
         book: Грубая маска книги (контур).
         title: Начало шапки (кадр).
+        fit: Подгонка разворота (``pipeline.SpreadFit``) или None (не рисуется).
 
     Returns:
         Картинка BGR.
     """
     canvas = img.copy()
+    strip = getattr(fit, "strip", None)
+    if strip is not None:
+        layer = canvas.copy()
+        layer[strip.mask] = COLOUR_STRIP
+        cv2.addWeighted(layer, STRIP_ALPHA, canvas, 1 - STRIP_ALPHA, 0, canvas)
     _contour(canvas, book, COLOUR_BOOK, 1)
     _draw_pages(canvas, pages)
+    if fit is not None:
+        for boundary in fit.old:
+            cv2.polylines(
+                canvas, [np.round(boundary.polygon()).astype(np.int32)], True, COLOUR_OLD_SPLINE, 2, cv2.LINE_AA
+            )
+        for frame in fit.frames:
+            cv2.polylines(
+                canvas, [np.round(frame.polygon()).astype(np.int32)], True, COLOUR_FRAME, LINE_PX, cv2.LINE_AA
+            )
+            for x, y in np.round(frame.knots).astype(int):
+                cv2.circle(canvas, (int(x), int(y)), KNOT_RADIUS, COLOUR_FRAME, 2, cv2.LINE_AA)
     _draw_spread_lines(canvas, lines, points=True)
+    if strip is not None:
+        _draw_line(canvas, strip.left, COLOUR_AUX, LINE_PX, dashed=True)
+        _draw_line(canvas, strip.right, COLOUR_AUX, LINE_PX, dashed=True)
+        _draw_line(canvas, fit.spine, COLOUR_GUTTER_SPINE, LINE_PX, dashed=False)
     s = STEP_WIDTH / canvas.shape[1]
     small = _line_captions(cv2.resize(canvas, None, fx=s, fy=s, interpolation=cv2.INTER_AREA), lines, s)
 
     sub = (f"край книги слева {_edge_place(lines.book_left)}, справа {_edge_place(lines.book_right)}; наклоны: книга "
            + " / ".join("—" if e.line is None else f"{e.line.tilt_deg:+.2f}°" for e in (lines.book_left, lines.book_right))
            + f", разделитель {lines.spine.tilt_deg:+.2f}°")  # fmt: skip
+    head = [f"{title} — шаг 07: прямые разворота и подгоночные области страниц", sub]
+    if fit is not None:
+        gutter = (f"полоса-вклейка {strip.width_mm:.1f} мм, края {strip.left.tilt_deg:+.2f}° / {strip.right.tilt_deg:+.2f}°"
+                  if strip is not None else "полосы-вклейки нет")  # fmt: skip
+        head.append(f"щель SAM 3 у корешка {fit.gap_mm:.1f} мм — {gutter}; корешок {fit.spine.tilt_deg:+.2f}°: "
+                    f"{fit.spine_source}")  # fmt: skip
     legend = [
         *LINES_LEGEND,
         LegendEntry("точки края книги, по которым строится прямая", COLOUR_BOOK_LINE),
         LegendEntry("точки края книги отброшены: у рамки кадра, рядом рука или палец", COLOUR_DROPPED),
         LegendEntry("грубая маска книги", COLOUR_BOOK),
-        LegendEntry("трапеция: страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
-        LegendEntry("трапеция: страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+        LegendEntry("трапеция (точки): страница лежит плоско", POSE_COLOUR[PagePose.FLAT]),
+        LegendEntry("трапеция (точки): страница приподнята", POSE_COLOUR[PagePose.RAISED]),
+        LegendEntry("трапеция (точки): страница опущена (внешний край свисает)", POSE_COLOUR[PagePose.LOWERED]),
     ]
-    return framed(small, [f"{title} — шаг 07: прямые разворота", sub], legend)
+    if fit is not None:
+        legend += [
+            LegendEntry(
+                "подгоночная область: внешняя сторона, верх и низ — сплайн с узлами на изгибах, у корешка — по линии "
+                "корешка; у полосы — по маске до зоны полосы, дальше касательной до линии корешка",
+                COLOUR_FRAME,
+            ),
+            LegendEntry("кружок — добавленный узел сплайна на изгибе", COLOUR_FRAME),
+            LegendEntry("прежний сплайн рамки страницы (для сравнения)", COLOUR_OLD_SPLINE),
+            LegendEntry("полоса-вклейка (маска)", COLOUR_STRIP, alpha=STRIP_ALPHA, style=SampleStyle.BOX),
+            LegendEntry("вспомогательные линии: края полосы", COLOUR_AUX, style=SampleStyle.DASHED),
+            LegendEntry(
+                "линия корешка у полосы: через её середину, наклон — по краям полосы или разделителю (см. шапку)",
+                COLOUR_GUTTER_SPINE,
+            ),
+        ]
+    return framed(small, head, legend)
 
 
 # Карта осветления на картинке тени: шкала прибавки, уровни (насыщение цвета) и наименьшая видимая прибавка.

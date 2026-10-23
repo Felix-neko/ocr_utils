@@ -16,6 +16,7 @@ import click
 from ocr_utils.scan_cropping.cropping import CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
+from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_TORTUOSITY
 from ocr_utils.scan_cropping.v2.spread_lines import SpineMethod
 from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
@@ -23,6 +24,7 @@ from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT
 from ocr_utils.scan_cropping.v2.pipeline import (
     CORE_GROW_MM,
     CROP_FILL_BLUR_MM,
+    DEFAULT_FINGER_THREADS,
     DEFAULT_JOBS,
     FINGER_DILATE_MM,
     LAYOUT_PAD_MM,
@@ -96,6 +98,8 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 @click.option(
     "--jobs", default=DEFAULT_JOBS, show_default=True, help="Число CPU-воркеров (GPU-шаги — в главном процессе)."
 )
+@click.option("--finger-threads", default=DEFAULT_FINGER_THREADS, show_default=True,
+              help="Потоков закраса пальцев (сети — под общей блокировкой GPU; 1 — по кадру, как раньше).")  # fmt: skip
 @click.option("--px-per-mm", type=float, default=None,
               help=f"Плотность кадра, px/мм бумаги; без неё и без --dpi — {REF_PX_PER_MM} (калибровочные кадры "
                    "подшивок МТО 1990, пак-6). Мерить заранее и задавать в run-скрипте.")  # fmt: skip
@@ -162,6 +166,25 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
               help="Вето фона: фон отдаётся книге, где SAM 3 видит страницу, а SAM 2 по точкам коврика — не фон "
                    "(рукописный номер, логотип, линейка у края листа не уводят фон на страницу; +SAM 2 на GPU, "
                    "~0.4 с на кадр).")  # fmt: skip
+@click.option("--gutter-strip/--no-gutter-strip", default=True, show_default=True,
+              help="Полоса-вклейка у корешка (щель SAM 3 ≥ 7.8 мм) — в бумагу кадра: склейка страниц закрывает щель только "
+                   "до ~11.6 мм, белая часть полосы шире иначе закрашивается до прямоугольника.")  # fmt: skip
+@click.option("--refine-ragged/--no-refine-ragged", default=False, show_default=True,
+              help="Тонкое уточнение рваных внешних сторон страниц разворота: детектор по сырой маске SAM 3, сегментация "
+                   "ленты вдоль стороны в полном разрешении (SAM 3 и SAM 2.1 прогона, сокращённый набор способов, при "
+                   "неудаче — полный); 2–6 с на рваную сторону.")  # fmt: skip
+@click.option("--ragged-threshold", type=float, default=RAGGED_TORTUOSITY, show_default=True,
+              help="Порог извилистости сырой маски SAM 3 внешней стороны страницы для --refine-ragged.")  # fmt: skip
+@click.option("--dual-levels/--no-dual-levels", default=False, show_default=True,
+              help="Двойная грубая сегментация: SAM 3 без растяжения уровней — база, в зонах у внешних кромок книги — "
+                   "проход по кадру с растянутыми уровнями (+1 проход SAM 3 на кадр); промахи прохода — зона на "
+                   "базе.")  # fmt: skip
+@click.option("--levels-edges/--no-levels-edges", default=True, show_default=True,
+              help="При --dual-levels: у верхних и нижних краёв страниц к базе SAM 3 добавлять то, что видит проход по "
+                   "растянутым уровням (объединение, не замена; заделывает выемки края у корешка).")  # fmt: skip
+@click.option("--sam3-levels/--no-sam3-levels", default=False, show_default=True,
+              help="Проба: растягивать уровни светлоты кадра по бумаге перед SAM 3 (против рваных краёв). Кэш SAM 3 "
+                   "флагом не помечается — сравнивать в отдельном --cache.")  # fmt: skip
 @click.option("--save-before-shadow", is_flag=True,
               help="Сохранять в --cache итог до осветления тени и маски входа карты (стенд research/finger_repaint "
                    "edge, ~40 МБ на кадр).")  # fmt: skip
@@ -180,6 +203,7 @@ def main(
     skip_if_exists: bool,
     redo: bool,
     jobs: int,
+    finger_threads: int,
     save_fingers: bool,
     px_per_mm: float | None,
     dpi: float | None,
@@ -205,6 +229,12 @@ def main(
     copy_back_core_grow_mm: float,
     colour_pages: bool,
     bg_veto: bool,
+    gutter_strip: bool,
+    sam3_levels: bool,
+    dual_levels: bool,
+    levels_edges: bool,
+    refine_ragged: bool,
+    ragged_threshold: float,
     output_format: str | None,
     force_dpi: int | None,
     log_level: str,
@@ -242,11 +272,18 @@ def main(
         copy_back_core_grow_mm=copy_back_core_grow_mm,
         colour_pages=colour_pages,
         bg_veto=bg_veto,
+        gutter_strip=gutter_strip,
+        sam3_levels=sam3_levels,
+        dual_levels=dual_levels,
+        levels_edges=levels_edges,
+        refine_ragged=refine_ragged,
+        ragged_threshold=ragged_threshold,
         output_format=output_format,
         force_dpi=force_dpi,
         skip_if_exists=skip_if_exists,
         redo=redo,
         jobs=jobs,
+        finger_threads=finger_threads,
         save_fingers=save_fingers,
     )
     files = visible_frames(collect_images(input_dir, recursive), input_dir)

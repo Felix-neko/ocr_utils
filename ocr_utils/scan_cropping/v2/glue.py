@@ -15,6 +15,12 @@ W_MAX = 80
 # Поиск корешка: доли ширины книги и окно сглаживания профиля печати по столбцам, px.
 SPINE_SEARCH = (0.2, 0.8)
 SPINE_SMOOTH = 15
+# Оболочки мостика — по частям страниц у щели, а не по целым страницам (см. :func:`hull_bridge_add`).
+LOCAL_HULLS = True
+# Часть страницы у щели для оболочек мостика — не дальше этого от соседней страницы, px сегментации: две предельные
+# ширины щели (полоса склейки ``pair_band`` перекрывает щель до 2·W_MAX — полоса-вклейка 12–18 мм, ПХ 1975/05 IMG_0021;
+# при W_MAX часть страницы у широкой полосы пуста, и полоса выпадает из бумаги).
+LOCAL_REACH = 2 * W_MAX
 
 
 @dataclass(frozen=True)
@@ -125,13 +131,26 @@ def close_pairs(dists: list[np.ndarray], pages: list[np.ndarray], width: int = W
             if pages[j].any() and dists[i][pages[j]].min() <= width]  # fmt: skip
 
 
-def hull_bridge_add(pages: list[np.ndarray], dists: list[np.ndarray], pairs: list[tuple[int, int]]) -> np.ndarray:
+def hull_bridge_add(
+    pages: list[np.ndarray],
+    dists: list[np.ndarray],
+    pairs: list[tuple[int, int]],
+    local: bool = LOCAL_HULLS,
+    reach: int = LOCAL_REACH,
+) -> np.ndarray:
     """Мостик выпуклых оболочек: часть общей оболочки пары страниц, не накрытая оболочкой ни одной из них, в полосе.
+
+    Оболочки — по частям страниц у щели (``local``): пиксели страницы не дальше ``reach`` от соседней. По целым
+    страницам хорда общей оболочки идёт по самым нижним (верхним) точкам страниц вдали от корешка и у корешка проходит
+    под концом щели: мостик заливает ткань переплёта под полосой-вклейкой «пупырышкой» (ПХ 1975/08 IMG_0061_5, низ
+    левой страницы к корешку поднимается). Ещё мостик — только в строках, где у щели есть обе страницы.
 
     Args:
         pages: Маски страниц.
         dists: Расстояния до страниц.
         pairs: Близкие пары страниц (:func:`close_pairs`).
+        local: Оболочки по частям страниц у щели (True) или по целым страницам (прежнее поведение).
+        reach: Часть страницы у щели — пиксели не дальше этого от соседней страницы, px.
 
     Returns:
         Булева маска добавленного.
@@ -139,12 +158,23 @@ def hull_bridge_add(pages: list[np.ndarray], dists: list[np.ndarray], pairs: lis
     shape = pages[0].shape if pages else (0, 0)
     add = np.zeros(shape, bool)
     for i, j in pairs:
+        pi, pj = pages[i], pages[j]
+        if local:
+            pi, pj = pi & (dists[j] <= reach), pj & (dists[i] <= reach)
+            if not pi.any() or not pj.any():
+                continue
         hulls = []
-        for m in (pages[i], pages[j], pages[i] | pages[j]):
+        for m in (pi, pj, pi | pj):
             h = np.zeros(shape, np.uint8)
             cv2.fillPoly(h, [cv2.convexHull(cv2.findNonZero(m.astype(np.uint8)))], 1)
             hulls.append(h > 0)
-        add |= hulls[2] & ~hulls[0] & ~hulls[1] & pair_band(dists, i, j)
+        bridge = hulls[2] & ~hulls[0] & ~hulls[1] & pair_band(dists, i, j)
+        if local:
+            # Только строки, где у щели есть обе страницы: под концом щели (низ одной страницы выше другой) мостик не
+            # натягивается на ткань переплёта.
+            rows = pi.any(axis=1) & pj.any(axis=1)
+            bridge &= rows[:, None]
+        add |= bridge
     return add
 
 

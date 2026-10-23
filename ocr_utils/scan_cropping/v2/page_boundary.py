@@ -8,7 +8,7 @@ from enum import Enum
 import numpy as np
 from scipy.interpolate import BSpline
 
-from research.page_cutting.geometry import Side, SideProfile, inward_normal, quad_sides, side_profiles
+from ocr_utils.scan_cropping.v2.page_sides import Side, SideProfile, inward_normal, quad_sides, side_profiles
 
 # Итераций IRLS (перевзвешивание Хубера).
 IRLS_ITERS = 8
@@ -184,6 +184,8 @@ def bspline_basis_knots(t: np.ndarray, inner: np.ndarray) -> tuple[np.ndarray, n
     Returns:
         ``(матрица (N, len(inner) + 2), узлы)``.
     """
+    # Узлы зоны у корешка могут выходить за концы стороны: вне [0, 1] они ломают порядок узлов B-сплайна.
+    inner = np.unique(np.clip(inner, 0.0, 1.0))
     knots = np.concatenate([[0.0] * 3, inner, [1.0] * 3])
     n_coef = len(knots) - 4
     basis = np.zeros((len(t), n_coef))

@@ -1,12 +1,14 @@
-"""Конвейер v2 по папке кадров: пальцы (GPU) → фон и книга (пул) → SAM 3 и SAM 2 (GPU) → вето фона, бумага и страницы (пул) → surya по выпрямленному кадру (GPU) → защита, copy back, закрас до прямоугольника (пул)."""
+"""Конвейер v2 по папке кадров: пальцы (потоки, GPU под общей блокировкой) → фон и книга (пул) → SAM 3 и SAM 2 (GPU) → вето фона, бумага и страницы (пул) → surya по выпрямленному кадру (GPU) → защита, copy back, закрас до прямоугольника (пул)."""
 
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import logging
+import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, replace
 from multiprocessing import get_context
 from pathlib import Path
@@ -40,12 +42,18 @@ from ocr_utils.scan_cropping.v2.glyphs import content_mask
 from ocr_utils.scan_cropping.v2.ink_fill import fill_bold_ink, touching_ink
 from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp_for_layout
 from ocr_utils.scan_cropping.v2.overlay import OverlayTag, overlay_path
-from ocr_utils.scan_cropping.v2.page_pose import PageQuad, page_quads
+from ocr_utils.scan_cropping.v2.page_boundary import FitKind, PageBoundary, fit_boundary
+from ocr_utils.scan_cropping.v2.edge_zones import merge_levels, outer_zones, union_levels_edges
+from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_TORTUOSITY, is_ragged, measure_far_side, page_raw_mask
+from ocr_utils.scan_cropping.v2.gutter_strip import Strip, find_strip, spine_line, strip_paper
+from ocr_utils.scan_cropping.v2.page_frames import PageFrame, spread_frames
+from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PageQuad, page_quads
 from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, fill_page_pockets, postprocess_plain
 from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX
 from ocr_utils.scan_cropping.v2.side_fit import regularize_sides, snap_sheet_edges
 from ocr_utils.scan_cropping.v2.spread_lines import (
+    Line,
     SpineMethod,
     SpreadLines,
     finger_hands,
@@ -67,6 +75,10 @@ CROP_FILL_BLUR_MM = round(CROP_FILL_BLUR_PX / REF_PX_PER_MM, 6)  # replicate: 48
 # Число CPU-воркеров по умолчанию: 16 физических ядер; на кадр в воркере держится несколько копий полного кадра
 # (~75 МБ каждая), так что память не ограничивает.
 DEFAULT_JOBS = 16
+# Потоков закраса пальцев по умолчанию: GPU в шаге — ~10 % времени (YOLO-World, SAM, LaMa), остальное — CPU OpenCV и
+# NumPy без GIL (возврат краски, Telea контекста, запись clean.png; профиль 2026-10-23, ПХ 1975: 21 с на кадр при
+# занятом CPU, из них GPU ~2 с). Три потока перекрывают CPU одних кадров с GPU других.
+DEFAULT_FINGER_THREADS = 3
 # Версия формата ``layout.json``: 4 — блоки surya после бумаги и трапеций, по выпрямленному кадру, с типами блоков
 # (``{"version": 4, "keystone": bool, "blocks": [...], "labels": [...]}``). Версия 3 (без типов) читается — блоки
 # годны для защиты и copy back, но шаг surya пересчитывается, чтобы на оверлеях были типы; прежние форматы
@@ -111,6 +123,8 @@ class RunParams:
         skip_if_exists: Пропускать кадры, итог которых уже есть.
         redo: Пересчитать кэш шагов в ``work_dir``.
         jobs: Число CPU-воркеров.
+        finger_threads: Потоков закраса пальцев в главном процессе (вызовы сетей — под общей блокировкой GPU); 1 —
+            по кадру, как раньше.
         save_fingers: Оставлять в кэше кадр без пальцев (``clean.png``, ~18 МБ); по умолчанию он удаляется после
             финала кадра.
         finger_shadow: После copy back и растяжки уровней осветлять тень пальца по карте (``finger_shadow``): закрас
@@ -125,8 +139,20 @@ class RunParams:
             калибровочного кадра): кайма кожи у края ядра не возвращается с оригинала; 0 — без припуска.
         colour_pages: Правила для целиком цветных страниц (``colour_pages``): рост бумаги у края по палитре страницы
             вверх и вниз, защита контента при любой позе.
+        gutter_strip: Полоса-вклейка у корешка (``gutter_strip``) — в бумагу кадра: склейка страниц закрывает щель
+            только до ~11.6 мм, белая часть полосы шире закрашивалась до прямоугольника.
         bg_veto: Вето фона (``bg_veto``): фон ``flood`` отдаётся книге, где SAM 3 видит страницу, а SAM 2 по точкам
             коврика — не фон (рукописный номер, логотип, линейка у края листа не уводят фон на страницу).
+        sam3_levels: Растягивать уровни светлоты кадра по бумаге перед SAM 3 (``paper.stretch_paper_levels``);
+            проба против рваных краёв, по умолчанию выключено. Кэш SAM 3 этим флагом не помечается: для сравнения
+            прогонять в отдельный ``work_dir``.
+        dual_levels: Двойная грубая сегментация (``edge_zones``): база SAM 3 без растяжения, а в зонах у внешних
+            кромок книги — второй проход по кадру с растянутыми уровнями; явные промахи прохода — зона на базе.
+        levels_edges: При ``dual_levels`` — ещё и объединение базы с растянутым проходом у верхних и нижних краёв
+            страниц (``edge_zones.union_levels_edges``: выемки края у корешка, дыры у кромки).
+        refine_ragged: Тонкое уточнение рваных внешних сторон страниц разворота (``ragged_edge`` — детектор по сырой
+            маске SAM 3, ``edge_refine`` — сегментация ленты вдоль стороны в полном разрешении).
+        ragged_threshold: Порог извилистости сырой маски SAM 3 для детектора рваной стороны.
     """
 
     input_dir: Path
@@ -155,6 +181,7 @@ class RunParams:
     skip_if_exists: bool = False
     redo: bool = False
     jobs: int = DEFAULT_JOBS
+    finger_threads: int = DEFAULT_FINGER_THREADS
     save_fingers: bool = False
     finger_shadow: bool = False
     save_before_shadow: bool = False
@@ -163,6 +190,12 @@ class RunParams:
     copy_back_core_grow_mm: float = CORE_GROW_MM
     colour_pages: bool = True
     bg_veto: bool = True
+    gutter_strip: bool = True
+    sam3_levels: bool = False
+    dual_levels: bool = False
+    levels_edges: bool = True
+    refine_ragged: bool = False
+    ragged_threshold: float = RAGGED_TORTUOSITY
 
 
 @dataclass(frozen=True)
@@ -238,6 +271,31 @@ class WorkPaths:
     def pages(self) -> Path:
         """Страницы кадра: трапеции, признаки и класс положения (json)."""
         return self.root / "pages.json"
+
+    @property
+    def dual(self) -> Path:
+        """Итог двойной грубой сегментации по зонам у кромок книги (json, ``--dual-levels``)."""
+        return self.root / "dual.json"
+
+    @property
+    def ragged(self) -> Path:
+        """Меры рваности внешних сторон страниц по сырой маске SAM 3 и флаги детектора (json, ``--refine-ragged``)."""
+        return self.root / "ragged.json"
+
+    @property
+    def refine_in(self) -> Path:
+        """Вход уточнения рваных сторон: трапеции и маски страниц, номера рваных (npz); нет — уточнять нечего."""
+        return self.root / "refine_in.npz"
+
+    @property
+    def refine_out(self) -> Path:
+        """Выбранные края уточнённых сторон по строкам ленты (npz)."""
+        return self.root / "refine_out.npz"
+
+    @property
+    def refine_report(self) -> Path:
+        """Итог уточнения по сторонам и способам: выбранный способ, меры, промахи (json)."""
+        return self.root / "refine.json"
 
     @property
     def sam2_bg(self) -> Path:
@@ -502,6 +560,8 @@ def sam3_ready(work: WorkPaths, params: RunParams) -> bool:
         # Кэш прежней версии (без правил пустых страниц и слияния вложенных экземпляров) считается заново.
         if "version" not in data.files or int(data["version"]) != SAM3_CACHE_VERSION:
             return False
+        if params.dual_levels and "raw_lv" not in data.files:
+            return False
         return not params.ink_fill or "raw_noink" in data.files
 
 
@@ -516,17 +576,33 @@ def gpu_sam3(job: FrameJob, predictor, params: RunParams) -> None:
         predictor: ``SAM3SemanticPredictor`` (``paper.load_sam3``).
         params: Параметры прогона.
     """
-    from ocr_utils.scan_cropping.v2.paper import sam3_pages
+    from ocr_utils.scan_cropping.v2.paper import sam3_pages, stretch_paper_levels
 
     work = WorkPaths(params.work_dir / job.key)
     img = read_bgr(work.seg)
-    hulls = np.load(work.book)["hulls"]
+    book = np.load(work.book)
+    hulls = book["hulls"]
+    noink = read_bgr(work.seg_noink) if params.ink_fill else None
+    if params.sam3_levels:
+        # Растяжение уровней по бумаге: точки — по кадру, то же преобразование и для кадра без краски.
+        region = hulls if hulls.any() else book["book"]
+        img, black, white = stretch_paper_levels(img, region)
+        if noink is not None:
+            noink = stretch_paper_levels(noink, region)[0]
+        log.info("%s: уровни перед SAM 3 — чёрная %.0f, белая %.0f", job.key, black, white)
     t0 = time.perf_counter()
     raw, inst = sam3_pages(predictor, img, hulls)
     out = {"raw": raw, "inst": inst, "version": np.int32(SAM3_CACHE_VERSION)}
-    if params.ink_fill:
+    if noink is not None:
         # Второй проход — по кадру без крупной краски.
-        out["raw_noink"], out["inst_noink"] = sam3_pages(predictor, read_bgr(work.seg_noink), hulls)
+        out["raw_noink"], out["inst_noink"] = sam3_pages(predictor, noink, hulls)
+    if params.dual_levels:
+        # Проход по кадру с растянутыми уровнями — для зон у кромок книги (edge_zones.merge_levels в cpu_pages).
+        region = hulls if hulls.any() else book["book"]
+        stretched, black, white = stretch_paper_levels(read_bgr(work.seg), region)
+        out["raw_lv"], out["inst_lv"] = sam3_pages(predictor, stretched, hulls)
+        log.info("%s: растянутый проход SAM 3 — уровни %.0f…%.0f, страниц %d", job.key, black, white,
+                 int(out["inst_lv"].max()))  # fmt: skip
     np.savez_compressed(work.sam3, **out)
     # Страницы и их трапеции после нового SAM 3 могут быть другими, а surya считается по кадру, выпрямленному по ним.
     work.layout.unlink(missing_ok=True)
@@ -603,6 +679,7 @@ class PaperMasks:
         side_cut: Срезано выравниванием боковых сторон (выбросы).
         pocket_added: Добавлено как карман, листок или вклейка на странице (``paper.fill_page_pockets``).
         palette_added: Добавлено у края цветной страницы по её палитре (``colour_pages.colour_pages_growth``).
+        strip_added: Добавлено полосой-вклейкой у корешка (``gutter_strip.strip_paper``).
     """
 
     plain: np.ndarray
@@ -615,6 +692,20 @@ class PaperMasks:
     side_cut: np.ndarray
     pocket_added: np.ndarray | None = None
     palette_added: np.ndarray | None = None
+    strip_added: np.ndarray | None = None
+
+
+def masks_arrays(masks: PaperMasks) -> dict[str, np.ndarray]:
+    """Поля масок бумаги для ``np.savez``: незаданные (None) пропускаются — иначе в npz ложится object-массив, который
+    без ``allow_pickle`` не читается (при загрузке пропущенное поле получает умолчание None).
+
+    Args:
+        masks: Маски бумаги кадра.
+
+    Returns:
+        Имя поля → массив.
+    """
+    return {name: value for name, value in asdict(masks).items() if value is not None}
 
 
 def paper_masks(img: np.ndarray, book: dict, sam3: dict, refine_depth: int) -> PaperMasks:
@@ -758,6 +849,40 @@ def frame_pages(img: np.ndarray, book: dict, sam3: dict, paint_seg: np.ndarray, 
 # --- Шаг 4, CPU: бумага и страницы --------------------------------------------------------------------------------
 
 
+def dual_sam3(work: WorkPaths, sam3: dict, book: np.ndarray, paint_seg: np.ndarray, levels_edges: bool = False) -> dict:
+    """SAM 3 кадра после двойной грубой сегментации: база, в зонах у кромок книги — растянутый проход (``edge_zones``).
+
+    Итог зон пишется в ``dual.json`` кэша кадра и в лог.
+
+    Args:
+        work: Файлы кэша кадра.
+        sam3: Выход SAM 3 (``raw``, ``inst``, ``raw_lv``, ``inst_lv`` и, может быть, второй проход без краски).
+        book: Грубая маска книги (после вето фона).
+        paint_seg: Зона закраса пальцев на масштабе сегментации (строки у неё не идут в прямую кромки).
+        levels_edges: Ещё и объединение с растянутым проходом у верхних и нижних краёв страниц
+            (``edge_zones.union_levels_edges``).
+
+    Returns:
+        Новый словарь SAM 3 с заменёнными ``raw`` и ``inst``.
+    """
+    zones = outer_zones(book, paint_seg)
+    merged = merge_levels(sam3["raw"].astype(bool), sam3["inst"], sam3["raw_lv"].astype(bool), sam3["inst_lv"], zones)
+    report = {"frame": merged.frame_status, "sides": {str(k): str(v) for k, v in merged.status.items()},
+              "zone_mm2": {str(k): round(float(z.sum()) / SEG_PX_PER_MM**2) for k, z in merged.zones.items()},
+              "changed_mm2": round(float((merged.raw ^ sam3["raw"].astype(bool)).sum()) / SEG_PX_PER_MM**2)}  # fmt: skip
+    out = {**sam3, "raw": merged.raw, "inst": merged.inst}
+    if levels_edges:
+        # У верхних и нижних краёв страниц — объединение с растянутым проходом (выемки края у корешка).
+        union = union_levels_edges(out["raw"], out["inst"], sam3["raw_lv"].astype(bool), sam3["inst_lv"], book,
+                                   sam3.get("raw_noink"))  # fmt: skip
+        report["edges_added_mm2"] = {"top": round(float(union.added_top.sum()) / SEG_PX_PER_MM**2, 1),
+                                     "bottom": round(float(union.added_bottom.sum()) / SEG_PX_PER_MM**2, 1)}  # fmt: skip
+        out = {**out, "raw": union.raw, "inst": union.inst}
+    work.dual.write_text(json.dumps(report, ensure_ascii=False, indent=1))
+    log.info("%s: двойная сегментация — %s", work.root.name, merged.frame_status or report["sides"])
+    return out
+
+
 def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
     """Бумага кадра (два прохода SAM 3, выравнивание сторон) и страницы с трапециями (для пула) → кэш.
 
@@ -774,9 +899,17 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
     book = frame_book(work, params, img, sam3)
     if not params.ink_fill:
         sam3.pop("raw_noink", None)
-    masks = frame_paper(img, book, sam3, params.scale.seg_px(params.refine_depth_mm))
     paint_seg = paint_on_seg(np.load(work.fingers), img.shape[:2])
+    if params.dual_levels and "raw_lv" in sam3:
+        sam3 = dual_sam3(work, sam3, book["book"], paint_seg, params.levels_edges)
+    masks = frame_paper(img, book, sam3, params.scale.seg_px(params.refine_depth_mm))
     pages = frame_pages(img, book, sam3, paint_seg, masks)
+    if params.gutter_strip:
+        # Полоса-вклейка у корешка — в бумагу: склейка закрывает щель только до ~11.6 мм (ПХ 1975/05 IMG_0021).
+        strip_added = strip_paper(img, sam3["inst"], book["book"], pages, masks.paper)
+        if strip_added.any():
+            masks = replace(masks, paper=masks.paper | strip_added, strip_added=strip_added)
+            pages = frame_pages(img, book, sam3, paint_seg, masks)
     if params.fit_sides:
         # Поле страницы до кромки листа, где SAM 3 взял его рваными языками (цветная плашка с белым полем, МТС 1990/04
         # IMG_1113); страницы пересчитываются — рваная маска делала страницу «приподнятой».
@@ -796,13 +929,140 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
         side = regularize_sides(masks.paper, pages, book["bg"], img, params.snap_sides)
         masks = replace(masks, paper=side.paper, side_added=side.added | edge_added, side_cut=side.cut)
         pages = frame_pages(img, book, sam3, paint_seg, masks)
-    np.savez_compressed(work.masks, **asdict(masks))
+    if params.refine_ragged:
+        mark_ragged(work, sam3["raw"], pages, paint_seg, params.ragged_threshold)
+    save_pages(work, masks, pages)
+    return job.key
+
+
+def save_pages(work: WorkPaths, masks: PaperMasks, pages: list[PageQuad]) -> None:
+    """Бумага по шагам и страницы кадра → кэш; разметка surya сбрасывается, если трапеции изменились.
+
+    Args:
+        work: Файлы кэша кадра.
+        masks: Маски бумаги.
+        pages: Страницы кадра.
+    """
+    np.savez_compressed(work.masks, **masks_arrays(masks))
     # Трапеции изменились (новая бумага) — разметка surya по кадру, выпрямленному по старым трапециям, устарела.
     if work.pages.exists() and not same_quads(
         read_page_quads(work.pages), [p.quad for p in pages if p.quad is not None]
     ):
         work.layout.unlink(missing_ok=True)
     write_pages(work.pages, pages)
+
+
+def mark_ragged(
+    work: WorkPaths, raw: np.ndarray, pages: list[PageQuad], paint_seg: np.ndarray, threshold: float
+) -> list[int]:
+    """Детектор рваных внешних сторон разворота по сырой маске SAM 3 → ``ragged.json`` и вход уточнения.
+
+    Мера (``ragged_edge.measure_far_side``) — по сырой маске SAM 3 страницы (``page_raw_mask``): дальше по конвейеру
+    рваный край сглаживается, оставаясь не на месте. Только развороты из двух страниц с трапециями.
+
+    Args:
+        work: Файлы кэша кадра.
+        raw: Сырое объединение экземпляров SAM 3 (после двойной сегментации, если она была).
+        pages: Страницы кадра.
+        paint_seg: Зона закраса пальцев (точки там не меряются).
+        threshold: Порог извилистости.
+
+    Returns:
+        Номера рваных страниц (0 — левая, 1 — правая).
+    """
+    for path in (work.refine_in, work.refine_out, work.refine_report):
+        path.unlink(missing_ok=True)
+    two = [p for p in pages if p.quad is not None]
+    report: dict = {"sides": []}
+    flagged = []
+    if len(two) == 2:
+        for i, name in ((0, "L"), (1, "R")):
+            mask = page_raw_mask(raw, two[i].mask, two[1 - i].mask, SEG_PX_PER_MM)
+            m = measure_far_side(mask, two[i].quad, i == 0, paint_seg, SEG_PX_PER_MM)
+            ragged = is_ragged(m, threshold)
+            report["sides"].append({"page": name, "ragged": ragged, **({k: round(float(v), 4)
+                                    for k, v in asdict(m).items()} if m else {})})  # fmt: skip
+            if ragged:
+                flagged.append(i)
+    work.ragged.write_text(json.dumps(report, ensure_ascii=False, indent=1))
+    if flagged:
+        np.savez_compressed(work.refine_in, flagged=np.array(flagged), quad0=two[0].quad, quad1=two[1].quad,
+                            mask0=two[0].mask, mask1=two[1].mask)  # fmt: skip
+    return flagged
+
+
+# --- Шаг 4б, GPU и CPU: тонкое уточнение рваных сторон -------------------------------------------------------------
+
+
+def gpu_refine(job: FrameJob, refiner, params: RunParams) -> None:
+    """Уточнение рваных сторон кадра (``edge_refine.refine_side``) → ``refine_out.npz`` и ``refine.json``.
+
+    Args:
+        job: Кадр.
+        refiner: ``edge_refine.Refiner`` (SAM 3 и SAM 2.1 прогона).
+        params: Параметры прогона.
+    """
+    from ocr_utils.scan_cropping.v2.edge_refine import refine_side
+
+    work = WorkPaths(params.work_dir / job.key)
+    data = dict(np.load(work.refine_in))
+    clean = read_bgr(work.clean)
+    seg_shape_hw = data["mask0"].shape
+    hulls = np.load(work.book)["hulls"]
+    core = cv2.resize(np.load(work.fingers)["core"].astype(np.uint8), seg_shape_hw[::-1],
+                      interpolation=cv2.INTER_NEAREST) > 0  # fmt: skip
+    out, report = {}, {"sides": []}
+    t0 = time.perf_counter()
+    for i in data["flagged"].tolist():
+        res = refine_side(refiner, clean, data[f"quad{i}"], i == 0, data[f"mask{i}"], hulls, core, SEG_PX_PER_MM)
+        side = {"page": "LR"[i], "chosen": res.chosen, "full_set": res.full_set, "status": res.status,
+                "finger_share": round(res.finger_share, 3),
+                "methods": {n: {"cover": round(r.cover, 3), "rough_mm": round(r.rough_mm, 3), "step_mm": round(r.step_mm, 2),
+                                "ink_out_mm2": round(r.ink_out_mm2, 2), "missed_chunks": r.missed_chunks,
+                                "miss": r.miss, "accepted": r.accepted} for n, r in res.results.items()}}  # fmt: skip
+        report["sides"].append(side)
+        if res.edge is not None:
+            out[f"edge{i}"] = res.edge
+        log.info("%s: уточнение %s — %s", job.key, "LR"[i], res.chosen or res.status)
+    report["seconds"] = round(time.perf_counter() - t0, 1)
+    # Полное разрешение / масштаб сегментации — для ленты при замене бумаги (без чтения clean.png в пуле).
+    np.savez_compressed(work.refine_out, ratio=np.float64(clean.shape[1] / seg_shape_hw[1]), **out)
+    work.refine_report.write_text(json.dumps(report, ensure_ascii=False, indent=1))
+
+
+def cpu_refine(args: tuple[FrameJob, RunParams]) -> str:
+    """Замена бумаги в лентах уточнённых сторон и пересчёт страниц (для пула) → кэш.
+
+    Args:
+        args: ``(кадр, параметры)``.
+
+    Returns:
+        Ключ кадра.
+    """
+    from ocr_utils.scan_cropping.v2.edge_refine import Band, apply_edge
+
+    job, params = args
+    work = WorkPaths(params.work_dir / job.key)
+    edges = dict(np.load(work.refine_out))
+    ratio = float(edges.pop("ratio"))
+    if not edges:
+        return job.key
+    data = dict(np.load(work.refine_in))
+    img = read_bgr(work.seg)
+    sam3 = dict(np.load(work.sam3))
+    book = frame_book(work, params, img, sam3)
+    paint_seg = paint_on_seg(np.load(work.fingers), img.shape[:2])
+    if params.dual_levels and "raw_lv" in sam3:
+        sam3 = dual_sam3(work, sam3, book["book"], paint_seg, params.levels_edges)
+    with np.load(work.masks) as d:
+        masks = PaperMasks(**{n: d[n] if n in d.files else None for n in PaperMasks.__dataclass_fields__})
+    paper = masks.paper
+    for i in data["flagged"].tolist():
+        if f"edge{i}" in edges:
+            paper = apply_edge(paper, Band(data[f"quad{i}"], i == 0, SEG_PX_PER_MM, ratio), edges[f"edge{i}"])
+    masks = replace(masks, paper=paper)
+    pages = frame_pages(img, book, sam3, paint_seg, masks)
+    save_pages(work, masks, pages)
     return job.key
 
 
@@ -1003,7 +1263,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     # Оригинал нужен для copy back, «не фона без рук» и оверлея.
     original = read_bgr(job.src)
     zone_seg = book_zone(original, fingers["core"], book["book"])
-    # Страницы: трапеции и класс «плоско / приподнята» по итоговой бумаге (дёшево, детерминированно — как в шаге 4);
+    # Страницы: трапеции и класс «плоско / приподнята / опущена» по итоговой бумаге (дёшево, детерминированно — как в шаге 4);
     # защита контента — только блоки плоских страниц.
     pages = frame_pages(img, book, sam3, paint_on_seg(fingers, img.shape[:2]), masks)
     # Припуск блоков — один для защиты контента и copy back: на оверлее рисуется ровно возвращаемая зона.
@@ -1011,7 +1271,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     # Цветные страницы — защита контента при любой позе: рваная маска делала их «приподнятыми» (IMG_1113).
     guard_pages = colour_pages_flat(img, pages) if params.colour_pages else pages
     protected = protect_content(masks.paper, polys, guard_pages, zone_seg, img.shape[0] / shape[0], pad)
-    np.savez_compressed(work.masks, **asdict(masks), protected=protected)
+    np.savez_compressed(work.masks, **masks_arrays(masks), protected=protected)
     # Copy back блоков surya в зоне закраса — только внутри грубой маски книги без рук.
     # Где copy back разрешён: «не фон» целиком (с пальцами и руками) — детектор пальцев ошибается, и лучше вернуть
     # с оригинала кусок пальца, чем потерять текст под ложным срабатыванием (решение пользователя 2026-10-13); или,
@@ -1103,7 +1363,16 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
                 cv2.imwrite(str(shadow_path), roi, [cv2.IMWRITE_JPEG_QUALITY, 88])
         if params.debug_steps:
             # Шаги сегментации бумаги — по маскам кэша; маски книги до вето — из ``book.npz``.
-            steps = StepInputs(img, dict(np.load(work.book)), book, sam3, masks, protected, pages, lines)
+            fit = None
+            if lines is not None:
+                try:
+                    core_seg = cv2.resize(fingers["core"].astype(np.uint8), img.shape[1::-1],
+                                          interpolation=cv2.INTER_NEAREST)  # fmt: skip
+                    fit = spread_fit(img, sam3["inst"], book["book"], pages, lines, polys,
+                                     paint_on_seg(fingers, img.shape[:2]), core_seg > 0, img.shape[0] / shape[0])  # fmt: skip
+                except Exception:  # noqa: BLE001 — диагностика не роняет кадр
+                    log.exception("%s: подгоночные области страниц не построились", job.key)
+            steps = StepInputs(img, dict(np.load(work.book)), book, sam3, masks, protected, pages, lines, fit)
             for tag, step in draw_steps(steps, str(job.rel)).items():
                 step_path = overlay_path(params.debug_dir, job.rel, tag)
                 step_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1135,6 +1404,80 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
         seconds=time.perf_counter() - t0,
         **shadow_stats(shadow, params.scale.px_per_mm),
     )
+
+
+# Припуск к ядру пальца, где точки верха и низа сплайна с узлами на изгибах негодны, мм (``research/page_cutting``
+# ``bends.CORE_MARGIN_MM``): шов закраса LaMa у ядра; дальше в зоне закраса край листа настоящий (ХиП 1991/01 IMG_1052).
+BEND_CORE_MARGIN_MM = 3.0
+
+
+@dataclass(frozen=True)
+class SpreadFit:
+    """Подгонка разворота для оверлея шага ``07_lines`` (только диагностика, итог кадра от неё не зависит).
+
+    Поля:
+        old: Прежние рамки страниц сплайном ``page_boundary`` (для сравнения), по странице слева направо.
+        frames: Подгоночные области страниц (``page_frames.spread_frames``).
+        strip: Полоса-вклейка или None.
+        spine: Линия корешка.
+        spine_source: Откуда линия корешка (подпись).
+        gap_mm: Медианная щель между экземплярами SAM 3 у корешка, мм (признак полосы).
+    """
+
+    old: list[PageBoundary]
+    frames: list[PageFrame]
+    strip: Strip | None
+    spine: Line
+    spine_source: str
+    gap_mm: float
+
+
+def spread_fit(
+    img: np.ndarray,
+    inst: np.ndarray,
+    book: np.ndarray,
+    pages: list[PageQuad],
+    lines: SpreadLines,
+    polys: list[np.ndarray],
+    paint: np.ndarray,
+    core: np.ndarray,
+    seg: float,
+) -> SpreadFit | None:
+    """Полоса-вклейка, линия корешка и подгоночные области двух страниц разворота.
+
+    Args:
+        img: Кадр масштаба сегментации, BGR.
+        inst: Экземпляры-страницы SAM 3.
+        book: Грубая маска книги.
+        pages: Страницы кадра слева направо.
+        lines: Прямые разворота v2 (разделитель ``auto``).
+        polys: Блоки surya на кадре (px кадра).
+        paint: Зона закраса пальцев на масштабе сегментации.
+        core: Ядро пальца на масштабе сегментации.
+        seg: Масштаб сегментации относительно кадра.
+
+    Returns:
+        Подгонка или None (страниц с трапецией не две).
+    """
+    two = [p for p in pages if p.quad is not None]
+    if len(two) != 2:
+        return None
+    strip, sam3 = find_strip(img, inst, book, lines.spine)
+    spine, source = spine_line(strip, lines.spine, lines.method.value)
+    # Вершины блоков surya на масштабе сегментации — к странице, в маске которой центр блока.
+    blocks = [np.asarray(poly, np.float64).reshape(-1, 2) * seg for poly in polys]
+    texts = []
+    for page in two:
+        h, w = page.mask.shape
+        own = [b for b in blocks if page.mask[min(int(b[:, 1].mean()), h - 1), min(int(b[:, 0].mean()), w - 1)]]
+        texts.append(np.vstack(own) if own else np.zeros((0, 2)))
+    r = max(int(round(BEND_CORE_MARGIN_MM * SEG_PX_PER_MM)), 1)
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    core_zone = cv2.dilate(core.astype(np.uint8), disk) > 0
+    old = [fit_boundary(p.mask, p.quad, right, FitKind.SPLINE, SEG_PX_PER_MM, paint, text)
+           for p, right, text in ((two[0], True, texts[0]), (two[1], False, texts[1]))]  # fmt: skip
+    frames = spread_frames(two, spine, strip, paint, core_zone, texts)
+    return SpreadFit(old, frames, strip, spine, source, float(sam3.extra.get("gap_mm", 0.0)))
 
 
 def frame_spread_lines(
@@ -1240,10 +1583,47 @@ def write_summary_row(path: Path, row: FrameStats) -> None:
         writer.writerow(asdict(row))
 
 
+class LockedModels:
+    """``GpuModels`` для потоков закраса пальцев: каждый вызов метода моделей — под общей блокировкой GPU прогона."""
+
+    def __init__(self, models, lock: threading.RLock) -> None:
+        """Args:
+        models: ``GpuModels``.
+        lock: Блокировка GPU, общая с шагами SAM 3, SAM 2, уточнения и surya главного потока.
+        """
+        self._models = models
+        self._lock = lock
+
+    def __getattr__(self, name: str):
+        """Атрибут моделей; метод — обёрнутый блокировкой."""
+        attr = getattr(self._models, name)
+        return functools.partial(self._locked, attr) if callable(attr) else attr
+
+    def _locked(self, fn, *args, **kwargs):
+        """Вызов ``fn`` под блокировкой GPU."""
+        with self._lock:
+            return fn(*args, **kwargs)
+
+
+def finger_task(job: FrameJob, models: LockedModels, params: RunParams) -> None:
+    """Закрас пальцев кадра в потоке (``gpu_fingers`` с моделями под блокировкой GPU)."""
+    gpu_fingers(job, models, params)
+
+
 class FrameStream:
     """Кадры в работе: фоны, страницы и финалы в пуле, SAM 3 и surya в главном процессе, сводка по мере готовности."""
 
-    def __init__(self, pool: ProcessPoolExecutor, models, predictor, sam2, params: RunParams) -> None:
+    def __init__(
+        self,
+        pool: ProcessPoolExecutor,
+        models,
+        predictor,
+        sam2,
+        params: RunParams,
+        refiner=None,
+        threads: ThreadPoolExecutor | None = None,
+        gpu_lock: threading.RLock | None = None,
+    ) -> None:
         """Пустой поток.
 
         Args:
@@ -1252,12 +1632,20 @@ class FrameStream:
             predictor: SAM 3 (``paper.load_sam3``).
             sam2: Фон SAM 2 для вето (``bg_veto.Sam2Background``) или None без вето.
             params: Параметры прогона.
+            refiner: ``edge_refine.Refiner`` для уточнения рваных сторон или None.
+            threads: Потоки закраса пальцев или None — пальцы считает вызывающий.
+            gpu_lock: Блокировка GPU, общая с потоками пальцев (None — без потоков).
         """
         self.pool = pool
+        self.threads = threads
+        self.gpu_lock = gpu_lock if gpu_lock is not None else threading.RLock()
+        self.fingers: dict[Future, FrameJob] = {}
         self.models = models
         self.predictor = predictor
         self.sam2 = sam2
+        self.refiner = refiner
         self.params = params
+        self.refines: dict[Future, FrameJob] = {}
         self.summary = params.work_dir / "summary.csv"
         self.books: dict[Future, FrameJob] = {}
         self.pages: dict[Future, FrameJob] = {}
@@ -1267,7 +1655,15 @@ class FrameStream:
     @property
     def busy(self) -> int:
         """Сколько кадров в работе."""
-        return len(self.books) + len(self.pages) + len(self.finishes)
+        return len(self.fingers) + len(self.books) + len(self.pages) + len(self.refines) + len(self.finishes)
+
+    def submit_fingers(self, job: FrameJob) -> None:
+        """Закрас пальцев кадра в поток (готовый в кэше — сразу фон и книга в пул)."""
+        if frame_ready(job, self.params):
+            self.submit(job)
+            return
+        locked = LockedModels(self.models, self.gpu_lock)
+        self.fingers[self.threads.submit(finger_task, job, locked, self.params)] = job
 
     def submit(self, job: FrameJob) -> None:
         """Отдать в пул фон и книгу кадра (после его закраса пальцев)."""
@@ -1286,33 +1682,52 @@ class FrameStream:
         Args:
             block: Ждать хотя бы один готовый шаг (иначе — только уже готовые).
         """
-        pending = list(self.books) + list(self.pages) + list(self.finishes)
+        pending = list(self.fingers) + list(self.books) + list(self.pages) + list(self.refines) + list(self.finishes)
         if not pending:
             return
         ready, _ = wait(pending, timeout=None if block else 0, return_when=FIRST_COMPLETED)
         for fut in ready:
-            if fut in self.books:
+            if fut in self.fingers:
+                job = self.fingers.pop(fut)
+                try:
+                    fut.result()
+                except Exception as exc:
+                    log.exception("%s: ошибка закраса пальцев", job.key)
+                    self.record(FrameStats(job.key, "error", message=repr(exc)))
+                    continue
+                self.submit(job)
+            elif fut in self.books:
                 job = self.books.pop(fut)
                 try:
                     fut.result()
                     work = WorkPaths(self.params.work_dir / job.key)
-                    if not sam3_ready(work, self.params):
-                        gpu_sam3(job, self.predictor, self.params)
-                    if not sam2_ready(work, self.params):
-                        gpu_sam2_bg(job, self.sam2, self.params)
+                    with self.gpu_lock:
+                        if not sam3_ready(work, self.params):
+                            gpu_sam3(job, self.predictor, self.params)
+                        if not sam2_ready(work, self.params):
+                            gpu_sam2_bg(job, self.sam2, self.params)
                 except Exception as exc:
                     log.exception("%s: ошибка фона, SAM 3 или SAM 2", job.key)
                     self.record(FrameStats(job.key, "error", message=repr(exc)))
                     continue
                 self.pages[self.pool.submit(cpu_pages, (job, self.params))] = job
-            elif fut in self.pages:
-                job = self.pages.pop(fut)
+            elif fut in self.pages or fut in self.refines:
+                refined = fut in self.refines
+                job = (self.refines if refined else self.pages).pop(fut)
+                work = WorkPaths(self.params.work_dir / job.key)
                 try:
                     fut.result()
-                    if not layout_ready(WorkPaths(self.params.work_dir / job.key), self.params):
-                        gpu_layout(job, self.models, self.params)
+                    if not refined and self.refiner is not None and work.refine_in.exists():
+                        # Рваные стороны: уточнение на GPU, замена бумаги и пересчёт страниц — в пуле, потом surya.
+                        with self.gpu_lock:
+                            gpu_refine(job, self.refiner, self.params)
+                        self.refines[self.pool.submit(cpu_refine, (job, self.params))] = job
+                        continue
+                    if not layout_ready(work, self.params):
+                        with self.gpu_lock:
+                            gpu_layout(job, self.models, self.params)
                 except Exception as exc:
-                    log.exception("%s: ошибка страниц или surya", job.key)
+                    log.exception("%s: ошибка страниц, уточнения или surya", job.key)
                     self.record(FrameStats(job.key, "error", message=repr(exc)))
                     continue
                 self.finishes[self.pool.submit(cpu_finish, (job, self.params))] = job
@@ -1325,9 +1740,11 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
     """Прогон v2 по списку кадров потоком: кадр проходит все шаги, итог и оверлей появляются по мере готовности.
 
     Все модели (``GpuModels``, SAM 3 и при вето фона SAM 2) грузятся один раз и живут весь прогон: пик видеопамяти
-    ~7.4 ГБ без SAM 2 (замер 2026-10-12 на RTX 5060 Ti 16 ГБ). GPU-шаги идут в главном процессе по кадрам: пальцы
-    кадра *i*, SAM 3 и SAM 2 для кадров, у которых пул уже посчитал фон, surya для кадров, у которых готовы бумага и трапеции; CPU-шаги (фон и
-    книга, бумага и страницы, финал) — в пуле, пока GPU занят следующим кадром. В работе не больше ``2 × jobs`` кадров. Готовые шаги берутся из кэша (кроме ``redo``).
+    ~7.4 ГБ без SAM 2 (замер 2026-10-12 на RTX 5060 Ti 16 ГБ). GPU-шаги идут в главном процессе: закрас пальцев — в
+    ``finger_threads`` потоках (его CPU-часть перекрывается с GPU других кадров, вызовы сетей — под общей блокировкой
+    GPU), SAM 3 и SAM 2 для кадров, у которых пул уже посчитал фон, уточнение рваных сторон и surya — в главном потоке
+    под той же блокировкой; CPU-шаги (фон и книга, бумага и страницы, финал) — в пуле. В работе не больше ``2 × jobs``
+    кадров. Готовые шаги берутся из кэша (кроме ``redo``).
 
     Args:
         files: Входные кадры.
@@ -1338,6 +1755,7 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
     """
     from ocr_utils.scan_cropping.gpu_models import GpuModels
     from ocr_utils.scan_cropping.v2.bg_veto import Sam2Background
+    from ocr_utils.scan_cropping.v2.edge_refine import Refiner
     from ocr_utils.scan_cropping.v2.paper import load_sam3
 
     jobs = [FrameJob(f, f.relative_to(params.input_dir)) for f in files]
@@ -1348,24 +1766,24 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
     params.work_dir.mkdir(parents=True, exist_ok=True)
     in_flight = max(2, 2 * params.jobs)
     ctx = get_context("forkserver")
+    gpu_lock = threading.RLock()
     with (
         ProcessPoolExecutor(params.jobs, mp_context=ctx, initializer=init_worker) as pool,
+        ThreadPoolExecutor(max(1, params.finger_threads), thread_name_prefix="fingers") as threads,
         GpuModels(with_lama=True, with_layout=True) as models,
     ):
         # SAM 2.1 Hiera-L для вето фона: +~1 ГБ видеопамяти к ~7.4 ГБ остальных моделей.
-        sam2 = Sam2Background() if params.bg_veto else None
-        stream = FrameStream(pool, models, load_sam3(), sam2, params)
+        sam2 = Sam2Background() if params.bg_veto or params.refine_ragged else None
+        predictor = load_sam3()
+        # Уточнение рваных сторон — теми же SAM 3 и SAM 2.1: новых весов в видеопамяти нет.
+        refiner = Refiner(predictor, sam2) if params.refine_ragged else None
+        stream = FrameStream(pool, models, predictor, sam2 if params.bg_veto else None, params, refiner, threads,
+                             gpu_lock)  # fmt: skip
         for job in jobs:
-            while stream.busy >= in_flight:
+            # В работе не больше in_flight кадров, в потоках пальцев — не больше потоков (следующий кадр ждёт в очереди).
+            while stream.busy >= in_flight or len(stream.fingers) >= max(1, params.finger_threads):
                 stream.drain(block=True)
-            if not frame_ready(job, params):
-                try:
-                    gpu_fingers(job, models, params)
-                except Exception as exc:
-                    log.exception("%s: ошибка закраса пальцев", job.key)
-                    stream.record(FrameStats(job.key, "error", message=repr(exc)))
-                    continue
-            stream.submit(job)
+            stream.submit_fingers(job)
             stream.drain(block=False)
         while stream.busy:
             stream.drain(block=True)

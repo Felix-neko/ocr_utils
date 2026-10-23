@@ -1,4 +1,4 @@
-"""Страницы кадра: охватывающая трапеция каждой и класс «лежит плоско на столе / приподнята» по сходу сторон трапеции."""
+"""Страницы кадра: охватывающая трапеция каждой и класс «лежит плоско / приподнята / опущена» по сходу сторон трапеции."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.v2.glue import outside_distance, split_pages
+from ocr_utils.scan_cropping.v2.keystone import vertical_sides
 from ocr_utils.scan_cropping.v2.trapezoid import fit_enclosing_quad, keystone_deg, quad_mask
 
 # Плотность масштаба сегментации, px/мм (масштаб сегментации всегда приведён к калибровочным кадрам МТО 1990).
@@ -32,12 +33,28 @@ RAISED_MIN_KEYSTONE = 8.0
 # Сход приподнятой страницы больше, чем у соседней, хотя бы на столько градусов (общая перспектива кадра — у обеих).
 RAISED_MIN_KEYSTONE_GAP = 4.0
 
+# Знак схода. Угол схода (``keystone_deg``) без знака: страница, чей внешний край свисает с опоры и уходит от камеры
+# (опущена, МТС 1990/01 IMG_0875), сходится так же сильно, как приподнятая, только в другую сторону. Знак — отношение
+# длины внешней стороны трапеции (от сгиба дальше) к стороне у сгиба (``PageFeatures.outer_ratio``): у приподнятой
+# внешний край ближе к камере и длиннее. Пак-6 (кэш pack6_v6, 4 917 страниц двухстраничных кадров; отсмотр 2026-10-21):
+# плоские — 0.91–1.10 (медиана 0.95: у сгиба книга выше стола); приподнятые по сходу — 807 страниц 1.03–1.45 (поднята
+# рукой) и 50 страниц 0.905–0.93 (опущена: внешний край свисает, отсмотрены IMG_0875, 0270, 0562, 0715, 1324);
+# между 0.95 и 1.03 — только две одиночные обложки РИСК, ошибочно разрезанные на две «страницы». Опущенной страница
+# считается, если её отношение не больше этого и меньше, чем у соседней (иначе остаётся «приподнята»).
+LOWERED_MAX_OUTER_RATIO = 0.95
+
 
 class PagePose(Enum):
     """Положение страницы в кадре."""
 
     FLAT = "flat"
     RAISED = "raised"
+    LOWERED = "lowered"
+
+    @property
+    def on_book(self) -> bool:
+        """Страница лежит на блоке (плоско или свисает внешним краем) — её контент защищается, как у обычной."""
+        return self is not PagePose.RAISED
 
 
 @dataclass(frozen=True)
@@ -51,6 +68,9 @@ class PageFeatures:
         light_share: Медианная яркость страницы / яркость соседней; без соседа — 1.
         finger: Доля зоны закраса пальцев, касающейся страницы.
         curl: Отклонение края страницы внутрь от сторон трапеции (перцентиль ``CURL_PERCENTILE``), мм.
+        outer_ratio: Длина внешней стороны трапеции (дальней от сгиба) к стороне у сгиба — знак схода: больше
+            соседней — внешний край ближе к камере (приподнята), меньше — дальше (опущена); 1 — без трапеции или
+            страница не крайняя.
     """
 
     fill: float
@@ -59,6 +79,7 @@ class PageFeatures:
     light_share: float
     finger: float
     curl: float
+    outer_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -140,8 +161,32 @@ def edge_curl(page: np.ndarray, quad: np.ndarray) -> float:
     return float(np.percentile(np.min(dists, axis=0), CURL_PERCENTILE)) / SEG_PX_PER_MM
 
 
+def outer_ratio(quad: np.ndarray | None, outer_left: bool | None) -> float:
+    """Знак схода: длина внешней «вертикальной» стороны трапеции к стороне у сгиба.
+
+    Args:
+        quad: Трапеция страницы или None.
+        outer_left: True — внешний край слева (левая страница), False — справа (правая), None — страница не крайняя
+            или одна в кадре.
+
+    Returns:
+        Отношение; 1 без трапеции или без внешнего края.
+    """
+    if quad is None or outer_left is None:
+        return 1.0
+    left, right = vertical_sides(quad)
+    lengths = (float(np.linalg.norm(left[1] - left[0])), float(np.linalg.norm(right[1] - right[0])))
+    outer, fold = lengths if outer_left else lengths[::-1]
+    return outer / max(fold, 1e-6)
+
+
 def page_features(
-    page: np.ndarray, quad: np.ndarray | None, gray: np.ndarray, paint: np.ndarray, neighbor: np.ndarray | None
+    page: np.ndarray,
+    quad: np.ndarray | None,
+    gray: np.ndarray,
+    paint: np.ndarray,
+    neighbor: np.ndarray | None,
+    outer_left: bool | None = None,
 ) -> PageFeatures:
     """Признаки одной страницы.
 
@@ -151,6 +196,7 @@ def page_features(
         gray: Кадр без пальцев в сером (масштаб сегментации).
         paint: Зона закраса пальцев (bool, масштаб сегментации).
         neighbor: Маска соседней страницы (самой большой из остальных) или None.
+        outer_left: Где внешний край страницы (``outer_ratio``): True — слева, False — справа, None — нет.
 
     Returns:
         Признаки.
@@ -169,7 +215,7 @@ def page_features(
         k = 2 * FINGER_TOUCH_PX + 1
         near = cv2.dilate(page.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
         finger = float((paint & near).sum() / paint.sum())
-    return PageFeatures(fill, keystone, width_share, light_share, finger, curl)
+    return PageFeatures(fill, keystone, width_share, light_share, finger, curl, outer_ratio(quad, outer_left))
 
 
 def raised_by_rule(f: PageFeatures, neighbor: PageFeatures) -> bool:
@@ -185,12 +231,26 @@ def raised_by_rule(f: PageFeatures, neighbor: PageFeatures) -> bool:
     return f.keystone >= RAISED_MIN_KEYSTONE and f.keystone - neighbor.keystone >= RAISED_MIN_KEYSTONE_GAP
 
 
+def lowered_by_sign(f: PageFeatures, neighbor: PageFeatures) -> bool:
+    """Знак схода наклонённой страницы: внешний край короче, чем у плоской, — свисает с опоры, а не поднят.
+
+    Args:
+        f: Признаки страницы, наклонённой по ``raised_by_rule``.
+        neighbor: Признаки соседней страницы.
+
+    Returns:
+        True — опущена.
+    """
+    return f.outer_ratio <= LOWERED_MAX_OUTER_RATIO and f.outer_ratio < neighbor.outer_ratio
+
+
 def classify_poses(features: list[PageFeatures]) -> list[PagePose]:
     """Классы положения страниц кадра.
 
-    Одна страница в кадре — лежит плоско. Приподнятой может быть только одна страница: если правило отметило
-    несколько, все считаются плоскими (правило сбилось — защита контента остаётся на всех). Соседняя страница для
-    правила — с наименьшим сходом среди остальных.
+    Одна страница в кадре — лежит плоско. Наклонённой (по сходу) может быть только одна страница: если правило
+    отметило несколько, все считаются плоскими (правило сбилось — защита контента остаётся на всех). Соседняя
+    страница для правила — с наименьшим сходом среди остальных. Наклонённая страница — опущена, если по знаку схода
+    её внешний край уходит от камеры (``lowered_by_sign``), иначе приподнята.
 
     Args:
         features: Признаки страниц кадра.
@@ -200,13 +260,17 @@ def classify_poses(features: list[PageFeatures]) -> list[PagePose]:
     """
     if len(features) < 2:
         return [PagePose.FLAT] * len(features)
-    raised = []
+    tilted, neighbors = [], []
     for k, f in enumerate(features):
         others = [g for j, g in enumerate(features) if j != k]
-        raised.append(raised_by_rule(f, min(others, key=lambda g: g.keystone)))
-    if sum(raised) != 1:
+        neighbors.append(min(others, key=lambda g: g.keystone))
+        tilted.append(raised_by_rule(f, neighbors[-1]))
+    if sum(tilted) != 1:
         return [PagePose.FLAT] * len(features)
-    return [PagePose.RAISED if r else PagePose.FLAT for r in raised]
+    return [
+        (PagePose.LOWERED if lowered_by_sign(f, nb) else PagePose.RAISED) if t else PagePose.FLAT
+        for f, nb, t in zip(features, neighbors, tilted)
+    ]
 
 
 def page_quads(
@@ -231,7 +295,9 @@ def page_quads(
     for k, page in enumerate(pages):
         others = [p for j, p in enumerate(pages) if j != k]
         neighbor = max(others, key=lambda p: int(p.sum())) if others else None
-        features.append(page_features(page, quads[k], gray, paint, neighbor))
+        # Внешний край — у крайних страниц разворота: левая — слева, правая — справа.
+        outer_left = None if len(pages) < 2 else True if k == 0 else False if k == len(pages) - 1 else None
+        features.append(page_features(page, quads[k], gray, paint, neighbor, outer_left))
     poses = classify_poses(features)
     return [PageQuad(p, q, f, c) for p, q, f, c in zip(pages, quads, features, poses)]
 

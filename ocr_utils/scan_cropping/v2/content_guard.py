@@ -1,4 +1,4 @@
-"""Защита контента при вырезке: куски блоков surya плоско лежащих страниц внутри «не фона» без рук входят в бумагу."""
+"""Защита контента при вырезке: куски блоков surya страниц на блоке (плоских и опущенных) внутри «не фона» без рук — в бумагу."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.scan_cropping.finger_removal.text_protection import polygons_to_mask
-from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PagePose, PageQuad, page_owner
+from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PageQuad, page_owner
 from ocr_utils.scan_cropping.v2.trapezoid import quad_mask
 
 # Припуск блоков surya при защите — общий с copy back: ``copy_back.LAYOUT_PAD_PX`` (``--layout-pad-mm``).
@@ -18,7 +18,7 @@ QUAD_MARGIN_MM = 2.0
 
 
 def flat_blocks(polys: list[np.ndarray], pages: list[PageQuad], seg: float, shape: tuple[int, int]) -> list[np.ndarray]:
-    """Блоки surya, принадлежащие плоско лежащим страницам (по ближайшей странице к центру блока).
+    """Блоки surya, принадлежащие страницам на блоке — плоским и опущенным (по ближайшей странице к центру блока).
 
     Args:
         polys: Полигоны блоков surya, px кадра.
@@ -27,10 +27,10 @@ def flat_blocks(polys: list[np.ndarray], pages: list[PageQuad], seg: float, shap
         shape: ``(H, W)`` масштаба сегментации.
 
     Returns:
-        Полигоны блоков плоских страниц, px масштаба сегментации.
+        Полигоны блоков страниц на блоке, px масштаба сегментации.
     """
     small = [np.asarray(p, np.float32) * seg for p in polys]
-    if not pages or all(p.pose is PagePose.FLAT for p in pages):
+    if not pages or all(p.pose.on_book for p in pages):
         return small
     owner = page_owner(pages, shape)
     h, w = shape
@@ -38,13 +38,13 @@ def flat_blocks(polys: list[np.ndarray], pages: list[PageQuad], seg: float, shap
     for poly in small:
         cx, cy = poly.mean(axis=0)
         k = owner[int(np.clip(cy, 0, h - 1)), int(np.clip(cx, 0, w - 1))]
-        if pages[k].pose is PagePose.FLAT:
+        if pages[k].pose.on_book:
             out.append(poly)
     return out
 
 
 def flat_quads(pages: list[PageQuad], shape: tuple[int, int]) -> np.ndarray:
-    """Трапеции плоских страниц с запасом ``QUAD_MARGIN_MM`` (без трапеции — маска самой страницы с тем же запасом).
+    """Трапеции страниц на блоке (плоских и опущенных) с запасом ``QUAD_MARGIN_MM`` (без трапеции — маска страницы).
 
     Args:
         pages: Страницы кадра.
@@ -55,7 +55,7 @@ def flat_quads(pages: list[PageQuad], shape: tuple[int, int]) -> np.ndarray:
     """
     out = np.zeros(shape, np.uint8)
     for page in pages:
-        if page.pose is not PagePose.FLAT:
+        if not page.pose.on_book:
             continue
         out |= quad_mask(page.quad, shape) if page.quad is not None else page.mask
     k = 2 * int(round(QUAD_MARGIN_MM * SEG_PX_PER_MM)) + 1
@@ -71,7 +71,7 @@ def protect_content(
     pad_px: tuple[int, int],
     limit_to_quads: bool = False,
 ) -> np.ndarray:
-    """Куски блоков surya плоских страниц внутри «не фона» без рук, которых нет в бумаге.
+    """Куски блоков surya страниц на блоке (плоских и опущенных) внутри «не фона» без рук, которых нет в бумаге.
 
     Args:
         paper: Итоговая маска бумаги (масштаб сегментации).

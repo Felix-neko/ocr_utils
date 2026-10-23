@@ -73,6 +73,30 @@ class Sam2Background:
         masks = self.processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0][0].numpy()
         return masks.astype(bool)
 
+    def masks_scored(
+        self, rgb: np.ndarray, points: list[list[float]], labels: list[int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Три маски-кандидата SAM 2 по точкам и их оценки IoU (для уточнения края, ``edge_refine``).
+
+        Args:
+            rgb: Картинка RGB входа сети.
+            points: Точки ``[[x, y], ...]`` в px картинки.
+            labels: Метки точек: 1 — объект, 0 — не объект.
+
+        Returns:
+            ``(маски (3, H, W) bool, оценки (3,))``.
+        """
+        import torch
+        from PIL import Image
+
+        inputs = self.processor(
+            images=Image.fromarray(rgb), input_points=[[points]], input_labels=[[labels]], return_tensors="pt"
+        ).to(self.device)
+        with torch.no_grad():
+            out = self.model(**inputs, multimask_output=True)
+        masks = self.processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0][0].numpy()
+        return masks.astype(bool), out.iou_scores[0, 0].float().cpu().numpy()
+
     def __call__(self, bgr: np.ndarray, content: np.ndarray) -> np.ndarray:
         """Фон кадра сегментации по SAM 2.
 
