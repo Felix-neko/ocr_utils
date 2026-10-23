@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from research.page_cutting.boundary import PageBoundary
+from ocr_utils.scan_cropping.v2.page_boundary import PageBoundary
 
 
 @dataclass(frozen=True)

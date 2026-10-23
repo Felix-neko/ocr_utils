@@ -9,9 +9,9 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.overlay_frame import LegendEntry, framed, header_strip
-from research.page_cutting.boundary import FitKind, PageBoundary, fit_boundary
+from ocr_utils.scan_cropping.v2.page_boundary import FitKind, PageBoundary, fit_boundary
 from research.page_cutting.cases import FrameCase, load_case
-from research.page_cutting.geometry import Side
+from ocr_utils.scan_cropping.v2.page_sides import Side
 from research.page_cutting.runs import RunSpec, read_image, write_image
 from research.page_cutting.straightness import measure_straightness
 from research.page_cutting.warp import plan_page_warp, warp_page

@@ -16,6 +16,14 @@ PACK6_450_ROOT="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки
 # (Остановленный 2026-10-12 первый прогон — в $SCAN_CROPPING_V2_ROOT/pack6_stopped_2026-10-12.)
 PACK6_450_WORK="$SCAN_CROPPING_V2_ROOT/pack6_v2"
 PACK6_450_READY="$PACK6_450_WORK/output"
+
+# Пак-5 МТС (1985 и далее + немножко пересканов), фото-развороты на чёрном коврике, JPG 5549×4160 — Я.Диск, только
+# чтение. Съёмка как у пака-6: по шагу строк 1990/01–03 против пака-6 МТС 1990/01–02 плотность на 1–2 % ниже
+# (53.0 / 65.9 px против 53.6 / 67.1 px; замер 2026-10-19) — по решению пользователя ключи пака-6 берутся как есть.
+PACK5_ROOT="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/МТС/в работе/пак-5 (1985 и далее + немножко пересканов) (450 DPI)"
+# Прогон v2 по 1990/01–03: итоги, кэш и оверлеи — на SSD hotstore.
+PACK5_1990_Q1_WORK="$SCAN_CROPPING_V2_ROOT/pack5_1990_01-03"
+
 # Пак-4 «Плановое хозяйство» (ПХ), фото-развороты на чёрном коврике, JPG 5660×4244 — Я.Диск, только чтение. Плотность
 # бумаги — 13.8 px/мм, как у паков 5–6 (замер research/edge_cut_pages: ~6.9 px/мм на ½ кадра); «450 dpi» в имени — не она.
 PACK4_PH_ROOT="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/Плановое хозяйство/в работе/пак-4 (450 dpi)"
@@ -27,6 +35,8 @@ PH_GUTTER_STRIP_SET="$PACK4_PH_WORK/sets/gutter_strip"
 PH_GUTTER_STRIP_WORK="$SCAN_CROPPING_V2_ROOT/ph/gutter_strip_check"
 # Стенд research/spread_lines (прямые разворота по кэшу прогонов v2): CSV и картинки — на SSD hotstore.
 SPREAD_LINES_ROOT="/mnt/hotstore/scan_processing/spread_lines"
+# Стенд research/gutter_strip (полоса-вклейка у корешка по кэшу прогонов v2): признаки, листы, оверлеи — SSD.
+GUTTER_STRIP_ROOT="${GUTTER_STRIP_ROOT:-/mnt/hotstore/scan_processing/gutter_strip}"
 
 # «Хозяйство и право» 1991/02 (пробный пак), фото-развороты на чёрном коврике, JPG 5392×4394, 434 dpi — Я.Диск, только
 # чтение. Страницы сильно изогнуты (сверху, снизу и по бокам) — вход стенда research/page_cutting (группа curved).
@@ -43,6 +53,14 @@ SPLINE_BENDS_WORK="${SPLINE_BENDS_WORK:-$SCAN_CROPPING_V2_ROOT/spline_bends}"
 # Те же наборы с полосой-вклейкой и подгоночными областями страниц (сплайн с узлами, у корешка — линия корешка, у полосы —
 # до вспомогательных линий и отрезок через полосу) на шаге 07_lines и склейкой по частям страниц у щели.
 SPLINE_FRAMES_WORK="${SPLINE_FRAMES_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames}"
+# Рваные внешние края страниц (двойная грубая сегментация + детектор + тонкое уточнение, research/ragged_edges): итоги,
+# оверлеи и свои копии кэша (без SAM 3, бумаги, страниц, surya) по наборам — SSD; кэши прежних прогонов не трогаются.
+RAGGED_EDGES_WORK="${RAGGED_EDGES_WORK:-$SCAN_CROPPING_V2_ROOT/ragged_edges}"
+# Перепрогон тех же наборов после правок 2026-10-23 (палец у края в уточнении, заполнение пропусков края грубым краем,
+# щель полосы-вклейки без оторванных островков, порог 8.2 мм, потоки закраса пальцев): кэш SAM 3 — из $RAGGED_EDGES_WORK.
+RAGGED_EDGES_V2_WORK="${RAGGED_EDGES_V2_WORK:-$SCAN_CROPPING_V2_ROOT/ragged_edges_v2}"
+# Тестовый набор рваных и ровных сторон: 210 кадров стенда уточнения (stack_edges/refine_set) + примеры пользователя.
+RAGGED_EDGES_SET="${RAGGED_EDGES_SET:-$RAGGED_EDGES_WORK/set_in}"
 # Итоги spline_frames, выпрямленные по подгоночным областям страниц (research/page_rectify): выборка и все кадры — SSD.
 SPLINE_RECTIFIED_SAMPLE_WORK="${SPLINE_RECTIFIED_SAMPLE_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_rectified_sample}"
 SPLINE_RECTIFIED_WORK="${SPLINE_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_rectified}"
@@ -50,10 +68,11 @@ SPLINE_RECTIFIED_WORK="${SPLINE_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_fr
 TEXT_RECTIFIED_SAMPLE_WORK="${TEXT_RECTIFIED_SAMPLE_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified_sample}"
 TEXT_RECTIFIED_WORK="${TEXT_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified}"
 
-
 # Боевой прогон v2 пака-6 целиком (6-я версия ключей, 2026-10-15/16, 2480 кадров) — вход стенда research/page_cutting.
 PACK6_V6_WORK="$SCAN_CROPPING_V2_ROOT/pack6_v6"
 # Стенд «нарезка сканов» (research/page_cutting): меры, кандидаты, листы, выпрямленные страницы, выход ScanTailor — SSD.
 PAGE_CUTTING_ROOT="${PAGE_CUTTING_ROOT:-/mnt/hotstore/scan_processing/page_cutting}"
+# Стенд «заострение края листа перед SAM 3» (research/edge_sharpen): SAM 3 и бумага по фильтрам, меры, листы — SSD.
+EDGE_SHARPEN_ROOT="${EDGE_SHARPEN_ROOT:-/mnt/hotstore/scan_processing/edge_sharpen}"
 # scantailor-cli — ScanTailor Advanced без окна (ветка cli, сборка build-cli; Qt offscreen).
 SCANTAILOR_CLI="${SCANTAILOR_CLI:-$HOME/Projects/scantailor-advanced/build-cli/scantailor-cli}"

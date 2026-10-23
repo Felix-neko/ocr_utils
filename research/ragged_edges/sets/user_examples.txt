@@ -1,0 +1,18 @@
+# Примеры пользователя (2026-10-22): <прогон> <ключ кадра> <страница> <метка ragged|smooth>
+# Прогоны: ph1975 — кэш v2 ПХ 1975 ($PACK4_PH_WORK/cache/1975, оверлеи spline_frames/ph_1975/debug/02_sam3);
+# ph1975_lv — то же с растяжением уровней перед SAM 3 (stack_edges/coarse_levels/cache/ph1975, оверлеи
+# coarse_levels/cmp/frames — зелёная линия).
+ph1975 01__IMG_0029 L ragged
+ph1975 01__IMG_0031 L ragged
+ph1975 01__IMG_0035 L ragged
+ph1975 01__IMG_0046 L ragged
+ph1975 01__IMG_0064 L smooth
+ph1975 01__IMG_0064 R smooth
+ph1975 01__IMG_0065 L smooth
+ph1975 01__IMG_0065 R smooth
+ph1975 01__IMG_0085 L smooth
+ph1975 01__IMG_0085 R smooth
+ph1975_lv 09__IMG_0040 L ragged
+ph1975_lv 09__IMG_0022 L ragged
+ph1975_lv 05__IMG_0038 L ragged
+ph1975_lv 05__IMG_0037 L ragged

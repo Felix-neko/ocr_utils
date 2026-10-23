@@ -11,7 +11,7 @@ from PIL import Image
 
 from ocr_utils.page_layout.overlay_frame import LegendEntry, framed, header_strip
 from ocr_utils.units import MM_PER_INCH
-from research.page_cutting.boundary import FitKind, fit_boundary
+from ocr_utils.scan_cropping.v2.page_boundary import FitKind, fit_boundary
 from research.page_cutting.cases import load_case
 from research.page_cutting.fitting import page_name, side_by_side
 from research.page_cutting.judge import Verdict, judge

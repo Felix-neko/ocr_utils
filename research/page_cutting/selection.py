@@ -12,7 +12,14 @@ import numpy as np
 from ocr_utils.scan_cropping.v2.page_pose import frame_pages
 from ocr_utils.scan_cropping.v2.pipeline import read_layout, read_layout_labels
 from ocr_utils.scan_cropping.v2.trapezoid import fit_enclosing_quad
-from research.page_cutting.geometry import Side, SideProfile, inward_normal, quad_sides, side_profiles, smooth_profile
+from ocr_utils.scan_cropping.v2.page_sides import (
+    Side,
+    SideProfile,
+    inward_normal,
+    quad_sides,
+    side_profiles,
+    smooth_profile,
+)
 from research.page_cutting.runs import RunSpec, read_image
 
 # Окно медианного сглаживания профиля стороны, мм: длиннее зубцов рваного края (2–8 мм), короче изгиба страницы.

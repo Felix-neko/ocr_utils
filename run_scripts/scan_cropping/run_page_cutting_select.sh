@@ -6,7 +6,8 @@
 # Прогоны и плотность (px/мм — из их run-скриптов):
 #   pack6 — $PACK6_V6_WORK (МТС и РИСК, 13.8; v2_pack6_args.sh);
 #   ph4   — $PACK4_PH_WORK, подпапка 1975 (13.8; run_v2_ph_pack4_1975.sh);
-#   hp91  — $HP_1991_02_WORK («Хозяйство и право» 1991/02, 17.1; run_v2_hp_1991_02.sh).
+#   hp91  — $HP_1991_WORK, подпапка «02 оплачено» («Хозяйство и право» 1991/02, 17.1; run_v2_hp_1991.sh — прогон с
+#           вето фона; прежний $HP_1991_02_WORK — до вето, край с печатью там срезан).
 # Читает: кэш и debug прогонов (SSD). Пишет: $PAGE_CUTTING_ROOT/select/{measures.csv,candidates/*.txt,sheets/*.jpg}.
 # Время: ~0.5 с на кадр на воркер, ~3600 кадров — ~2–3 мин на 16 воркерах.
 #
@@ -25,7 +26,7 @@ OUT="$PAGE_CUTTING_ROOT/select"
 RUNS=(
     --run "pack6=$PACK6_V6_WORK,,13.8"
     --run "ph4=$PACK4_PH_WORK,1975,13.8"
-    --run "hp91=$HP_1991_02_WORK,,17.1"
+    --run "hp91=$HP_1991_WORK,02 оплачено,17.1"
 )
 
 uv run python -m research.page_cutting select "${RUNS[@]}" --out-dir "$OUT" --per-run 8 --jobs "$JOBS"

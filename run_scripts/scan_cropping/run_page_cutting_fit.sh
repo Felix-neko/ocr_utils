@@ -26,7 +26,7 @@ SETS_DIR=research/page_cutting/sets
 RUNS=(
     --run "pack6=$PACK6_V6_WORK,,13.8"
     --run "ph4=$PACK4_PH_WORK,1975,13.8"
-    --run "hp91=$HP_1991_02_WORK,,17.1"
+    --run "hp91=$HP_1991_WORK,02 оплачено,17.1"
 )
 
 uv run python -m research.page_cutting fit "${RUNS[@]}" --out-dir "$OUT" --jobs "$JOBS" ${SAVE_PAGES:+--save-pages} \

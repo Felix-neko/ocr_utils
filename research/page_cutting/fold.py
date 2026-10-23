@@ -10,7 +10,7 @@ import numpy as np
 from scipy.interpolate import BSpline
 from scipy.ndimage import maximum_filter1d, median_filter
 
-from research.page_cutting.boundary import bspline_basis
+from ocr_utils.scan_cropping.v2.page_boundary import bspline_basis
 
 log = logging.getLogger(__name__)
 

@@ -18,7 +18,8 @@ import numpy as np
 from ocr_utils.page_layout.overlay_frame import header_strip
 from ocr_utils.scan_cropping.v2.overlay import OverlayTag, overlay_path
 from ocr_utils.scan_cropping.v2.pipeline import init_worker
-from research.page_cutting.boundary import FitKind
+from ocr_utils.scan_cropping.v2.page_boundary import FitKind
+from research.page_cutting.bends import BendRow, draw_bends, frame_bends
 from research.page_cutting.cutting import CutRow, cut_frame
 from research.page_cutting.scantailor import default_profile_xml
 from research.page_cutting.fitting import PageRow, process_frame
@@ -269,6 +270,82 @@ def fit_cmd(
         writer.writeheader()
         writer.writerows(asdict(r) for r in result)
     log.info("страниц × вариантов: %d → %s", len(result), out_dir / "fit.csv")
+
+
+# Пояса расхождения адаптивного сплайна и прежнего (``bends``), мм: оверлеи кадра раскладываются по поясу худшей стороны.
+BEND_BANDS = (0.15, 0.3, 0.5)
+
+
+def band_of(diff_mm: float) -> str:
+    """Имя папки пояса расхождения: ``lt0.15``, ``0.15-0.3``, ``0.3-0.5``, ``ge0.5``."""
+    if diff_mm < BEND_BANDS[0]:
+        return f"lt{BEND_BANDS[0]:g}"
+    for lo, hi in zip(BEND_BANDS, BEND_BANDS[1:]):
+        if diff_mm < hi:
+            return f"{lo:g}-{hi:g}"
+    return f"ge{BEND_BANDS[-1]:g}"
+
+
+def bends_task(args: tuple[RunSpec, str, Path, float]) -> list[BendRow]:
+    """Изгибы верха и низа одного кадра для пула: меры и оверлей (если расхождение не меньше порога).
+
+    Args:
+        args: ``(прогон, ключ, корень выхода, порог расхождения для оверлея в мм)``.
+
+    Returns:
+        Строки мер (сбой кадра — в лог и пустой список).
+    """
+    run, key, out_dir, overlay_min_mm = args
+    try:
+        case, pages, rows = frame_bends(run, key)
+        worst = max((r.diff_max_mm for r in rows), default=0.0)
+        if worst >= overlay_min_mm:
+            path = out_dir / "overlays" / band_of(worst) / f"{run.name}__{key}.jpg"
+            write_image(path, draw_bends(case, pages, rows), quality=88)
+        return rows
+    except Exception as exc:  # noqa: BLE001 — один битый кэш не роняет обход
+        log.warning("%s %s: %s", run.name, key, exc)
+        return []
+
+
+@main.command("bends")
+@click.option("--run", "runs", multiple=True, required=True, help=RUN_HELP)
+@click.option(
+    "--set",
+    "set_files",
+    multiple=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Набор кадров; без наборов — все кадры прогонов с pages.json и layout.json.",
+)
+@click.option("--out-dir", type=click.Path(path_type=Path), required=True, help="Куда писать bends.csv и оверлеи.")
+@click.option(
+    "--overlay-min-mm",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Оверлей кадра — только если наибольшее расхождение кривых не меньше, мм.",
+)
+@click.option("--jobs", type=int, default=16, show_default=True, help="Воркеров пула (CPU: подгонка и чтение кэша).")
+def bends_cmd(
+    runs: tuple[str, ...], set_files: tuple[Path, ...], out_dir: Path, overlay_min_mm: float, jobs: int
+) -> None:
+    """Верх и низ страниц: прежний сплайн против адаптивного (``bends.csv``, оверлеи по поясам расхождения)."""
+    specs = {s.name: s for s in (parse_run(r) for r in runs)}
+    if set_files:
+        keys = [(specs[r.run], r.key) for f in set_files for r in read_set(f) if r.run in specs]
+    else:
+        keys = [(spec, key) for spec in specs.values() for key in run_keys(spec)]
+    tasks = [(spec, key, out_dir, overlay_min_mm) for spec, key in keys]
+    log.info("кадров: %d", len(tasks))
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=init_worker) as pool:
+        result = [row for chunk in pool.map(bends_task, tasks, chunksize=4) for row in chunk]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result.sort(key=lambda r: -r.diff_max_mm)
+    with (out_dir / "bends.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, [fl.name for fl in fields(BendRow)])
+        writer.writeheader()
+        writer.writerows(asdict(r) for r in result)
+    log.info("сторон: %d → %s", len(result), out_dir / "bends.csv")
 
 
 def cut_task(args: tuple[RunSpec, str, Path, Path, Path]) -> list[CutRow]:
