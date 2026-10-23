@@ -6,7 +6,7 @@
 #     "imagededup",
 #     "numpy",
 #     "Pillow",
-#     "opencv-python-headless",
+#     "opencv-python-headless<5",  # в OpenCV 5 нет cv2.AKAZE_create
 #     "click",
 #     "tqdm",
 #     "torch",
@@ -17,6 +17,7 @@
 import io
 import shutil
 import tempfile
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -43,6 +44,18 @@ class Mode(str, Enum):
 
     COPY = "copy"
     REPORT = "report"
+
+
+@dataclass
+class FolderResult:
+    """Итог поиска дубликатов в одной папке: группы кадров и резкость каждого кадра."""
+
+    # Группы имён (stem + ".jpg"); одиночные кадры — группы из одного элемента
+    groups: list[list[str]]
+    # Резкость (lapvar) по имени кадра
+    sharpness: dict[str, float]
+    # Исходный RAF-файл по имени кадра
+    raf_by_jpeg: dict[str, Path]
 
 
 def read_raf_image(path: Path) -> np.ndarray:
@@ -347,112 +360,69 @@ def build_groups(all_names: list[str], duplicates: dict[str, list[str]]) -> list
     return groups
 
 
-@click.command()
-@click.argument(
-    "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-30/992_FUJI"
-)
-@click.argument("output_dir", required=False, default="/mnt/hotstore/scan_processing/1967_10_12")
-@click.option(
-    "--mode",
-    default="copy",
-    show_default=True,
-    type=click.Choice([m.value for m in Mode]),
-    help="Режим: copy — копировать лучший файл группы в output_dir, report — только отчёт по группам из 2+ файлов",
-)
-@click.option("--n-search", default=5, show_default=True, help="Макс. расстояние в позициях между кадрами одной группы")
-@click.option(
-    "--method",
-    default="local",
-    show_default=True,
-    type=click.Choice([m.value for m in Method]),
-    help="Метод детектирования дубликатов: cnn — MobileNet-эмбеддинги, local — AKAZE локальные признаки",
-)
-@click.option(
-    "--min-similarity",
-    default=0.97,
-    show_default=True,
-    help="[cnn] Мин. косинусное сходство CNN-эмбеддингов для объединения в группу (0..1)",
-)
-@click.option(
-    "--min-match-ratio",
-    default=0.2,
-    show_default=True,
-    help="[local] Мин. процент RANSAC-инлайеров от max(кол-во ключ. точек в паре) для объединения в группу (0..1)",
-)
-@click.option(
-    "--max-scale-change",
-    default=1.15,
-    show_default=True,
-    help="[local] Макс. изменение масштаба гомографии; пары с большим scale отброcываются (полоса vs. разворот)",
-)
-def main(
-    input_dir: str,
-    output_dir: str,
-    mode: str,
+def find_raf_folders(in_path: Path, recursive: bool) -> list[tuple[Path, list[Path]]]:
+    """Собирает папки с RAF-файлами и списки RAF-файлов в каждой.
+
+    Дубликаты ищутся только внутри одной папки: разные папки — разные партии съёмки,
+    а имена DSCFxxxx.RAF в них могут повторяться.
+
+    Args:
+        in_path: Корневая папка.
+        recursive: False — только сама in_path; True — in_path и все вложенные папки
+            на любой глубине, кроме скрытых (имя с точки, например ``.defocus_for_debugging``)
+            и всего, что лежит внутри них: там служебные копии и забракованные кадры.
+
+    Returns:
+        Список пар (папка, отсортированный по имени список её RAF-файлов). Папки без RAF
+        пропускаются; папки идут в порядке сортировки путей.
+    """
+    # Кандидаты: сама папка и, при рекурсивном обходе, все вложенные
+    candidates = [in_path]
+    if recursive:
+        # Скрытые подпапки и всё внутри них пропускаем: проверяем каждую часть пути от корня
+        candidates += sorted(
+            p
+            for p in in_path.rglob("*")
+            if p.is_dir() and not any(part.startswith(".") for part in p.relative_to(in_path).parts)
+        )
+
+    folders: list[tuple[Path, list[Path]]] = []
+    for folder in candidates:
+        # RAF-файлы только этой папки (без вложенных), регистр расширения любой
+        raf_files = sorted(p for p in folder.glob("*.[Rr][Aa][Ff]") if p.is_file())
+        if raf_files:
+            folders.append((folder, raf_files))
+    return folders
+
+
+def analyze_folder(
+    raf_files: list[Path],
+    method: Method,
     n_search: int,
-    method: str,
     min_similarity: float,
     min_match_ratio: float,
     max_scale_change: float,
-) -> None:
-    """Выбирает самый резкий RAF-файл из каждой группы дубликатов.
-
-    Основная функция скрипта. Сканирует папку с RAF-файлами, находит дубликаты
-    одним из двух методов (CNN или локальные признаки), группирует их и выбирает
-    самый резкий файл из каждой группы. В режиме copy лучшие файлы копируются
-    в выходную папку, в режиме report — только печатается отчёт по группам
-    из двух и более файлов.
+) -> FolderResult:
+    """Ищет группы дубликатов среди RAF-файлов одной папки и считает резкость кадров.
 
     Args:
-        input_dir: Путь к папке с исходными RAF-файлами.
-        output_dir: Путь к папке для сохранения лучших файлов.
-            Будет создана автоматически, если не существует.
-            В режиме report не используется.
-        mode: Режим работы: 'copy' — копировать лучший файл из каждой группы,
-            'report' — только вывести отчёт по группам дубликатов (2+ файла),
-            ничего не копируя.
-        n_search: Размер скользящего окна — максимальное расстояние в позициях
-            между кадрами, которые могут быть признаны дубликатами.
-            Типичное значение: 3-10.
-        method: Метод детектирования дубликатов:
-            - 'cnn': MobileNet-эмбеддинги через imagededup (быстро, требует GPU).
-            - 'local': AKAZE локальные признаки (медленнее, но точнее для разного кадрирования).
-        min_similarity: [только для CNN] Минимальное косинусное сходство
-            CNN-эмбеддингов для объединения в группу. Диапазон: 0.0-1.0.
-            Типичное значение: 0.95-0.99.
-        min_match_ratio: [только для local] Минимальный процент RANSAC-инлайеров
-            от максимума количества ключевых точек в паре изображений.
-            Диапазон: 0.0-1.0. Типичное значение: 0.3-0.5.
-        max_scale_change: [только для local] Максимально допустимое изменение
-            масштаба гомографии. Пары с большим изменением масштаба отбрасываются
-            (например, полоса vs. разворот). Типичное значение: 1.1-1.3.
+        raf_files: RAF-файлы одной папки, отсортированные по имени (порядок съёмки).
+        method: Метод поиска дубликатов: CNN (MobileNet) или LOCAL (AKAZE).
+        n_search: Макс. расстояние в позициях между кадрами одной группы.
+        min_similarity: [CNN] Мин. косинусное сходство эмбеддингов.
+        min_match_ratio: [LOCAL] Мин. доля RANSAC-инлайеров от max(ключевых точек пары).
+        max_scale_change: [LOCAL] Макс. изменение масштаба гомографии.
 
     Returns:
-        None. Результаты выводятся в консоль, в режиме copy файлы копируются
-        в output_dir.
+        FolderResult: группы кадров (включая одиночные), резкость и исходный RAF по имени кадра.
     """
-    m = Method(method)
-    mode_enum = Mode(mode)
-
-    in_path = Path(input_dir)
-    out_path = Path(output_dir)
-    if mode_enum is Mode.COPY:
-        out_path.mkdir(parents=True, exist_ok=True)
-
-    raf_files = sorted(in_path.glob("*.[Rr][Aa][Ff]"))
-    if not raf_files:
-        click.echo(f"RAF-файлы не найдены в {in_path}")
-        return
-
-    click.echo(f"Найдено {len(raf_files)} RAF-файлов в {in_path}, метод: {m.value}, режим: {mode_enum.value}")
-
     all_names = [f.stem + ".jpg" for f in raf_files]
     sharpness: dict[str, float] = {}
     raf_by_jpeg: dict[str, Path] = {}
     all_kps: list[list] = []
     all_descs: list[np.ndarray | None] = []
 
-    if m is Method.CNN:
+    if method is Method.CNN:
         # Импорт тяжёлый — здесь, чтобы не грузить torch при выборе local
         from imagededup.methods import CNN
 
@@ -486,7 +456,7 @@ def main(
 
         duplicates = filter_by_window(duplicates, all_names, n_search)
 
-    elif m is Method.LOCAL:
+    elif method is Method.LOCAL:
         # Шаг 1: извлекаем превью, считаем резкость и AKAZE-дескрипторы
         for f in tqdm(raf_files, desc="Читаем и анализируем"):
             rgb = read_raf_image(f)
@@ -502,46 +472,198 @@ def main(
         duplicates = find_duplicates_local(all_names, all_kps, all_descs, n_search, min_match_ratio, max_scale_change)
 
     else:
-        raise ValueError(f"Неизвестный метод: {m!r}")
+        raise ValueError(f"Неизвестный метод: {method!r}")
 
     # Шаг 4: связные компоненты → группы
     groups = build_groups(all_names, duplicates)
+    return FolderResult(groups=groups, sharpness=sharpness, raf_by_jpeg=raf_by_jpeg)
 
-    dup_groups = [g for g in groups if len(g) > 1]
-    click.echo(f"\nГрупп дубликатов: {len(dup_groups)}, одиночных файлов: {len(groups) - len(dup_groups)}")
 
-    if mode_enum is Mode.REPORT:
-        # Только отчёт: перечисляем группы из 2+ файлов, ничего не копируем.
-        # Группы и файлы внутри них сортируем по имени, чтобы отчёт был воспроизводимым.
-        for idx, group in enumerate(sorted(dup_groups, key=min), 1):
-            best_jpeg = max(group, key=lambda j: sharpness[j])
-            click.echo(f"\nГруппа {idx} / {len(dup_groups)} ({len(group)} файлов):")
-            for jpeg_name in sorted(group):
-                marker = "  <-- лучший" if jpeg_name == best_jpeg else ""
-                click.echo(f"    {raf_by_jpeg[jpeg_name].name}: резкость={sharpness[jpeg_name]:.1f}{marker}")
-        if not dup_groups:
-            click.echo("Групп с двумя и более файлами нет")
-        return
+def print_report(result: FolderResult) -> int:
+    """Печатает отчёт по группам дубликатов из двух и более файлов одной папки.
 
-    # Шаг 5: копируем лучший файл из каждой группы
+    Группы и файлы внутри них сортируются по имени, чтобы отчёт был воспроизводимым.
+
+    Args:
+        result: Итог analyze_folder для папки.
+
+    Returns:
+        Число групп из двух и более файлов.
+    """
+    dup_groups = [g for g in result.groups if len(g) > 1]
+    for idx, group in enumerate(sorted(dup_groups, key=min), 1):
+        best_jpeg = max(group, key=lambda j: result.sharpness[j])
+        click.echo(f"\nГруппа {idx} / {len(dup_groups)} ({len(group)} файлов):")
+        for jpeg_name in sorted(group):
+            marker = "  <-- лучший" if jpeg_name == best_jpeg else ""
+            click.echo(f"    {result.raf_by_jpeg[jpeg_name].name}: резкость={result.sharpness[jpeg_name]:.1f}{marker}")
+    if not dup_groups:
+        click.echo("Групп с двумя и более файлами нет")
+    return len(dup_groups)
+
+
+def copy_best(result: FolderResult, out_path: Path) -> int:
+    """Копирует самый резкий RAF из каждой группы папки (одиночные — как есть) в out_path.
+
+    Args:
+        result: Итог analyze_folder для папки.
+        out_path: Папка назначения; создаётся при необходимости.
+
+    Returns:
+        Число скопированных файлов.
+    """
+    out_path.mkdir(parents=True, exist_ok=True)
+    n_dup_groups = sum(1 for g in result.groups if len(g) > 1)
     dup_counter = 0
-    for group in groups:
-        best_jpeg = max(group, key=lambda j: sharpness[j])
-        src = raf_by_jpeg[best_jpeg]
+    for group in result.groups:
+        best_jpeg = max(group, key=lambda j: result.sharpness[j])
+        src = result.raf_by_jpeg[best_jpeg]
 
         if len(group) == 1:
-            click.echo(f"  {src.name}: резкость={sharpness[best_jpeg]:.1f}")
+            click.echo(f"  {src.name}: резкость={result.sharpness[best_jpeg]:.1f}")
         else:
             dup_counter += 1
-            names = [raf_by_jpeg[j].name for j in group]
-            sharp_map = {raf_by_jpeg[j].name: f"{sharpness[j]:.1f}" for j in group}
-            click.echo(f"  Дубликаты {names} ({dup_counter} / {len(dup_groups)})")
+            names = [result.raf_by_jpeg[j].name for j in group]
+            sharp_map = {result.raf_by_jpeg[j].name: f"{result.sharpness[j]:.1f}" for j in group}
+            click.echo(f"  Дубликаты {names} ({dup_counter} / {n_dup_groups})")
             click.echo(f"    резкость: {sharp_map}")
             click.echo(f"    -> выбран: {src.name}")
 
         shutil.copy2(src, out_path / src.name)
+    return len(result.groups)
 
-    click.echo(f"\nСкопировано {len(groups)} файлов в {out_path}")
+
+@click.command()
+@click.argument(
+    "input_dir", default="/mnt/dump3/yandex_disk_linux_baby_zergling/Общее/Фотки/неразобранное/2026-05-30/992_FUJI"
+)
+@click.argument("output_dir", required=False, default="/mnt/hotstore/scan_processing/1967_10_12")
+@click.option(
+    "--mode",
+    default="copy",
+    show_default=True,
+    type=click.Choice([m.value for m in Mode]),
+    help="Режим: copy — копировать лучший файл группы в output_dir, report — только отчёт по группам из 2+ файлов",
+)
+@click.option(
+    "--recursive/--no-recursive",
+    default=False,
+    show_default=True,
+    help="Обойти и вложенные папки; дубликаты ищутся внутри каждой папки отдельно, в copy — структура папок сохраняется",
+)
+@click.option("--n-search", default=5, show_default=True, help="Макс. расстояние в позициях между кадрами одной группы")
+@click.option(
+    "--method",
+    default="local",
+    show_default=True,
+    type=click.Choice([m.value for m in Method]),
+    help="Метод детектирования дубликатов: cnn — MobileNet-эмбеддинги, local — AKAZE локальные признаки",
+)
+@click.option(
+    "--min-similarity",
+    default=0.97,
+    show_default=True,
+    help="[cnn] Мин. косинусное сходство CNN-эмбеддингов для объединения в группу (0..1)",
+)
+@click.option(
+    "--min-match-ratio",
+    default=0.2,
+    show_default=True,
+    help="[local] Мин. процент RANSAC-инлайеров от max(кол-во ключ. точек в паре) для объединения в группу (0..1)",
+)
+@click.option(
+    "--max-scale-change",
+    default=1.15,
+    show_default=True,
+    help="[local] Макс. изменение масштаба гомографии; пары с большим scale отброcываются (полоса vs. разворот)",
+)
+def main(
+    input_dir: str,
+    output_dir: str,
+    mode: str,
+    recursive: bool,
+    n_search: int,
+    method: str,
+    min_similarity: float,
+    min_match_ratio: float,
+    max_scale_change: float,
+) -> None:
+    """Выбирает самый резкий RAF-файл из каждой группы дубликатов.
+
+    Основная функция скрипта. Сканирует папку (или, с --recursive, дерево папок) с RAF-файлами,
+    в каждой папке отдельно находит дубликаты одним из двух методов (CNN или локальные признаки),
+    группирует их и выбирает самый резкий файл из каждой группы. В режиме copy лучшие файлы
+    копируются в выходную папку (вложенные папки — в одноимённые подпапки output_dir), в режиме
+    report — только печатается отчёт по группам из двух и более файлов.
+
+    Args:
+        input_dir: Путь к папке с исходными RAF-файлами.
+        output_dir: Путь к папке для сохранения лучших файлов.
+            Будет создана автоматически, если не существует.
+            В режиме report не используется.
+        mode: Режим работы: 'copy' — копировать лучший файл из каждой группы,
+            'report' — только вывести отчёт по группам дубликатов (2+ файла),
+            ничего не копируя.
+        recursive: Обходить ли вложенные папки input_dir на любой глубине.
+            Каждая папка с RAF обрабатывается отдельно: группы не пересекают границы папок.
+        n_search: Размер скользящего окна — максимальное расстояние в позициях
+            между кадрами, которые могут быть признаны дубликатами.
+            Типичное значение: 3-10.
+        method: Метод детектирования дубликатов:
+            - 'cnn': MobileNet-эмбеддинги через imagededup (быстро, требует GPU).
+            - 'local': AKAZE локальные признаки (медленнее, но точнее для разного кадрирования).
+        min_similarity: [только для CNN] Минимальное косинусное сходство
+            CNN-эмбеддингов для объединения в группу. Диапазон: 0.0-1.0.
+            Типичное значение: 0.95-0.99.
+        min_match_ratio: [только для local] Минимальный процент RANSAC-инлайеров
+            от максимума количества ключевых точек в паре изображений.
+            Диапазон: 0.0-1.0. Типичное значение: 0.3-0.5.
+        max_scale_change: [только для local] Максимально допустимое изменение
+            масштаба гомографии. Пары с большим изменением масштаба отбрасываются
+            (например, полоса vs. разворот). Типичное значение: 1.1-1.3.
+
+    Returns:
+        None. Результаты выводятся в консоль, в режиме copy файлы копируются
+        в output_dir.
+    """
+    m = Method(method)
+    mode_enum = Mode(mode)
+
+    in_path = Path(input_dir)
+    out_path = Path(output_dir)
+
+    folders = find_raf_folders(in_path, recursive)
+    if not folders:
+        click.echo(f"RAF-файлы не найдены в {in_path}")
+        return
+
+    n_files = sum(len(files) for _, files in folders)
+    click.echo(
+        f"Найдено {n_files} RAF-файлов в {len(folders)} папк(ах) под {in_path}, метод: {m.value}, режим: {mode_enum.value}"
+    )
+
+    total_dup_groups = 0
+    total_copied = 0
+    for folder, raf_files in folders:
+        # Заголовок папки печатаем только при обходе дерева — одиночный прогон выглядит как раньше
+        if recursive:
+            click.echo(f"\n=== Папка: {folder} ({len(raf_files)} RAF) ===")
+
+        result = analyze_folder(raf_files, m, n_search, min_similarity, min_match_ratio, max_scale_change)
+        n_dup_groups = sum(1 for g in result.groups if len(g) > 1)
+        click.echo(f"\nГрупп дубликатов: {n_dup_groups}, одиночных файлов: {len(result.groups) - n_dup_groups}")
+
+        if mode_enum is Mode.REPORT:
+            total_dup_groups += print_report(result)
+        else:
+            # Вложенная папка копируется в ту же относительную подпапку output_dir
+            total_copied += copy_best(result, out_path / folder.relative_to(in_path))
+
+    if mode_enum is Mode.REPORT:
+        if recursive:
+            click.echo(f"\nИтого групп дубликатов по всем папкам: {total_dup_groups}")
+    else:
+        click.echo(f"\nСкопировано {total_copied} файлов в {out_path}")
 
 
 if __name__ == "__main__":

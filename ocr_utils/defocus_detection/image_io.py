@@ -68,8 +68,26 @@ def read_gray(path: Path) -> np.ndarray | None:
         return None
 
 
+def in_hidden_subfolder(path: Path, folder: Path) -> bool:
+    """Лежит ли файл внутри скрытой подпапки (имя с точки) относительно корня обхода.
+
+    Скрытые подпапки вроде ``.defocus_for_debugging`` — служебные: туда откладывают
+    забракованные кадры и отладочные копии. В прогон они попадать не должны, иначе
+    брак и дубли смешиваются с подшивкой. Сам корень обхода и имя файла не проверяются:
+    корень пользователь указал явно, а скрытые файлы — отдельный вопрос.
+
+    Args:
+        path: Путь к файлу внутри ``folder``.
+        folder: Корень обхода.
+
+    Returns:
+        True, если хотя бы одна папка между ``folder`` и файлом начинается с точки.
+    """
+    return any(part.startswith(".") for part in path.relative_to(folder).parts[:-1])
+
+
 def collect_images(folder: Path, recursive: bool = False) -> list[Path]:
-    """Собирает поддерживаемые изображения в папке.
+    """Собирает поддерживаемые изображения в папке; скрытые подпапки (имя с точки) не обходит.
 
     Args:
         folder: Папка со сканами (либо путь к одиночному файлу).
@@ -81,7 +99,11 @@ def collect_images(folder: Path, recursive: bool = False) -> list[Path]:
     if folder.is_file():
         return [folder]
     pattern = "**/*" if recursive else "*"
-    files = [p for p in folder.glob(pattern) if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES]
+    files = [
+        p
+        for p in folder.glob(pattern)
+        if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES and not in_hidden_subfolder(p, folder)
+    ]
     return sorted(files)
 
 
@@ -96,7 +118,8 @@ def unsupported_files(folder: Path, recursive: bool = False) -> list[Path]:
     ``show_through_detection``, и менять контракт ради предупреждения незачем.
 
     Скрытые файлы (имя с точки) не считаются пропущенными: это служебный мусор
-    файловых менеджеров и синхронизаторов, а не потерянные кадры.
+    файловых менеджеров и синхронизаторов, а не потерянные кадры. Содержимое скрытых
+    подпапок — тоже: их ``collect_images`` пропускает намеренно.
 
     Args:
         folder: Папка со сканами (либо путь к одиночному файлу).
@@ -111,5 +134,8 @@ def unsupported_files(folder: Path, recursive: bool = False) -> list[Path]:
     return sorted(
         p
         for p in folder.glob(pattern)
-        if p.is_file() and p.suffix.lower() not in SUPPORTED_SUFFIXES and not p.name.startswith(".")
+        if p.is_file()
+        and p.suffix.lower() not in SUPPORTED_SUFFIXES
+        and not p.name.startswith(".")
+        and not in_hidden_subfolder(p, folder)
     )
