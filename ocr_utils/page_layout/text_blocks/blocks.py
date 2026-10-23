@@ -371,6 +371,8 @@ class TextBlock:
     envelope: BlockEnvelope  # главная: полоса вокруг оси
     envelope_coarse: BlockEnvelope
     envelope_ink: BlockEnvelope | None = None  # справочная: кромки по краске крайних рядов
+    # Колонка номеров страниц оглавления (:mod:`page_numbers`): правая сторона выровнена по построению, левая — нет.
+    number_column: bool = False
 
     @property
     def glyph_size(self) -> tuple[float, float]:
@@ -750,6 +752,10 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
     return out
 
 
+# Края ряда по краске должны накрывать хотя бы такую долю длины его осей (:func:`rows_of`).
+EDGE_AXIS_SHARE = 0.5
+
+
 def rows_of(
     axes: list[LineAxis],
     ink: np.ndarray,
@@ -848,6 +854,12 @@ def rows_of(
         max_gap = EDGE_GAP_HEIGHTS * height * k
         left = connected_edge(ink, left, row_x0 * k, y0, y1, max_gap, "left")
         right = connected_edge(ink, right, row_x1 * k, y0, y1, max_gap, "right")
+        # Края, не накрывающие и половины собственных осей ряда, — чужие: буквы шапки крупнее маски глифов в краску
+        # текста не попадают, и край находился по соседнему мелкому набору («СНАБЖЕНИЕ», ось 48–633, края 651–668 по
+        # «Год издания» — ряд вставал в чужую колонку и сливался с ней в блок, 1970/02 IMG_0054_2R). Тогда края — по осям.
+        covered = min(right, row_x1 * k) - max(left, row_x0 * k)
+        if covered < EDGE_AXIS_SHARE * (row_x1 - row_x0) * k:
+            left, right = row_x0 * k, row_x1 * k
         band = ink[max(0, y0) : y1, int(left) : int(right) + 1]
         # Точки отточия толще штриха корпуса вдвое и проходят нижний порог глифа: если их не
         # исключить, строка таблицы выглядит «другим набором» и блок дробится.

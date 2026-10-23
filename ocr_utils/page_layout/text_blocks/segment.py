@@ -286,6 +286,14 @@ def _crosses(
     return any(gy0 <= cy <= gy1 and gx0 < right and gx1 > left for gx0, gx1, gy0, gy1 in separators)
 
 
+# Узкий сгусток (ширина от этой доли высоты, но меньше половины) годен в кусок строки, если он не выше стольких
+# типичных сгустков страницы: одиночная буква, срезанная краем листа или сгибом (:func:`candidates_of`).
+NARROW_MIN_SHARE = 0.3
+NARROW_MAX_HEIGHTS = 1.3
+# ...и стоит у края картинки ближе стольких мм (буква, срезанная краем листа или вырезки).
+NARROW_EDGE_MM = 1.5
+
+
 def candidates_of(stats: np.ndarray, scale: Scale, dpi: float) -> list[int]:
     """Сгустки, годные в куски строки этого масштаба, слева направо.
 
@@ -298,12 +306,30 @@ def candidates_of(stats: np.ndarray, scale: Scale, dpi: float) -> list[int]:
         Индексы компонент, отсортированные по левому краю.
     """
     max_thickness = mm_to_px(scale.max_thickness_mm, dpi)
-    out = [
-        index
-        for index in range(1, stats.shape[0])
-        if scale.min_height <= stats[index, cv2.CC_STAT_HEIGHT] <= max_thickness
-        and stats[index, cv2.CC_STAT_WIDTH] >= 0.5 * stats[index, cv2.CC_STAT_HEIGHT]
-    ]
+    heights = stats[:, cv2.CC_STAT_HEIGHT]
+    widths = stats[:, cv2.CC_STAT_WIDTH]
+    sized = [index for index in range(1, stats.shape[0]) if scale.min_height <= heights[index] <= max_thickness]
+    out = [index for index in sized if widths[index] >= 0.5 * heights[index]]
+    # Узкий сгусток высотой с обычный сгусток строки — одиночная буква, срезанная краем листа или ушедшая в сгиб
+    # (обрезанная «и» в конце строки у корешка: 4 × 11 px при 150 dpi — ХиП 1991/01 IMG_0989). Отношение 0.5 его
+    # отбрасывало, и строка теряла последнее слово. Вертикальные черты и обрывки рамок выше обычного сгустка и
+    # сюда не попадают; дальше кусок проходит ту же сцепку, что и остальные.
+    # Только у края картинки (ближе ``NARROW_EDGE_MM``): в поле страницы узкий сгусток высотой с букву — чаще карандашная
+    # галочка, и, пришитый к строке, он сдвигал её край и отрывал следующую строку в свой блок (1972/06 IMG_0105_1L).
+    # Ширина картинки — по рамке фона (нулевая компонента разметки покрывает весь кадр).
+    if out:
+        typical = float(np.median(heights[out]))
+        width = float(stats[0, cv2.CC_STAT_LEFT] + stats[0, cv2.CC_STAT_WIDTH])
+        edge = mm_to_px(NARROW_EDGE_MM, dpi)
+        out += [
+            index
+            for index in sized
+            if NARROW_MIN_SHARE * heights[index] <= widths[index] < 0.5 * heights[index]
+            and heights[index] <= NARROW_MAX_HEIGHTS * typical
+            and (
+                stats[index, cv2.CC_STAT_LEFT] <= edge or stats[index, cv2.CC_STAT_LEFT] + widths[index] >= width - edge
+            )
+        ]
     out.sort(key=lambda index: stats[index, cv2.CC_STAT_LEFT])
     return out
 

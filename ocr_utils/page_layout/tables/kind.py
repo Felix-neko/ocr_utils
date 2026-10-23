@@ -142,6 +142,14 @@ def is_diagram(kind: KindFeatures, box: Box, dpi: int, long_rules: float = 0.0, 
     return loose and kind.tall_share <= DIAGRAM_MAX_TALL_SHARE and long_rules <= DIAGRAM_MAX_LONG_RULES
 
 
+# График со штриховкой: штриховка «заполняет» ячейки сетки (у ПХ 1975/02 IMG_0018, рис. 1 — 43 % ячеек при пороге
+# ``FLOOR_FILLED_CELLS`` 40 %), и правило «мало букв и пустые ячейки» его пропускало в таблицы. Если букв в краске
+# совсем мало (у графика 3.7 %, у таблицы на той же полосе 74 %) и строк текста внутри не больше
+# ``DRAWING_MAX_TEXT_LINES`` (подписи осей), это рисунок, сколько бы ячеек ни было заполнено.
+DRAWING_GLYPH_OF_INK = 0.06
+DRAWING_MAX_TEXT_LINES = 2
+
+
 def classify(
     kind: KindFeatures, signs: "Features | None", box: Box, dpi: int, long_rules: float = 0.0
 ) -> tuple[str, str]:
@@ -149,6 +157,10 @@ def classify(
     if signs is not None and signs.glyph_of_ink < FLOOR_GLYPH_OF_INK and signs.filled_cells < FLOOR_FILLED_CELLS:
         return KIND_DRAWING, (
             f"букв в краске {signs.glyph_of_ink:.0%}, заполнено ячеек {signs.filled_cells:.0%} — сетка графика или чертёж"
+        )
+    if signs is not None and signs.glyph_of_ink < DRAWING_GLYPH_OF_INK and signs.text_lines <= DRAWING_MAX_TEXT_LINES:
+        return KIND_DRAWING, (
+            f"букв в краске {signs.glyph_of_ink:.0%}, строк текста {signs.text_lines} — штриховка графика или чертёж"
         )
     if is_diagram(kind, box, dpi, long_rules):
         return KIND_DIAGRAM, (

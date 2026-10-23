@@ -14,7 +14,6 @@ from ocr_utils.page_layout.text_blocks import blocks as legacy
 from ocr_utils.page_layout.text_blocks.blocks import FALLBACK_ASPECT, FALLBACK_HEIGHT, BlockEnvelope, Row, pitch_of
 from ocr_utils.page_layout.text_blocks.smooth_sides import PUNCT_MM, EdgeKind, side_curve
 
-
 # Выровненная сторона: столько соседей (и не меньше этой доли) стоят на одной вертикали с таким допуском.
 ALIGN_MIN_ROWS = 3
 ALIGN_SHARE = 0.5
@@ -363,12 +362,19 @@ def _has_sides(rows: list[Row]) -> bool:
 
 
 def _within_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> bool:
-    """Лежит ли контур в рамке строк блока (края не уже концов осей) с полем ``PUNCT_MM``."""
+    """Лежит ли контур в рамке строк блока (края не уже концов осей) с полем ``PUNCT_MM``.
+
+    Верх и низ рамки — по самим осям строк, а не по их серединам: у наклонной или изогнутой строки ось на конце
+    выше (ниже) середины, и верх блока, идущий по ней, выходил из рамки по середине первой строки (ХиП 1991/01
+    IMG_0932, страница после первого выпрямления, наклон ~1.5°: угол на 3.1 мм выше рамки при допуске 2.5 мм), —
+    гладкая граница отвергалась, и блок уходил в ступенчатую с прямыми трендами, режущими текст.
+    """
     spans = [_axis_span(row) for row in rows]
     x0 = min(min(row.x0, span[0]) for row, span in zip(rows, spans))
     x1 = max(max(row.x1, span[1]) for row, span in zip(rows, spans))
-    y0 = min(row.y - row.height for row in rows)
-    y1 = max(row.y + row.height for row in rows)
+    axis_ys = [np.concatenate([[row.y], *(np.asarray(axis.points)[:, 1] for axis in row.axes)]) for row in rows]
+    y0 = min(float(ys.min()) - row.height for row, ys in zip(rows, axis_ys))
+    y1 = max(float(ys.max()) + row.height for row, ys in zip(rows, axis_ys))
     pad = mm_to_px(PUNCT_MM, dpi)
     return bool(
         polygon[:, 0].min() >= x0 - pad

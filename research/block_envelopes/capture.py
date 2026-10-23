@@ -121,7 +121,8 @@ def capture_page(key: str, pack_dir: Path, sharpened_dir: Path, records_dir: Pat
         analysis, _ = text_blocks(image, record, final["objects"], AxisKind.BODY)
     if spy.calls != 1:
         raise RuntimeError(f"{key}: blocks_of вызван {spy.calls} раз — полоса разбиралась по областям")
-    (axes, zones, gutters, width, ink, rules, dpi, smooth, coarse, dilate, leaders, barriers) = spy.args
+    # Хвост — режим сборки блоков (``blocks_mode``, добавлен после стенда): кэш его не хранит.
+    (axes, zones, gutters, width, ink, rules, dpi, smooth, coarse, dilate, leaders, barriers) = spy.args[:12]
     gray300 = image.gray_at(RENDER_DPI)
     gray = cv2.resize(gray300, (analysis.width, analysis.height), interpolation=cv2.INTER_AREA)
     return BlockInput(

@@ -186,3 +186,20 @@ def test_short_mode_leaves_plain_columns_alone():
     short = analyse_gray(page, InkEngine(gutter_mode=GutterMode.SHORT))
     assert len(short.gutters) == len(segmented.gutters)
     assert len(short.blocks) == len(segmented.blocks) == 2
+
+
+def test_dotted_gutter_trimmed_not_dropped():
+    """Межколонник, задевший внизу отточия таблицы, обрезается над ними; поле отточий по всей высоте — не межколонник."""
+    from ocr_utils.page_layout.text_blocks.columns import Gutter, _undotted_pieces
+    from ocr_utils.page_layout.text_blocks.leaders import Leader
+
+    dpi = 150.0
+    gutter = Gutter(points=((0.0, 352.0, 374.0), (600.0, 352.0, 374.0), (1200.0, 340.0, 374.0)))
+    # Отточия подписей таблицы — внизу (y 1070–1150), заходят в полосу межколонника.
+    table = [Leader(x0=200.0, x1=361.0, y=float(y), thickness=3.0, dots=8) for y in (1070, 1090, 1110, 1130, 1150)]
+    pieces = _undotted_pieces(gutter, table, dpi)
+    assert len(pieces) == 1
+    assert pieces[0].y0 == 0.0 and 1040 <= pieces[0].y1 < 1070
+    # Поле отточий по всей высоте (1971/10 с.93): чистых кусков не остаётся.
+    field = [Leader(x0=300.0, x1=420.0, y=float(y), thickness=3.0, dots=10) for y in range(20, 1200, 60)]
+    assert _undotted_pieces(gutter, field, dpi) == []

@@ -66,6 +66,17 @@ class LineAxis:
     body_points: np.ndarray | None = None
     # Прежняя ось по краске, если основной стала вторая (:func:`baseline_axis.use_body`).
     centre_points: np.ndarray | None = None
+    # На сколько вторая ось поднята над базовой линией (пиксели рабочей копии, вниз по y — плюс): база —
+    # ``body_points`` плюс этот сдвиг (:attr:`base_points`). ``None`` — базы нет (нет второй оси или строка из
+    # повёрнутой области: там сдвиг не вертикален в координатах страницы).
+    body_lift: float | None = None
+
+    @property
+    def base_points(self) -> np.ndarray | None:
+        """Базовая линия строки ``(M, 2)`` — по низу букв без выносных (:mod:`baseline_axis`); ``None`` — нет."""
+        if self.body_points is None or self.body_lift is None:
+            return None
+        return self.body_points + np.array([0.0, self.body_lift])
 
     @property
     def x0(self) -> float:

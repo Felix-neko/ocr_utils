@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
-from ocr_utils.page_layout.text_blocks.alignment import Alignment, alignment_of
+from ocr_utils.page_layout.text_blocks.alignment import Alignment, Side, alignment_of, cut_rows
 from ocr_utils.page_layout.text_blocks.baseline_axis import body_axes, extend_to_ink, use_body
 from ocr_utils.page_layout.text_blocks.axes_fix import fixed_axes
 from ocr_utils.page_layout.text_blocks.blocks import (
@@ -32,6 +32,7 @@ from ocr_utils.page_layout.text_blocks.metrics import pitch_of, points_without_m
 from ocr_utils.page_layout.orientation.detectors.ink_axis import glyph_mask
 from ocr_utils.page_layout.text_blocks.columns import gutters_of, mark_cut_lines, zones_of
 from ocr_utils.page_layout.text_blocks.leaders import leaders_mask, leaders_of
+from ocr_utils.page_layout.text_blocks.page_numbers import column_block, inside_numbers, leader_numbers, number_columns
 
 # Полоса строки для меры покрытия краски: ось ± столько её высот.
 BAND_HEIGHTS = 0.6
@@ -200,8 +201,6 @@ def _analyse_plain(
             blocks_mode,
         )
     result = engine.segment(gray300, dpi)
-    # Вторая ось (по базовой линии глифов) считается у всех строк сразу: ей нужны соседи.
-    axes = body_axes(axes_of(result.lines, dpi, smooth_line))
     # Куски заголовка во всю ширину, набранные через межколонник, помечаются до сборки блоков.
     work = _work_copy(gray300, dpi)
     # Отточия считаются один раз на разбор: они нужны и колонкам (поле точек — не межколонник), и
@@ -209,6 +208,9 @@ def _analyse_plain(
     page_leaders = list(result.leaders) if result.leaders else leaders_of(work, dpi)[0]
     gutters = result.gutters or gutters_of(work, dpi, page_leaders)
     ink = text_ink(gray300, dpi, work=work, leaders=page_leaders)
+    # Вторая ось (по базовой линии глифов) считается у всех строк сразу: ей нужны соседи; низы глифов — по полке
+    # нижнего профиля на краске текста.
+    axes = body_axes(axes_of(result.lines, dpi, smooth_line), ink, RENDER_DPI / dpi)
     # Вторая ось доходит до края краски строки — дефиса переноса, точки (их нет среди глифов).
     axes = extend_to_ink(axes, ink > 0, RENDER_DPI / dpi)
     if axis is AxisKind.BODY:
@@ -219,6 +221,17 @@ def _analyse_plain(
     # три колонки заметки слипались в один блок (1975/05 с.97, pero). Считаем сами по рендеру.
     zones = zones_of(gutters, height, width, dpi)
     mode = DEFAULT_BLOCKS_MODE if blocks_mode is None else BlocksMode(blocks_mode)
+    # Номера страниц за отточиями: оси, лежащие на них (3-значный номер длиннее 4 мм), в общий разбор не идут — номера
+    # соберутся в колонку после блоков.
+    # Отточия для номеров — вместе с редкими (шаг до 7 мм, :func:`leaders_of` с ``sparse``).
+    number_leaders = leaders_of(work, dpi, sparse=True)[0]
+    numbers = leader_numbers(ink, number_leaders, RENDER_DPI / dpi)
+    if len(number_columns(numbers, dpi)):
+        column_marks = [mark for column in number_columns(numbers, dpi) for mark in column]
+        axes = [axis for axis in axes if not inside_numbers(axis, column_marks, 2.0)]
+        numbers = column_marks
+    else:
+        numbers = []
     if mode is BlocksMode.SMOOTH:
         # Оси крупного набора, ушедшие наискось от корпуса (крупный курсив — 1971/08 IMG_0072_1L),
         # заменяются до сборки рядов: полосы строк заголовка иначе налезают друг на друга.
@@ -241,7 +254,14 @@ def _analyse_plain(
     # Участки перескока на соседнюю строку — по готовым рядам (им нужен шаг строк); в осях и рядах
     # блоков меры формы у таких осей пересчитываются без перескока.
     axes, blocks = marked_jumps(axes, blocks)
-    alignments = [alignment_of(block) for block in blocks]
+    # Ряды, обрезанные краем картинки (страница уходит в сгиб или за вырезку), выключку не мерят, а участки сторон
+    # у них — недостоверные: где кончается такая строка, неизвестно.
+    blocks = [mark_cut_rows(block, width) for block in blocks]
+    # Колонки номеров страниц оглавления — отдельными блоками (номера в 1–3 цифры оси не получают).
+    blocks = list(blocks) + [
+        column_block(column, len(blocks) + i, dpi) for i, column in enumerate(number_columns(numbers, dpi))
+    ]
+    alignments = [alignment_of(block, width, number_leaders) for block in blocks]
     share = ink_share(axes, ink, dpi)
     return PageAnalysis(
         name=name,
@@ -528,3 +548,26 @@ def analyse_pdf_page(
 
 
 __all__ = ["PageAnalysis", "Variant", "analyse_gray", "analyse_pdf_page", "ink_share", "render_page", "text_ink"]
+
+
+def mark_cut_rows(block: TextBlock, width: float) -> TextBlock:
+    """Блок, у гладкой огибающей которого участки сторон у обрезанных краем картинки рядов помечены недостоверными.
+
+    Args:
+        block: Блок.
+        width: Ширина разбираемой картинки, пиксели рабочей копии.
+
+    Returns:
+        Тот же блок; у ``SmoothEnvelope`` дополнены ``unreliable_left/right`` полосами ``row.y ± height / 2``.
+    """
+    envelope = block.envelope
+    if not hasattr(envelope, "unreliable_left"):
+        return block
+    spans = {}
+    for side, name in ((Side.LEFT, "unreliable_left"), (Side.RIGHT, "unreliable_right")):
+        cut = cut_rows(block, side, width)
+        own = [(row.y - row.height / 2.0, row.y + row.height / 2.0) for row, flag in zip(block.rows, cut) if flag]
+        spans[name] = tuple(sorted(list(getattr(envelope, name)) + own))
+    if not any(len(spans[name]) != len(getattr(envelope, name)) for name in spans):
+        return block
+    return replace(block, envelope=replace(envelope, **spans))

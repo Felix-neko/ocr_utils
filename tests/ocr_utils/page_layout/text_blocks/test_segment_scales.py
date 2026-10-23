@@ -118,3 +118,24 @@ def test_link_verdicts_name_the_reason():
     assert zn._verdict_of(left, _piece(10.0, 104.0, letters=5), seg.SCALES[0], [], None, ink, 2.0, seg._crosses) is (
         zn.LinkVerdict.OVERLAP
     )
+
+
+def test_candidates_keep_narrow_cut_letter():
+    """Узкий сгусток высотой с букву у края кадра (буква, срезанная сгибом) — кандидат в кусок; узкая высокая черта и
+    узкая галочка в поле — нет."""
+    import cv2
+
+    from ocr_utils.page_layout.text_blocks.segment import SCALES, candidates_of
+
+    # Строки статистики ``connectedComponentsWithStats``: x, y, ширина, высота, площадь; нулевая — фон.
+    stats = [[0, 0, 436, 1000, 0]]  # фон — весь кадр шириной 436 px
+    stats += [[20 + 40 * i, 100, 30, 11, 200] for i in range(10)]  # обычные сгустки строки
+    stats += [[430, 100, 4, 11, 30]]  # обрезанная «и» у края кадра: 4 × 11 px
+    stats += [[400, 80, 4, 40, 120]]  # вертикальная черта: узкая и высокая
+    stats += [[205, 130, 4, 11, 30]]  # узкая галочка в поле страницы, далеко от края
+    stats = np.array(stats, np.int32)
+    chosen = candidates_of(stats, SCALES[0], 150.0)
+    assert 11 in chosen
+    assert 12 not in chosen
+    assert 13 not in chosen
+    assert chosen == sorted(chosen, key=lambda i: stats[i, cv2.CC_STAT_LEFT])

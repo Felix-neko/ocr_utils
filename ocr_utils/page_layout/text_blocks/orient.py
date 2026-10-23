@@ -113,6 +113,7 @@ def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
         axis,
         points=points,
         body_points=_back_curve(axis.body_points, size, zone),
+        body_lift=axis.body_lift if not zone.sideways and zone.rotate_cw == 0 else None,
         centre_points=_back_curve(axis.centre_points, size, zone),
         # Боксы глифов после поворота на 90° уже не боксы: вторая ось посчитана в выпрямленном кадре.
         glyphs=None,

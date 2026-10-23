@@ -35,7 +35,6 @@ from ocr_utils.page_layout.text_blocks.columns import inside_gutter
 from ocr_utils.page_layout.text_blocks.smooth_envelope import _glyph, envelope_smooth
 from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, axes_kegl, barrier_between, same_baseline
 
-
 # Штрих текста, а не разделитель: линейка целиком в полосе строки — от стольких высот над осью (верх
 # крупных букв) до стольких под ней (подчёркивание).
 INSIDE_HEIGHTS = 0.6
@@ -55,6 +54,15 @@ REJOIN_STYLE = SAME_STYLE_DISTANCE
 # меньшей высоты и разнесены по x не дальше стольких высот строки.
 SAME_LINE_OVERLAP = 0.5
 SAME_LINE_GAP_HEIGHTS = 1.5
+# Разный набор кусков на одной высоте (:func:`_different_type`) решается по кеглю, только если у обоих кусков не
+# меньше стольких глифов; основной кегль — до стольких мм (выше — заголовок, защита просвета по меньшему кеглю).
+TYPE_MIN_GLYPHS = 5
+# Широкий пробел строки по формату: куски на одной высоте сливаются и при просвете до стольких высот строки, если
+# над и под просветом в пределах стольких высот (через одну короткую строку — конец записи) идут строки через
+# весь просвет (:func:`_bridged`).
+SAME_LINE_WIDE_GAP_HEIGHTS = 4.0
+BRIDGE_ROWS_HEIGHTS = 3.5
+BODY_KEGL_MAX_MM = 2.5
 
 
 def underline_free(barriers, axes: list) -> object:
@@ -125,11 +133,16 @@ def merge_same_line(rows: list[Row], dpi: float, barriers=None, gutters: list | 
                 if overlap < SAME_LINE_OVERLAP * min(a.height, b.height):
                     continue
                 gap = max(a.x0, b.x0) - min(a.x1, b.x1)
-                if gap > SAME_LINE_GAP_HEIGHTS * max(a.height, b.height):
+                limit = SAME_LINE_GAP_HEIGHTS * max(a.height, b.height)
+                bridged = _bridged(a, b, out)
+                if gap > limit and not (gap <= SAME_LINE_WIDE_GAP_HEIGHTS * max(a.height, b.height) and bridged):
                     continue
                 if style_distance(a, b) >= SAME_STYLE_DISTANCE:
                     continue
-                if _divided(a, b, barriers, gutters):
+                # Просвет, перекрытый строками сверху и снизу, — пробел внутри строки: ни межколонник (столбец широких
+                # пробелов библиографии по формату принимался за межколонник — ХиП 1991/01 IMG_1016), ни разный кегль
+                # (жирная фамилия автора записи в начале строки — 01/IMG_1030) её не делят; линейка-барьер — делит.
+                if _divided(a, b, barriers, None if bridged else gutters, check_type=not bridged):
                     continue
                 out[i] = _joined(a, b)
                 del out[j]
@@ -140,7 +153,42 @@ def merge_same_line(rows: list[Row], dpi: float, barriers=None, gutters: list | 
     return sorted(out, key=lambda row: row.y)
 
 
-def _divided(a: Row, b: Row, barriers, gutters: list | None) -> bool:
+def _bridged(a: Row, b: Row, rows: list[Row]) -> bool:
+    """Перекрыт ли просвет между кусками строки соседними строками сверху и снизу — просвет не канал колонок.
+
+    Строка по формату с широкими пробелами (библиография: «формы, методы, перспективы.— Л.: Лениздат, 1990.— 144 с.»,
+    ХиП 1991/01 IMG_1016 — просвет 6.7 мм, три высоты строки) рвётся на куски шире ``SAME_LINE_GAP_HEIGHTS``. Если
+    над просветом и под ним (не дальше ``BRIDGE_ROWS_HEIGHTS`` высот) идут строки через весь просвет, это не
+    межколонник и не графа таблицы, а пробел внутри строки.
+
+    Args:
+        a, b: Куски на одной высоте.
+        rows: Все ряды.
+
+    Returns:
+        ``True`` — просвет перекрыт строками и сверху, и снизу.
+    """
+    # Куски разной высоты строки — не одна строка с широкими пробелами: номер выпуска «4-й» (ось 23 px) рядом с
+    # «СНАБЖЕНИЕ» шапки журнала (ось 60 px) считался перекрытым строками «Год издания» и «ОРГАН…» и сливался с ним
+    # в ряд без сравнения набора (1969/06 IMG_0105_2R).
+    heights = sorted((max(axis.height for axis in a.axes), max(axis.height for axis in b.axes)))
+    if heights[1] >= ROW_GLYPH_STRONG_RATIO * heights[0]:
+        return False
+    left, right = (a, b) if a.x0 <= b.x0 else (b, a)
+    gx0, gx1 = left.x1, right.x0
+    y, reach = (a.y + b.y) / 2.0, BRIDGE_ROWS_HEIGHTS * max(a.height, b.height)
+    above = below = False
+    for row in rows:
+        if row is a or row is b or row.x0 > gx0 or row.x1 < gx1:
+            continue
+        if y - reach <= row.y < y - 0.5 * row.height:
+            above = True
+        elif y + 0.5 * row.height < row.y <= y + reach:
+            below = True
+    return above and below
+
+
+def _divided(a: Row, b: Row, barriers, gutters: list | None, check_type: bool = True) -> bool:
     """Разделяет ли два куска на одной высоте линейка-барьер, межколонник или разный кегль через пустоту.
 
     Разный кегль (:func:`_different_type`) — подпись автора рядом с заголовком: ряды налезают по краске, и
@@ -153,6 +201,7 @@ def _divided(a: Row, b: Row, barriers, gutters: list | None) -> bool:
         a, b: Ряды.
         barriers: Линейки-барьеры (``barriers.BarrierLines``) или ``None``.
         gutters: Межколонники или ``None``.
+        check_type: Сравнивать набор кусков (:func:`_different_type`).
 
     Returns:
         ``True`` — ряды не сливать.
@@ -168,7 +217,7 @@ def _divided(a: Row, b: Row, barriers, gutters: list | None) -> bool:
             return True
     if barrier_between(left.axes, right.axes, y, y, barriers):
         return True
-    return _different_type(left, right)
+    return check_type and _different_type(left, right)
 
 
 def _different_type(left: Row, right: Row) -> bool:
@@ -188,14 +237,35 @@ def _different_type(left: Row, right: Row) -> bool:
         ``True`` — ряды разного набора.
     """
     gap = min(axis.x0 for axis in right.axes) - max(axis.x1 for axis in left.axes)
+    left_glyphs, right_glyphs = axes_glyphs(left.axes), axes_glyphs(right.axes)
+    # Кегль по горстке глифов (тире, точка, обломок слова) не мера набора: обломок «—» в 3 глифа с кеглем 0.68 мм
+    # отделялся от своей строки библиографии (ХиП 1991/01 IMG_1016), строка оставалась тремя кусками, и сторона блока
+    # по ним не строилась.
+    if min(_glyph_count(left_glyphs), _glyph_count(right_glyphs)) < TYPE_MIN_GLYPHS:
+        # Высота осей сравнивается и у горстки глифов: номер выпуска «4-й» (3 глифа, ось 23 px) рядом с «СНАБЖЕНИЕ»
+        # шапки журнала (ось 60 px) иначе сливался с ним в ряд (1969/06 IMG_0105_2R). У обломка строки библиографии
+        # высота оси — высота своей строки, разницы нет.
+        heights = sorted((max(axis.height for axis in left.axes), max(axis.height for axis in right.axes)))
+        return heights[1] >= ROW_GLYPH_STRONG_RATIO * heights[0] and gap > mm_to_px(ROW_GLYPH_STRONG_GAP_MM, WORK_DPI)
     low, high = sorted((axes_kegl(left.axes), axes_kegl(right.axes)))
     if low <= 0:
         return False
-    if gap <= SAME_BASELINE_MAX_GAP_KEGL * low and same_baseline(axes_glyphs(left.axes), axes_glyphs(right.axes), low):
+    # Защита «одна базовая линия»: в наборе основного кегля просвет меряется кеглем большего куска. У кусков
+    # одной строки кегль меньшего может быть занижен обломками глифов (бледное начало абзаца после выравнивания
+    # освещения: глифы 0.2–1.0 мм при кегле строки 1.9 мм, ХиП 1991/01 IMG_0937), и обычный пробел между словами
+    # (2 мм) превышал защиту по меньшему кеглю. Подпись рядом с заголовком (кегль заголовка крупнее основного) —
+    # по-прежнему по меньшему кеглю.
+    guard = high if high <= mm_to_px(BODY_KEGL_MAX_MM, WORK_DPI) else low
+    if gap <= SAME_BASELINE_MAX_GAP_KEGL * guard and same_baseline(left_glyphs, right_glyphs, low):
         return False
     if high >= ROW_GLYPH_RATIO * low and gap > mm_to_px(ROW_GLYPH_GAP_MM, WORK_DPI):
         return True
     return high >= ROW_GLYPH_STRONG_RATIO * low and gap > mm_to_px(ROW_GLYPH_STRONG_GAP_MM, WORK_DPI)
+
+
+def _glyph_count(glyphs) -> int:
+    """Число глифов группы (``None`` — ноль)."""
+    return 0 if glyphs is None else len(glyphs)
 
 
 def _joined(a: Row, b: Row) -> Row:
@@ -495,6 +565,10 @@ def smooth_groups(
         for group in column_groups(rows, span, rules, dpi, body_height, barriers):
             groups.extend(reach_components(merge_same_line(group, dpi, barriers, gutters)))
     groups = resolve_shared_rows(rejoin(groups, rules, dpi, barriers, body_height))
+    # Куски одной строки, попавшие в одну группу только после склейки ложных разрезов (до неё они были в разных
+    # группах и сливаться не могли): строка библиографии с широкими пробелами шла в блок двумя рядами на одной
+    # высоте, и у блока не строились стороны (ХиП 1991/01 IMG_1016).
+    groups = [merge_same_line(rows, dpi, barriers, gutters) for rows in groups]
     ordered = sorted(groups, key=lambda rows: (rows[0].y, _extent(rows)[0]))
     return [((int(_extent(rows)[0]), int(_extent(rows)[1])), rows) for rows in ordered]
 

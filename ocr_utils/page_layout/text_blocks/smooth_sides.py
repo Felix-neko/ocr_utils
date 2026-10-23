@@ -11,7 +11,7 @@ from scipy.sparse.linalg import spsolve
 
 from ocr_utils.page_layout import mm_to_px
 from ocr_utils.page_layout.text_blocks.alignment import ALIGN_TOL_MM
-from ocr_utils.page_layout.text_blocks.sides import _fit_robust, _statuses, aligned_runs
+from ocr_utils.page_layout.text_blocks.sides import PARABOLA_GAIN_ROWS, _fit_robust, _statuses, aligned_runs
 
 # Вынос края строки наружу за сторону не больше этого — висячая пунктуация, дефис, кавычка, соринка у
 # конца строки (1966/01 IMG_0004_2R, «поставленных»: 1.7 мм — ось дотянута до пятнышка за словом):
@@ -31,6 +31,12 @@ SMOOTH_PITCHES = 8.0
 ANCHOR_WEIGHT = 1e-4
 # Сторона выровнена и без серий, если на кривой не меньше этой доли строк (висячий отступ в оглавлении).
 HALF_ON_SHARE = 0.5
+# Устойчивая кривая стороны строится по краям не дальше этого внутрь от наружного края соседей (±OUTER_WINDOW строк),
+# мм: концы абзацев и строки без висячего знака её не тянут внутрь (:func:`_outer_rows`).
+OUTER_KEEP_MM = 3.0
+OUTER_WINDOW = 3
+# ...или если на кривой не меньше этой доли строк, не ушедших внутрь (набор по формату с короткими абзацами).
+FLUSH_ON_SHARE = 0.75
 # Шаг сетки стороны по высоте, пиксели рабочей копии.
 GRID_STEP_PX = 1.0
 
@@ -116,6 +122,36 @@ def _clusters(us: np.ndarray, limit: float) -> list[tuple[int, int]]:
     return out
 
 
+def _on_count(coef: np.ndarray, ys: np.ndarray, us: np.ndarray, tol: float) -> int:
+    """Сколько краёв строк лежит на кривой ``coef`` с допуском ``tol`` (пиксели)."""
+    return int((np.abs(us - np.polyval(coef, ys)) <= tol).sum())
+
+
+def _outer_rows(ys: np.ndarray, us: np.ndarray, dpi: float) -> tuple[np.ndarray, np.ndarray]:
+    """Края строк для устойчивой кривой стороны — без ушедших внутрь дальше ``OUTER_KEEP_MM`` от наружного края соседей.
+
+    Устойчивая кривая (медиана сдвигов у Тейла—Сена) уходила внутрь, когда коротких строк в блоке почти половина:
+    в библиографии по формату с записями в 2–3 строки (ХиП 1991/01 IMG_1030, итог) из девяти правых краёв четыре —
+    концы записей (22–93 мм при колонке 110 мм), ещё два без висячего тире (105.6–105.9 мм); кривая встала на 105.6 мм,
+    и доля строк на ней — 0.40, сторона «рваная». Наружный край соседей — максимум ``us`` по ±``OUTER_WINDOW`` строкам.
+    Если отобранных меньше трёх — берутся все края. Кривая по ним — основной кандидат; кривая по всем краям берётся,
+    если вписывает заметно больше строк: на стороне с разбросом краёв около миллиметра кривая по наружным уходила
+    к верхней кучке краёв (01/IMG_1021, итог, левая страница: 7 строк на кривой против 11).
+
+    Args:
+        ys: Середины строк сверху вниз.
+        us: Края строк в «наружной» координате.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``(ys, us)`` отобранных строк.
+    """
+    keep_px = mm_to_px(OUTER_KEEP_MM, dpi)
+    outer = np.array([us[max(0, i - OUTER_WINDOW) : i + OUTER_WINDOW + 1].max() for i in range(us.size)])
+    keep = us >= outer - keep_px
+    return (ys[keep], us[keep]) if keep.sum() >= 3 else (ys, us)
+
+
 def side_curve(
     ys: np.ndarray, us: np.ndarray, tops: np.ndarray, bottoms: np.ndarray, pitch: float, dpi: float
 ) -> SideCurve:
@@ -152,7 +188,14 @@ def side_curve(
     core = None
     member = np.zeros(n, dtype=bool)
     if n >= 3:
-        coef, fitted = _fit_robust(ys, us, mm_to_px(ALIGN_TOL_MM, dpi))
+        # Кривая по наружным краям (:func:`_outer_rows`); по всем краям — только если на неё ложится заметно больше строк
+        # (на ``PARABOLA_GAIN_ROWS``): у библиографии кривая по всем краям шла косо через концы записей и вписывала на
+        # одну строку больше (01/IMG_1030, итог: 109.9 → 93.6 мм, 4 строки против 3).
+        tol_px = mm_to_px(ALIGN_TOL_MM, dpi)
+        outer_coef, all_coef = _fit_robust(*_outer_rows(ys, us, dpi), tol_px)[0], _fit_robust(ys, us, tol_px)[0]
+        gain = _on_count(all_coef, ys, us, tol_px) - _on_count(outer_coef, ys, us, tol_px)
+        coef = all_coef if gain >= PARABOLA_GAIN_ROWS else outer_coef
+        fitted = np.polyval(coef, ys)
         # Остаток «внутрь — плюс» в мм: у наружной координаты внутрь — меньше.
         resid_mm = (fitted - us) * 25.4 / dpi
         statuses = _statuses(resid_mm)
@@ -163,7 +206,12 @@ def side_curve(
         # (1968/12 IMG_0149_1L). Сторона выровнена и тогда, когда на кривой не меньше половины строк
         # и никто не торчит наружу дальше пунктуации: строки внутрь между ними добиваются ниже.
         outward = (us - fitted) > punct
-        if not member.any() and on_all.sum() >= 3 and on_all.mean() >= HALF_ON_SHARE and not outward.any():
+        # Набор по формату с короткими абзацами (библиография: запись в 2–3 строки, ХиП 1991/01 IMG_1030) — строки
+        # на кривой разделены концами записей, серий нет, и строк на кривой меньше половины блока; но среди строк,
+        # не ушедших внутрь (не «отступ»), на кривой почти все. Тогда сторона тоже выровнена.
+        inward = np.array([status.value == "indent" for status in statuses])
+        flush = on_all.sum() >= 3 and on_all.sum() >= FLUSH_ON_SHARE * max(int((~inward).sum()), 1)
+        if not member.any() and (on_all.mean() >= HALF_ON_SHARE or flush) and on_all.sum() >= 3 and not outward.any():
             member = on_all.copy()
         on = on_all & member
         if on.sum() >= 3:

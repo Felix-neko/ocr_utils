@@ -97,3 +97,37 @@ def test_overlapping_pieces_are_not_linked():
     assert (
         zones._verdict_of(rule, next_word, scale, [], [], None, 2.0, lambda *args: False) is zones.LinkVerdict.OVERLAP
     )
+
+
+def test_cut_rows_touch_image_edge():
+    """Ряд, чья краска подходит к краю картинки ближе 0.3 мм, — обрезан; ряд в 1 мм от края — нет."""
+    from types import SimpleNamespace
+
+    from ocr_utils.page_layout.text_blocks.alignment import Side, cut_rows
+
+    dpi = 150.0
+    rows = [SimpleNamespace(x0=0.5, x1=600.0), SimpleNamespace(x0=20.0, x1=683.5), SimpleNamespace(x0=20.0, x1=678.0)]
+    block = SimpleNamespace(rows=rows, dpi=dpi)
+    assert cut_rows(block, Side.RIGHT, 684.0).tolist() == [False, True, False]
+    assert cut_rows(block, Side.LEFT, 684.0).tolist() == [True, False, False]
+    assert not cut_rows(block, Side.RIGHT, None).any()
+
+
+def _block(rows: list) -> SimpleNamespace:
+    """Блок с прямыми вертикальными сторонами по медианам краёв рядов (для ``side_stats``)."""
+    ys = np.array([rows[0].y - 10.0, rows[-1].y + 10.0])
+    left = np.column_stack([np.full(2, np.median([r.x0 for r in rows])), ys])
+    right = np.column_stack([np.full(2, np.median([r.x1 for r in rows])), ys])
+    envelope = SimpleNamespace(core_left=left, core_right=right, left=left, right=right)
+    return SimpleNamespace(rows=rows, dpi=DPI, envelope=envelope, envelope_coarse=envelope)
+
+
+def test_two_matching_rows_do_not_make_a_side():
+    """Три ряда, последний короче (конец абзаца): правую сторону держат два ряда — не выровнена; шесть — выровнена."""
+    from ocr_utils.page_layout.text_blocks.alignment import Side, side_stats
+
+    short = _block(_rows([(100, 337), (100, 334), (100, 309)]))
+    assert not side_stats(short, Side.RIGHT).aligned
+    assert side_stats(short, Side.LEFT).aligned
+    long = _block(_rows([(100, 337)] * 5 + [(100, 250)]))
+    assert side_stats(long, Side.RIGHT).aligned

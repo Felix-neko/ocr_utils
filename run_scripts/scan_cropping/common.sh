@@ -33,6 +33,23 @@ SPREAD_LINES_ROOT="/mnt/hotstore/scan_processing/spread_lines"
 HP_1991_02_ROOT="/mnt/dump3/yandex_disk_linux_baby_zergling/Пробное/Отобранное/Хозяйство и право/1991/02 оплачено"
 # Прогон v2 по этому выпуску: итоги, кэш и оверлеи — на SSD hotstore.
 HP_1991_02_WORK="${HP_1991_02_WORK:-$SCAN_CROPPING_V2_ROOT/hp_1991_02}"
+# Весь 1991 год того же журнала (12 выпусков «NN оплачено…», 966 кадров) — Я.Диск, только чтение; прогон v2 по
+# выпускам — на SSD hotstore, отдельно от hp_1991_02.
+HP_1991_ROOT="/mnt/dump3/yandex_disk_linux_baby_zergling/Пробное/Отобранное/Хозяйство и право/1991"
+HP_1991_WORK="${HP_1991_WORK:-$SCAN_CROPPING_V2_ROOT/hp_1991}"
+# Прогоны v2 с подгоночными рамками страниц сплайнами (прежний и с узлами на изгибах) на шаге 07_lines: итоги и
+# оверлеи — отдельно по наборам, кэш шагов — прежних прогонов (рамки на него не влияют).
+SPLINE_BENDS_WORK="${SPLINE_BENDS_WORK:-$SCAN_CROPPING_V2_ROOT/spline_bends}"
+# Те же наборы с полосой-вклейкой и подгоночными областями страниц (сплайн с узлами, у корешка — линия корешка, у полосы —
+# до вспомогательных линий и отрезок через полосу) на шаге 07_lines и склейкой по частям страниц у щели.
+SPLINE_FRAMES_WORK="${SPLINE_FRAMES_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames}"
+# Итоги spline_frames, выпрямленные по подгоночным областям страниц (research/page_rectify): выборка и все кадры — SSD.
+SPLINE_RECTIFIED_SAMPLE_WORK="${SPLINE_RECTIFIED_SAMPLE_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_rectified_sample}"
+SPLINE_RECTIFIED_WORK="${SPLINE_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_rectified}"
+# То же плюс выравнивание освещения и второе преобразование по тексту (research/page_rectify text-run) — SSD.
+TEXT_RECTIFIED_SAMPLE_WORK="${TEXT_RECTIFIED_SAMPLE_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified_sample}"
+TEXT_RECTIFIED_WORK="${TEXT_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified}"
+
 
 # Боевой прогон v2 пака-6 целиком (6-я версия ключей, 2026-10-15/16, 2480 кадров) — вход стенда research/page_cutting.
 PACK6_V6_WORK="$SCAN_CROPPING_V2_ROOT/pack6_v6"

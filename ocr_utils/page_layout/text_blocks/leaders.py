@@ -37,6 +37,11 @@ LEADER_MIN_DOTS = 4
 LEADER_MIN_LENGTH_MM = 8.0
 # Точки одной цепочки одного кегля; разнокалиберная россыпь цепочкой не считается.
 LEADER_SIZE_RATIO = 1.6
+# Редкие отточия (второй проход :func:`leaders_of`): шаг до стольких мм, не меньше стольких точек, размах шагов не
+# больше такой доли медианного шага (равномерность — признак отточия, а не случайной россыпи).
+SPARSE_STEP_MAX_MM = 7.0
+SPARSE_MIN_DOTS = 5
+SPARSE_STEP_SPREAD = 0.25
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,7 @@ def dot_boxes(work: np.ndarray, dpi: float = WORK_DPI) -> tuple[np.ndarray, np.n
     return (np.asarray(out, dtype=np.float64) if out else np.zeros((0, 5), dtype=np.float64)), labels
 
 
-def leaders_of(work: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[Leader], np.ndarray]:
+def leaders_of(work: np.ndarray, dpi: float = WORK_DPI, sparse: bool = False) -> tuple[list[Leader], np.ndarray]:
     """Отточия страницы и маска их точек.
 
     Цепочка наращивается ВДОЛЬ СТРОКИ: от каждой точки ищется следующая правее, не дальше
@@ -102,6 +107,9 @@ def leaders_of(work: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[Leader], n
     Args:
         work: Серая рабочая копия страницы.
         dpi: Её разрешение.
+        sparse: Искать ещё и редкие отточия (второй проход): только для колонки номеров оглавления
+            (:mod:`page_numbers`) — в краску текста, межколонники и сборку строк они не идут, иначе записи оглавления
+            резались на блоки (1972/09 IMG_0105_1L).
 
     Returns:
         Пара ``(отточия, маска)``: маска — ``uint8`` размером с ``work``, в ней только точки
@@ -112,12 +120,42 @@ def leaders_of(work: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[Leader], n
     if boxes.shape[0] < LEADER_MIN_DOTS:
         return [], mask
     tolerance = mm_to_px(LEADER_ROW_TOL_MM, dpi)
-    step_max = mm_to_px(LEADER_STEP_MAX_MM, dpi)
     boxes = boxes[np.argsort(boxes[:, 1])]
-    xs = boxes[:, 1]
     used = np.zeros(boxes.shape[0], dtype=bool)
     out: list[Leader] = []
     kept: list[int] = []
+    for chain in _chains(boxes, used, mm_to_px(LEADER_STEP_MAX_MM, dpi), tolerance):
+        accepted = _accept([boxes[index] for index in chain], dpi, kept)
+        out.extend(accepted)
+        if not accepted:
+            used[chain] = False  # точки отвергнутой цепочки свободны для второго прохода
+    # Второй проход — редкие отточия (шаг до ``SPARSE_STEP_MAX_MM``) из точек, не вошедших в частые: только с
+    # РАВНОМЕРНЫМ шагом и не короче ``SPARSE_MIN_DOTS`` точек. У оглавления 1968/04 IMG_0052_1L шаг точек 5.5 мм, и
+    # отточий не находилось вовсе. Отвергнутые цепочки точки не забирают: ``used`` откатывается.
+    for chain in _chains(boxes, used, mm_to_px(SPARSE_STEP_MAX_MM, dpi), tolerance) if sparse else []:
+        steps = np.diff([boxes[index][1] for index in chain])
+        regular = len(chain) >= SPARSE_MIN_DOTS and np.ptp(steps) <= SPARSE_STEP_SPREAD * float(np.median(steps))
+        accepted = _accept([boxes[index] for index in chain], dpi, kept) if regular else []
+        out.extend(accepted)
+    if kept:
+        mask[np.isin(labels, kept)] = 255
+    return out, mask
+
+
+def _chains(boxes: np.ndarray, used: np.ndarray, step_max: float, tolerance: float) -> list[list[int]]:
+    """Цепочки точек вдоль строки (наращивание от точки к ближайшей следующей того же размера), ``used`` пополняется.
+
+    Args:
+        boxes: Точки ``(index, cx, cy, w, h)``, отсортированные по x.
+        used: Флаги уже занятых точек (меняются на месте — общий учёт двух проходов).
+        step_max: Наибольший шаг по x, px.
+        tolerance: Допуск по y от предыдущей точки, px.
+
+    Returns:
+        Цепочки индексов в ``boxes``.
+    """
+    xs = boxes[:, 1]
+    chains = []
     for head in range(boxes.shape[0]):
         if used[head]:
             continue
@@ -125,8 +163,7 @@ def leaders_of(work: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[Leader], n
         used[head] = True
         while True:
             last = boxes[chain[-1]]
-            # Кандидаты — только точки в окне по x: список отсортирован, поэтому окно ищется
-            # двоичным поиском, а не перебором всех точек страницы.
+            # Кандидаты — только точки в окне по x: список отсортирован, окно ищется двоичным поиском.
             lo = int(np.searchsorted(xs, last[1], side="right"))
             hi = int(np.searchsorted(xs, last[1] + step_max, side="right"))
             best = None
@@ -145,10 +182,8 @@ def leaders_of(work: np.ndarray, dpi: float = WORK_DPI) -> tuple[list[Leader], n
                 break
             chain.append(best)
             used[best] = True
-        out.extend(_accept([boxes[index] for index in chain], dpi, kept))
-    if kept:
-        mask[np.isin(labels, kept)] = 255
-    return out, mask
+        chains.append(chain)
+    return chains
 
 
 def _accept(chain: list[np.ndarray], dpi: float, kept: list[int]) -> list[Leader]:

@@ -45,6 +45,22 @@ SMOOTH_XH = 4.0
 # Односторонний отсев низов (доли высоты строчной): ниже кривой — выносной («р», «у», запятая,
 # нижний индекс), выше — верхний индекс, тире, дефис, кавычка.
 DESCENDER_XH = 0.22
+# У мелкого глифа (ниже ``TOP_VOTE_MIN_XH`` строчной: запятая, хвост «;», точка, тире, дефис, «−», «°») допуск
+# отклонения низа от опоры в обе стороны — столько строчных: на базе стоит только точка, а запятая висит под базой
+# на 0.2–0.3 строчной, тире и дефис — над ней на 0.3 (общие допуски их пропускали, и база на концах строк «…ру,»,
+# «— Тире…», «…пере-» уходила на 0.2–0.5 мм).
+SMALL_TOLERANCE_XH = 0.08
+# Полка нижнего профиля глифа (:func:`glyph_bottoms`, приём Tesseract ``C_BLOB::EstimateBaselinePosition``): ищется не
+# выше стольких строчных над низом рамки; полка должна быть длиннее (по числу столбцов) полосы у самого низа рамки во
+# столько раз; ширина полосы уровня — столько пикселей рендера (уровни y−1…y). Хвосты, ради которых полка нужна, ниже
+# базы на 0.19 (курсивная «Н») — 0.3 («Ц») строчной; при 0.5 полкой становилась нижняя перекладина петли прописной
+# «Р» (на полвысоты над низом), база строки заголовка подскакивала и строки расходились по блокам (1973/02
+# IMG_0058_1L). Ножку «р» отсекает правило «выносной по верху» в :func:`fit_baseline`.
+SHELF_MAX_XH = 0.3
+# Полка подменяет низ рамки только у глифа, чей низ ниже опорной прямой строки больше стольких строчных.
+SHELF_HANG_XH = 0.1
+SHELF_RATIO = 1.5
+SHELF_BAND_PX = 2
 RAISED_XH = 0.30
 # Первый отсев — по МЕСТНОЙ МЕДИАНЕ низов соседних глифов в окне ±``LOCAL_WINDOW_XH`` строчных:
 # её не сдвигает и половина выносных, а крайний глиф строки («р», запятая) иначе стягивал к себе
@@ -219,12 +235,16 @@ def _solve(
     return np.asarray(spsolve(system.tocsc(), rhs), dtype=np.float64)
 
 
-def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit | None:
+def fit_baseline(
+    axis: LineAxis, x_height: float | None = None, bottoms_of_glyphs: np.ndarray | None = None
+) -> BaselineFit | None:
     """Базовая линия строки по низам и верхам её глифов (первый проход, без соседей).
 
     Args:
         axis: Ось строки с глифами (``axis.glyphs``).
         x_height: Высота строчной; ``None`` — по глифам строки (:func:`line_x_height`).
+        bottoms_of_glyphs: Низы глифов по полке нижнего профиля (:func:`glyph_bottoms`, по одному на глиф);
+            ``None`` — низы рамок.
 
     Returns:
         :class:`BaselineFit` или ``None``, если глифов нет или принятых низов слишком мало.
@@ -238,6 +258,9 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     heights = glyphs[:, 3] - glyphs[:, 1]
     usable = heights <= BRIDGE_XH * x_h
     centres = 0.5 * (glyphs[usable, 0] + glyphs[usable, 2])
+    # Низ глифа — низ рамки; полка нижнего профиля (``bottoms_of_glyphs``) заменяет его ниже, только у глифа с хвостом
+    # под строкой.
+    lows = glyphs[:, 3].astype(np.float64)
     # Два голоса за базовую линию от каждого глифа: его низ и его верх, опущенный на высоту
     # строчной. Низ врёт у выносных вниз («р», запятая), верх — у прописных, цифр и выносных вверх;
     # отсев у обоих один и тот же, односторонний (ниже кривой — выносной или точка с тире, выше —
@@ -247,7 +270,7 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     # верх не лежит на линии строчных (индекс «м²» тянул ось на 4 px вверх).
     tall = heights[usable] >= TOP_VOTE_MIN_XH * x_h
     xs = np.concatenate([centres, centres[tall]])
-    bottoms = np.concatenate([glyphs[usable, 3], glyphs[usable, 1][tall] + x_h]).astype(np.float64)
+    bottoms = np.concatenate([lows[usable], glyphs[usable, 1][tall] + x_h]).astype(np.float64)
     # Вес голоса: мелкий глиф (индекс, тире, точка) голосует низом слабо — у конца строки из «б»,
     # «м²» и точки нормальных строчных нет, и равные голоса индексов перетягивали базу вверх.
     weights = np.concatenate([np.where(tall, 1.0, SMALL_GLYPH_WEIGHT), np.ones(int(tall.sum()))])
@@ -255,7 +278,21 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     tops = np.concatenate([np.zeros(centres.size, dtype=bool), np.ones(int(tall.sum()), dtype=bool)])
     # Опора первого отсева — строчные без выносных: у них оба голоса согласны.
     x_class = np.abs(heights[usable] - x_h) <= X_CLASS_TOLERANCE * x_h
-    reference = (centres[x_class], glyphs[usable, 3][x_class].astype(np.float64))
+    # Опора — только строчные, очищенные проверкой «без себя» по робастной прямой. Высокие глифы (прописные, цифры) в
+    # опору не берутся: среди них и «ф» с выносом вверх и вниз, и в заголовке из двух строк («…гофрированного
+    # картона», 1970/02 IMG_0095_1L) её низ уводил опору, строки выпадали из блоков. Цена — строка почти из одних
+    # знаков и цифр («2 × 3 < 4 > 0»), где опору составляют знаки над базой; в тексте такая редкость, формулы стенд
+    # выпрямления исключает областями.
+    reference = _clean_reference(centres[x_class], lows[usable][x_class], x_h)
+    if bottoms_of_glyphs is not None:
+        # Полка заменяет низ рамки только у глифа, чей низ уходит ниже опорной прямой больше SHELF_HANG_XH строчной:
+        # это хвосты (курсивная «Н», «Ц»), которые полка и должна снять. У прочих глифов полка находила то, чего нет:
+        # у прописных заголовка — перекладины и петли, и разбивка строк заголовка на ряды и блоки менялась (1973/02
+        # IMG_0058_1L: заголовок в две строки распадался на два блока).
+        hang = lows[usable] - _reference_at(centres, reference, lows[usable]) > SHELF_HANG_XH * x_h
+        shelf = np.asarray(bottoms_of_glyphs, np.float64)[usable]
+        lows_u = np.where(hang, shelf, lows[usable])
+        bottoms[: centres.size] = lows_u
     if centres.size < MIN_SAMPLES:
         return None
     step = mm_to_px(GRID_STEP_MM, axis.dpi)
@@ -269,6 +306,17 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
     anchor = np.interp(grid, axis.points[:, 0], axis.points[:, 1]) + x_h / 2.0
     stiffness = (SMOOTH_XH * x_h / step) ** 4 / max(xs.size / grid.size, 1e-3) * 1e-2
     kept = _local_kept(xs, bottoms, weights, x_h, reference, tops)
+    # Буква с выносным вниз («у», «р», «д», «ф») узнаётся по своему верху: если голос верха принят (верх на линии
+    # строчных), а низ уходит ниже базы по этому верху больше допуска выносного, низ не голосует. Без этого у конца
+    # строки, где опорная прямая продлена за последнюю строчную и уходит на 1–2 px, низ «у» проходил допуск.
+    n_low = int(usable.sum())
+    top_index = np.flatnonzero(tall)
+    hanging = np.zeros(xs.size, dtype=bool)
+    hanging[top_index] = kept[n_low:] & (bottoms[top_index] - bottoms[n_low:] > DESCENDER_XH * x_h)
+    # Мелкий глиф голосует, только если стоит на опоре (точка); запятая под ней и тире, дефис, знаки над ней — нет.
+    small = np.concatenate([~tall, np.zeros(int(tall.sum()), dtype=bool)])
+    off = np.abs(bottoms - _reference_at(xs, reference, bottoms))
+    kept = kept & ~hanging & ~(small & (off > SMALL_TOLERANCE_XH * x_h))
     if kept.sum() < MIN_SAMPLES:
         return None
     base = _solve(grid, xs, bottoms, kept * weights, stiffness, anchor=anchor)
@@ -282,6 +330,61 @@ def fit_baseline(axis: LineAxis, x_height: float | None = None) -> BaselineFit |
             return None
         base = _solve(grid, xs, bottoms, kept * weights, stiffness, anchor=anchor)
     return BaselineFit(grid=grid, base=base, x_height=x_h, xs=xs, bottoms=bottoms, kept=kept)
+
+
+def _reference_at(xs: np.ndarray, reference: tuple[np.ndarray, np.ndarray], fallback: np.ndarray) -> np.ndarray:
+    """Опорная прямая по ближайшим опорным строчным в точках ``xs`` (как в :func:`_local_kept`); опоры мало —
+    ``fallback``."""
+    ref_x, ref_bottom = reference
+    if ref_x.size < MIN_SAMPLES:
+        return fallback
+    count = min(REFERENCE_LETTERS, ref_x.size)
+    nearest = np.argsort(np.abs(xs[:, None] - ref_x[None, :]), axis=1)[:, :count]
+    return np.array([_line_at(ref_x[row], ref_bottom[row], x) for row, x in zip(nearest, xs)])
+
+
+def _robust_line_at(xs: np.ndarray, ys: np.ndarray, x: float) -> float:
+    """Значение в точке ``x`` прямой Тейла–Сена по точкам ``(xs, ys)``: наклон — медиана попарных наклонов, сдвиг —
+    медиана остатков; треть выбросов её не сдвигает (МНК уводят и одна-две)."""
+    if xs.size < 2 or np.ptp(xs) < 1e-6:
+        return float(np.median(ys))
+    i, j = np.triu_indices(xs.size, 1)
+    dx = xs[j] - xs[i]
+    ok = np.abs(dx) > 1e-6
+    slope = float(np.median((ys[j] - ys[i])[ok] / dx[ok])) if ok.any() else 0.0
+    return float(np.median(ys - slope * xs) + slope * x)
+
+
+def _clean_reference(ref_x: np.ndarray, ref_bottom: np.ndarray, x_height: float) -> tuple[np.ndarray, np.ndarray]:
+    """Опорные строчные без самозванцев: буква, чей низ уходит от прямой по ближайшим ДРУГИМ опорным выше
+    ``RAISED_XH`` или ниже ``DESCENDER_XH`` строчной, из опоры выбывает (проверка «без себя»).
+
+    Надстрочная цифра сноски ростом почти со строчную (0.8 строчной) попадала в опору со своим низом на 0.8
+    строчной выше базы и наклоняла опорную прямую начала строки: отсев принимал ложный голос верха курсивной
+    прописной и отбрасывал её верный низ, база в начале строки уходила вверх на 0.6–1 мм (синтетика «⁸ Ведомости
+    Верховного Совета…», ХиП 1991/03 IMG_0107).
+
+    Args:
+        ref_x: Абсциссы опорных строчных.
+        ref_bottom: Их низы.
+        x_height: Высота строчной строки.
+
+    Returns:
+        Оставшиеся абсциссы и низы.
+    """
+    if ref_x.size <= MIN_SAMPLES:
+        return ref_x, ref_bottom
+    count = min(REFERENCE_LETTERS, ref_x.size - 1)
+    keep = np.ones(ref_x.size, dtype=bool)
+    for index in range(ref_x.size):
+        distance = np.abs(ref_x - ref_x[index])
+        distance[index] = np.inf
+        nearest = np.argsort(distance)[:count]
+        residual = ref_bottom[index] - _robust_line_at(ref_x[nearest], ref_bottom[nearest], float(ref_x[index]))
+        keep[index] = -RAISED_XH * x_height <= residual <= DESCENDER_XH * x_height
+    if keep.sum() < MIN_SAMPLES:
+        return ref_x, ref_bottom
+    return ref_x[keep], ref_bottom[keep]
 
 
 def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
@@ -421,16 +524,70 @@ def _neighbour_slope(
     return slope, weight
 
 
-def body_axes(axes: list[LineAxis]) -> list[LineAxis]:
+def glyph_bottoms(axis: LineAxis, ink: np.ndarray, k: float) -> np.ndarray:
+    """Низы глифов строки по полке нижнего профиля (приём Tesseract ``C_BLOB::EstimateBaselinePosition``).
+
+    По каждому столбцу рамки глифа на рендере берётся нижняя краска ``b(x)``. Низ рамки — самый нижний ``b``. Полка
+    уровня ``y`` — число столбцов с ``b`` в полосе ``y − SHELF_BAND_PX + 1 … y``. Ищется самая нижняя полка не выше
+    ``SHELF_MAX_XH`` строчной над низом рамки, которая длиннее полосы у самого низа в ``SHELF_RATIO`` раз: узкий хвост
+    (ножка курсивной «Н» на 0.3 мм ниже базы, хвост «Ц», ножка «р») проигрывает широкой полке на базовой линии. Нет
+    такой полки — низ рамки (у «о», «с» низ и есть полка; у «у», запятой — выносной, его отсеет подгонка).
+
+    Args:
+        axis: Строка с глифами (пиксели рабочей копии).
+        ink: Краска текста рендера (``bool``).
+        k: Во сколько раз рендер крупнее рабочей копии.
+
+    Returns:
+        Низы ``(n,)`` в пикселях рабочей копии, по порядку глифов.
+    """
+    glyphs = axis.glyphs
+    out = glyphs[:, 3].astype(np.float64).copy()
+    x_h = line_x_height(glyphs)
+    limit = SHELF_MAX_XH * x_h * k
+    for index, (x0, y0, x1, y1) in enumerate(glyphs):
+        c0, c1 = max(int(np.floor(x0 * k)), 0), min(int(np.ceil(x1 * k)), ink.shape[1])
+        r0, r1 = max(int(np.floor(y0 * k)), 0), min(int(np.ceil(y1 * k)), ink.shape[0])
+        crop = ink[r0:r1, c0:c1]
+        if crop.size == 0:
+            continue
+        filled = crop.any(axis=0)
+        if filled.sum() < 3:
+            continue
+        # Нижняя краска по столбцам (индекс строки вырезки).
+        lows = crop.shape[0] - 1 - np.argmax(crop[::-1, filled], axis=0)
+        bottom = int(lows.max())
+        band = SHELF_BAND_PX
+
+        def shelf(level: int) -> int:
+            return int(((lows <= level) & (lows > level - band)).sum())
+
+        at_bottom = shelf(bottom)
+        for level in range(bottom - 1, max(int(bottom - limit), -1), -1):
+            if shelf(level) >= SHELF_RATIO * at_bottom and shelf(level) >= 3:
+                out[index] = (r0 + level + 1) / k
+                break
+    return out
+
+
+def body_axes(axes: list[LineAxis], ink: np.ndarray | None = None, k: float = 2.0) -> list[LineAxis]:
     """Вторые оси всех строк страницы: по базовой линии, со вторым проходом по соседям.
 
     Args:
         axes: Оси страницы с глифами (у строк без глифов второй оси нет).
+        ink: Краска текста рендера (``bool``) — по ней низы глифов берутся по полке нижнего профиля
+            (:func:`glyph_bottoms`); ``None`` — по низам рамок.
+        k: Во сколько раз рендер крупнее рабочей копии.
 
     Returns:
         Те же оси, у каждой проставлено ``body_points`` (``None``, если посчитать не из чего).
     """
-    fits = [fit_baseline(axis) for axis in axes]
+    fits = [
+        fit_baseline(
+            axis, bottoms_of_glyphs=None if ink is None or axis.glyphs is None else glyph_bottoms(axis, ink, k)
+        )
+        for axis in axes
+    ]
     neighbours = _neighbours(fits, axes)
     out: list[LineAxis] = []
     for axis, fit, own in zip(axes, fits, neighbours):
@@ -459,7 +616,7 @@ def body_axes(axes: list[LineAxis]) -> list[LineAxis]:
                 )
         lift = _body_lift(axis, fit, base)
         points = np.column_stack([fit.grid, base - lift])
-        out.append(replace(axis, body_points=points))
+        out.append(replace(axis, body_points=points, body_lift=lift))
     return out
 
 

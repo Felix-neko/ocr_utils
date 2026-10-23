@@ -216,7 +216,7 @@ def fixed_axes(axes: list, dpi: float) -> tuple[list, list[AxisFix]]:
                 log.append(AxisFix(axis.cy, axis.x0, axis.x1, before, float("nan"), "none", axis.height, axis.height))
                 continue
             points, height, source = glyph[0], min(axis.height, ROW_PER_GLYPH * glyph[1]), "glyphs"
-        fixed = replace(axis, points=points, height=float(height), body_points=None)
+        fixed = replace(axis, points=points, height=float(height), body_points=None, body_lift=None)
         out.append(fixed)
         log.append(AxisFix(axis.cy, axis.x0, axis.x1, before, slope_of(points), source, axis.height, float(height)))
     return out, log

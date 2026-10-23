@@ -26,8 +26,20 @@ CORE_SHARE = 0.8
 # Ряд, ушедший внутрь блока больше чем на столько мм, — исключение (абзацный отступ слева,
 # конец абзаца справа), а не рваный край: такие ряды не портят вердикт, но считаются отдельно.
 INDENT_MIN_MM = 2.5
-# Исключений больше этой доли рядов — сторона всё-таки рваная (в рваном наборе «отступ» у каждой второй).
-INDENT_MAX_SHARE = 0.45
+# Ряд, чья краска подходит к краю разбираемой картинки ближе этого, — обрезан краем (страница уходит в сгиб или за
+# вырезку): где кончается его строка, неизвестно, и выключку он не мерит ни за, ни против (ХиП 1991/01 IMG_0989:
+# концы строк у корешка дотягивались тенью сгиба до края вырезки, разброс стороны 0.12 → 0.29 мм), мм.
+EDGE_TOUCH_MM = 0.3
+# Исключений больше этой доли рядов — сторона всё-таки рваная (в рваном наборе «отступ» у каждой второй). Не 0.45:
+# в библиографии по формату конец каждой записи — короткая строка, и у блока из 11 строк 5 концов записей
+# (0.455) делали правую сторону рваной при доле на огибающей 0.83 (ХиП 1991/01 IMG_1016, «Вышли из печати»).
+INDENT_MAX_SHARE = 0.49
+# Меньше стольких рядов на огибающей — сторона не выровнена (:func:`side_stats`).
+MIN_CORE_ROWS = 3
+# Правая сторона по концам отточий (:func:`leader_side`): доля рядов, кончающихся отточием, и близость конца ряда к
+# концу точек, мм.
+LEADER_SIDE_SHARE = 0.5
+LEADER_END_MM = 0.5
 # Набор по центру (подпись автора, эпиграф, строки заголовка): середины рядов вдоль строк не дальше
 # ``CENTER_TOL_MM`` от их медианы у не меньше ``CENTER_SHARE`` рядов, при этом длины рядов заметно
 # различаются (размах больше ``CENTER_MIN_SPREAD_MM``: иначе это колонка по формату, у которой
@@ -108,24 +120,85 @@ def _bend(curve: np.ndarray) -> float:
     return float(resid.max() - resid.min())
 
 
-def side_stats(block: TextBlock, side: Side) -> SideStats:
-    """Меры одной стороны блока: плотность прилегания к огибающей, отступы, изгиб, девиация."""
+def _paragraph_ends(block: TextBlock) -> np.ndarray:
+    """Флаги рядов — концов абзаца: следующий ряд начинается абзацным отступом слева (от ``INDENT_MIN_MM`` внутрь от
+    левой огибающей) или ряд последний в блоке.
+
+    Args:
+        block: Блок.
+
+    Returns:
+        Флаги ``(n,)``.
+    """
+    rows = list(block.rows)
+    left_mm = np.array([px_to_mm(value, block.dpi) for value in _residuals(rows, block.envelope, Side.LEFT)])
+    ends = np.zeros(len(rows), dtype=bool)
+    if len(rows):
+        ends[-1] = True
+        ends[:-1] = left_mm[1:] >= INDENT_MIN_MM
+    return ends
+
+
+def cut_rows(block: TextBlock, side: Side, width: float | None) -> np.ndarray:
+    """Флаги рядов, обрезанных краем картинки с этой стороны (ближе :data:`EDGE_TOUCH_MM`).
+
+    Args:
+        block: Блок.
+        side: Сторона.
+        width: Ширина разбираемой картинки, пиксели рабочей копии; ``None`` — край неизвестен, обрезанных нет.
+
+    Returns:
+        Флаги ``(n,)``.
+    """
+    rows = list(block.rows)
+    if width is None or not rows:
+        return np.zeros(len(rows), dtype=bool)
+    edge = EDGE_TOUCH_MM / 25.4 * block.dpi
+    if side is Side.LEFT:
+        return np.array([row.x0 <= edge for row in rows], dtype=bool)
+    return np.array([row.x1 >= width - edge for row in rows], dtype=bool)
+
+
+def side_stats(block: TextBlock, side: Side, width: float | None = None) -> SideStats:
+    """Меры одной стороны блока: плотность прилегания к огибающей, отступы, изгиб, девиация.
+
+    Args:
+        block: Блок.
+        side: Сторона.
+        width: Ширина разбираемой картинки, пиксели рабочей копии: ряды, обрезанные её краем (:func:`cut_rows`), в
+            меры не идут; ``None`` — все ряды.
+
+    Returns:
+        Меры стороны.
+    """
     rows = list(block.rows)
     dpi = block.dpi
     resid = _residuals(rows, block.envelope, side)
     tol = ALIGN_TOL_MM
     resid_mm = np.array([px_to_mm(value, dpi) for value in resid], dtype=np.float64)
-    indent = resid_mm >= INDENT_MIN_MM  # ушли внутрь блока — исключения
+    cut = cut_rows(block, side, width)
+    indent = (resid_mm >= INDENT_MIN_MM) & ~cut  # ушли внутрь блока — исключения
     core = np.abs(resid_mm) <= tol
-    considered = ~indent
+    considered = ~indent & ~cut
     share = float(core[considered].mean()) if considered.any() else 0.0
-    indent_share = float(indent.mean()) if indent.size else 0.0
+    # Концы абзацев справа (короткая строка, за которой абзацный отступ слева или конец блока) — не признак рваного
+    # края: в наборе по формату с короткими абзацами (библиография «Вышли из печати» — запись в 2–3 строки) их
+    # больше ``INDENT_MAX_SHARE``, и правая сторона выходила рваной при доле на огибающей 0.83–1.00 (ХиП 1991/01
+    # IMG_1016: 7 из 13, IMG_1030: 6 из 9). В доле исключений они не считаются.
+    counted = indent & ~_paragraph_ends(block) if side is Side.RIGHT else indent
+    indent_share = float(counted[~cut].mean()) if (~cut).any() else 0.0
     # Девиация масштабов тоже считается по тренду тела: внешний контур обоих масштабов прижат
     # к одним и тем же выносам и различался бы меньше, чем сами блоки.
     fine = _core_curve(block.envelope, side)
     coarse = _core_curve(block.envelope_coarse, side)
     dev = float(np.abs(fine[:, 0] - np.interp(fine[:, 1], coarse[:, 1], coarse[:, 0])).max())
-    aligned = share >= CORE_SHARE and indent_share <= INDENT_MAX_SHARE
+    # Сторону должны держать не меньше MIN_CORE_ROWS рядов на огибающей (без концов абзацев справа и обрезанных
+    # краем): две совпавшие строки выключку не доказывают (1973/01 IMG_0005_1L: «И. И. ФЕТИСОВ, / П. В. ФУРДУЕВ, /
+    # А. А. ЯКОБИ» — последний ряд конец абзаца, правые края двух других совпали случайно, вердикт был both).
+    holders = core & considered
+    if side is Side.RIGHT:
+        holders &= ~_paragraph_ends(block)
+    aligned = share >= CORE_SHARE and indent_share <= INDENT_MAX_SHARE and int(holders.sum()) >= MIN_CORE_ROWS
     return SideStats(
         resid_mad_mm=float(np.median(np.abs(resid_mm[considered]))) if considered.any() else 0.0,
         core_share=share,
@@ -206,14 +279,52 @@ def verdict(left: bool, right: bool, centered: bool) -> AlignKind:
     return AlignKind.CENTER if centered else AlignKind.RAGGED
 
 
-def alignment_of(block: TextBlock) -> Alignment:
+def leader_side(block: TextBlock, leaders: list | None) -> bool:
+    """Правая сторона блока — упор отточий: не меньше :data:`LEADER_SIDE_SHARE` рядов кончаются концом отточия.
+
+    Концы точек гуляют до 1.5 мм (ПХ 1975/01 IMG_0085), край набора оглавления — у номеров страниц (:mod:`page_numbers`).
+
+    Args:
+        block: Блок.
+        leaders: Отточия страницы (``leaders.Leader``) или ``None``.
+
+    Returns:
+        ``True`` — правая сторона не выключка.
+    """
+    if not leaders or not block.rows:
+        return False
+    near = LEADER_END_MM / 25.4 * block.dpi
+    ends = sum(
+        any(abs(leader.y - row.y) <= row.height / 2.0 and abs(leader.x1 - row.x1) <= near for leader in leaders)
+        for row in block.rows
+    )
+    return ends >= LEADER_SIDE_SHARE * len(block.rows)
+
+
+def alignment_of(block: TextBlock, width: float | None = None, leaders: list | None = None) -> Alignment:
     """Выключка блока по обеим сторонам и по центру.
 
     Однострочный блок выключки не имеет: оба края одной строки совпадают со своим трендом по
     определению, и прежде такой блок получал ``both``. Теперь — ``ragged`` (на оверлее ``none``).
+    Колонка номеров оглавления (``block.number_column``) выключена вправо по построению; правая сторона блока по
+    концам отточий (:func:`leader_side`) не выровнена.
+
+    Args:
+        block: Блок.
+        width: Ширина разбираемой картинки, пиксели рабочей копии (ряды, обрезанные её краем, выключку не мерят);
+            ``None`` — все ряды.
+        leaders: Отточия страницы или ``None``.
+
+    Returns:
+        Вердикт и меры сторон.
     """
-    left = side_stats(block, Side.LEFT)
-    right = side_stats(block, Side.RIGHT)
+    left = side_stats(block, Side.LEFT, width)
+    right = side_stats(block, Side.RIGHT, width)
+    if getattr(block, "number_column", False):
+        left, right = replace(left, aligned=False), replace(right, aligned=True)
+        return Alignment(kind=AlignKind.RIGHT, left=left, right=right)
+    if right.aligned and leader_side(block, leaders):
+        right = replace(right, aligned=False)
     if len(block.rows) < 2:
         left, right = replace(left, aligned=False), replace(right, aligned=False)
         return Alignment(kind=AlignKind.RAGGED, left=left, right=right)
@@ -230,7 +341,9 @@ __all__ = [
     "alignment_of",
     "block_frame",
     "center_share",
+    "cut_rows",
     "is_centered",
+    "leader_side",
     "side_stats",
     "verdict",
 ]

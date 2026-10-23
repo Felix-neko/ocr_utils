@@ -267,7 +267,18 @@ def gutters_of(
         extended = sorted(extended + short_gutters(mask, dpi, extended, headings), key=lambda gutter: gutter.centre)
     # Отбраковка поля отточий — ПОСЛЕ продления: до него диапазон высот кандидата ещё короткий, и
     # отточия в него не попадают (на 1971/10 с.93 ложный межколонник видел 0 отточий вместо 15).
-    return [gutter for gutter in extended if not leaders or _dotted(gutter, leaders) < DOT_GUTTER_LEADERS]
+    if not leaders:
+        return extended
+    kept: list[Gutter] = []
+    for gutter in extended:
+        if _dotted(gutter, leaders) < DOT_GUTTER_LEADERS:
+            kept.append(gutter)
+        else:
+            # Кусок, оставшийся после обрезки, — тот же кандидат: текст по обе стороны на его высоте обязателен. Иначе
+            # ложный межколонник поля отточий оставлял кусок под отточиями и резал выходные данные под оглавлением
+            # (1969/11 IMG_0100_1L: «Техн. редактор | Корректор»).
+            kept.extend(_confirm(_undotted_pieces(gutter, leaders, dpi), mask, dpi))
+    return sorted(kept, key=lambda gutter: gutter.centre)
 
 
 def _band_runs(mask: np.ndarray, bands: list[tuple[int, int]], min_gutter: int) -> list[tuple[int, int, int, int]]:
@@ -733,6 +744,41 @@ def _row_blocked(mask: np.ndarray, gutter: Gutter, y: int, share: float = BLOCK_
     x0 = int(max(0, min(mask.shape[1] - 1, gutter.x0_at(y))))
     x1 = int(max(x0 + 1, min(mask.shape[1], gutter.x1_at(y))))
     return bool(mask[y, x0:x1].mean() > share)
+
+
+def _undotted_pieces(gutter: Gutter, leaders: list, dpi: float) -> list[Gutter]:
+    """Части межколонника выше и ниже отточий, которые его задевают: не короче ``MIN_ZONE_MM`` и без отточий.
+
+    Настоящий межколонник двух колонок, продлённый по пустой полосе вниз в таблицу, задевал отточия её подписей
+    («тыс. руб. . . . .») и выбрасывался целиком — строки двух колонок сшивались через просвет 3.8 мм (ПХ 1975/01
+    IMG_0083, с.157: 21 строка из 43). Ложный межколонник поля отточий (1971/10 с.93) задевает их по всей высоте, и
+    длинных чистых кусков у него не остаётся.
+
+    Args:
+        gutter: Межколонник, задевающий не меньше ``DOT_GUTTER_LEADERS`` отточий.
+        leaders: Отточия страницы.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        Куски межколонника (возможно, ни одного).
+    """
+    hit = [
+        leader
+        for leader in leaders
+        if gutter.alive_at(leader.y) and leader.x1 > gutter.x0_at(leader.y) and leader.x0 < gutter.x1_at(leader.y)
+    ]
+    # Поле с отточиями — от верхнего до нижнего задевшего с запасом в четыре точки.
+    pad = 4.0 * max(leader.thickness for leader in hit)
+    low, high = min(leader.y for leader in hit) - pad, max(leader.y for leader in hit) + pad
+    out = []
+    for a, b in ((gutter.y0, low), (high, gutter.y1)):
+        if b - a < mm_to_px(MIN_ZONE_MM, dpi):
+            continue
+        inner = [point for point in gutter.points if a < point[0] < b]
+        piece = Gutter(points=((a, gutter.x0_at(a), gutter.x1_at(a)), *inner, (b, gutter.x0_at(b), gutter.x1_at(b))))
+        if _dotted(piece, leaders) == 0:
+            out.append(piece)
+    return out
 
 
 def _dotted(gutter: Gutter, leaders: list) -> int:
