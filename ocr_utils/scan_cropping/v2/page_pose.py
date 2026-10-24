@@ -10,6 +10,7 @@ import numpy as np
 
 from ocr_utils.scan_cropping.v2.glue import outside_distance, split_pages
 from ocr_utils.scan_cropping.v2.keystone import vertical_sides
+from ocr_utils.scan_cropping.v2.single_page import FrameKind, classify_frame, wide_index
 from ocr_utils.scan_cropping.v2.trapezoid import fit_enclosing_quad, keystone_deg, quad_mask
 
 # Плотность масштаба сегментации, px/мм (масштаб сегментации всегда приведён к калибровочным кадрам МТО 1990).
@@ -91,12 +92,17 @@ class PageQuad:
         quad: Вершины трапеции (4, 2) px сегментации по часовой стрелке или None (вырожденная).
         features: Признаки.
         pose: Класс положения.
+        frame_kind: Сколько страниц в кадре (``single_page.FrameKind``; у всех страниц кадра один).
+        spread_index: Место страницы в развороте (0 — левая, 1 — правая): у кадра ``SLIVER`` — место широкой страницы
+            (полоска соседней отброшена, корешок — с её стороны); у ``SINGLE`` — None.
     """
 
     mask: np.ndarray
     quad: np.ndarray | None
     features: PageFeatures
     pose: PagePose
+    frame_kind: FrameKind = FrameKind.SPREAD
+    spread_index: int | None = None
 
 
 def frame_pages(paper: np.ndarray, book: np.ndarray, hulls: np.ndarray, inst: np.ndarray) -> list[np.ndarray]:
@@ -274,9 +280,20 @@ def classify_poses(features: list[PageFeatures]) -> list[PagePose]:
 
 
 def page_quads(
-    paper: np.ndarray, book: np.ndarray, hulls: np.ndarray, inst: np.ndarray, gray: np.ndarray, paint: np.ndarray
+    paper: np.ndarray,
+    book: np.ndarray,
+    hulls: np.ndarray,
+    inst: np.ndarray,
+    gray: np.ndarray,
+    paint: np.ndarray,
+    forced: FrameKind | None = None,
 ) -> list[PageQuad]:
-    """Страницы кадра с трапециями, признаками и классом положения.
+    """Страницы кадра с трапециями, признаками и классом положения; сколько страниц в кадре — по ``single_page``.
+
+    Кадр ``SINGLE`` (лист разрезан по ложному корешку или страница одна) — одна страница по объединению масок;
+    ``SLIVER`` — только широкая страница (бумага полоски соседней остаётся в маске бумаги основного итога);
+    ``NO_PAGE`` и ``SPREAD`` — страницы как есть (ярлык на крышке основной итог вырезает, как раньше, выход страниц его
+    пропускает).
 
     Args:
         paper: Итоговая маска бумаги (масштаб сегментации).
@@ -285,12 +302,25 @@ def page_quads(
         inst: Карта экземпляров-страниц SAM 3.
         gray: Кадр без пальцев в сером (масштаб сегментации).
         paint: Зона закраса пальцев (bool, масштаб сегментации).
+        forced: Вид кадра по флагу кадра (``single-page`` → ``SINGLE``, ``spread`` → ``SPREAD``) или None — по правилу.
 
     Returns:
         Страницы слева направо.
     """
     pages = frame_pages(paper, book, hulls, inst)
     quads = [fit_enclosing_quad(p) for p in pages]
+    n_inst = int(len(np.unique(inst[inst > 0])))
+    kind = forced if forced is not None and pages else classify_frame(quads, paper, n_inst, SEG_PX_PER_MM)
+    spread_index = None
+    if kind is FrameKind.SINGLE and len(pages) > 1:
+        # Лист одной страницы, разрезанный по ложному корешку, — снова одна страница.
+        pages = [np.logical_or.reduce(pages)]
+        quads = [fit_enclosing_quad(pages[0])]
+    elif kind is FrameKind.SLIVER:
+        # Страница — широкая; её место в развороте: полоска соседней лежала с другой стороны корешка.
+        k = wide_index(quads)
+        spread_index = 0 if k == 0 else 1
+        pages, quads = [pages[k]], [quads[k]]
     features = []
     for k, page in enumerate(pages):
         others = [p for j, p in enumerate(pages) if j != k]
@@ -299,7 +329,7 @@ def page_quads(
         outer_left = None if len(pages) < 2 else True if k == 0 else False if k == len(pages) - 1 else None
         features.append(page_features(page, quads[k], gray, paint, neighbor, outer_left))
     poses = classify_poses(features)
-    return [PageQuad(p, q, f, c) for p, q, f, c in zip(pages, quads, features, poses)]
+    return [PageQuad(p, q, f, c, kind, spread_index) for p, q, f, c in zip(pages, quads, features, poses)]
 
 
 def page_owner(pages: list[PageQuad], shape: tuple[int, int]) -> np.ndarray:

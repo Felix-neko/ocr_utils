@@ -64,3 +64,33 @@ def test_grow_takes_margin_not_cloth_or_board() -> None:
     assert grown[575:595, 200:500].mean() > 0.9  # нижнее поле в тени
     assert not grown[:, :148].any()  # ткань крышки и картон левее кромки
     assert not grown[:148, :].any()  # картон выше кромки
+
+
+def _lab_page(lab_bg: tuple[int, int, int], size: tuple[int, int] = (300, 200)) -> np.ndarray:
+    """Страница BGR сплошного цвета, заданного в Lab OpenCV."""
+    lab = np.zeros((*size, 3), np.uint8)
+    lab[:] = lab_bg
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
+def test_tinted_share_olive_cover_with_white_plate():
+    from ocr_utils.scan_cropping.v2.colour_pages import TINT_MIN_SHARE, tinted_share
+
+    # Оливковое поле обложки (L 165, a −4, b +20) и белая плашка сверху — как обложка ПХ 1974/01 IMG_0003.
+    page = _lab_page((165, 124, 148))
+    page[20:110] = _lab_page((235, 126, 120), (90, 200))
+    mask = np.ones(page.shape[:2], bool)
+    assert tinted_share(page, mask, 4.0) >= TINT_MIN_SHARE
+
+
+def test_tinted_share_white_page_with_text_and_photo():
+    from ocr_utils.scan_cropping.v2.colour_pages import TINT_MIN_SHARE, tinted_share
+
+    page = _lab_page((235, 127, 133))
+    rng = np.random.default_rng(0)
+    # Строки текста — тёмные штрихи; серое фото без цвета — не тонировка.
+    for y in range(20, 280, 12):
+        page[y : y + 4, 20:180] = 30
+    page[150:250, 30:170] = rng.integers(40, 220, (100, 140, 1), dtype=np.uint8)
+    mask = np.ones(page.shape[:2], bool)
+    assert tinted_share(page, mask, 4.0) < TINT_MIN_SHARE

@@ -41,12 +41,24 @@ fi
 # Все наборы — одним вызовом: кадры всех наборов идут в один пул (при поочерёдных наборах выборка ХиП по 2 кадра на
 # выпуск занимала 2 воркера из 12). Набор: подпись (подпуть в output/, debug/<шаг>/, summary/), вход, кэш v2, итоги v2,
 # сколько кадров (0 — все).
+# Плотность бумаги наборов, px/мм (--px-per-mm): размеры выпрямления — в мм бумаги, а тег dpi итога v2 — --force-dpi, не
+# плотность (пак-4 ПХ: тег 450 при 13.8 px/мм; ХиП 1991: тег 434 при 16.3–17.9 px/мм по выпускам). По тегу строки
+# подписи ПХ 1974/01 IMG_0078 выходили короче 25 мм и выпрямлялись дугой.
+# ХиП 1991: плотность по выпускам (run_v2_hp_1991.sh).
+declare -A HP_PX_PER_MM=(
+    [01]=17.9 [02]=17.1 [03]=17.3 [04]=17.2 [05]=17.0 [06]=17.3
+    [07]=16.9 [08]=16.6 [09]=16.6 [10]=16.6 [11]=16.3 [12]=16.3
+)
+PH_PX_PER_MM=13.8
 SETS=(--set ph_gutter_strip "$PH_GUTTER_STRIP_SET" "$PH_GUTTER_STRIP_WORK/cache" "$SPLINE_FRAMES_WORK/ph_gutter_strip/output" "$SAMPLE")
+SETS+=(--px-per-mm ph_gutter_strip "$PH_PX_PER_MM")
 for DIR in "$HP_1991_ROOT"/*/; do
     NAME="$(basename "$DIR")"
     SETS+=(--set "hp_1991/$NAME" "$DIR" "$HP_1991_WORK/cache/$NAME" "$SPLINE_FRAMES_WORK/hp_1991/$NAME/output" "$HP_SAMPLE")
+    SETS+=(--px-per-mm "hp_1991/$NAME" "${HP_PX_PER_MM[${NAME:0:2}]}")
 done
 SETS+=(--set ph_1975 "$PACK4_PH_ROOT/1975" "$PACK4_PH_WORK/cache/1975" "$SPLINE_FRAMES_WORK/ph_1975/output" "$SAMPLE")
+SETS+=(--px-per-mm ph_1975 "$PH_PX_PER_MM")
 
 mkdir -p "$OUT_ROOT"
 echo "=== page_rectify text-run → $OUT_ROOT"

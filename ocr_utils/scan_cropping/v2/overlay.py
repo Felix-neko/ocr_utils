@@ -105,6 +105,9 @@ class OverlayTag(StrEnum):
     SIDES = "05_sides"  # второй проход SAM 3, кромка листа, палитра, выравнивание сторон, защита контента
     PAGES = "06_pages"  # итоговая бумага и трапеции страниц
     LINES = "07_lines"  # прямые разворота: края книги, разделитель страниц, ограничители внешних краёв
+    # Выход страниц (только при ``--output-pages`` и ``--debug-steps``).
+    RECTIFY = "08_rectify"  # триптих: итог v2 с областями | Кунс | Кунс + поле; оси строк, стороны, линия разреза
+    RECTIFIED_PAGES = "09_pages"  # выпрямленный разворот: области страниц, линия разреза, рамки записанных страниц
 
 
 def overlay_path(debug_dir: Path, rel: Path, tag: OverlayTag) -> Path:
@@ -260,8 +263,29 @@ LINES_LEGEND = [
 ]
 
 
+def _closed_arc(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Замкнутая ломаная (первая вершина повторена в конце) и накопленная длина дуги по её вершинам.
+
+    Args:
+        pts: Вершины (N, 2).
+
+    Returns:
+        ``(вершины (N + 1, 2), длины (N + 1,))``.
+    """
+    closed = np.vstack([np.asarray(pts, np.float64).reshape(-1, 2), np.asarray(pts, np.float64).reshape(-1, 2)[:1]])
+    return closed, np.r_[0.0, np.cumsum(np.hypot(*np.diff(closed, axis=0).T))]
+
+
+def _arc_points(closed: np.ndarray, arc: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Точки замкнутой ломаной на расстояниях ``d`` по дуге (``np.interp`` по накопленной длине)."""
+    return np.stack([np.interp(d, arc, closed[:, 0]), np.interp(d, arc, closed[:, 1])], axis=1)
+
+
 def _dashed_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, int], width: int) -> None:
-    """Замкнутый пунктирный многоугольник на холсте.
+    """Замкнутый пунктирный многоугольник на холсте: штрихи по накопленной длине дуги всего контура.
+
+    Штрих не начинается заново на каждом ребре: у сгущённого кривого многоугольника (блоки surya после переноса с
+    холста Кунса — рёбра короче ``DASH_PX + GAP_PX``) пунктир иначе сливался бы в сплошную линию.
 
     Args:
         canvas: Холст BGR (локальный холст оверлея, меняется на месте).
@@ -269,20 +293,22 @@ def _dashed_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, in
         colour: Цвет BGR.
         width: Толщина, px.
     """
-    for i in range(len(pts)):
-        a, b = pts[i].astype(float), pts[(i + 1) % len(pts)].astype(float)
-        length = float(np.linalg.norm(b - a))
-        step = DASH_PX + GAP_PX
-        for t0 in np.arange(0.0, length, step):
-            t1 = min(t0 + DASH_PX, length)
-            p0 = a + (b - a) * (t0 / max(length, 1e-9))
-            p1 = a + (b - a) * (t1 / max(length, 1e-9))
-            q0, q1 = tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int))
-            cv2.line(canvas, q0, q1, colour, width, cv2.LINE_AA)
+    if len(pts) < 2:
+        return
+    closed, arc = _closed_arc(pts)
+    length = float(arc[-1])
+    for t0 in np.arange(0.0, length, DASH_PX + GAP_PX):
+        t1 = min(t0 + DASH_PX, length)
+        # Штрих — концы на дуге и все вершины между ними (штрих огибает излом, а не срезает его хордой).
+        inner = np.flatnonzero((arc > t0) & (arc < t1))
+        piece = np.vstack(
+            [_arc_points(closed, arc, np.array([t0])), closed[inner], _arc_points(closed, arc, np.array([t1]))]
+        )
+        cv2.polylines(canvas, [np.round(piece).astype(np.int32).reshape(-1, 1, 2)], False, colour, width, cv2.LINE_AA)
 
 
 def _dotted_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, int], radius: int) -> None:
-    """Замкнутый многоугольник точками (справочная линия: тоньше и тише пунктира).
+    """Замкнутый многоугольник точками через ``DOT_STEP_PX`` по накопленной длине дуги (справочная линия).
 
     Args:
         canvas: Холст BGR (локальный холст оверлея, меняется на месте).
@@ -290,12 +316,11 @@ def _dotted_poly(canvas: np.ndarray, pts: np.ndarray, colour: tuple[int, int, in
         colour: Цвет BGR.
         radius: Радиус точки, px.
     """
-    for i in range(len(pts)):
-        a, b = pts[i].astype(float), pts[(i + 1) % len(pts)].astype(float)
-        length = float(np.linalg.norm(b - a))
-        for t0 in np.arange(0.0, length, DOT_STEP_PX):
-            p = a + (b - a) * (t0 / max(length, 1e-9))
-            cv2.circle(canvas, tuple(np.round(p).astype(int)), radius, colour, -1, cv2.LINE_AA)
+    if len(pts) < 2:
+        return
+    closed, arc = _closed_arc(pts)
+    for p in _arc_points(closed, arc, np.arange(0.0, float(arc[-1]), DOT_STEP_PX)):
+        cv2.circle(canvas, tuple(np.round(p).astype(int)), radius, colour, -1, cv2.LINE_AA)
 
 
 def _draw_blocks(canvas: np.ndarray, polys: list[np.ndarray], scale: float, pad: tuple[int, int]) -> None:
@@ -531,6 +556,101 @@ def draw_overlay(frame: np.ndarray, book: dict, layers: OverlayLayers, result: n
     return framed(pair, [title, sub], legend)
 
 
+# Лист «вход surya»: высота каждой половины диптиха, px; толщина блоков; зазор между половинами.
+SURYA_PANEL_H = 1300
+SURYA_BLOCK_PX = 2
+SURYA_GAP_PX = 20
+
+
+@dataclass(frozen=True)
+class SuryaInput:
+    """Всё для листа «вход surya»: холст, который видела сеть, и кадр с перенесёнными блоками.
+
+    Поля:
+        canvas: Холст на входе сети (малый холст Кунса или холст трапеций), BGR.
+        raw: Блоки surya на холсте, px ``canvas``.
+        labels: Типы блоков по порядку ``raw`` (и ``polys``).
+        frame: Исходный кадр BGR.
+        polys: Блоки после обратного переноса, px кадра.
+        outlines: Контуры подгоночных областей surya на кадре, px кадра (пусто — областей нет).
+        page_rects: Прямоугольники страниц на холсте ``(x0, y0, x1, y1)``, px ``canvas`` (пусто — холст трапеций).
+        spine_x: X линии корешка на холсте, px ``canvas``, или None.
+    """
+
+    canvas: np.ndarray
+    raw: list[np.ndarray]
+    labels: list[str]
+    frame: np.ndarray
+    polys: list[np.ndarray]
+    outlines: list[np.ndarray]
+    page_rects: list[tuple[float, float, float, float]]
+    spine_x: float | None
+
+
+def _surya_panel(image: np.ndarray, blocks: list[np.ndarray], outlines: list[np.ndarray]) -> tuple[np.ndarray, float]:
+    """Половина диптиха: картинка высотой ``SURYA_PANEL_H``, блоки surya сплошным контуром, контуры — пунктиром.
+
+    Args:
+        image: Картинка BGR.
+        blocks: Блоки, px ``image``.
+        outlines: Справочные контуры (области или прямоугольники страниц), px ``image``.
+
+    Returns:
+        ``(панель BGR, масштаб относительно image)``.
+    """
+    s = SURYA_PANEL_H / image.shape[0]
+    panel = cv2.resize(image, (max(1, int(round(image.shape[1] * s))), SURYA_PANEL_H), interpolation=cv2.INTER_AREA)
+    for outline in outlines:
+        _dashed_poly(panel, np.asarray(outline, np.float64) * s, COLOUR_FRAME, 2)
+    pts = [np.round(np.asarray(p, np.float64) * s).astype(np.int32).reshape(-1, 1, 2) for p in blocks]
+    cv2.polylines(panel, pts, True, COLOUR_SURYA, SURYA_BLOCK_PX, cv2.LINE_AA)
+    return panel, s
+
+
+def draw_surya_input(inputs: SuryaInput, header: str) -> np.ndarray:
+    """Лист «вход surya»: слева холст с блоками сети, справа исходный кадр с блоками после обратного переноса.
+
+    На холсте Кунса пунктиром — прямоугольники страниц и линия корешка (левее — карта левой страницы, правее —
+    правой); на кадре пунктиром — подгоночные области surya, по которым построен холст. Шапка и легенда — в полях.
+
+    Args:
+        inputs: Холст, кадр, блоки и контуры.
+        header: Первая строка шапки (кадр, выпрямление, поле, масштаб, откат).
+
+    Returns:
+        Картинка BGR.
+    """
+    rects = [np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) for x0, y0, x1, y1 in inputs.page_rects]
+    left, ls = _surya_panel(inputs.canvas, inputs.raw, rects)
+    if inputs.spine_x is not None:
+        x = int(round(inputs.spine_x * ls))
+        _draw_line(left, Line(float(x), 0.0, 0.0, 0.0, float(left.shape[0] - 1)), COLOUR_SPINE, 1, dashed=True)
+    left = block_labels(left, [np.asarray(p, np.float64) * ls for p in inputs.raw], inputs.labels)
+    right, rs = _surya_panel(inputs.frame, inputs.polys, inputs.outlines)
+    right = block_labels(right, [np.asarray(p, np.float64) * rs for p in inputs.polys], inputs.labels)
+    pair = np.hstack([left, np.full((SURYA_PANEL_H, SURYA_GAP_PX, 3), 255, np.uint8), right])
+    sub = "слева — холст на входе surya (как его видит сеть), справа — исходный кадр с блоками после обратного переноса"
+    legend = [
+        LegendEntry("блок surya: на холсте — прямоугольник сети, на кадре — после обратного переноса", COLOUR_SURYA),
+        LegendEntry(
+            "тип блока surya (Text — текст, SectionHeader — заголовок, Picture — картинка…)",
+            COLOUR_SURYA_LABEL,
+            alpha=LABEL_ALPHA,
+        ),
+        LegendEntry(
+            "холст: прямоугольник страницы; кадр: подгоночная область surya (без текста)",
+            COLOUR_FRAME,
+            style=SampleStyle.DASHED,
+        ),
+        LegendEntry(
+            "линия корешка на холсте (левее — карта левой страницы, правее — правой)",
+            COLOUR_SPINE,
+            style=SampleStyle.DASHED,
+        ),
+    ]
+    return framed(pair, [header, sub], legend)
+
+
 @dataclass(frozen=True)
 class StepInputs:
     """Всё, по чему рисуются картинки шагов сегментации кадра (масштаб сегментации).
@@ -546,6 +666,8 @@ class StepInputs:
         lines: Прямые разворота или None (не две страницы).
         fit: Подгонка разворота (``pipeline.SpreadFit``: полоса, линия корешка, прежние рамки и подгоночные области)
             или None.
+        surya_frames: Подгоночные области без текста — по ним строился холст Кунса для surya (``layout_frames.npz``),
+            или None; на шаге 07 — пунктиром рядом с итоговыми (сдвиг стороны текстом).
     """
 
     img: np.ndarray
@@ -557,6 +679,7 @@ class StepInputs:
     pages: list[PageQuad]
     lines: SpreadLines | None = None
     fit: object | None = None
+    surya_frames: list | None = None
 
 
 def _area(entry: str, colour: tuple[int, int, int]) -> LegendEntry:
@@ -751,7 +874,8 @@ def draw_steps(inputs: StepInputs, title: str) -> dict[OverlayTag, np.ndarray]:
     )
     out[OverlayTag.PAGES] = picture
     if inputs.lines is not None:
-        out[OverlayTag.LINES] = draw_lines_step(img, inputs.pages, inputs.lines, book["book"], title, inputs.fit)
+        out[OverlayTag.LINES] = draw_lines_step(img, inputs.pages, inputs.lines, book["book"], title, inputs.fit,
+                                                inputs.surya_frames)  # fmt: skip
     return out
 
 
@@ -761,7 +885,13 @@ def _edge_place(edge) -> str:
 
 
 def draw_lines_step(
-    img: np.ndarray, pages: list[PageQuad], lines: SpreadLines, book: np.ndarray, title: str, fit: object | None = None
+    img: np.ndarray,
+    pages: list[PageQuad],
+    lines: SpreadLines,
+    book: np.ndarray,
+    title: str,
+    fit: object | None = None,
+    surya_frames: list | None = None,
 ) -> np.ndarray:
     """Картинка шага ``07_lines``: края книги с точками, разделитель страниц, ограничители, трапеции, полоса-вклейка с
     вспомогательными линиями, линия корешка и подгоночные области страниц — для сверки.
@@ -773,6 +903,7 @@ def draw_lines_step(
         book: Грубая маска книги (контур).
         title: Начало шапки (кадр).
         fit: Подгонка разворота (``pipeline.SpreadFit``) или None (не рисуется).
+        surya_frames: Подгоночные области без текста (вход холста Кунса для surya) или None (не рисуются).
 
     Returns:
         Картинка BGR.
@@ -796,6 +927,8 @@ def draw_lines_step(
             )
             for x, y in np.round(frame.knots).astype(int):
                 cv2.circle(canvas, (int(x), int(y)), KNOT_RADIUS, COLOUR_FRAME, 2, cv2.LINE_AA)
+    for frame in surya_frames or []:
+        _dashed_poly(canvas, frame.polygon(), COLOUR_SURYA, 2)
     _draw_spread_lines(canvas, lines, points=True)
     if strip is not None:
         _draw_line(canvas, strip.left, COLOUR_AUX, LINE_PX, dashed=True)
@@ -830,6 +963,11 @@ def draw_lines_step(
                 COLOUR_FRAME,
             ),
             LegendEntry("кружок — добавленный узел сплайна на изгибе", COLOUR_FRAME),
+            LegendEntry(
+                "подгоночная область без текста (по ней — холст Кунса для surya)",
+                COLOUR_SURYA,
+                style=SampleStyle.DASHED,
+            ),
             LegendEntry("прежний сплайн рамки страницы (для сравнения)", COLOUR_OLD_SPLINE),
             LegendEntry("полоса-вклейка (маска)", COLOUR_STRIP, alpha=STRIP_ALPHA, style=SampleStyle.BOX),
             LegendEntry("вспомогательные линии: края полосы", COLOUR_AUX, style=SampleStyle.DASHED),

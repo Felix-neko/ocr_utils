@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 import numpy as np
 
@@ -194,3 +196,90 @@ def spread_frames(
         spine_side = np.array([top[-1], bottom[-1]])
         frames.append(PageFrame(top, bottom, far, spine_side, knots))
     return frames
+
+
+def single_frame(page: PageQuad, paint: np.ndarray, core_zone: np.ndarray, text: np.ndarray) -> PageFrame:
+    """Подгоночная область одной страницы кадра (обложка, крышка, страница с отброшенной полоской соседней).
+
+    Корешка нет: все четыре стороны — ``fit_boundary_adaptive`` по маске страницы (``spine_right=None``, без линии
+    сгиба и без зоны у корешка). Область строится как у левой страницы разворота: ``far`` — левая сторона, ``spine`` —
+    правая (кривая, а не отрезок), верх и низ — слева направо; так её без правки берёт ``rectify.coons.page_patch``.
+
+    Args:
+        page: Страница с трапецией.
+        paint: Зона закраса пальцев на масштабе сегментации (точки контура там негодны).
+        core_zone: Ядро пальца с припуском (точки верха и низа там негодны).
+        text: Вершины текста страницы (N, 2) px сегментации (сторона сдвигается наружу, чтобы его накрыть).
+
+    Returns:
+        Область страницы.
+    """
+    boundary, fits = fit_boundary_adaptive(page.mask, page.quad, None, SEG_PX_PER_MM, paint, text,
+                                           edge_exclude=core_zone, spine_zone_mm=None)  # fmt: skip
+    knots = [boundary.curves[s].points(np.asarray(f.added, np.float64)) for s, f in fits.items() if len(f.added)]
+    return PageFrame(boundary.top, boundary.bottom, boundary.left, boundary.right,
+                     np.vstack(knots) if knots else np.zeros((0, 2)))  # fmt: skip
+
+
+# Поля области в файле кэша (ключи ``<поле><номер страницы>``).
+FRAME_FIELDS = ("top", "bottom", "far", "spine", "knots")
+# Причина отсутствия областей, когда файла кэша нет (``coons_layout.FramesReason.MISSING``).
+FRAMES_MISSING = "missing"
+# Округление вершин перед отпечатком областей, px сегментации: шум вычисления ниже 0.05 px отпечаток не меняет.
+DIGEST_DECIMALS = 1
+
+
+def save_frames(path: Path, frames: list[PageFrame] | None, reason: str = "") -> None:
+    """Области страниц → npz (``top0, bottom0, far0, spine0, knots0, …1`` и ``reason``).
+
+    Args:
+        path: Файл кэша (``layout_frames.npz``).
+        frames: Области страниц слева направо или None — областей нет.
+        reason: Почему областей нет (``coons_layout.FramesReason``) или пусто.
+    """
+    arrays = {"reason": np.array(reason)}
+    for i, frame in enumerate(frames or []):
+        for name in FRAME_FIELDS:
+            arrays[f"{name}{i}"] = np.asarray(getattr(frame, name), np.float64)
+    np.savez_compressed(path, **arrays)
+
+
+def load_frames(path: Path) -> tuple[list[PageFrame] | None, str]:
+    """Области страниц из npz :func:`save_frames`.
+
+    Args:
+        path: Файл кэша.
+
+    Returns:
+        ``(области или None, причина отсутствия)``; файла нет — ``(None, FRAMES_MISSING)``.
+    """
+    if not path.exists():
+        return None, FRAMES_MISSING
+    with np.load(path) as data:
+        reason = str(data["reason"]) if "reason" in data.files else ""
+        frames = []
+        i = 0
+        while f"top{i}" in data.files:
+            frames.append(PageFrame(*(data[f"{name}{i}"] for name in FRAME_FIELDS)))
+            i += 1
+    return (frames or None), reason
+
+
+def frames_digest(frames: list[PageFrame] | None) -> str:
+    """Отпечаток областей: sha1 вершин, округлённых до ``DIGEST_DECIMALS`` знаков; ``"none"`` без областей.
+
+    Args:
+        frames: Области или None.
+
+    Returns:
+        Шестнадцатеричный sha1 или ``"none"``.
+    """
+    if not frames:
+        return "none"
+    h = hashlib.sha1()
+    for frame in frames:
+        for name in FRAME_FIELDS:
+            arr = np.round(np.asarray(getattr(frame, name), np.float64), DIGEST_DECIMALS) + 0.0
+            h.update(name.encode())
+            h.update(np.ascontiguousarray(arr).tobytes())
+    return h.hexdigest()

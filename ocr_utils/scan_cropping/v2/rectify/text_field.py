@@ -12,13 +12,14 @@ from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks.baseline_axis import SMOOTH_XH, X_CLASS_TOLERANCE, line_x_height
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
-from ocr_utils.page_layout.text_blocks.hints import LayoutHints
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, masked_ink
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
 from ocr_utils.page_layout.text_blocks.lines import clean_run
 from ocr_utils.page_layout.text_blocks.page import PageAnalysis, analyse_gray
 from ocr_utils.units import mm_to_px, mm_to_px_float, px_to_mm
-from research.page_rectify.coons import Layout, Patch, PageRect, rect_fractions
+from ocr_utils.scan_cropping.v2.rectify.coons import Layout, Patch, PageRect, coons_at
 
 # Короче этого ось строки или выровненная сторона в выборки не идёт, мм: на коротких наклон и изгиб — шум формы букв.
 MIN_RUN_MM = 25.0
@@ -27,11 +28,36 @@ MIN_RUN_MM = 25.0
 # увода отбивки после Кунса (до 2.6 мм — ХиП 1991/07 IMG_0090).
 MIN_SIDE_MM = 8.0
 COLUMN_TOL_MM = 3.5
+# Наклон выровненной стороны (прямая МНК по её точкам) больше этого — не отбивка, а ложная сторона, градусы. После
+# Кунса настоящие стороны почти отвесны (24 кадра ПХ 1974/01 и ХиП 1991: вне таблиц 297 из 298 — до 1.94°); наклонный
+# тренд даёт блок из строк с разным отступом — ячейка таблицы с центрованными строками «млн. руб. / тыс. руб. / и в
+# нату- / ральном / выражении» (ПХ 1974/01 IMG_0029: левые стороны трёх ячеек 3–5° по 12 мм, вместе длиннее 25 мм —
+# общая цель), висячий отступ абзаца, центрованный текст (ХиП 1991/03 и 04 IMG_0152, 7°). Сведённая в вертикаль, такая
+# сторона за 3 мм от линейки таблицы гнула её волной 0.74 мм.
+SIDE_MAX_TILT_DEG = 3.0
 # Шаг выборок вдоль оси или стороны, мм; на концах — гуще: самые сильные изгибы строк — на концах, у корешка лист
 # уходит в сгиб на последних 3–5 мм (ХиП 1991/01 IMG_1057), и выборки через 3 мм от начала оси до конца не дотягивались.
 SAMPLE_STEP_MM = 3.0
 END_STEP_MM = 1.0
 END_ZONE_MM = 8.0
+# Надстрочный знак в начале строки (цифра сноски «³ К. Маркс…» — ПХ 1975/03 IMG_0063, левая страница): 1–2 первых
+# глифа строки до пробела не уже SUPERSCRIPT_GAP_XH строчной, каждый не шире SUPERSCRIPT_GLYPH_WIDTH_XH (цифра мелкого
+# кегля; однобуквенное «В» в начале абзаца — 0.8–0.9 строчной, ПХ 1974/01 IMG_0081), вместе не шире
+# SUPERSCRIPT_MAX_WIDTH_XH и не ниже SUPERSCRIPT_MIN_XH строчной; их низ выше прямой по низам SUPERSCRIPT_NEIGHBOURS
+# ближайших строчных после пробела больше чем на SUPERSCRIPT_RAISED_XH строчной, и база там поднята над той же прямой
+# больше SUPERSCRIPT_PULL_XH. У мелкой цифры ПХ 1975 низ лишь на 0.3–0.4 строчной над базой, на границе отсева базы
+# (``RAISED_XH`` = 0.3), и она голосует: база у начала строки поднята на 0.45 мм и выходит на свой уровень лишь через
+# ~7 мм (жёсткость сплайна базы — SMOOTH_XH строчных). Поле опускало «³ К.» на 0.25 мм, а черту над сноской (2.7 мм
+# выше) гнуло вслед. Пробел и прямая (а не медиана) по соседям — против загиба строки у корешка: там поднят и первый
+# глиф, и соседние (без них на ХиП 1991 срабатывало до 36 начал и концов строк на кадр). Участок базы от начала строки
+# до знака плюс SMOOTH_XH строчных в выборки не идёт.
+SUPERSCRIPT_GAP_XH = 0.6
+SUPERSCRIPT_MAX_WIDTH_XH = 1.5
+SUPERSCRIPT_GLYPH_WIDTH_XH = 0.6
+SUPERSCRIPT_MIN_XH = 0.5
+SUPERSCRIPT_RAISED_XH = 0.25
+SUPERSCRIPT_PULL_XH = 0.2
+SUPERSCRIPT_NEIGHBOURS = 4
 # Радиус, в котором выборки считаются дублями (одна строка из двух пересекающихся блоков или страниц), мм.
 DUPLICATE_RADIUS_MM = 2.0
 # Шаг узлов сетки поля, мм.
@@ -78,6 +104,36 @@ SPARSE_MIN_LINES = 2
 SPARSE_MIN_LENGTH_MM = 100.0
 SPARSE_MIN_SPAN_MM = 40.0
 SPARSE_ZERO_MM = 15.0
+# Режим полосы (:class:`FieldMode`): страница с одной строкой или с несколькими рядом по высоте (выходные данные внизу
+# второй страницы обложки ПХ 1975 — 10/IMG_0003 левая: одна строка 85 мм в 14 мм над низом, после Кунса наклонена на
+# 1.5° и прогнута на 0.8 мм; шесть строк подзаголовка над фото ХиП 1991/06 IMG_0377 на 23 мм по высоте) прежде
+# прижималась к нулю. Теперь у опор поле решают они, а в узлах дальше SPARSE_ZERO_MM — изгиб опор низкого порядка
+# (многочлен 2-й степени по x, за концами опор — продление наклоном опор в целом), затухающий с удалением
+# по высоте d как exp(−(d/BAND_DECAY_MM)²). Затухание — по опыту на 37 страницах FULL (ПХ 1974/01, 1975, ХиП 1991):
+# изгиб 2-й степени одной строки предсказывает строку в d мм от неё с долей (МНК) 0.99 при 10–25 мм, 0.94 — 25–50,
+# 0.80 — 50–100, 0.64 — 100–150, 0.26 — 150–250; дальше 100 мм продление без затухания уже хуже нуля. Опоры
+# принимаются, если среди них есть строка текста (не одни линейки: верхний край карточки-вклейки ХиП 1991/05 IMG_0271
+# — линейка), их суммарная длина не меньше BAND_MIN_LENGTH_MM, остаток подгонки — не больше BAND_MAX_RESIDUAL_MM
+# (у строк FULL 99 % — до 0.34 мм, ложная «строка» по краю листа ХиП 1991/06 IMG_0479 правая — 0.50) и наклон — не
+# больше BAND_MAX_TILT_DEG (строки после Кунса — до 2.6°). Короче BAND_QUAD_MIN_MM по x — только наклон (1-я степень).
+BAND_MIN_LENGTH_MM = 40.0
+BAND_MAX_RESIDUAL_MM = 0.25
+BAND_MAX_TILT_DEG = 3.0
+BAND_QUAD_MIN_MM = 50.0
+BAND_DECAY_MM = 170.0
+# Краска страницы вне полосы опор (дальше SPARSE_ZERO_MM по высоте) и вне растра, мм² (:func:`foreign_ink`): больше
+# этого — на странице есть то, что опоры не описывают (схема, повёрнутый текст, таблица), и режима полосы нет. Порог
+# серого краски и клетка карты краски (``PageText.ink``), мм.
+# Замер (2026-10-24, ПХ 1975 — 88 кадров со страницами из 1–7 строк, ХиП 1991): выходные данные на пустой странице —
+# 0–38 мм² (просвечивание), фото с подписью ХиП 06/IMG_0377 — 46, библиотечная карточка-вклейка 05/IMG_0002 — 120,
+# колонтитул над повёрнутой схемой (01/IMG_0019, 01/IMG_0020, 09/IMG_0016, 09/IMG_0017) — 1950–2950.
+BAND_MAX_FOREIGN_INK_MM2 = 80.0
+# Опора режима полосы ближе этого к верху или низу страницы — край листа или тень, а не строка, мм: ложные «строки» по
+# нижнему краю пустых страниц 07/IMG_0002 правой и 08/IMG_0079 левой — за краем прямоугольника страницы и в 1 мм от
+# него; выходные данные — от 14 мм, колонтитулы — от 13 мм.
+BAND_EDGE_MM = 6.0
+INK_LEVEL = 128
+INK_CELL_MM = 1.0
 # Шаг «нулевых» выборок на странице без поля (цветная, мало строк), мм, и их вес.
 ZERO_STEP_MM = 8.0
 ZERO_WEIGHT = 4.0
@@ -114,6 +170,8 @@ FRAME_INNER_SHARE = 0.02
 FRAME_SIDE_COVER = 0.8
 FRAME_PAPER_MM = 2.0
 RULE_ZONE_MARGIN_MM = 1.0
+# Припуск вокруг краски линеек, которую гасят перед разбором текста (:func:`rule_ink`), мм (≈ 1 px копии 150 dpi).
+RULE_ERASE_MM = 0.2
 # Смешивание полей страниц в пустой полосе у корешка: отступ от края текста и наибольшая полуширина полосы, мм.
 BLEND_TEXT_MARGIN_MM = 1.0
 BLEND_MAX_MM = 8.0
@@ -132,6 +190,7 @@ class SampleKind(StrEnum):
     LINE = "line"  # ось строки → горизонталь (составляющая dy)
     SIDE = "side"  # выровненная сторона блока → вертикаль (составляющая dx)
     ZERO = "zero"  # страница без поля: смещение 0 (обе составляющие)
+    BAND = "band"  # режим полосы: продление изгиба опор вдали от них (:func:`band_samples`)
 
 
 @dataclass(frozen=True)
@@ -215,30 +274,56 @@ class FieldMode(StrEnum):
 
     FULL = "full"  # строк достаточно: поле по всем опорам
     SPARSE = "sparse"  # строк мало, но они длинные и разнесены по высоте: поле у опор, вдали — нули
+    BAND = "band"  # одна строка или несколько рядом: поле у опор, вдали — их изгиб низкого порядка с затуханием
     NONE = "none"  # цветная или опор нет: только нули
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class PageRegion:
-    """Область страницы на холсте ``(x0, y0, x1, y1)`` px."""
+    """Область страницы на холсте ``(x0, y0, x1, y1)`` px; у фото с чётким краем — ещё и многоугольник.
+
+    Поля:
+        kind: Вид области.
+        box: Рамка; у фото с многоугольником — его охват (преграда разбора ``region_barriers``).
+        polygon: Кривой четырёхугольник фото (M, 2) px холста или None — область задана рамкой.
+        photo: Найденное фото (``page_layout.raster.photo_edges.PhotoBound``) — стороны для опор поля, или None.
+    """
 
     kind: RegionKindR
     box: tuple[float, float, float, float]
+    polygon: np.ndarray | None = None
+    photo: object | None = None
 
     def contains(self, points: np.ndarray, margin: float = 0.0) -> np.ndarray:
-        """Какие точки (N, 2) внутри рамки с полем ``margin`` px."""
+        """Какие точки (N, 2) внутри области с полем ``margin`` px: по многоугольнику, если он есть, иначе по рамке.
+
+        Подпись под фото, строки обтекания у скошенного края, номер страницы у угла рамки внутрь фото не попадают
+        и остаются опорами поля (стенд research/photo_bounds: на паке-1 вернулось 55 строк на 12 полосах, из них
+        23 и 23 — на полосах, где растр детектора накрыл фото вместе с колонкой текста).
+        """
+        if self.polygon is not None and len(self.polygon) >= 3 and len(points):
+            contour = np.asarray(self.polygon, np.float32).reshape(-1, 1, 2)
+            dist = np.array([cv2.pointPolygonTest(contour, (float(x), float(y)), True) for x, y in points])
+            return dist >= -margin
         x0, y0, x1, y1 = self.box
         return ((points[:, 0] >= x0 - margin) & (points[:, 0] <= x1 + margin)
                 & (points[:, 1] >= y0 - margin) & (points[:, 1] <= y1 + margin))  # fmt: skip
 
 
-def page_regions(canvas: np.ndarray, box: tuple[int, int, int, int], dpi: float) -> tuple[PageRegion, ...]:
+def page_regions(
+    canvas: np.ndarray, box: tuple[int, int, int, int], dpi: float, photos: bool = True
+) -> tuple[PageRegion, ...]:
     """Растр, таблицы и line art страницы детекторами ``page_layout`` по пикселям (без surya; ~0.5–1.5 с).
+
+    Растр уточняется до фото (``page_layout.raster.photo_edges``): рамка по краю снимка, у фото с чётким краем по всем
+    сторонам — кривой четырёхугольник (``PageRegion.polygon``) и само фото (``PageRegion.photo``) — его стороны идут
+    в опоры поля (:func:`photo_samples`).
 
     Args:
         canvas: Выпрямленный кадр BGR.
         box: Вырезка страницы ``(x0, y0, x1, y1)``.
         dpi: Разрешение холста.
+        photos: Уточнять растр до фото; False — рамки детектора как есть (прежнее поведение).
 
     Returns:
         Области на холсте.
@@ -249,12 +334,28 @@ def page_regions(canvas: np.ndarray, box: tuple[int, int, int, int], dpi: float)
     x0, y0, x1, y1 = box
     image = PageImage.from_array(canvas[y0:y1, x0:x1], dpi=dpi, variant=Variant.SCAN, cache_name="page_rectify")
     layout = PageLayout(image, {Find.RASTER, Find.TABLES, Find.LINE_ART}, LayoutOptions(use_surya=False)).process(None)
+    from ocr_utils.page_layout.raster.photo_edges import find_photos
+
     out = []
+    gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY) if photos and layout.raster_pics else None
     for kind, found in ((RegionKindR.RASTER, layout.raster_pics), (RegionKindR.TABLE, layout.tables),
                         (RegionKindR.LINE_ART, layout.line_arts)):  # fmt: skip
         for region in found:
             b = region.box
-            out.append(PageRegion(kind, (b.x0 + x0, b.y0 + y0, b.x1 + x0, b.y1 + y0)))
+            box = (b.x0 + x0, b.y0 + y0, b.x1 + x0, b.y1 + y0)
+            if kind is not RegionKindR.RASTER or gray is None:
+                out.append(PageRegion(kind, box))
+                continue
+            # Растр: уточнённые фото (рамка по краю снимка, у чёткого края — кривой четырёхугольник); затравка без
+            # годной компоненты остаётся рамкой детектора.
+            photos = [p for p in find_photos(gray, [tuple(int(round(v)) for v in box)], dpi) if p.sides]
+            if not photos:
+                out.append(PageRegion(kind, box))
+            for p in photos:
+                polygon = p.polygon() if p.corners is not None else None
+                rect = p.box if polygon is None else (float(polygon[:, 0].min()), float(polygon[:, 1].min()),
+                                                      float(polygon[:, 0].max()), float(polygon[:, 1].max()))  # fmt: skip
+                out.append(PageRegion(kind, rect, polygon, p if p.corners is not None else None))
     return tuple(out)
 
 
@@ -324,6 +425,8 @@ class PageText:
         scale: px холста на px рабочей копии.
         rules: Линейки страницы (горизонтальные и вертикальные) на холсте, годные в опоры поля.
         regions: Растр, таблицы и line art страницы на холсте (``page_regions``).
+        ink: Доля краски в клетках :data:`INK_CELL_MM` вырезки (``ink_map``) или None; клетка ``(i, j)`` — от
+            ``offset`` на ``(j, i) · INK_CELL_MM`` мм.
     """
 
     analysis: PageAnalysis
@@ -331,6 +434,8 @@ class PageText:
     scale: float
     rules: tuple[Rule, ...] = ()
     regions: tuple[PageRegion, ...] = ()
+    ink: np.ndarray | None = None
+    photos: tuple = ()  # фото с чётким краем, найденные на холсте этого прохода (``photo_edges.PhotoBound``)
 
     def to_canvas(self, points: np.ndarray) -> np.ndarray:
         """Точки рабочей копии (N, 2) → px холста."""
@@ -393,6 +498,8 @@ def analyze_page(
     # Без этого узкая колонка у рисунка и полная ширина под ним собирались в один блок, и правая сторона выходила
     # рваной (ХиП 1991/01 IMG_0986: 20 из 34 строк «с отступом»).
     barriers = region_barriers(regions, offset, dpi, (x1 - x0, y1 - y0))
+    # Краска горизонтальных линеек гасится до разбора: линейка не срастается со словом в одну строку (:func:`rule_ink`).
+    gray300 = masked_ink(gray300, ~rule_ink(gray, dpi))
     analysis = analyse_gray(gray300, InkEngine(), hints=LayoutHints(barriers=barriers))
     if barriers:
         # Второй проход: линии раздела над и под рисунком — между последним рядом обтекания и первым рядом на всю
@@ -403,7 +510,31 @@ def analyze_page(
     rules = orphan_rules(find_rules(gray, dpi, offset), gray, offset, dpi, regions)
     rules = inner_rules(rules, rect, dpi, gray, offset)
     scale = dpi / analysis.dpi
-    return PageText(analysis, offset, scale, rules, regions)
+    # Фото с чётким краем — заново на этом холсте (поле прохода сдвигает их на миллиметры): стороны — опоры поля.
+    photos = ()
+    seeds = [tuple(int(round(v)) for v in r.box) for r in regions if r.polygon is not None and r.photo is not None]
+    if seeds:
+        from ocr_utils.page_layout.raster.photo_edges import find_photos
+
+        photos = tuple(p for p in find_photos(cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY), seeds, dpi)
+                       if p.corners is not None)  # fmt: skip
+    return PageText(analysis, offset, scale, rules, regions, ink_map(gray, dpi), photos)
+
+
+def ink_map(gray: np.ndarray, dpi: float) -> np.ndarray:
+    """Доля краски (серый темнее :data:`INK_LEVEL`) в клетках :data:`INK_CELL_MM` — для меры «чужой» краски режима
+    полосы (:func:`foreign_ink`).
+
+    Args:
+        gray: Серая вырезка страницы (после выравнивания освещения фон ~255).
+        dpi: Разрешение.
+
+    Returns:
+        Карта долей float32 (клетки по высоте × по ширине).
+    """
+    cell = mm_to_px_float(INK_CELL_MM, dpi)
+    size = (max(1, int(round(gray.shape[1] / cell))), max(1, int(round(gray.shape[0] / cell))))
+    return cv2.resize((gray < INK_LEVEL).astype(np.float32), size, interpolation=cv2.INTER_AREA)
 
 
 def region_barriers(
@@ -639,6 +770,84 @@ def _paper_outside(rule: Rule, rect: PageRect, dpi: float, gray: np.ndarray | No
     return float(np.median(strip)) > threshold
 
 
+def long_runs(ink: np.ndarray, axis: RuleAxis, kernel_len: int, slack: int) -> tuple[int, np.ndarray, np.ndarray]:
+    """Компоненты длинных пробегов краски вдоль направления: морфологическое открытие отрезком ``kernel_len``.
+
+    Поперёк линейки краска сначала расширяется на ``slack``: тонкая черта, загнутая к концу (у корешка — ХиП 1991/01
+    IMG_1088, выходные данные), переходит со строки на строку пикселей и не давала прямого пробега длиной в отрезок
+    открытия — линейка обрывалась там, где начинался изгиб.
+
+    Args:
+        ink: Краска 0/1 (uint8) рабочей копии :data:`RULE_WORK_DPI`.
+        axis: Направление линеек.
+        kernel_len: Отрезок открытия, px копии.
+        slack: Расширение поперёк, px копии.
+
+    Returns:
+        ``(число меток, метки, статистика)``: компоненты — по открытой краске, а метки оставлены только на исходной
+        краске внутри компоненты (по ней считаются толщина и осевая).
+    """
+    across = (1, 2 * slack + 1) if axis is RuleAxis.HORIZONTAL else (2 * slack + 1, 1)
+    kernel = (kernel_len, 1) if axis is RuleAxis.HORIZONTAL else (1, kernel_len)
+    widened = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_RECT, across))
+    opened = cv2.morphologyEx(widened, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, kernel))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    return count, np.where(ink > 0, labels, 0), stats
+
+
+def thin_long(
+    labels: np.ndarray, stats: np.ndarray, count: int, along: int, min_len: float, max_thick: float
+) -> list[int]:
+    """Метки компонент :func:`long_runs`, похожих на линейку: длиннее ``min_len`` и в среднем не толще ``max_thick``.
+
+    Args:
+        labels: Метки (только на краске).
+        stats: Статистика компонент.
+        count: Число меток.
+        along: 0 — горизонталь, 1 — вертикаль.
+        min_len: Наименьшая длина, px копии.
+        max_thick: Наибольшая средняя толщина (площадь / длина), px копии.
+
+    Returns:
+        Номера меток.
+    """
+    areas = np.bincount(labels.ravel(), minlength=count)
+    kept = []
+    for k in range(1, count):
+        length = stats[k, cv2.CC_STAT_WIDTH if along == 0 else cv2.CC_STAT_HEIGHT]
+        if length >= min_len and areas[k] > 0 and areas[k] / length <= max_thick:
+            kept.append(k)
+    return kept
+
+
+def rule_ink(gray: np.ndarray, dpi: float) -> np.ndarray:
+    """Краска горизонтальных линеек — всех, что находит :func:`find_rules`, до отбора годных в опоры (сирот, не у края).
+
+    Её гасят перед разбором текста: декоративная линейка заголовка (двойная, с загибом на конце, — не сирота и в опоры
+    не идёт) иначе сращивалась со словом рубрики в одну «строку» во всю ширину страницы, ось строки шла наискось от
+    линейки к слову, и поле наклоняло всю шапку (ХиП 1991/01 IMG_1052, «Публицистика»). Буквы, касающиеся линейки,
+    остаются: открытие отрезком :data:`RULE_KERNEL_MM` оставляет только длинные пробеги, у букв их нет.
+
+    Args:
+        gray: Серая вырезка страницы (разрешение холста).
+        dpi: Разрешение холста.
+
+    Returns:
+        Маска bool рабочей копии :data:`RULE_WORK_DPI`, расширенная на :data:`RULE_ERASE_MM`.
+    """
+    f = RULE_WORK_DPI / dpi
+    small = cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    _, ink = cv2.threshold(small, 0, 1, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    kernel_len = max(mm_to_px(RULE_KERNEL_MM, RULE_WORK_DPI), 3)
+    slack = max(mm_to_px(RULE_SLACK_MM, RULE_WORK_DPI), 1)
+    count, labels, stats = long_runs(ink, RuleAxis.HORIZONTAL, kernel_len, slack)
+    keep = thin_long(labels, stats, count, 0, mm_to_px_float(RULE_MIN_MM, RULE_WORK_DPI),
+                     mm_to_px_float(RULE_MAX_THICK_MM, RULE_WORK_DPI))  # fmt: skip
+    mask = np.isin(labels, keep) if keep else np.zeros(labels.shape, bool)
+    grow = max(mm_to_px(RULE_ERASE_MM, RULE_WORK_DPI), 1)
+    return cv2.dilate(mask.astype(np.uint8), np.ones((2 * grow + 1, 2 * grow + 1), np.uint8)) > 0
+
+
 def find_rules(gray: np.ndarray, dpi: float, offset: np.ndarray) -> tuple[Rule, ...]:
     """Линейки страницы по краске: длинные тонкие прямые по горизонтали и по вертикали.
 
@@ -664,22 +873,10 @@ def find_rules(gray: np.ndarray, dpi: float, offset: np.ndarray) -> tuple[Rule, 
     smooth = max(int(mm_to_px(RULE_SMOOTH_MM, RULE_WORK_DPI)) | 1, 3)
     slack = max(mm_to_px(RULE_SLACK_MM, RULE_WORK_DPI), 1)
     rules = []
-    for axis, kernel in ((RuleAxis.HORIZONTAL, (kernel_len, 1)), (RuleAxis.VERTICAL, (1, kernel_len))):
-        # Поперёк линейки краска сначала расширяется на ``slack``: тонкая черта, загнутая к концу (у корешка — ХиП
-        # 1991/01 IMG_1088, выходные данные), переходит со строки на строку пикселей и не давала прямого пробега длиной
-        # в отрезок открытия — линейка обрывалась там, где начинался изгиб.
-        across = (1, 2 * slack + 1) if axis is RuleAxis.HORIZONTAL else (2 * slack + 1, 1)
-        widened = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_RECT, across))
-        opened = cv2.morphologyEx(widened, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, kernel))
-        # Компоненты — по открытому, а сама линейка (толщина, осевая) — по исходной краске внутри компоненты.
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
-        labels = np.where(ink > 0, labels, 0)
+    for axis in (RuleAxis.HORIZONTAL, RuleAxis.VERTICAL):
+        count, labels, stats = long_runs(ink, axis, kernel_len, slack)
         along = 0 if axis is RuleAxis.HORIZONTAL else 1
-        areas = np.bincount(labels.ravel(), minlength=count)
-        for k in range(1, count):
-            length = stats[k, cv2.CC_STAT_WIDTH if along == 0 else cv2.CC_STAT_HEIGHT]
-            if length < min_len or areas[k] == 0 or areas[k] / length > max_thick:
-                continue
+        for k in thin_long(labels, stats, count, along, min_len, max_thick):
             ys, xs = np.nonzero(labels == k)
             t, c = (xs, ys) if along == 0 else (ys, xs)
             # Осевая линия: средняя поперечная координата по каждому положению вдоль линейки.
@@ -721,6 +918,135 @@ def rule_samples(page: PageText, dpi: float) -> tuple[Samples, Samples, int]:
             h_parts.append(Samples(at, pts[:, 0] - target, np.ones(n), pts, np.full(n, SampleKind.SIDE),
                                    np.full(n, len(h_parts))))  # fmt: skip
     return sum(h_parts, Samples.empty()), sum(v_parts, Samples.empty()), len(v_parts)
+
+
+# Сторона фото короче этого в опоры не идёт, мм (как ось строки — :data:`MIN_RUN_MM`); отступ выборок от углов, мм.
+PHOTO_MIN_SIDE_MM = 25.0
+CORNER_MARGIN_MM = 1.0
+# Ограничение веса сторон фото у текста (:func:`limit_photo_weights`): ближе PHOTO_NEAR_MM к опоре текста той же
+# составляющей вес — PHOTO_NEAR_WEIGHT, дальше 2 × PHOTO_NEAR_MM — полный. Замер стенда research/photo_bounds на 5 кадрах
+# (ХиП 1991 02/IMG_1091, 04/IMG_0154, 06/IMG_0377, МТС 1990/02 IMG_0906, 1990/03 IMG_1101; reports/photo_bounds.md,
+# «Встраивание»): без ограничения на IMG_1101 строки p95 0.50 → 0.74 мм, стороны блоков 0.32 → 0.41; 5 мм / 0.5 —
+# 0.33 и 0.34 при наклоне сторон фото ≤ 0.11° (было 1.44°); 10 мм / 0.25 — 0.37 и 0.32, но наклон до 0.26–0.30°
+# (IMG_0154); 20 мм / 0.1 — сторона фото почти не выпрямляется (0.50–0.70°). На прочих кадрах разница в пределах 0.01 мм.
+PHOTO_NEAR_MM = 5.0
+PHOTO_NEAR_WEIGHT = 0.5
+
+
+def side_span(photo, side) -> tuple[float, float]:
+    """Участок стороны между углами четырёхугольника (вдоль-координата), без :data:`CORNER_MARGIN_MM` у углов.
+
+    Args:
+        photo: Фото с углами.
+        side: Сторона.
+
+    Returns:
+        ``(a0, a1)`` px.
+    """
+    from ocr_utils.page_layout.raster.photo_edges import Side
+
+    tl, tr, br, bl = photo.corners
+    lo, hi = {Side.TOP: (tl[0], tr[0]), Side.BOTTOM: (bl[0], br[0]),
+              Side.LEFT: (tl[1], bl[1]), Side.RIGHT: (tr[1], br[1])}[side]  # fmt: skip
+    margin = mm_to_px_float(CORNER_MARGIN_MM, photo.dpi)
+    return float(lo) + margin, float(hi) - margin
+
+
+def photo_side_samples(photo, dpi: float) -> tuple[Samples, Samples, int]:
+    """Выборки поля по сторонам фото: верх и низ — в горизонталь (как ось строки, составляющая ``dy``), левая и
+    правая — в вертикаль (как выровненная сторона блока, ``dx``).
+
+    **Правило четырёх сторон**: стороны идут в опоры, только если у фото есть кривой четырёхугольник
+    (``photo.corners``: все четыре стороны чёткие, сходятся в углах, многоугольник выпуклый и правдоподобный —
+    ``photo_edges.quad_check``). Иначе — ни одной стороны: одиночная «чёткая» сторона бывает прямой внутри снимка
+    (стрела крана МТС 1991/01 IMG_0615), и опора по ней гнёт страницу.
+
+    Точки — подогнанная кривая стороны (сплайн или многочлен по точкам края, ``photo_edges.SideModel``) с шагом
+    ``SAMPLE_STEP_MM`` и гуще на концах (``END_STEP_MM`` на ``END_ZONE_MM``), как у строк, между углами без
+    :data:`CORNER_MARGIN_MM`. Цель — медиана поперечной координаты стороны: сторона фото на бумаге прямая. Стороны
+    короче :data:`PHOTO_MIN_SIDE_MM` не идут.
+
+    Args:
+        photo: Найденное фото (``photo_edges.PhotoBound``; координаты — px холста).
+        dpi: Разрешение холста.
+
+    Returns:
+        ``(выборки dx, выборки dy, число горизонтальных сторон)`` — тот же вид, что у :func:`rule_samples`.
+    """
+    if photo.corners is None:
+        return Samples.empty(), Samples.empty(), 0
+    step = mm_to_px_float(SAMPLE_STEP_MM, dpi)
+    end_step, end_zone = mm_to_px_float(END_STEP_MM, dpi), mm_to_px_float(END_ZONE_MM, dpi)
+    min_len = mm_to_px_float(PHOTO_MIN_SIDE_MM, dpi)
+    h_parts, v_parts = [], []
+    for fit, sharp in zip(photo.sides, photo.sharp_sides):
+        if not sharp or fit.coef is None:
+            continue
+        a0, a1 = side_span(photo, fit.side)
+        if a1 - a0 < min_len:
+            continue
+        along = 0 if fit.side.horizontal else 1
+        pts = resample(fit.curve(a0, a1, max(8, int((a1 - a0) / (end_step / 2)))), along, step, end_step, end_zone)
+        target = float(np.median(pts[:, 1 - along]))
+        at = pts.copy()
+        at[:, 1 - along] = target
+        n = len(pts)
+        if along == 0:
+            v_parts.append(Samples(at, pts[:, 1] - target, np.ones(n), pts, np.full(n, SampleKind.LINE),
+                                   np.full(n, len(v_parts))))  # fmt: skip
+        else:
+            h_parts.append(Samples(at, pts[:, 0] - target, np.ones(n), pts, np.full(n, SampleKind.SIDE),
+                                   np.full(n, len(h_parts))))  # fmt: skip
+    return sum(h_parts, Samples.empty()), sum(v_parts, Samples.empty()), len(v_parts)
+
+
+def photo_samples(page: PageText, dpi: float) -> tuple[Samples, Samples, int]:
+    """Выборки по сторонам всех фото страницы с чётким краем (``PageText.photos``, найдены на холсте прохода).
+
+    Args:
+        page: Разбор страницы.
+        dpi: Разрешение холста.
+
+    Returns:
+        Выборки ``dx`` (боковые стороны), ``dy`` (верх и низ), число горизонтальных сторон.
+    """
+    h_parts, v_parts, count = Samples.empty(), Samples.empty(), 0
+    for photo in page.photos:
+        dx, dy, n = photo_side_samples(photo, dpi)
+        h_parts, v_parts, count = h_parts + dx, v_parts + dy, count + n
+    return h_parts, v_parts, count
+
+
+def limit_photo_weights(
+    photo: Samples, text: Samples, dpi: float, near_mm: float = PHOTO_NEAR_MM, near_weight: float = PHOTO_NEAR_WEIGHT
+) -> Samples:
+    """Вес выборок сторон фото у текста: рядом с опорами текста той же составляющей — :data:`PHOTO_NEAR_WEIGHT`,
+    дальше ``2 × near_mm`` — полный, между — линейный переход.
+
+    Текст — главная опора: строки и стороны блоков выпрямляют то, ради чего всё делается, а сторона фото — лишь
+    прямая кромка картинки, которую поле рядом с текстом гнёт против него. Без ограничения на МТС 1990/03 IMG_1101
+    левая сторона снимка в 1–3 мм от отбивки колонки над ним тянула поле, и выровненные стороны блоков страницы
+    разошлись (p95 размаха 0.32 → 0.56 мм). Вдали от текста (фото на странице с подписью, верх и низ снимка между
+    абзацами) сторона фото — единственная опора и весит полностью.
+
+    Args:
+        photo: Выборки сторон фото одной составляющей.
+        text: Опоры текста той же составляющей и страницы (строки и линейки для ``dy``, стороны блоков и линейки для
+            ``dx``).
+        dpi: Разрешение холста.
+        near_mm: Расстояние до ближайшей опоры текста, ближе которого вес — ``near_weight``, мм.
+        near_weight: Вес выборки фото рядом с текстом (доля полного).
+
+    Returns:
+        Выборки фото с поправленными весами.
+    """
+    if not len(photo) or not len(text) or near_weight >= 1.0:
+        return photo
+    near = mm_to_px_float(near_mm, dpi)
+    dist, _ = cKDTree(text.at).query(photo.at)
+    ramp = np.clip((dist - near) / max(near, 1e-9), 0.0, 1.0)
+    weight = photo.weight * (near_weight + (1.0 - near_weight) * ramp)
+    return Samples(photo.at, photo.value, weight, photo.source, photo.kind, photo.group)
 
 
 def thicken_strokes(gray300: np.ndarray, height_mm: float = THICKEN_MM) -> np.ndarray:
@@ -790,6 +1116,60 @@ def line_curve(axis) -> np.ndarray:
     return pts
 
 
+def raised_start_span(axis, base: np.ndarray) -> tuple[float, float] | None:
+    """Участок базы у начала строки, поднятый надстрочным знаком (цифрой сноски).
+
+    Знак — 1–2 первых глифа строки до пробела не уже :data:`SUPERSCRIPT_GAP_XH` строчной, каждый не шире
+    :data:`SUPERSCRIPT_GLYPH_WIDTH_XH`, вместе не шире
+    :data:`SUPERSCRIPT_MAX_WIDTH_XH` строчной, выше :data:`SUPERSCRIPT_MIN_XH` строчной (тире и кавычки ниже — их
+    отсев базы и так держит). Опора — прямая МНК по низам :data:`SUPERSCRIPT_NEIGHBOURS` ближайших строчных без
+    выносных после пробела, продлённая к знаку: при загибе строки у корешка поднят и знак, и соседи, и прямая это
+    повторяет. Знак выше опоры больше :data:`SUPERSCRIPT_RAISED_XH` строчной, база в его центре — больше
+    :data:`SUPERSCRIPT_PULL_XH` (отсев базы знак не отбросил).
+
+    Args:
+        axis: Ось строки (``LineAxis``, px рабочей копии) с глифами; без глифов участка нет.
+        base: Базовая линия строки ``(N, 2)`` px рабочей копии, по возрастанию x.
+
+    Returns:
+        Участок ``(x0, x1)`` px рабочей копии — от начала базы до дальнего края знака плюс ``SMOOTH_XH`` строчных
+        (на такой длине сплайн базы возвращается на свой уровень), или None.
+    """
+    glyphs = axis.glyphs
+    if glyphs is None or len(glyphs) <= SUPERSCRIPT_NEIGHBOURS + 2:
+        return None
+    x_h = line_x_height(glyphs)
+    if x_h <= 0:
+        return None
+    glyphs = glyphs[np.argsort(glyphs[:, 0])]
+    # Знак — первые глифы до пробела (не больше двух: «¹⁸»).
+    gaps = glyphs[1:3, 0] - glyphs[:2, 2]
+    wide = np.flatnonzero(gaps >= SUPERSCRIPT_GAP_XH * x_h)
+    if not len(wide):
+        return None
+    mark = glyphs[: wide[0] + 1]
+    heights = glyphs[:, 3] - glyphs[:, 1]
+    if (
+        mark[:, 2].max() - mark[0, 0] > SUPERSCRIPT_MAX_WIDTH_XH * x_h
+        or (mark[:, 2] - mark[:, 0]).max() > SUPERSCRIPT_GLYPH_WIDTH_XH * x_h
+        or heights[: len(mark)].max() < SUPERSCRIPT_MIN_XH * x_h
+    ):
+        return None
+    # Опора — ближайшие строчные без выносных после знака.
+    lower = np.flatnonzero(np.abs(heights - x_h) <= X_CLASS_TOLERANCE * x_h)
+    lower = lower[lower >= len(mark)][:SUPERSCRIPT_NEIGHBOURS]
+    if len(lower) < 3:
+        return None
+    slope, intercept = np.polyfit(0.5 * (glyphs[lower, 0] + glyphs[lower, 2]), glyphs[lower, 3], 1)
+    centre = 0.5 * (mark[0, 0] + mark[:, 2].max())
+    reference = slope * centre + intercept
+    raised = reference - mark[:, 3].max()  # низ знака (нижний из глифов) над опорой
+    pulled = reference - float(np.interp(centre, base[:, 0], base[:, 1]))
+    if raised <= SUPERSCRIPT_RAISED_XH * x_h or pulled <= SUPERSCRIPT_PULL_XH * x_h:
+        return None
+    return float(base[0, 0]) - 1.0, float(mark[:, 2].max()) + SMOOTH_XH * x_h
+
+
 def line_samples(page: PageText, dpi: float) -> tuple[Samples, int]:
     """Выборки по строкам: каждая точка базовой линии строки (:func:`line_curve`) должна встать на медианную высоту
     своей строки.
@@ -807,6 +1187,11 @@ def line_samples(page: PageText, dpi: float) -> tuple[Samples, int]:
     parts, count = [], 0
     for axis in page.analysis.axes:
         pts = line_curve(axis)
+        if axis.base_points is not None and len(pts) >= 2:
+            # Участок базы, поднятый цифрой сноски в начале строки, — не опора (:func:`raised_start_span`).
+            span = raised_start_span(axis, pts)
+            if span is not None:
+                pts = pts[~inside_spans(pts[:, 0], [span])]
         if len(pts) < 2:
             continue
         pts = page.to_canvas(pts)
@@ -815,6 +1200,11 @@ def line_samples(page: PageText, dpi: float) -> tuple[Samples, int]:
         if len(pts) < 2 or np.ptp(pts[:, 0]) < min_len:
             continue
         pts = resample(pts, 0, step, end_step, end_zone)
+        # Передискретизация соединяет куски оси по обе стороны фото прямой через него (ось строки, продлённая разбором
+        # через снимок, — МТС 1975/02 IMG_0101_2R): точки внутри зон отсекаются ещё раз, уже после неё.
+        pts = pts[outside(pts, zones, margin)]
+        if len(pts) < 2:
+            continue
         target = float(np.median(pts[:, 1]))
         at = np.stack([pts[:, 0], np.full(len(pts), target)], axis=1)
         parts.append(Samples(at, pts[:, 1] - target, np.ones(len(pts)), pts, np.full(len(pts), SampleKind.LINE),
@@ -827,7 +1217,8 @@ def aligned_sides(page: PageText, dpi: float) -> list[tuple[int, np.ndarray]]:
     """Выровненные стороны блоков страницы на холсте: ``(0 — левая, 1 — правая, точки (N, 2) сверху вниз)``.
 
     Сторона — гладкий тренд по телу блока (``core_left``/``core_right``), без недостоверных участков (``unreliable_*``
-    — ступеньки по выносам), не короче :data:`MIN_SIDE_MM`.
+    — ступеньки по выносам), не короче :data:`MIN_SIDE_MM` и не наклоннее :data:`SIDE_MAX_TILT_DEG` (наклонный тренд —
+    блок из строк с разным отступом, а не отбивка).
 
     Args:
         page: Разбор страницы.
@@ -855,9 +1246,22 @@ def aligned_sides(page: PageText, dpi: float) -> list[tuple[int, np.ndarray]]:
                 continue
             pts = page.to_canvas(pts)
             pts = pts[outside(pts, zones, margin)]
-            if len(pts) >= 2 and np.ptp(pts[:, 1]) >= min_len:
+            if len(pts) >= 2 and np.ptp(pts[:, 1]) >= min_len and side_tilt(pts) <= SIDE_MAX_TILT_DEG:
                 sides.append((which, pts[np.argsort(pts[:, 1])]))
     return sides
+
+
+def side_tilt(points: np.ndarray) -> float:
+    """Наклон стороны блока от вертикали: прямая ``x = a·y + b`` МНК по точкам.
+
+    Args:
+        points: Точки стороны (N, 2) px холста, N ≥ 2, с разными ``y``.
+
+    Returns:
+        Модуль наклона, градусы.
+    """
+    slope = np.polyfit(points[:, 1], points[:, 0], 1)[0]
+    return float(np.degrees(np.arctan(abs(slope))))
 
 
 def column_groups(medians: np.ndarray, tolerance: float) -> list[np.ndarray]:
@@ -906,7 +1310,11 @@ def side_samples(page: PageText, dpi: float) -> Samples:
     sides = aligned_sides(page, dpi)
     parts = []
     for which in (0, 1):
+        zones, margin = no_text_zones(page.regions), mm_to_px_float(RULE_ZONE_MARGIN_MM, dpi)
         own = [resample(pts, 1, step, end_step, end_zone) for kind, pts in sides if kind == which]
+        # Как у строк: точки, легшие передискретизацией внутрь фото или рисунка, — не опоры.
+        own = [pts[outside(pts, zones, margin)] for pts in own]
+        own = [pts for pts in own if len(pts) >= 2]
         if not own:
             continue
         medians = np.array([np.median(pts[:, 0]) for pts in own])
@@ -923,26 +1331,199 @@ def side_samples(page: PageText, dpi: float) -> Samples:
     return sum(parts, Samples.empty())
 
 
-def field_mode(count: int, supports: Samples, dpi: float) -> FieldMode:
+def field_mode(count: int, supports: Samples, dpi: float, text_lines: int | None = None) -> FieldMode:
     """Режим страницы по её опорам.
 
     Args:
         count: Строк и горизонтальных линеек в выборках.
         supports: Выборки строк и линеек ``dy`` страницы (по группам — длина опор, по ``at`` — размах по высоте).
         dpi: Разрешение холста.
+        text_lines: Из них строк текста (без линеек); None — все ``count``. Режим полосы — только при строке текста.
 
     Returns:
         :class:`FieldMode`.
     """
     if count >= MIN_LINES:
         return FieldMode.FULL
-    if count < SPARSE_MIN_LINES or not len(supports.at):
+    if not count or not len(supports.at):
         return FieldMode.NONE
     length = sum(float(np.ptp(supports.at[supports.group == g, 0])) for g in np.unique(supports.group))
     span = float(np.ptp(supports.at[:, 1]))
-    if length >= mm_to_px_float(SPARSE_MIN_LENGTH_MM, dpi) and span >= mm_to_px_float(SPARSE_MIN_SPAN_MM, dpi):
+    if (count >= SPARSE_MIN_LINES and length >= mm_to_px_float(SPARSE_MIN_LENGTH_MM, dpi)
+            and span >= mm_to_px_float(SPARSE_MIN_SPAN_MM, dpi)):  # fmt: skip
         return FieldMode.SPARSE
+    # Одна строка или несколько рядом: поле по ним с затуханием вдали, если опоры похожи на строки текста.
+    if (count if text_lines is None else text_lines) >= 1 and length >= mm_to_px_float(BAND_MIN_LENGTH_MM, dpi):
+        if band_profile(supports, dpi) is not None:
+            return FieldMode.BAND
     return FieldMode.NONE
+
+
+@dataclass(frozen=True)
+class BandProfile:
+    """Изгиб опор страницы в режиме полосы: смещение ``dy`` как функция x (одна на все опоры).
+
+    Поля:
+        coef: Коэффициенты многочлена (``np.polyval``) по ``x`` px холста — степень 2 или 1.
+        slope: Наклон опор в целом (прямая), px на px: продление за концами опор.
+        x_range: Опоры по x ``(x0, x1)``, px.
+        y_range: Опоры по высоте ``(y0, y1)``, px: от этой полосы считается удаление.
+    """
+
+    coef: np.ndarray
+    slope: float
+    x_range: tuple[float, float]
+    y_range: tuple[float, float]
+
+    def at(self, xs: np.ndarray) -> np.ndarray:
+        """Смещение в точках ``xs`` (px холста): многочлен в пределах опор, за концами — от конца с наклоном опор в
+        целом. Касательная многочлена на конце круче: у 10/IMG_0003 левой (прогиб 0.8 мм на 85 мм) — 3.5° против 1.5°,
+        и за 50 мм до корешка она выдумывала 3 мм подъёма."""
+        x0, x1 = self.x_range
+        inner = np.clip(xs, x0, x1)
+        return np.polyval(self.coef, inner) + self.slope * (xs - inner)
+
+
+def band_fit(
+    u: np.ndarray, values: np.ndarray, groups: np.ndarray, weight: np.ndarray, degree: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Взвешенный МНК «многочлен по u без свободного члена + своя постоянная у каждой опоры».
+
+    Постоянная своя: значения выборок — смещение до медианы СВОЕЙ строки, а у строк разной длины по x медианы
+    наклонной прямой разные (колонтитул 01/IMG_0019: текст 55–120 мм и линейка 21–118 мм под ним; одним многочленом
+    без постоянных остаток 0.36 мм, и опоры отвергались).
+
+    Args:
+        u: Нормированная координата x выборок (N,).
+        values: Значения выборок (N,).
+        groups: Номер опоры каждой выборки (N,).
+        weight: Веса (N,).
+        degree: Степень многочлена (1 или 2).
+
+    Returns:
+        Коэффициенты многочлена по u (``np.polyval``, свободный член — средневзвешенная постоянная опор) и остатки (N,).
+    """
+    _, index = np.unique(groups, return_inverse=True)
+    powers = np.stack([u**k for k in range(degree, 0, -1)], axis=1)
+    design = np.hstack([powers, np.eye(index.max() + 1)[index]])
+    root = np.sqrt(weight)[:, None]
+    solution = np.linalg.lstsq(design * root, values * root[:, 0], rcond=None)[0]
+    offsets = solution[degree:]
+    residual = design @ solution - values
+    return np.append(solution[:degree], float(np.average(offsets[index], weights=weight))), residual
+
+
+def band_profile(supports: Samples, dpi: float) -> BandProfile | None:
+    """Изгиб низкого порядка опор страницы для режима полосы (:data:`BAND_DECAY_MM` и соседние пороги).
+
+    Многочлен степени 2 (1 — если опоры по x короче :data:`BAND_QUAD_MIN_MM`) плюс своя постоянная у каждой опоры
+    (:func:`band_fit`), робастно — Хьюбер :data:`HUBER_MM`, :data:`IRLS_PASSES` проходов. Опоры отвергаются, если
+    остаток (СКО) больше :data:`BAND_MAX_RESIDUAL_MM` (не строка текста — край листа, тень) или наклон опор в целом
+    больше :data:`BAND_MAX_TILT_DEG`.
+
+    Args:
+        supports: Выборки строк и горизонтальных линеек ``dy`` страницы.
+        dpi: Разрешение холста.
+
+    Returns:
+        Изгиб или None — опоры не годятся.
+    """
+    if len(supports) < 3:
+        return None
+    xs, values = supports.at[:, 0], supports.value
+    x0, x1 = float(xs.min()), float(xs.max())
+    degree = 2 if x1 - x0 >= mm_to_px_float(BAND_QUAD_MIN_MM, dpi) else 1
+    # Многочлен — по x относительно середины опор (обусловленность), затем пересчёт в коэффициенты по x холста.
+    mid, half = (x0 + x1) / 2, max((x1 - x0) / 2, 1.0)
+    u = (xs - mid) / half
+    huber = mm_to_px_float(HUBER_MM, dpi)
+    robust = np.ones(len(values))
+    for _ in range(IRLS_PASSES):
+        coef_u, r = band_fit(u, values, supports.group, supports.weight * robust, degree)
+        robust = np.where(np.abs(r) <= huber, 1.0, huber / np.maximum(np.abs(r), 1e-9))
+    residual = float(np.sqrt(np.mean(r**2)))
+    # Наклон опор в целом — прямая с теми же постоянными опор и весами.
+    slope = float(band_fit(u, values, supports.group, supports.weight * robust, 1)[0][0]) / half
+    if residual > mm_to_px_float(BAND_MAX_RESIDUAL_MM, dpi) or np.degrees(np.arctan(abs(slope))) > BAND_MAX_TILT_DEG:
+        return None
+    # u = (x − mid) / half: подстановка в многочлен по u даёт многочлен по x.
+    coef = np.poly1d(coef_u)(np.poly1d([1.0 / half, -mid / half])).coeffs
+    ys = supports.at[:, 1]
+    return BandProfile(np.atleast_1d(coef), slope, (x0, x1), (float(ys.min()), float(ys.max())))
+
+
+def foreign_ink(page: PageText, supports: Samples, rect: PageRect, dpi: float) -> float:
+    """Краска страницы вне полосы опор и вне растра — то, что строки полосы не описывают.
+
+    Полоса — высоты опор плюс :data:`SPARSE_ZERO_MM` с каждой стороны; растр (фото) не в счёт: фото с подписью —
+    обычная страница полосы (ХиП 1991/06 IMG_0377), а схема (line art), таблица и повёрнутый текст — в счёт: колонтитул
+    над повёрнутой схемой её наклона не задаёт (01/IMG_0019: колонтитул −1.35°, черта схемы −0.23°), а стороны
+    повёрнутого блока ложны (09/IMG_0016).
+
+    Args:
+        page: Разбор страницы с картой краски.
+        supports: Опоры ``dy`` страницы (непустые).
+        rect: Прямоугольник страницы на холсте.
+        dpi: Разрешение холста.
+
+    Returns:
+        Площадь краски, мм²; без карты — 0.
+    """
+    if page.ink is None:
+        return 0.0
+    cell = mm_to_px_float(INK_CELL_MM, dpi)
+    rows, cols = np.indices(page.ink.shape)
+    # Центры клеток на холсте.
+    xs, ys = page.offset[0] + (cols + 0.5) * cell, page.offset[1] + (rows + 0.5) * cell
+    reach = mm_to_px_float(SPARSE_ZERO_MM, dpi)
+    keep = (xs >= rect.x0) & (xs <= rect.x1) & (ys >= rect.y0) & (ys <= rect.y1)
+    keep &= (ys < supports.at[:, 1].min() - reach) | (ys > supports.at[:, 1].max() + reach)
+    for region in page.regions:
+        if region.kind is RegionKindR.RASTER:
+            keep &= ~region.contains(np.stack([xs.ravel(), ys.ravel()], 1)).reshape(xs.shape)
+    return float(page.ink[keep].sum()) * INK_CELL_MM**2
+
+
+def band_fits_page(page: PageText, supports: Samples, rect: PageRect, dpi: float) -> bool:
+    """Годится ли страница для режима полосы: все опоры не ближе :data:`BAND_EDGE_MM` к верху и низу страницы и
+    краски вне полосы опор не больше :data:`BAND_MAX_FOREIGN_INK_MM2` (:func:`foreign_ink`).
+
+    Args:
+        page: Разбор страницы.
+        supports: Опоры ``dy`` страницы (непустые).
+        rect: Прямоугольник страницы на холсте.
+        dpi: Разрешение холста.
+
+    Returns:
+        True — полоса годится.
+    """
+    edge = mm_to_px_float(BAND_EDGE_MM, dpi)
+    heights = np.array([np.median(supports.source[supports.group == g, 1]) for g in np.unique(supports.group)])
+    if (heights < rect.y0 + edge).any() or (heights > rect.y1 - edge).any():
+        return False
+    return foreign_ink(page, supports, rect, dpi) <= BAND_MAX_FOREIGN_INK_MM2
+
+
+def band_samples(zeros: Samples, supports: Samples, profile: BandProfile, dpi: float) -> Samples:
+    """Выборки режима полосы: в узлах сетки дальше :data:`SPARSE_ZERO_MM` от опор — изгиб опор, затухающий по высоте.
+
+    Значение в узле ``(x, y)`` — ``profile.at(x) · exp(−(d / BAND_DECAY_MM)²)``, где ``d`` — удаление ``y`` от полосы
+    опор по высоте (внутри полосы 0); вес — как у нулевых выборок.
+
+    Args:
+        zeros: Нулевые выборки страницы (:func:`zero_samples`) — их узлы.
+        supports: Опоры ``dy`` страницы.
+        profile: Изгиб опор (:func:`band_profile`).
+        dpi: Разрешение холста.
+
+    Returns:
+        Выборки вида :attr:`SampleKind.BAND`.
+    """
+    far = far_zeros(zeros, supports, dpi)
+    y0, y1 = profile.y_range
+    d = np.maximum(np.maximum(y0 - far.at[:, 1], far.at[:, 1] - y1), 0.0)
+    value = profile.at(far.at[:, 0]) * np.exp(-((d / mm_to_px_float(BAND_DECAY_MM, dpi)) ** 2))
+    return Samples(far.at, value, far.weight, far.source, np.full(len(far), SampleKind.BAND), far.group)
 
 
 def far_zeros(zeros: Samples, supports: Samples, dpi: float) -> Samples:
@@ -1125,7 +1706,7 @@ def fit_component(
         # Хьюбер: квадрат до порога, линейно дальше; выбросы (перескок оси на соседнюю строку) — вес 0. Нулевые
         # выборки (цветная страница) не трогаются.
         robust = np.where(r <= huber, 1.0, huber / np.maximum(r, 1e-9))
-        robust[(r > outlier) & (samples.kind != SampleKind.ZERO)] = 0.0
+        robust[(r > outlier) & ~np.isin(samples.kind, (SampleKind.ZERO, SampleKind.BAND))] = 0.0
     nodes = z[: grid.size].reshape(grid.ny, grid.nx)
     return ComponentFit(nodes, samples.weight * robust, a @ z - samples.value)
 
@@ -1242,20 +1823,24 @@ def fit_field(
     """
     step = mm_to_px_float(step_mm, dpi)
     grid = Grid.over(layout.width, layout.height, step)
-    stiffness = stiffness_map(grid, layout.spine_x, dpi, smooth_mm, smooth_mm if gutter_mm is None else gutter_mm)
+    # У одной страницы корешка нет: жёсткость у правого края холста — как в теле страницы.
+    gutter = smooth_mm if gutter_mm is None or layout.single else gutter_mm
+    stiffness = stiffness_map(grid, layout.spine_x, dpi, smooth_mm, gutter)
     across = np.full_like(stiffness, stiffness_of(grid.step, dpi, across_mm))
     bending = grid.bending(stiffness, across)
     comps = []
     ordered = []
     for samples in (h_samples, v_samples):
         left = samples.at[:, 0] < layout.spine_x
-        parts = [dedupe_weights(samples.take(sel), dpi) for sel in (left, ~left)]
+        # Одна страница — все выборки её (и вышедшие за правый край холста).
+        sels = (np.ones_like(left),) if layout.single else (left, ~left)
+        parts = [dedupe_weights(samples.take(sel), dpi) for sel in sels]
         vertical = samples is v_samples
         fits = [fit_component(part, grid, bending, dpi, free_targets=vertical and scale_weight > 0,
                               scale_weight=scale_weight if vertical else 0.0) for part in parts]  # fmt: skip
         comps.append(ComponentFit(np.stack([f.nodes for f in fits]), np.concatenate([f.weight for f in fits]),
                                   np.concatenate([f.residual for f in fits])))  # fmt: skip
-        ordered.append(parts[0] + parts[1])
+        ordered.append(parts[0] if layout.single else parts[0] + parts[1])
     dx, dy = comps
     cap = mm_to_px_float(MAX_SHIFT_MM, dpi)
     norm = np.hypot(dx.nodes, dy.nodes)
@@ -1263,7 +1848,10 @@ def fit_field(
     if clipped:
         k = np.minimum(1.0, cap / np.maximum(norm, 1e-9))
         dx, dy = (ComponentFit(c.nodes * k, c.weight, c.residual) for c in (dx, dy))
-    blend = blend_band(ordered[0] + ordered[1], layout.spine_x, dpi)
+    # Смешивать поля двух страниц у одной страницы негде: «корешок» — правый край холста, правее него поля нет.
+    blend = (
+        (layout.spine_x, layout.spine_x) if layout.single else blend_band(ordered[0] + ordered[1], layout.spine_x, dpi)
+    )
     return TextField(grid, layout.spine_x, dx, dy, ordered[0], ordered[1], clipped, blend)
 
 
@@ -1283,7 +1871,7 @@ def blend_band(samples: Samples, spine_x: float, dpi: float) -> tuple[float, flo
         ``(x0, x1)``; ``x0 == x1 == spine_x`` — смешивать негде (текст у самого корешка).
     """
     margin, reach = mm_to_px_float(BLEND_TEXT_MARGIN_MM, dpi), mm_to_px_float(BLEND_MAX_MM, dpi)
-    real = samples.kind != SampleKind.ZERO
+    real = ~np.isin(samples.kind, (SampleKind.ZERO, SampleKind.BAND))
     xs, groups = samples.source[real, 0], samples.group[real]
     # Край текста страницы у корешка — по концам строк и сторон (у каждой группы — ближняя к корешку точка), с
     # перцентилем по группам: одна ложная ось, ушедшая в тень сгиба до самого корешка (08/IMG_0329), его не двигает.
@@ -1301,29 +1889,8 @@ def blend_band(samples: Samples, spine_x: float, dpi: float) -> tuple[float, flo
     return x0, x1
 
 
-def coons_at(patches: tuple[Patch, Patch], layout: Layout, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-    """Точки итога v2 по Кунсу для точек выпрямленного кадра: левее линии корешка — левая страница, правее — правая.
-
-    Args:
-        patches: Области левой и правой страницы.
-        layout: Расклад холста.
-        xs: X точек выпрямленного кадра (N,).
-        ys: Y точек (N,).
-
-    Returns:
-        Точки (N, 2) px итога v2.
-    """
-    out = np.empty((len(xs), 2))
-    left = xs < layout.spine_x
-    for patch, rect, sel in zip(patches, layout.rects, (left, ~left)):
-        if sel.any():
-            u, v = rect_fractions(rect, xs[sel], ys[sel])
-            out[sel] = patch.points(u, v)
-    return out
-
-
 def compose_maps(
-    patches: tuple[Patch, Patch], layout: Layout, dx: np.ndarray, dy: np.ndarray, coarse: int = COMPOSE_STEP_PX
+    patches: tuple[Patch, ...], layout: Layout, dx: np.ndarray, dy: np.ndarray, coarse: int = COMPOSE_STEP_PX
 ) -> tuple[np.ndarray, np.ndarray]:
     """Составная карта: пиксель холста → точка выпрямленного кадра ``(X + dx, Y + dy)`` → точка итога v2 по Кунсу.
 

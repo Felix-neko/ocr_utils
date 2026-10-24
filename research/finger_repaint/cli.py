@@ -327,6 +327,7 @@ def pack6_params(src_root: Path, run_dir: Path) -> "RunParams":
         Параметры прогона.
     """
     from ocr_utils.scan_cropping.v2.fill import FillMethod
+    from ocr_utils.scan_cropping.v2.coons_layout import LayoutWarp
     from ocr_utils.scan_cropping.v2.pipeline import RunParams
     from ocr_utils.scan_cropping.v2.scale import Scale
 
@@ -342,7 +343,7 @@ def pack6_params(src_root: Path, run_dir: Path) -> "RunParams":
         layout_pad_mm=(1.3043, 2.6087),  # 18, 36 px при 13.8 px/мм
         refine_depth_mm=5.0725,  # 35 px масштаба сегментации
         ink_fill=True,
-        keystone_layout=True,
+        layout_warp=LayoutWarp.KEYSTONE,
         fit_sides=True,
         snap_sides=False,
         copy_back_over_fingers=True,
@@ -351,6 +352,8 @@ def pack6_params(src_root: Path, run_dir: Path) -> "RunParams":
         output_format="tiff",
         force_dpi=450,
         save_fingers=True,
+        # Базовые прогоны стенда шли без двойной сегментации; с 2026-10-24 она у v2 по умолчанию включена.
+        dual_levels=False,
     )
 
 

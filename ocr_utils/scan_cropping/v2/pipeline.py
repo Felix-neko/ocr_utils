@@ -1,4 +1,4 @@
-"""Конвейер v2 по папке кадров: пальцы (потоки, GPU под общей блокировкой) → фон и книга (пул) → SAM 3 и SAM 2 (GPU) → вето фона, бумага и страницы (пул) → surya по выпрямленному кадру (GPU) → защита, copy back, закрас до прямоугольника (пул)."""
+"""Конвейер v2 по папке кадров: пальцы (потоки, GPU под общей блокировкой) → фон и книга (пул) → SAM 3 и SAM 2 (GPU) → вето фона, бумага, страницы и подгоночные области без текста (пул) → surya по холсту Кунса этих областей с откатом на трапеции (GPU) → защита, copy back, закрас до прямоугольника (пул)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import csv
 import functools
 import json
 import logging
+import os
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
@@ -17,6 +18,7 @@ import cv2
 import numpy as np
 import threadpoolctl
 
+from ocr_utils.frame_flags.flags import FlagsError, FrameFlags, read_flags
 from ocr_utils.scan_cropping.image_io import imwrite_params, resolve_output_suffix, write_image
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK, compensate_levels
 from ocr_utils.scan_cropping.v2.background import BG_SCALE, bg_flood, hand_mask
@@ -40,15 +42,41 @@ from ocr_utils.scan_cropping.v2.glue import glue_hull_bridge
 from ocr_utils.scan_cropping.v2.glue_refine import REFINE_DEPTH, refine_colour
 from ocr_utils.scan_cropping.v2.glyphs import content_mask
 from ocr_utils.scan_cropping.v2.ink_fill import fill_bold_ink, touching_ink
+from ocr_utils.scan_cropping.v2.coons_layout import (
+    CANVAS_MARGIN_MM,
+    FramesReason,
+    LayoutWarp,
+    canvas_record,
+    frames_on_frame,
+    from_surya,
+    plan_coons,
+    unwarp_coons,
+    warp_coons,
+)
 from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp_for_layout
 from ocr_utils.scan_cropping.v2.overlay import OverlayTag, overlay_path
 from ocr_utils.scan_cropping.v2.page_boundary import FitKind, PageBoundary, fit_boundary
 from ocr_utils.scan_cropping.v2.edge_zones import merge_levels, outer_zones, union_levels_edges
 from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_TORTUOSITY, is_ragged, measure_far_side, page_raw_mask
 from ocr_utils.scan_cropping.v2.gutter_strip import Strip, find_strip, spine_line, strip_paper
-from ocr_utils.scan_cropping.v2.page_frames import PageFrame, spread_frames
+from ocr_utils.scan_cropping.v2.page_frames import (
+    PageFrame,
+    frames_digest,
+    load_frames,
+    save_frames,
+    single_frame,
+    spread_frames,
+)
 from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PageQuad, page_quads
-from ocr_utils.scan_cropping.v2.paper import SAM3_CACHE_VERSION, fill_page_pockets, postprocess_plain
+from ocr_utils.scan_cropping.v2.single_page import FrameKind
+from ocr_utils.scan_cropping.v2.paper import (
+    SAM3_CACHE_COMPATIBLE,
+    SAM3_CACHE_VERSION,
+    SAM3_FALLBACK_MIN_SHARE,
+    covered_share,
+    fill_page_pockets,
+    postprocess_plain,
+)
 from ocr_utils.scan_cropping.v2.scale import REF_PX_PER_MM, Scale
 from ocr_utils.scan_cropping.cropping import CROP_FILL_BLUR_PX
 from ocr_utils.scan_cropping.v2.side_fit import regularize_sides, snap_sheet_edges
@@ -79,13 +107,15 @@ DEFAULT_JOBS = 16
 # NumPy без GIL (возврат краски, Telea контекста, запись clean.png; профиль 2026-10-23, ПХ 1975: 21 с на кадр при
 # занятом CPU, из них GPU ~2 с). Три потока перекрывают CPU одних кадров с GPU других.
 DEFAULT_FINGER_THREADS = 3
-# Версия формата ``layout.json``: 4 — блоки surya после бумаги и трапеций, по выпрямленному кадру, с типами блоков
-# (``{"version": 4, "keystone": bool, "blocks": [...], "labels": [...]}``). Версия 3 (без типов) читается — блоки
-# годны для защиты и copy back, но шаг surya пересчитывается, чтобы на оверлеях были типы; прежние форматы
-# (surya до SAM 3) не читаются.
-LAYOUT_VERSION = 4
+# Версия формата ``layout.json``: 5 — блоки surya по холсту выбранного выпрямления (``--layout-warp``) с типами и
+# сырыми блоками холста: ``{"version": 5, "mode": запрошенный LayoutWarp, "warp": применённый LayoutWarp, "reason":
+# FramesReason отката, "frames": отпечаток областей surya (``page_frames.frames_digest``), "canvas": параметры холста,
+# "canvas_blocks": [...], "blocks": [...], "labels": [...]}``; блоки — многоугольники в px кадра (у coons — кривые,
+# десятки вершин). Версия 4 (``{"keystone": bool, ...}``) годна для режимов keystone и none; версия 3 (без типов)
+# читается — блоки годны для защиты и copy back, но шаг surya пересчитывается; прежние форматы не читаются.
+LAYOUT_VERSION = 5
 # Версии ``layout.json``, блоки которых годны в дело.
-LAYOUT_READABLE = (3, 4)
+LAYOUT_READABLE = (3, 4, 5)
 
 
 @dataclass(frozen=True)
@@ -105,8 +135,11 @@ class RunParams:
         finger_dilate_mm: Припуск зоны закраса пальца, мм бумаги.
         layout_pad_mm: Припуск блоков surya, мм бумаги (X, Y) — один для copy back и защиты контента.
         light_increment: Высветление зоны пальца перед LaMa, уровни (слева, справа).
-        keystone_layout: surya layout по кадру, выпрямленному по трапециям страниц (``keystone``); блоки
-            возвращаются обратным преобразованием наклонными четырёхугольниками.
+        layout_warp: Чем выпрямлять кадр перед surya layout (``coons_layout.LayoutWarp``): ``coons`` — холст Кунса по
+            подгоночным областям страниц без текста (``layout_frames.npz`` шага страниц), блоки возвращаются на кадр
+            кривыми многоугольниками; не построился — откат на трапеции; ``keystone`` — гомографии по трапециям
+            страниц, блоки — наклонные четырёхугольники; ``none`` — кадр как есть.
+        layout_canvas_margin_mm: Поле холста Кунса вокруг прямоугольников страниц, мм бумаги.
         fit_sides: Устранять выступы и ямы на внешних боковых сторонах плоских страниц (``side_fit``).
         snap_sides: При выравнивании подтягивать сторону к настоящему краю листа, где SAM 3 колеблется.
         copy_back_over_fingers: Copy back блоков surya и поверх ядра пальца и рук (весь «не фон»): контент важнее
@@ -146,13 +179,24 @@ class RunParams:
         sam3_levels: Растягивать уровни светлоты кадра по бумаге перед SAM 3 (``paper.stretch_paper_levels``);
             проба против рваных краёв, по умолчанию выключено. Кэш SAM 3 этим флагом не помечается: для сравнения
             прогонять в отдельный ``work_dir``.
-        dual_levels: Двойная грубая сегментация (``edge_zones``): база SAM 3 без растяжения, а в зонах у внешних
+        dual_levels: Двойная грубая сегментация (``edge_zones``; по умолчанию включена с 2026-10-24): база SAM 3 без
+            растяжения, а в зонах у внешних
             кромок книги — второй проход по кадру с растянутыми уровнями; явные промахи прохода — зона на базе.
         levels_edges: При ``dual_levels`` — ещё и объединение базы с растянутым проходом у верхних и нижних краёв
             страниц (``edge_zones.union_levels_edges``: выемки края у корешка, дыры у кромки).
         refine_ragged: Тонкое уточнение рваных внешних сторон страниц разворота (``ragged_edge`` — детектор по сырой
             маске SAM 3, ``edge_refine`` — сегментация ленты вдоль стороны в полном разрешении).
         ragged_threshold: Порог извилистости сырой маски SAM 3 для детектора рваной стороны.
+        output_pages: Папка выхода страниц (``rectify``): итог кадра выпрямляется (Кунс + поле по тексту), режется по
+            кривой линии разреза на страницы ``<кадр>_L`` / ``<кадр>_R`` (``_LR`` — без разреза), каждая
+            закрашивается до прямоугольника; None — выхода страниц нет.
+        use_flags: Читать сайдкары флагов кадра ``<кадр>.flags.json`` (``frame_flags``): ``ignore-both`` — кадр не
+            обрабатывается; остальные флаги — для выхода страниц.
+        rectify_passes: Проходов «разбор текста → поле» выпрямления; 0 — только Кунс по подгоночным областям.
+        rectify_illumination: Выравнивать освещение страниц в выходе страниц (не-цветных и не запрещённых флагом).
+        output_pages_meta: Папка паспортов страниц (``rectify.passport``: исходный кадр, часть, флаги, dpi, цветность,
+            контуры закраса пальцев) и масок закраса ``<кадр>_L.fingers.png`` — отдельно от страниц; None — не писать.
+        pages_dpi: Тег разрешения страниц или None — настоящая плотность кадра (``scale.px_per_mm`` × 25.4).
     """
 
     input_dir: Path
@@ -169,7 +213,8 @@ class RunParams:
     light_increment: tuple[float, float] = LIGHT_INCREMENT
     ink_fill: bool = True
     fit_sides: bool = True
-    keystone_layout: bool = True
+    layout_warp: LayoutWarp = LayoutWarp.COONS
+    layout_canvas_margin_mm: float = CANVAS_MARGIN_MM
     snap_sides: bool = False
     copy_back_over_fingers: bool = True
     fill_before_copy_back: bool = True
@@ -192,10 +237,16 @@ class RunParams:
     bg_veto: bool = True
     gutter_strip: bool = True
     sam3_levels: bool = False
-    dual_levels: bool = False
+    dual_levels: bool = True
     levels_edges: bool = True
     refine_ragged: bool = False
     ragged_threshold: float = RAGGED_TORTUOSITY
+    output_pages: Path | None = None
+    use_flags: bool = True
+    rectify_passes: int = 3
+    rectify_illumination: bool = True
+    output_pages_meta: Path | None = None
+    pages_dpi: float | None = None
 
 
 @dataclass(frozen=True)
@@ -205,10 +256,12 @@ class FrameJob:
     Поля:
         src: Путь входного кадра.
         rel: Путь относительно ``input_dir``.
+        flags: Флаги кадра из сайдкара (пусто — обычный кадр или ``--no-flags``).
     """
 
     src: Path
     rel: Path
+    flags: FrameFlags = field(default_factory=FrameFlags)
 
     @property
     def key(self) -> str:
@@ -236,6 +289,11 @@ class WorkPaths:
     def layout(self) -> Path:
         """Полигоны блоков surya в координатах кадра (json)."""
         return self.root / "layout.json"
+
+    @property
+    def layout_frames(self) -> Path:
+        """Подгоночные области страниц без текста — вход холста Кунса для surya (npz, ``page_frames.save_frames``)."""
+        return self.root / "layout_frames.npz"
 
     @property
     def seg(self) -> Path:
@@ -319,7 +377,8 @@ class FrameStats:
 
     Поля:
         key: Ключ кадра.
-        status: ``ok`` / ``no_paper`` / ``error``.
+        status: ``ok`` / ``no_paper`` / ``error`` / ``ignored`` (флаг ``ignore-both``) / ``bad_flags`` (сайдкар не
+            прошёл проверку).
         finger_px: Площадь зоны закраса пальцев, px кадра.
         blocks_back: Сколько блоков surya задето закрасом (возвращены внутри книги).
         back_px: Сколько px зоны закраса возвращено с оригинала.
@@ -330,12 +389,21 @@ class FrameStats:
         side_cut: Срезано выравниванием боковых сторон, доля маски бумаги.
         protected: Добавлено защитой контента (блоки surya плоских страниц), доля маски бумаги.
         poses: Классы положения страниц слева направо через ``/`` (``flat`` / ``raised``).
+        frame_kind: Сколько страниц в кадре (``single_page.FrameKind``: разворот, одна страница, страница с полоской
+            соседней, страницы нет).
         fill_share: Доля прямоугольника вне бумаги (закрашено).
         width: Ширина итога, px.
         height: Высота итога, px.
         seconds: Время CPU-части финала, с.
         shadow_mm2: Площадь зоны поиска тени пальца, мм² (0 — шаг выключен или пальца на бумаге нет).
         shadow_mean: Средняя прибавка осветления тени в зоне поиска, уровни.
+        flags: Флаги кадра из сайдкара через ``+`` или пусто.
+        pages: Записанные части выхода страниц через ``+`` (``L``, ``R``, ``LR``, ``P``) или пусто.
+        pages_status: Исход выхода страниц (``rectify.pages.PagesStatus``) или пусто — выхода нет.
+        pages_tint: Доли тонированного фона левой и правой страницы через ``/`` (``colour_pages.tinted_share``).
+        pages_finger_mm2: Площадь закраса пальцев на записанных страницах через ``/``, мм².
+        pages_text: Меры прямизны текста страниц (``rectify.measure.TextMeasures``) после Кунса (``before_*``) и после
+            поля (``after_*``) — JSON одной строкой, или пусто.
         message: Текст ошибки или пусто.
     """
 
@@ -351,12 +419,19 @@ class FrameStats:
     side_cut: float = 0.0
     protected: float = 0.0
     poses: str = ""
+    frame_kind: str = ""
     fill_share: float = 0.0
     width: int = 0
     height: int = 0
     seconds: float = 0.0
     shadow_mm2: float = 0.0
     shadow_mean: float = 0.0
+    flags: str = ""
+    pages: str = ""
+    pages_status: str = ""
+    pages_tint: str = ""
+    pages_finger_mm2: str = ""
+    pages_text: str = ""
     message: str = ""
 
 
@@ -558,7 +633,18 @@ def sam3_ready(work: WorkPaths, params: RunParams) -> bool:
         return False
     with np.load(work.sam3) as data:
         # Кэш прежней версии (без правил пустых страниц и слияния вложенных экземпляров) считается заново.
-        if "version" not in data.files or int(data["version"]) != SAM3_CACHE_VERSION:
+        version = int(data["version"]) if "version" in data.files else 0
+        if version in SAM3_CACHE_COMPATIBLE:
+            # Прежняя версия годна, если каждый проход накрыл не меньше SAM3_FALLBACK_MIN_SHARE книги: запасные
+            # подсказки зовутся только ниже этой доли.
+            if not work.book.exists():
+                return False
+            with np.load(work.book) as book_data:
+                book = book_data["book"]
+            raws = [data[k] for k in data.files if k.startswith("raw")]
+            if any(covered_share([(1.0, raw)], book) < SAM3_FALLBACK_MIN_SHARE for raw in raws):
+                return False
+        elif version != SAM3_CACHE_VERSION:
             return False
         if params.dual_levels and "raw_lv" not in data.files:
             return False
@@ -591,16 +677,16 @@ def gpu_sam3(job: FrameJob, predictor, params: RunParams) -> None:
             noink = stretch_paper_levels(noink, region)[0]
         log.info("%s: уровни перед SAM 3 — чёрная %.0f, белая %.0f", job.key, black, white)
     t0 = time.perf_counter()
-    raw, inst = sam3_pages(predictor, img, hulls)
+    raw, inst = sam3_pages(predictor, img, hulls, book=book["book"])
     out = {"raw": raw, "inst": inst, "version": np.int32(SAM3_CACHE_VERSION)}
     if noink is not None:
         # Второй проход — по кадру без крупной краски.
-        out["raw_noink"], out["inst_noink"] = sam3_pages(predictor, noink, hulls)
+        out["raw_noink"], out["inst_noink"] = sam3_pages(predictor, noink, hulls, book=book["book"])
     if params.dual_levels:
         # Проход по кадру с растянутыми уровнями — для зон у кромок книги (edge_zones.merge_levels в cpu_pages).
         region = hulls if hulls.any() else book["book"]
         stretched, black, white = stretch_paper_levels(read_bgr(work.seg), region)
-        out["raw_lv"], out["inst_lv"] = sam3_pages(predictor, stretched, hulls)
+        out["raw_lv"], out["inst_lv"] = sam3_pages(predictor, stretched, hulls, book=book["book"])
         log.info("%s: растянутый проход SAM 3 — уровни %.0f…%.0f, страниц %d", job.key, black, white,
                  int(out["inst_lv"].max()))  # fmt: skip
     np.savez_compressed(work.sam3, **out)
@@ -803,16 +889,30 @@ def read_layout_labels(path: Path) -> list[str] | None:
     return [str(label) for label in data["labels"]]
 
 
-def layout_keystone(path: Path) -> bool | None:
-    """Был ли surya по выпрямленному кадру (флаг ``keystone`` в ``layout.json``); None — нет годного файла."""
+def layout_warp(path: Path) -> LayoutWarp | None:
+    """Чем был выпрямлен кадр перед surya (поле ``warp`` версии 5, флаг ``keystone`` версий 3–4); None — нет файла.
+
+    Args:
+        path: ``layout.json`` кадра.
+
+    Returns:
+        Применённое выпрямление или None.
+    """
     data = layout_data(path)
     if data is None:
         return None
-    return bool(data.get("keystone"))
+    if "warp" in data:
+        return LayoutWarp(data["warp"])
+    return LayoutWarp.KEYSTONE if data.get("keystone") else LayoutWarp.NONE
 
 
 def layout_ready(work: WorkPaths, params: RunParams) -> bool:
-    """Готов ли в кэше шаг surya: файл нужной версии, посчитанный с тем же ключом выпрямления.
+    """Готов ли в кэше шаг surya: файл с типами блоков, посчитанный тем же режимом выпрямления по тем же областям.
+
+    Режимы ``none`` и ``keystone``: годен файл версии 4 с тем же выпрямлением или версии 5 с тем же запрошенным
+    режимом. Режим ``coons``: годен файл версии 5 режима ``coons``, у которого отпечаток областей совпал с текущими
+    ``layout_frames.npz`` (в том числе откат на трапеции при отпечатке ``none``): области пересчитываются шагом
+    страниц при каждом прогоне, и сменившиеся области сбрасывают surya без удаления файла.
 
     Args:
         work: Файлы кэша кадра.
@@ -822,10 +922,17 @@ def layout_ready(work: WorkPaths, params: RunParams) -> bool:
         True — шаг можно не считать.
     """
     data = layout_data(work.layout)
-    if params.redo or data is None or data["version"] != LAYOUT_VERSION:
+    if params.redo or data is None or data["version"] == 3:
         # Нет файла или он без типов блоков (версия 3) — шаг считается заново.
         return False
-    return bool(data.get("keystone")) or not params.keystone_layout
+    mode = params.layout_warp
+    if data["version"] == 4:
+        return mode is not LayoutWarp.COONS and layout_warp(work.layout) is mode
+    if data.get("mode") != mode.value:
+        return False
+    if mode is not LayoutWarp.COONS:
+        return True
+    return data.get("frames") == frames_digest(load_frames(work.layout_frames)[0])
 
 
 def read_page_quads(path: Path) -> list[np.ndarray]:
@@ -840,10 +947,40 @@ def paint_on_seg(fingers, shape: tuple[int, int]) -> np.ndarray:
     return cv2.resize(fingers["paint"].astype(np.uint8), shape[::-1], interpolation=cv2.INTER_NEAREST) > 0
 
 
-def frame_pages(img: np.ndarray, book: dict, sam3: dict, paint_seg: np.ndarray, masks: PaperMasks) -> list[PageQuad]:
-    """Страницы кадра по итоговой бумаге: трапеции, признаки, класс положения."""
+def forced_kind(flags: FrameFlags) -> FrameKind | None:
+    """Вид кадра по его флагам: ``single-page`` → ``SINGLE``, ``spread`` → ``SPREAD``, иначе None (по правилу).
+
+    Args:
+        flags: Флаги кадра.
+
+    Returns:
+        Вид кадра или None.
+    """
+    if flags.single_page:
+        return FrameKind.SINGLE
+    return FrameKind.SPREAD if flags.spread else None
+
+
+def frame_pages(
+    img: np.ndarray, book: dict, sam3: dict, paint_seg: np.ndarray, masks: PaperMasks, flags: FrameFlags | None = None
+) -> list[PageQuad]:
+    """Страницы кадра по итоговой бумаге: трапеции, признаки, класс положения, сколько страниц в кадре.
+
+    Args:
+        img: Кадр масштаба сегментации, BGR.
+        book: Маски шага «фон и книга».
+        sam3: Кэш SAM 3 кадра (``inst`` — экземпляры-страницы).
+        paint_seg: Зона закраса пальцев на масштабе сегментации.
+        masks: Маски бумаги.
+        flags: Флаги кадра (``single-page`` / ``spread`` перекрывают правило ``single_page``); None — без флагов
+            (стенды по кэшу).
+
+    Returns:
+        Страницы слева направо.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return page_quads(masks.paper, book["book"], book["hulls"], sam3["inst"], gray, paint_seg)
+    forced = None if flags is None else forced_kind(flags)
+    return page_quads(masks.paper, book["book"], book["hulls"], sam3["inst"], gray, paint_seg, forced)
 
 
 # --- Шаг 4, CPU: бумага и страницы --------------------------------------------------------------------------------
@@ -903,35 +1040,36 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
     if params.dual_levels and "raw_lv" in sam3:
         sam3 = dual_sam3(work, sam3, book["book"], paint_seg, params.levels_edges)
     masks = frame_paper(img, book, sam3, params.scale.seg_px(params.refine_depth_mm))
-    pages = frame_pages(img, book, sam3, paint_seg, masks)
+    pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
     if params.gutter_strip:
         # Полоса-вклейка у корешка — в бумагу: склейка закрывает щель только до ~11.6 мм (ПХ 1975/05 IMG_0021).
         strip_added = strip_paper(img, sam3["inst"], book["book"], pages, masks.paper)
         if strip_added.any():
             masks = replace(masks, paper=masks.paper | strip_added, strip_added=strip_added)
-            pages = frame_pages(img, book, sam3, paint_seg, masks)
+            pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
     if params.fit_sides:
         # Поле страницы до кромки листа, где SAM 3 взял его рваными языками (цветная плашка с белым полем, МТС 1990/04
         # IMG_1113); страницы пересчитываются — рваная маска делала страницу «приподнятой».
         edge_added = snap_sheet_edges(masks.paper, pages, book["bg"], book["book"], img)
         if edge_added.any():
             masks = replace(masks, paper=masks.paper | edge_added)
-            pages = frame_pages(img, book, sam3, paint_seg, masks)
+            pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
         # Цветные страницы: поле и край — по палитре уверенного центра страницы, вверх и вниз (верхнее поле МТС 1990/04
         # IMG_1113 — тень кромки нашлась, но край маски не «рваный»); страницы пересчитываются.
         if params.colour_pages:
             palette_added = colour_pages_growth(img, pages, masks.paper, book["book"], book["bg"])
             if palette_added.any():
                 masks = replace(masks, paper=masks.paper | palette_added, palette_added=palette_added)
-                pages = frame_pages(img, book, sam3, paint_seg, masks)
+                pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
         # Выравнивание внешних боковых сторон плоских страниц: выбросы SAM 3 (заливка LaMa на торце, IMG_0240),
         # ямы, колебания края в тени у кромки (IMG_0538); затем страницы пересчитываются по выровненной бумаге.
         side = regularize_sides(masks.paper, pages, book["bg"], img, params.snap_sides)
         masks = replace(masks, paper=side.paper, side_added=side.added | edge_added, side_cut=side.cut)
-        pages = frame_pages(img, book, sam3, paint_seg, masks)
+        pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
     if params.refine_ragged:
         mark_ragged(work, sam3["raw"], pages, paint_seg, params.ragged_threshold)
     save_pages(work, masks, pages)
+    save_layout_frames(work, params, img, book, masks, paint_seg, job.flags)
     return job.key
 
 
@@ -1061,9 +1199,92 @@ def cpu_refine(args: tuple[FrameJob, RunParams]) -> str:
         if f"edge{i}" in edges:
             paper = apply_edge(paper, Band(data[f"quad{i}"], i == 0, SEG_PX_PER_MM, ratio), edges[f"edge{i}"])
     masks = replace(masks, paper=paper)
-    pages = frame_pages(img, book, sam3, paint_seg, masks)
+    pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
     save_pages(work, masks, pages)
+    save_layout_frames(work, params, img, book, masks, paint_seg, job.flags)
     return job.key
+
+
+def surya_frames(
+    img: np.ndarray,
+    book: dict,
+    inst: np.ndarray,
+    pages: list[PageQuad],
+    paint_seg: np.ndarray,
+    core_seg: np.ndarray,
+    method: SpineMethod,
+) -> tuple[list[PageFrame] | None, FramesReason]:
+    """Подгоночные области страниц без текста — вход холста Кунса для surya (двух у разворота, одной у кадра с одной страницей).
+
+    Те же области, что строит финал кадра (:func:`spread_fit`), но без вершин блоков surya: текст только сдвигает
+    сторону наружу, а кривизну и положение задают маска SAM 3, трапеция, линия корешка, полоса-вклейка и зоны пальца.
+    Руки для прямых разворота не нужны: линия корешка от них не зависит (``spine_candidates`` смотрит на страницы),
+    поэтому кадр с NTFS не читается.
+
+    Args:
+        img: Кадр масштаба сегментации, BGR.
+        book: Маски шага «фон и книга» (``book`` — грубая маска книги).
+        inst: Экземпляры-страницы SAM 3 (из ``sam3.npz``, как в финале).
+        pages: Страницы кадра слева направо.
+        paint_seg: Зона закраса пальцев на масштабе сегментации.
+        core_seg: Ядро пальца на масштабе сегментации (bool).
+        method: Способ линии-разделителя страниц (``--spine-method``).
+
+    Returns:
+        ``(области или None, причина)``: областей не построить (нет страниц с трапецией, разворот без двух) —
+        ``NOT_TWO_PAGES``, подгонка упала — ``FIT_FAILED``.
+    """
+    single = frame_kind_of(pages)[0] in (FrameKind.SINGLE, FrameKind.SLIVER)
+    lines = None if single else frame_spread_lines(pages, book["book"], book["book"], paint_seg, method)
+    if lines is None and not single:
+        return None, FramesReason.NOT_TWO_PAGES
+    try:
+        if single:
+            # Одна страница: та же область, что у выхода страниц (``single_fit``), без вершин текста.
+            fit = single_fit(pages, [], paint_seg, core_seg, 1.0)
+        else:
+            fit = spread_fit(img, inst, book["book"], pages, lines, [], paint_seg, core_seg, 1.0)
+    except Exception:  # noqa: BLE001 — подгонка не роняет кадр: surya откатывается на трапеции
+        log.exception("подгоночные области для surya не построились")
+        return None, FramesReason.FIT_FAILED
+    if fit is None:
+        return None, FramesReason.NOT_TWO_PAGES
+    return fit.frames, FramesReason.OK
+
+
+def save_layout_frames(
+    work: WorkPaths,
+    params: RunParams,
+    img: np.ndarray,
+    book: dict,
+    masks: PaperMasks,
+    paint_seg: np.ndarray,
+    flags: FrameFlags,
+) -> None:
+    """Области страниц без текста → ``layout_frames.npz`` (только при ``--layout-warp coons``).
+
+    Страницы считаются так же, как в финале кадра (по итоговой бумаге и экземплярам SAM 3 из файла кэша), чтобы
+    области surya отличались от итоговых только сдвигом текстом.
+
+    Args:
+        work: Файлы кэша кадра.
+        params: Параметры прогона.
+        img: Кадр масштаба сегментации, BGR.
+        book: Маски шага «фон и книга», которыми считалась бумага.
+        masks: Итоговые маски бумаги кадра.
+        paint_seg: Зона закраса пальцев на масштабе сегментации.
+        flags: Флаги кадра (вид кадра — ``frame_pages``).
+    """
+    if params.layout_warp is not LayoutWarp.COONS:
+        return
+    sam3 = dict(np.load(work.sam3))
+    pages = frame_pages(img, book, sam3, paint_seg, masks, flags)
+    core = np.load(work.fingers)["core"]
+    core_seg = cv2.resize(core.astype(np.uint8), img.shape[1::-1], interpolation=cv2.INTER_NEAREST) > 0
+    frames, reason = surya_frames(img, book, sam3["inst"], pages, paint_seg, core_seg, params.spine_method)
+    if reason is not FramesReason.OK:
+        log.info("%s: области для surya — нет (%s)", work.root.name, reason.value)
+    save_frames(work.layout_frames, frames, reason.value)
 
 
 def same_quads(old: list[np.ndarray], new: list[np.ndarray], tol: float = 2.0) -> bool:
@@ -1075,10 +1296,13 @@ def same_quads(old: list[np.ndarray], new: list[np.ndarray], tol: float = 2.0) -
 
 
 def gpu_layout(job: FrameJob, models, params: RunParams) -> None:
-    """Блоки surya одного кадра → кэш: по кадру, выпрямленному по трапециям страниц, с обратным переносом блоков.
+    """Блоки surya одного кадра → кэш: по холсту выбранного выпрямления с обратным переносом блоков на кадр.
 
-    Кадр — исходный (с пальцами), как в v1: блок, задетый пальцем, потом вернётся с оригинала. Без трапеций или при
-    ``--no-keystone-layout`` — по кадру как есть.
+    Кадр — исходный (с пальцами), как в v1: блок, задетый пальцем, потом вернётся с оригинала. Режим ``coons``: холст
+    Кунса по подгоночным областям из ``layout_frames.npz`` (блоки — кривые многоугольники); областей нет или
+    поверхность вырождена — откат на трапеции, нет и трапеций — кадр как есть. Режим ``keystone`` — трапеции с
+    откатом на кадр, ``none`` — кадр как есть. Файл пишется через временный и ``os.replace``: запись не идёт по
+    жёсткой ссылке в чужой кэш (копия ``cp -al``).
 
     Args:
         job: Кадр.
@@ -1090,52 +1314,119 @@ def gpu_layout(job: FrameJob, models, params: RunParams) -> None:
     work = WorkPaths(params.work_dir / job.key)
     bgr = read_bgr(job.src)
     t0 = time.perf_counter()
-    # Трапеции — в px сегментации; размер сегментации тот же, что у шага «фон и книга» (``seg_shape``).
-    ratio = bgr.shape[1] / seg_shape(bgr.shape[:2], params.scale)[1]
-    warp = None
-    if params.keystone_layout:
-        warp = plan_warp([q * ratio for q in read_page_quads(work.pages)])
-    if warp is None:
-        polys, labels = layout_blocks(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), models)
-    else:
-        canvas = warp_for_layout(bgr, warp)
+    # Области и трапеции — в px сегментации; размер сегментации тот же, что у шага «фон и книга» (``seg_shape``).
+    seg_hw = seg_shape(bgr.shape[:2], params.scale)
+    seg_scale = (seg_hw[1] / bgr.shape[1], seg_hw[0] / bgr.shape[0])
+    mode = params.layout_warp
+    reason, digest, frames = FramesReason.OK, "", None
+    coons = keystone = None
+    if mode is LayoutWarp.COONS:
+        frames, stored = load_frames(work.layout_frames)
+        digest = frames_digest(frames)
+        coons, reason = plan_coons(frames, seg_scale, bgr.shape[:2], params.scale.px_per_mm,
+                                   params.layout_canvas_margin_mm) if frames else (None, FramesReason(stored))  # fmt: skip
+    if coons is None and mode is not LayoutWarp.NONE:
+        ratio = bgr.shape[1] / seg_hw[1]
+        keystone = plan_warp([q * ratio for q in read_page_quads(work.pages)])
+    record: dict = {"version": LAYOUT_VERSION, "mode": mode.value, "reason": reason.value, "frames": digest}
+    if coons is not None:
+        canvas = warp_coons(bgr, coons)
         raw, labels = layout_blocks(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), models)
-        polys = unwarp_polygons(raw, warp)
-        if params.debug_dir is not None:
-            write_layout_debug(job, params, canvas, raw, labels)
-    work.layout.write_text(json.dumps({"version": LAYOUT_VERSION, "keystone": warp is not None,
-                                       "blocks": [np.asarray(p).tolist() for p in polys],
-                                       "labels": labels}))  # fmt: skip
-    log.info("%s: surya %.1f с, блоков %d, %s", job.key, time.perf_counter() - t0, len(polys),
-             "по выпрямленному кадру" if warp is not None else "по кадру")  # fmt: skip
+        canvas_blocks = from_surya(raw, coons)
+        polys = unwarp_coons(canvas_blocks, coons, params.scale.px_per_mm)
+        warp = LayoutWarp.COONS
+        record.update(canvas=canvas_record(coons), canvas_blocks=[np.round(p, 2).tolist() for p in canvas_blocks])
+    elif keystone is not None:
+        canvas = warp_for_layout(bgr, keystone)
+        raw, labels = layout_blocks(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), models)
+        polys = unwarp_polygons(raw, keystone)
+        warp = LayoutWarp.KEYSTONE
+        record.update(canvas={"width": keystone.size[0], "height": keystone.size[1], "spine_x": keystone.spine_x},
+                      canvas_blocks=[np.round(np.asarray(p, np.float64), 2).tolist() for p in raw])  # fmt: skip
+    else:
+        canvas, raw = None, []
+        polys, labels = layout_blocks(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), models)
+        warp = LayoutWarp.NONE
+    record.update(warp=warp.value, blocks=[np.round(np.asarray(p, np.float64), 2).tolist() for p in polys],
+                  labels=labels)  # fmt: skip
+    seconds = time.perf_counter() - t0
+    tmp = work.layout.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record))
+    os.replace(tmp, work.layout)
+    fallback = f", откат: {reason.value}" if mode is LayoutWarp.COONS and warp is not LayoutWarp.COONS else ""
+    log.info("%s: surya %.1f с, блоков %d, %s%s", job.key, seconds, len(polys), warp_caption(warp), fallback)
+    if params.debug_dir is not None and canvas is not None:
+        write_layout_debug(job, params, canvas, raw, labels, bgr, polys, warp, reason,
+                           frames_on_frame(frames, seg_scale), coons, keystone)  # fmt: skip
+
+
+def warp_caption(warp: LayoutWarp | None) -> str:
+    """Подпись выпрямления входа surya для логов и оверлеев.
+
+    Args:
+        warp: Применённое выпрямление или None (нет файла).
+
+    Returns:
+        Строка вида «по Кунсу областей».
+    """
+    return {
+        LayoutWarp.COONS: "по холсту Кунса подгоночных областей",
+        LayoutWarp.KEYSTONE: "по кадру, выпрямленному по трапециям",
+        LayoutWarp.NONE: "по кадру",
+    }.get(warp, "нет")
 
 
 def write_layout_debug(
-    job: FrameJob, params: RunParams, canvas: np.ndarray, polys: list[np.ndarray], labels: list[str]
+    job: FrameJob,
+    params: RunParams,
+    canvas: np.ndarray,
+    raw: list[np.ndarray],
+    labels: list[str],
+    frame: np.ndarray,
+    polys: list[np.ndarray],
+    warp: LayoutWarp,
+    reason: FramesReason,
+    outlines: list[np.ndarray],
+    coons,
+    keystone,
 ) -> None:
-    """Выпрямленный кадр с рамками surya и их типами (как их видит сеть) → ``debug/surya/<кадр>_surya.jpg``, ширина
-    1600 px.
+    """Лист «вход surya» → ``debug/surya/<кадр>_surya.jpg``: холст с блоками сети | кадр с перенесёнными блоками.
 
     Args:
         job: Кадр.
         params: Параметры прогона.
-        canvas: Выпрямленный кадр.
-        polys: Рамки surya на нём.
-        labels: Типы блоков surya, по порядку ``polys``.
+        canvas: Холст, который видела сеть (малый холст Кунса или холст трапеций).
+        raw: Блоки surya на холсте, px ``canvas``.
+        labels: Типы блоков по порядку ``raw``.
+        frame: Исходный кадр BGR.
+        polys: Блоки, перенесённые на кадр, px кадра.
+        warp: Применённое выпрямление.
+        reason: Причина отката на трапеции (``FramesReason.OK`` — отката нет).
+        outlines: Контуры подгоночных областей surya в px кадра (пусто — областей нет).
+        coons: ``CoonsWarp`` или None.
+        keystone: ``KeystoneWarp`` или None.
     """
-    from ocr_utils.page_layout.overlay_frame import LegendEntry, framed
-    from ocr_utils.scan_cropping.v2.overlay import COLOUR_SURYA, COLOUR_SURYA_LABEL, LABEL_ALPHA, block_labels
+    from ocr_utils.scan_cropping.v2.overlay import SuryaInput, draw_surya_input
 
-    s = 1600 / canvas.shape[1]
-    small = cv2.resize(canvas, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-    scaled = [np.asarray(p, np.float32) * s for p in polys]
-    pts = [np.round(p).astype(np.int32).reshape(-1, 1, 2) for p in scaled]
-    cv2.polylines(small, pts, True, COLOUR_SURYA, 2, cv2.LINE_AA)
-    small = block_labels(small, scaled, labels)
-    picture = framed(small, [f"{job.rel} — вход surya: кадр, выпрямленный по трапециям страниц"],
-                     [LegendEntry("блок surya на выпрямленном кадре", COLOUR_SURYA),
-                      LegendEntry("тип блока surya (Text — текст, SectionHeader — заголовок, Picture — картинка…)",
-                                  COLOUR_SURYA_LABEL, alpha=LABEL_ALPHA)])  # fmt: skip
+    page_rects = []
+    spine_x = None
+    if coons is not None:
+        # Прямоугольники страниц и линия корешка — в px малого холста.
+        s = coons.scale
+        page_rects = [
+            ((r.x0 + 0.5) * s, (r.y0 + 0.5) * s, (r.x1 + 0.5) * s, (r.y1 + 0.5) * s) for r in coons.layout.rects
+        ]
+        spine_x = None if coons.layout.single else (coons.layout.spine_x + 0.5) * s
+    elif keystone is not None:
+        spine_x = keystone.spine_x
+    if warp is LayoutWarp.COONS:
+        header = (f"{job.rel} — вход surya: холст Кунса по подгоночным областям страниц (поле "
+                  f"{params.layout_canvas_margin_mm:g} мм, масштаб входа сети {coons.scale:.3f})")  # fmt: skip
+    else:
+        fallback = f"откат: трапеции ({reason.value}); " if params.layout_warp is LayoutWarp.COONS else ""
+        header = f"{job.rel} — вход surya: {fallback}кадр, выпрямленный по трапециям страниц"
+    inputs = SuryaInput(canvas, raw, labels, frame, polys, outlines, page_rects, spine_x)
+    picture = draw_surya_input(inputs, header)
     # Своя подпапка типа картинки, структура подпапок входа повторяется.
     path = overlay_path(params.debug_dir, job.rel, OverlayTag.SURYA)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1185,10 +1476,42 @@ def write_pages(path: Path, pages: list[PageQuad]) -> None:
         pages: Страницы слева направо.
     """
     rows = [
-        {"quad": None if p.quad is None else p.quad.round(1).tolist(), "pose": p.pose.value, **asdict(p.features)}
+        {"quad": None if p.quad is None else p.quad.round(1).tolist(), "pose": p.pose.value, **asdict(p.features),
+         "frame_kind": p.frame_kind.value, "spread_index": p.spread_index}
         for p in pages
-    ]
+    ]  # fmt: skip
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=1))
+
+
+def frame_kind_of(pages: list[PageQuad]) -> tuple[FrameKind, int | None]:
+    """Вид кадра и место страницы кадра ``SLIVER`` в развороте по его страницам.
+
+    Args:
+        pages: Страницы кадра (у всех один ``frame_kind``).
+
+    Returns:
+        ``(вид, место широкой страницы)``; страниц нет — ``NO_PAGE``.
+    """
+    if not pages:
+        return FrameKind.NO_PAGE, None
+    return pages[0].frame_kind, pages[0].spread_index
+
+
+def read_frame_kind(path: Path) -> tuple[FrameKind, int | None]:
+    """Вид кадра из ``pages.json`` (кэш прежней версии без поля — разворот).
+
+    Args:
+        path: ``pages.json`` кадра.
+
+    Returns:
+        ``(вид, место широкой страницы)``; файла нет или страниц нет — ``NO_PAGE``.
+    """
+    if not path.exists():
+        return FrameKind.NO_PAGE, None
+    rows = json.loads(path.read_text())
+    if not rows:
+        return FrameKind.NO_PAGE, None
+    return FrameKind(rows[0].get("frame_kind", FrameKind.SPREAD.value)), rows[0].get("spread_index")
 
 
 def spine_on_frame(pages: list[PageQuad], seg_to_frame: float) -> float | None:
@@ -1265,7 +1588,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     zone_seg = book_zone(original, fingers["core"], book["book"])
     # Страницы: трапеции и класс «плоско / приподнята / опущена» по итоговой бумаге (дёшево, детерминированно — как в шаге 4);
     # защита контента — только блоки плоских страниц.
-    pages = frame_pages(img, book, sam3, paint_on_seg(fingers, img.shape[:2]), masks)
+    pages = frame_pages(img, book, sam3, paint_on_seg(fingers, img.shape[:2]), masks, job.flags)
     # Припуск блоков — один для защиты контента и copy back: на оверлее рисуется ровно возвращаемая зона.
     pad = (params.scale.mm_px(params.layout_pad_mm[0]), params.scale.mm_px(params.layout_pad_mm[1]))
     # Цветные страницы — защита контента при любой позе: рваная маска делала их «приподнятыми» (IMG_1113).
@@ -1340,15 +1663,41 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
     out_path = output_path(job, params)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_image(out_path, out, imwrite_params(out_path.suffix), params.force_dpi)
+    # Прямые разворота и подгоночные области страниц — для оверлеев и выхода страниц; считаются один раз.
+    want_fit = params.output_pages is not None or (params.debug_dir is not None and params.debug_steps)
+    lines, fit = None, None
+    if params.debug_dir is not None or want_fit:
+        lines = frame_spread_lines(
+            pages, book["book"], zone_seg, paint_on_seg(fingers, img.shape[:2]), params.spine_method
+        )
+    single = frame_kind_of(pages)[0] in (FrameKind.SINGLE, FrameKind.SLIVER)
+    if want_fit and (lines is not None or single):
+        try:
+            core_seg = cv2.resize(fingers["core"].astype(np.uint8), img.shape[1::-1], interpolation=cv2.INTER_NEAREST)
+            paint_seg = paint_on_seg(fingers, img.shape[:2])
+            if single:
+                fit = single_fit(pages, polys, paint_seg, core_seg > 0, img.shape[0] / shape[0])
+            else:
+                fit = spread_fit(img, sam3["inst"], book["book"], pages, lines, polys, paint_seg, core_seg > 0,
+                                 img.shape[0] / shape[0])  # fmt: skip
+        except Exception:  # noqa: BLE001 — подгонка не роняет кадр: без неё нет только страниц и листа 07
+            log.exception("%s: подгоночные области страниц не построились", job.key)
+    pages_out = PagesOutcome()
+    if params.output_pages is not None:
+        seg_scale = (img.shape[1] / shape[1], img.shape[0] / shape[0])
+        # Закрас пальцев, который остался в итоге (без возвращённого copy back), — в координатах итога.
+        finger_out = None
+        if box is not None and status == "ok":
+            x0, y0, x1, y1 = box
+            finger_out = (paint & ~returned)[y0:y1, x0:x1]
+        pages_out = write_rectified_pages(job, params, out, status, box, fit, seg_scale, polys, labels, finger_out,
+                                          frame_kind_of(pages))  # fmt: skip
     if params.debug_dir is not None:
         dbg = overlay_path(params.debug_dir, job.rel, OverlayTag.MAIN)
         dbg.parent.mkdir(parents=True, exist_ok=True)
         shadow_area = None if shadow is None else shadow_on_frame(shadow.area, box, shape)
-        lines = frame_spread_lines(
-            pages, book["book"], zone_seg, paint_on_seg(fingers, img.shape[:2]), params.spine_method
-        )
         layers = OverlayLayers(masks, protected, fingers, returned, polys, pages, box, pad, labels, shadow_area, lines)
-        surya = "по выпрямленному кадру" if layout_keystone(work.layout) else "по кадру"
+        surya = warp_caption(layout_warp(work.layout))
         picture = draw_overlay(original, book, layers, out,
                                f"{job.rel} — v2, закрас до прямоугольника: {params.fill.value}, surya {surya}")  # fmt: skip
         cv2.imwrite(str(dbg), picture, [cv2.IMWRITE_JPEG_QUALITY, 88])
@@ -1363,16 +1712,8 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
                 cv2.imwrite(str(shadow_path), roi, [cv2.IMWRITE_JPEG_QUALITY, 88])
         if params.debug_steps:
             # Шаги сегментации бумаги — по маскам кэша; маски книги до вето — из ``book.npz``.
-            fit = None
-            if lines is not None:
-                try:
-                    core_seg = cv2.resize(fingers["core"].astype(np.uint8), img.shape[1::-1],
-                                          interpolation=cv2.INTER_NEAREST)  # fmt: skip
-                    fit = spread_fit(img, sam3["inst"], book["book"], pages, lines, polys,
-                                     paint_on_seg(fingers, img.shape[:2]), core_seg > 0, img.shape[0] / shape[0])  # fmt: skip
-                except Exception:  # noqa: BLE001 — диагностика не роняет кадр
-                    log.exception("%s: подгоночные области страниц не построились", job.key)
-            steps = StepInputs(img, dict(np.load(work.book)), book, sam3, masks, protected, pages, lines, fit)
+            frames0 = load_frames(work.layout_frames)[0] if params.layout_warp is LayoutWarp.COONS else None
+            steps = StepInputs(img, dict(np.load(work.book)), book, sam3, masks, protected, pages, lines, fit, frames0)
             for tag, step in draw_steps(steps, str(job.rel)).items():
                 step_path = overlay_path(params.debug_dir, job.rel, tag)
                 step_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1398,11 +1739,18 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
         side_cut=float(masks.side_cut.sum() / area),
         protected=float(protected.sum() / area),
         poses="/".join(p.pose.value for p in pages),
+        frame_kind=frame_kind_of(pages)[0].value,
         fill_share=fill_share,
         width=int(out.shape[1]),
         height=int(out.shape[0]),
         seconds=time.perf_counter() - t0,
         **shadow_stats(shadow, params.scale.px_per_mm),
+        flags=job.flags.label(),
+        pages=pages_out.label,
+        pages_status=pages_out.status,
+        pages_tint=pages_out.tint,
+        pages_finger_mm2=pages_out.finger_mm2,
+        pages_text=pages_out.text,
     )
 
 
@@ -1413,13 +1761,14 @@ BEND_CORE_MARGIN_MM = 3.0
 
 @dataclass(frozen=True)
 class SpreadFit:
-    """Подгонка разворота для оверлея шага ``07_lines`` (только диагностика, итог кадра от неё не зависит).
+    """Подгонка разворота: оверлей шага ``07_lines`` и выход страниц (основной итог кадра от неё не зависит).
 
     Поля:
         old: Прежние рамки страниц сплайном ``page_boundary`` (для сравнения), по странице слева направо.
-        frames: Подгоночные области страниц (``page_frames.spread_frames``).
+        frames: Подгоночные области страниц (``page_frames.spread_frames``; у одной страницы — одна,
+            ``page_frames.single_frame``).
         strip: Полоса-вклейка или None.
-        spine: Линия корешка.
+        spine: Линия корешка или None (одна страница).
         spine_source: Откуда линия корешка (подпись).
         gap_mm: Медианная щель между экземплярами SAM 3 у корешка, мм (признак полосы).
     """
@@ -1427,7 +1776,7 @@ class SpreadFit:
     old: list[PageBoundary]
     frames: list[PageFrame]
     strip: Strip | None
-    spine: Line
+    spine: Line | None
     spine_source: str
     gap_mm: float
 
@@ -1480,6 +1829,36 @@ def spread_fit(
     return SpreadFit(old, frames, strip, spine, source, float(sam3.extra.get("gap_mm", 0.0)))
 
 
+def single_fit(
+    pages: list[PageQuad], polys: list[np.ndarray], paint: np.ndarray, core: np.ndarray, seg: float
+) -> SpreadFit | None:
+    """Подгоночная область одной страницы кадра (``SINGLE`` или ``SLIVER``): без корешка и полосы-вклейки.
+
+    Args:
+        pages: Страницы кадра (одна).
+        polys: Блоки surya на кадре (px кадра).
+        paint: Зона закраса пальцев на масштабе сегментации.
+        core: Ядро пальца на масштабе сегментации.
+        seg: Масштаб сегментации относительно кадра.
+
+    Returns:
+        Подгонка с одной областью или None (страница без трапеции).
+    """
+    one = [p for p in pages if p.quad is not None]
+    if len(one) != 1:
+        return None
+    page = one[0]
+    h, w = page.mask.shape
+    blocks = [np.asarray(poly, np.float64).reshape(-1, 2) * seg for poly in polys]
+    own = [b for b in blocks if page.mask[min(int(b[:, 1].mean()), h - 1), min(int(b[:, 0].mean()), w - 1)]]
+    text = np.vstack(own) if own else np.zeros((0, 2))
+    r = max(int(round(BEND_CORE_MARGIN_MM * SEG_PX_PER_MM)), 1)
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    core_zone = cv2.dilate(core.astype(np.uint8), disk) > 0
+    frame = single_frame(page, paint, core_zone, text)
+    return SpreadFit([], [frame], None, None, "одна страница", 0.0)
+
+
 def frame_spread_lines(
     pages: list[PageQuad], book: np.ndarray, zone: np.ndarray, paint: np.ndarray, method: SpineMethod
 ) -> SpreadLines | None:
@@ -1520,6 +1899,196 @@ def shadow_on_frame(area: np.ndarray, box: tuple[int, int, int, int], shape: tup
     out = np.zeros(shape, bool)
     out[y0:y1, x0:x1] = cv2.resize(area.astype(np.uint8), (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST) > 0
     return out
+
+
+@dataclass(frozen=True)
+class PagesOutcome:
+    """Исход выхода страниц кадра для сводки.
+
+    Поля:
+        label: Записанные части через ``+`` (``L``, ``R``, ``LR``).
+        status: Исход (``rectify.pages.PagesStatus``); пусто — выхода страниц нет.
+        tint: Доли тонированного фона левой и правой страницы через ``/``.
+        finger_mm2: Площадь закраса пальцев на записанных страницах через ``/``, мм².
+        text: Меры прямизны текста до и после поля (JSON одной строкой) или пусто.
+    """
+
+    label: str = ""
+    status: str = ""
+    tint: str = ""
+    finger_mm2: str = ""
+    text: str = ""
+
+
+def pages_path(job: FrameJob, params: RunParams, suffix: str) -> Path:
+    """Путь части разворота в выходе страниц: ``<output_pages>/<подпапки>/<кадр><суффикс>.<расширение итога>``.
+
+    Args:
+        job: Кадр.
+        params: Параметры прогона (``output_pages`` задан).
+        suffix: Суффикс части (``rectify.pages.PagePart``: ``_L``, ``_R``, ``_LR``).
+
+    Returns:
+        Путь файла страницы.
+    """
+    ext = resolve_output_suffix(job.rel.suffix, params.output_format)
+    return params.output_pages / job.rel.parent / f"{job.rel.stem}{suffix}{ext}"
+
+
+def pages_done(job: FrameJob, params: RunParams) -> bool:
+    """Записаны ли уже все части выхода страниц, которые кадру положены по флагам.
+
+    Args:
+        job: Кадр.
+        params: Параметры прогона.
+
+    Returns:
+        True — выхода страниц нет или все положенные части есть на диске.
+    """
+    if params.output_pages is None:
+        return True
+    from ocr_utils.scan_cropping.v2.rectify.pages import wanted_parts
+
+    cached = WorkPaths(params.work_dir / job.key).pages
+    if not cached.exists():
+        # Вид кадра ещё не известен (кэша страниц нет) — части не проверить, кадр считается заново.
+        return False
+    kind, index = read_frame_kind(cached)
+    return all(pages_path(job, params, part.value).exists() for part in wanted_parts(job.flags, kind, index))
+
+
+def write_rectified_pages(
+    job: FrameJob,
+    params: RunParams,
+    out: np.ndarray,
+    status: str,
+    box: tuple[int, int, int, int] | None,
+    fit: SpreadFit | None,
+    seg_scale: tuple[float, float],
+    polys: list[np.ndarray],
+    labels: list[str] | None,
+    fingers: np.ndarray | None = None,
+    kind: tuple[FrameKind, int | None] = (FrameKind.SPREAD, None),
+) -> PagesOutcome:
+    """Выход страниц кадра: выпрямление итога, разрез на страницы по флагам, закрас до прямоугольника, запись.
+
+    Ошибка выпрямления не роняет кадр: основной итог уже записан, в сводку идёт исход ``error``.
+
+    Args:
+        job: Кадр (флаги — ``job.flags``).
+        params: Параметры прогона (``output_pages`` задан).
+        out: Итог кадра v2 BGR (после закраса, уровней и осветления тени).
+        status: Исход основного итога (``ok`` — вырезан по рамке ``box``).
+        box: Рамка вырезки итога в px кадра.
+        fit: Подгонка разворота (области двух страниц) или None.
+        seg_scale: Масштаб сегментации относительно кадра по X и Y.
+        polys: Блоки surya в px кадра (формулы — опоры-преграды разбора текста).
+        labels: Типы блоков surya или None.
+        fingers: Зона закраса пальцев, не возвращённая copy back, в координатах итога (bool, размер ``out``) или
+            None; переносится на страницы и пишется в паспорт (``--output-pages-meta``).
+        kind: Вид кадра и место широкой страницы кадра ``SLIVER`` (``frame_kind_of``): одна страница пишется
+            частью ``_P`` (у ``SLIVER`` — частью своей стороны), без страницы — ничего.
+
+    Returns:
+        Исход выхода страниц для сводки.
+    """
+    from ocr_utils.scan_cropping.v2.rectify.geometry import SpreadGeometry, equations_of
+    from ocr_utils.scan_cropping.v2.rectify.overlay import pages_overlay
+    from ocr_utils.scan_cropping.v2.rectify.pages import PagePart, PagesStatus, cut_pages, page_mask_of, wanted_parts
+    from ocr_utils.scan_cropping.v2.rectify.passport import PagePassport, finger_area_mm2, write_passport, zone_contours
+    from ocr_utils.scan_cropping.v2.rectify.sheets import sheet_result
+    from ocr_utils.scan_cropping.v2.rectify.text_run import PageControl, TextParams, text_frame
+    from ocr_utils.frame_flags.flags import Side
+    from ocr_utils.units import MM_PER_INCH
+
+    frame_kind, spread_index = kind
+    if job.flags.skip_frame:
+        return PagesOutcome(status=PagesStatus.OK.value)
+    if status != "ok" or box is None:
+        return PagesOutcome(status=PagesStatus.NO_PAPER.value)
+    if frame_kind is FrameKind.NO_PAGE:
+        log.info("%s: в кадре нет страницы (закрытая крышка, ярлык) — выход страниц пропущен", job.key)
+        return PagesOutcome(status=PagesStatus.NO_PAGE.value)
+    parts = wanted_parts(job.flags, frame_kind, spread_index)
+    if not parts:
+        return PagesOutcome(status=PagesStatus.OK.value)
+    if fit is None:
+        log.warning("%s: нет подгоночных областей страниц — выход страниц пропущен", job.key)
+        return PagesOutcome(status=PagesStatus.NO_FRAMES.value)
+    # Размеры выпрямления — в мм бумаги, поэтому dpi — настоящая плотность кадра, а не тег --force-dpi (у пака-4 тег 450
+    # при 13.8 px/мм ≈ 350 dpi: поле считалось бы в 1.29 раза мельче задуманного). Тег страниц — --pages-dpi или она же.
+    dpi = params.scale.px_per_mm * MM_PER_INCH
+    tag_dpi = int(round(params.pages_dpi or dpi))
+    geometry = SpreadGeometry(fit.frames, box, seg_scale, equations_of(polys, labels or []))
+    # Флаги кадра → запреты страницам: без освещения — по ``no-illumination-*``; без поля по строкам — игнорируемая (её
+    # текст не тянет поле) и помеченная ``no-text-rectify-*`` (передняя обложка, страница-картинка). Флаг обложки сам
+    # ничего не выключает: задней обложке с анонсом книг выпрямление строк нужно; цветные и тонированные страницы
+    # автоматика (``text_run``) и так оставляет без освещения и поля.
+    # Одна страница кадра — один запрет по флагам её сторон: у ``SINGLE`` — обеих (флаг любой стороны выключает), у
+    # ``SLIVER`` — стороны широкой страницы. Игнорирование одной стороны одну страницу не выключает: её пишут
+    # (``wanted_parts``), значит, и выпрямляют.
+    page_sides = [(Side.LEFT,), (Side.RIGHT,)]
+    if frame_kind is FrameKind.SINGLE:
+        page_sides = [(Side.LEFT, Side.RIGHT)]
+    elif frame_kind is FrameKind.SLIVER:
+        page_sides = [(Side.LEFT,) if spread_index == 0 else (Side.RIGHT,)]
+    single = len(page_sides) == 1
+    controls = tuple(PageControl(equalize=all(job.flags.equalize(side) for side in sides),
+                                 field=all((single or not job.flags.ignored(side)) and job.flags.text_rectify(side)
+                                           for side in sides))
+                     for sides in page_sides)  # fmt: skip
+    text = TextParams(illumination=params.rectify_illumination, passes=params.rectify_passes)
+    try:
+        result = text_frame(out, geometry, dpi, text, controls)
+        images = cut_pages(result, parts, dpi, params.fill, params.fill_seam_mm)
+    except Exception:  # noqa: BLE001 — выход страниц не роняет кадр: основной итог уже записан
+        log.exception("%s: выход страниц не построился", job.key)
+        return PagesOutcome(status=PagesStatus.ERROR.value)
+    # Страницы итога выпрямления (``result.pages``) по частям: у разворота — слева направо, у одной страницы — одна.
+    sides_of = {PagePart.LEFT: (0,), PagePart.RIGHT: (1,), PagePart.SPREAD: (0, 1)}
+    if single:
+        sides_of = {part: (0,) for part in parts}
+    finger_mm2 = []
+    for page in images:
+        path = pages_path(job, params, page.part.value)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_image(path, page.image, imwrite_params(path.suffix), tag_dpi)
+        sides = sides_of[page.part]
+        zone = None if fingers is None else page_mask_of(result, fingers, page)
+        finger_mm2.append(0.0 if zone is None else finger_area_mm2(zone, dpi))
+        passport = PagePassport(
+            source=job.rel.as_posix(),
+            part=page.part.value.lstrip("_"),
+            flags=[f.value for f in job.flags.flags],
+            cover=any(job.flags.cover(side) for i in sides for side in page_sides[i]),
+            dpi=round(dpi, 2),
+            width=int(page.image.shape[1]),
+            height=int(page.image.shape[0]),
+            tint=round(max(result.pages[i].tint for i in sides), 4),
+            plain=all(result.pages[i].plain for i in sides),
+            finger_mm2=0.0 if zone is None else round(finger_area_mm2(zone, dpi), 1),
+            finger_zones=[] if zone is None else zone_contours(zone, dpi),
+        )
+        if params.output_pages_meta is not None:
+            meta = params.output_pages_meta / job.rel.parent / f"{job.rel.stem}{page.part.value}"
+            write_passport(meta, passport, zone)
+    if params.debug_dir is not None and params.debug_steps:
+        header = [f"{job.rel} — выход страниц: Кунс + поле по тексту ({params.rectify_passes} прох.), "
+                  f"{dpi:.0f} dpi, флаги: {job.flags.label() or 'нет'}"]  # fmt: skip
+        # Триптих стенда page_rectify (лист 04): итог v2 с областями | Кунс | итог, оси строк и линия разреза.
+        sheets = {OverlayTag.RECTIFY: sheet_result(result, header),
+                  OverlayTag.RECTIFIED_PAGES: pages_overlay(result, parts, header)}  # fmt: skip
+        for tag, sheet in sheets.items():
+            sheet_path = overlay_path(params.debug_dir, job.rel, tag)
+            sheet_path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(sheet_path), sheet, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return PagesOutcome(
+        "+".join(page.part.value.lstrip("_") for page in images),
+        PagesStatus.OK.value,
+        "/".join(f"{p.tint:.2f}" for p in result.pages),
+        "/".join(f"{v:.0f}" for v in finger_mm2),
+        json.dumps({**result.before.row("before_"), **result.after.row("after_")}),
+    )
 
 
 def shadow_stats(shadow, px_per_mm: float) -> dict[str, float]:
@@ -1575,9 +2144,16 @@ def write_summary_row(path: Path, row: FrameStats) -> None:
         path: ``summary.csv`` в кэше.
         row: Строка.
     """
+    names = list(asdict(row).keys())
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), [])
+        if header != names:
+            # Сводка прежней версии с другими колонками: дописывать в неё — разъехать столбцы. Откладываем рядом.
+            path.rename(path.with_name(f"{path.stem}.{time.strftime('%Y%m%d_%H%M%S')}{path.suffix}"))
     new = not path.exists()
     with open(path, "a", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(asdict(row).keys()))
+        writer = csv.DictWriter(fh, fieldnames=names)
         if new:
             writer.writeheader()
         writer.writerow(asdict(row))
@@ -1758,12 +2334,14 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
     from ocr_utils.scan_cropping.v2.edge_refine import Refiner
     from ocr_utils.scan_cropping.v2.paper import load_sam3
 
-    jobs = [FrameJob(f, f.relative_to(params.input_dir)) for f in files]
+    params.work_dir.mkdir(parents=True, exist_ok=True)
+    jobs, skipped = frame_jobs(files, params)
+    for row in skipped:
+        write_summary_row(params.work_dir / "summary.csv", row)
     if params.skip_if_exists:
         before = len(jobs)
-        jobs = [j for j in jobs if not output_path(j, params).exists()]
+        jobs = [j for j in jobs if not (output_path(j, params).exists() and pages_done(j, params))]
         log.info("пропущено готовых: %d", before - len(jobs))
-    params.work_dir.mkdir(parents=True, exist_ok=True)
     in_flight = max(2, 2 * params.jobs)
     ctx = get_context("forkserver")
     gpu_lock = threading.RLock()
@@ -1787,4 +2365,36 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
             stream.drain(block=False)
         while stream.busy:
             stream.drain(block=True)
-    return sorted(stream.stats, key=lambda r: r.key)
+    return sorted(stream.stats + skipped, key=lambda r: r.key)
+
+
+def frame_jobs(files: list[Path], params: RunParams) -> tuple[list[FrameJob], list[FrameStats]]:
+    """Кадры прогона с флагами из сайдкаров; кадры с ``ignore-both`` и с битым сайдкаром в прогон не идут.
+
+    Args:
+        files: Входные кадры.
+        params: Параметры прогона (``use_flags`` — читать сайдкары).
+
+    Returns:
+        Кадры в работу и строки сводки отсеянных (``ignored`` / ``bad_flags``).
+    """
+    jobs, skipped = [], []
+    for src in files:
+        job = FrameJob(src, src.relative_to(params.input_dir))
+        if params.use_flags:
+            try:
+                job = replace(job, flags=read_flags(src))
+            except FlagsError as exc:
+                # Битый сайдкар — кадр не обрабатывается: молча обработать его как обычный значило бы потерять флаг.
+                log.error("%s: сайдкар не прошёл проверку, кадр пропущен: %s", job.key, exc)
+                skipped.append(FrameStats(job.key, "bad_flags", message=str(exc)))
+                continue
+        if job.flags.skip_frame:
+            log.info("%s: ignore-both — кадр не обрабатывается (%s)", job.key, job.flags.note or "без пояснения")
+            skipped.append(FrameStats(job.key, "ignored", flags=job.flags.label()))
+            continue
+        jobs.append(job)
+    if params.use_flags:
+        flagged = sum(not j.flags.empty for j in jobs)
+        log.info("флаги кадров: с флагами %d, отсеяно %d (ignore-both и битые сайдкары)", flagged, len(skipped))
+    return jobs, skipped

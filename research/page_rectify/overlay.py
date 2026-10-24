@@ -7,7 +7,7 @@ import numpy as np
 
 from ocr_utils.page_layout.overlay_frame import LegendEntry, framed
 from ocr_utils.scan_cropping.v2.overlay import COLOUR_FRAME
-from research.page_rectify.coons import Layout, Patch, PageRect
+from ocr_utils.scan_cropping.v2.rectify.coons import Layout, Patch, PageRect, patch_outline
 
 # Высота каждой половины листа, px: страница целиком видна, строки различимы.
 SHEET_HEIGHT = 1400
@@ -73,11 +73,6 @@ def draw_grid(image: np.ndarray, segments: list[np.ndarray], colour: tuple[int, 
     pts = [np.round(s * scale).astype(np.int32) for s in segments]
     cv2.polylines(layer, pts, False, colour, 1, cv2.LINE_AA)
     cv2.addWeighted(layer, GRID_ALPHA, image, 1 - GRID_ALPHA, 0, image)
-
-
-def patch_outline(patch: Patch) -> np.ndarray:
-    """Контур области: верх, правая сторона, низ обратно, левая обратно (N, 2)."""
-    return np.vstack([patch.top.points, patch.right.points, patch.bottom.points[::-1], patch.left.points[::-1]])
 
 
 def rect_outline(rect: PageRect) -> np.ndarray:

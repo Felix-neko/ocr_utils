@@ -3,7 +3,7 @@
 import numpy as np
 
 from ocr_utils.scan_cropping.v2.page_frames import PageFrame
-from research.page_rectify.coons import ArcCurve, page_patch, plan_layout, rectify_maps
+from ocr_utils.scan_cropping.v2.rectify.coons import ArcCurve, page_patch, plan_layout, rectify_maps
 
 TANGENT_PX = 20.0
 

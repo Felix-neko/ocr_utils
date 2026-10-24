@@ -19,6 +19,7 @@ from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
 from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_TORTUOSITY
 from ocr_utils.scan_cropping.v2.spread_lines import SpineMethod
 from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
+from ocr_utils.scan_cropping.v2.coons_layout import CANVAS_MARGIN_MM, LayoutWarp
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
 from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT
 from ocr_utils.scan_cropping.v2.pipeline import (
@@ -134,9 +135,16 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 @click.option("--fill-before-copy-back/--no-fill-before-copy-back", default=True, show_default=True,
               help="Закрас до прямоугольника от точного края бумаги, защита контента и copy back — поверх готового "
                    "закраса: печать и край обложки в блоке surya у края не тянутся шлейфом Telea.")  # fmt: skip
-@click.option("--keystone-layout/--no-keystone-layout", default=True, show_default=True,
-              help="surya layout по кадру, выпрямленному по трапециям страниц; блоки возвращаются наклонными "
-                   "четырёхугольниками (рамки по тексту, а не по осям кадра).")  # fmt: skip
+@click.option("--layout-warp", type=click.Choice([w.value for w in LayoutWarp]), default=LayoutWarp.COONS.value,
+              show_default=True,
+              help="Чем выпрямлять кадр перед surya layout: coons — холст Кунса по подгоночным областям страниц (без "
+                   "текста), блоки возвращаются на кадр кривыми многоугольниками, не построился — откат на трапеции; "
+                   "keystone — гомографии по трапециям страниц (наклонные четырёхугольники); none — кадр как есть.")  # fmt: skip
+@click.option("--layout-canvas-margin-mm", type=float, default=CANVAS_MARGIN_MM, show_default=True,
+              help="Поле холста Кунса для surya вокруг прямоугольников страниц, мм бумаги (345 px при 13.8 px/мм): "
+                   "текст за областью и чёрный коврик для фильтра мусорных блоков.")  # fmt: skip
+@click.option("--keystone-layout/--no-keystone-layout", "keystone_layout", default=None, hidden=True,
+              help="Устарело: --keystone-layout = --layout-warp keystone, --no-keystone-layout = --layout-warp none.")  # fmt: skip
 @click.option("--fit-sides/--no-fit-sides", default=True, show_default=True,
               help="Устранять выступы и ямы на внешних боковых сторонах плоских страниц (срез выбросов, заливка ям не "
                    "глубже 10 мм, фон не заливается).")  # fmt: skip
@@ -175,7 +183,7 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
                    "неудаче — полный); 2–6 с на рваную сторону.")  # fmt: skip
 @click.option("--ragged-threshold", type=float, default=RAGGED_TORTUOSITY, show_default=True,
               help="Порог извилистости сырой маски SAM 3 внешней стороны страницы для --refine-ragged.")  # fmt: skip
-@click.option("--dual-levels/--no-dual-levels", default=False, show_default=True,
+@click.option("--dual-levels/--no-dual-levels", default=True, show_default=True,
               help="Двойная грубая сегментация: SAM 3 без растяжения уровней — база, в зонах у внешних кромок книги — "
                    "проход по кадру с растянутыми уровнями (+1 проход SAM 3 на кадр); промахи прохода — зона на "
                    "базе.")  # fmt: skip
@@ -191,6 +199,28 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 @click.option("--output-format", type=click.Choice(["png", "tiff"]), default=None,
               help="Формат итога; по умолчанию как у входа.")  # fmt: skip
 @click.option("--force-dpi", type=int, default=None, help="Записать в итог это разрешение, dpi.")
+@click.option("--output-pages", "output_pages", type=click.Path(file_okay=False, path_type=Path), default=None,
+              help="Папка выпрямленных страниц: итог выпрямляется (Кунс по подгоночным областям + поле по строкам "
+                   "текста), режется по кривой линии разреза на <кадр>_L / <кадр>_R (<кадр>_LR — без разреза), "
+                   "каждая страница закрашивается до прямоугольника тем же --fill; ~25 с CPU и 1–2 ГБ на кадр.")  # fmt: skip
+@click.option("--flags/--no-flags", "use_flags", default=True, show_default=True,
+              help="Читать сайдкары <кадр>.flags.json (ocr_utils.frame_flags): ignore-both — кадр не обрабатывается; "
+                   "ignore-left/right, no-splitting, no-illumination-left/right, no-text-rectify-left/right, cover-* — "
+                   "для --output-pages.")  # fmt: skip
+@click.option(
+    "--rectify-passes",
+    default=3,
+    show_default=True,
+    help="Проходов «разбор текста → поле» в --output-pages; 0 — только Кунс по подгоночным областям.",
+)
+@click.option("--rectify-illumination/--no-rectify-illumination", default=True, show_default=True,
+              help="Выравнивать освещение страниц в --output-pages (кроме цветных и запрещённых флагом).")  # fmt: skip
+@click.option("--output-pages-meta", "output_pages_meta", type=click.Path(file_okay=False, path_type=Path), default=None,
+              help="Папка паспортов страниц --output-pages (<кадр>_L.json: исходный кадр, часть, флаги, dpi, цветность, "
+                   "контуры закраса пальцев) и масок закраса <кадр>_L.fingers.png — отдельно от самих страниц.")  # fmt: skip
+@click.option("--pages-dpi", type=float, default=None,
+              help="Тег разрешения страниц --output-pages; по умолчанию — настоящая плотность (--px-per-mm × 25.4), "
+                   "а не --force-dpi.")  # fmt: skip
 @click.option("--log-level", default="INFO", show_default=True, help="Уровень логов.")
 def main(
     input_dir: Path,
@@ -217,7 +247,9 @@ def main(
     finger_zone_light_increment: str,
     ink_fill: bool,
     fit_sides: bool,
-    keystone_layout: bool,
+    layout_warp: str,
+    layout_canvas_margin_mm: float,
+    keystone_layout: bool | None,
     snap_sides: bool,
     copy_back_over_fingers: bool,
     fill_before_copy_back: bool,
@@ -237,11 +269,22 @@ def main(
     ragged_threshold: float,
     output_format: str | None,
     force_dpi: int | None,
+    output_pages: Path | None,
+    use_flags: bool,
+    rectify_passes: int,
+    rectify_illumination: bool,
+    output_pages_meta: Path | None,
+    pages_dpi: float | None,
     log_level: str,
 ) -> None:
     """Вырезка разворотов v2: пальцы (LaMa, inkback) → фон → SAM 3 → склейка страниц → закрас до прямоугольника."""
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     scale = frame_scale(px_per_mm, dpi)
+    warp = LayoutWarp(layout_warp)
+    if keystone_layout is not None:
+        # Устаревший ключ — псевдоним, перекрывает --layout-warp.
+        warp = LayoutWarp.KEYSTONE if keystone_layout else LayoutWarp.NONE
+        log.warning("--keystone-layout/--no-keystone-layout устарели: используется --layout-warp %s", warp.value)
     params = RunParams(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -260,7 +303,8 @@ def main(
         light_increment=tuple(float(v) for v in parse_pad(finger_zone_light_increment)),
         ink_fill=ink_fill,
         fit_sides=fit_sides,
-        keystone_layout=keystone_layout,
+        layout_warp=warp,
+        layout_canvas_margin_mm=layout_canvas_margin_mm,
         snap_sides=snap_sides,
         copy_back_over_fingers=copy_back_over_fingers,
         fill_before_copy_back=fill_before_copy_back,
@@ -280,6 +324,12 @@ def main(
         ragged_threshold=ragged_threshold,
         output_format=output_format,
         force_dpi=force_dpi,
+        output_pages=output_pages,
+        use_flags=use_flags,
+        rectify_passes=rectify_passes,
+        rectify_illumination=rectify_illumination,
+        output_pages_meta=output_pages_meta,
+        pages_dpi=pages_dpi,
         skip_if_exists=skip_if_exists,
         redo=redo,
         jobs=jobs,

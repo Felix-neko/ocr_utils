@@ -244,33 +244,42 @@ class Layout:
     Поля:
         width: Ширина холста, px.
         height: Высота холста, px.
-        rects: Прямоугольники левой и правой страницы.
-        spine_x: X линии корешка на холсте (левее — карта левой страницы, правее — правой).
+        rects: Прямоугольники левой и правой страницы; у кадра с одной страницей — один прямоугольник.
+        spine_x: X линии корешка на холсте (левее — карта левой страницы, правее — правой); у одной страницы — правый
+            край холста (вся страница левее «корешка»: карты и поле те же, что у левой страницы разворота).
     """
 
     width: int
     height: int
-    rects: tuple[PageRect, PageRect]
+    rects: tuple[PageRect, ...]
     spine_x: float
 
+    @property
+    def single(self) -> bool:
+        """True, если на холсте одна страница (корешка и разреза нет)."""
+        return len(self.rects) == 1
 
-def plan_layout(patches: tuple[Patch, Patch], shape: tuple[int, int]) -> Layout:
+
+def plan_layout(patches: tuple[Patch, ...], shape: tuple[int, int], margin_px: float | None = None) -> Layout:
     """Прямоугольники страниц и холст.
 
     Ширина прямоугольника — средняя длина верха и низа, высота — длина стороны у корешка: тогда точки линии корешка
     с двух сторон ложатся на одну высоту и шва на корешке нет (у правой и левой страницы высоты разные — это
     допускается). Прямоугольники встык по линии корешка, верх каждого — на высоте его угла у корешка. Поля холста —
     расстояния от области до краёв итога (слева — от внешней стороны левой страницы, сверху — от высшей точки верха
-    и т. д.).
+    и т. д.); при заданном ``margin_px`` — фиксированные поля вокруг прямоугольников (холст surya, ``coons_layout``).
 
     Args:
-        patches: Области левой и правой страницы в px итога.
+        patches: Области левой и правой страницы в px итога (одна — страница кадра без корешка).
         shape: ``(H, W)`` итога.
+        margin_px: Поле холста вокруг прямоугольников, px; None — поля до краёв итога (выход страниц).
 
     Returns:
         Расклад холста.
     """
     h, w = shape
+    if len(patches) == 1:
+        return plan_single(patches[0], shape, margin_px)
     left, right = patches
     # Корешок — средний X концов стороны у корешка обеих страниц.
     spine_pts = np.vstack([left.right.points[[0, -1]], right.left.points[[0, -1]]])
@@ -282,6 +291,12 @@ def plan_layout(patches: tuple[Patch, Patch], shape: tuple[int, int]) -> Layout:
         y0 = float(spine_side.points[0, 1])
         x0, x1 = (xs - width, xs) if is_left else (xs, xs + width)
         rects.append(PageRect(x0, y0, x1, y0 + spine_side.length))
+    if margin_px is not None:
+        # Фиксированные поля вокруг прямоугольников страниц.
+        x_min, x_max = rects[0].x0 - margin_px, rects[1].x1 + margin_px
+        top_edge = min(r.y0 for r in rects) - margin_px
+        bottom_edge = max(r.y1 for r in rects) + margin_px
+        return shifted_layout(rects, x_min, x_max, top_edge, bottom_edge, xs)
     margin_left = float(left.left.points[:, 0].min())
     margin_right = float(w - right.right.points[:, 0].max())
     # Сторона области может выйти за край итога на пиксели (продление к углу) — поле тогда нулевое, не отрицательное.
@@ -289,9 +304,57 @@ def plan_layout(patches: tuple[Patch, Patch], shape: tuple[int, int]) -> Layout:
     bottom_edge = max(r.y1 + max(float(h - p.bottom.points[:, 1].max()), 0.0) for p, r in zip(patches, rects))
     x_min = rects[0].x0 - max(margin_left, 0.0)
     x_max = rects[1].x1 + max(margin_right, 0.0)
-    # Холст — от (x_min, top_edge); сдвигаем прямоугольники в его координаты.
+    return shifted_layout(rects, x_min, x_max, top_edge, bottom_edge, xs)
+
+
+def plan_single(patch: Patch, shape: tuple[int, int], margin_px: float | None = None) -> Layout:
+    """Расклад холста одной страницы: прямоугольник и поля, как у :func:`plan_layout`, без корешка.
+
+    Ширина прямоугольника — средняя длина верха и низа, высота — средняя длина боковых сторон; верх — на средней высоте
+    верхних углов, правый край — на среднем X правой стороны. Линия «корешка» холста — его правый край.
+
+    Args:
+        patch: Область страницы в px итога.
+        shape: ``(H, W)`` итога.
+        margin_px: Поле холста вокруг прямоугольника, px; None — поля до краёв итога.
+
+    Returns:
+        Расклад холста с одним прямоугольником.
+    """
+    h, w = shape
+    width = (patch.top.length + patch.bottom.length) / 2
+    height = (patch.left.length + patch.right.length) / 2
+    x1 = float(patch.right.points[[0, -1], 0].mean())
+    y0 = float((patch.left.points[0, 1] + patch.right.points[0, 1]) / 2)
+    rect = PageRect(x1 - width, y0, x1, y0 + height)
+    if margin_px is not None:
+        x_min, x_max = rect.x0 - margin_px, rect.x1 + margin_px
+        return shifted_layout([rect], x_min, x_max, rect.y0 - margin_px, rect.y1 + margin_px, x_max)
+    x_min = rect.x0 - max(float(patch.left.points[:, 0].min()), 0.0)
+    x_max = rect.x1 + max(float(w - patch.right.points[:, 0].max()), 0.0)
+    top_edge = rect.y0 - max(float(patch.top.points[:, 1].min()), 0.0)
+    bottom_edge = rect.y1 + max(float(h - patch.bottom.points[:, 1].max()), 0.0)
+    return shifted_layout([rect], x_min, x_max, top_edge, bottom_edge, x_max)
+
+
+def shifted_layout(
+    rects: list[PageRect], x_min: float, x_max: float, top_edge: float, bottom_edge: float, spine_x: float
+) -> Layout:
+    """Расклад холста от ``(x_min, top_edge)``: прямоугольники и линия корешка — в координатах холста.
+
+    Args:
+        rects: Прямоугольники левой и правой страницы в координатах итога.
+        x_min: Левый край холста, px итога.
+        x_max: Правый край холста.
+        top_edge: Верхний край холста.
+        bottom_edge: Нижний край холста.
+        spine_x: X линии корешка в координатах итога.
+
+    Returns:
+        Расклад холста.
+    """
     shifted = tuple(PageRect(r.x0 - x_min, r.y0 - top_edge, r.x1 - x_min, r.y1 - top_edge) for r in rects)
-    return Layout(int(np.ceil(x_max - x_min)), int(np.ceil(bottom_edge - top_edge)), shifted, xs - x_min)
+    return Layout(int(np.ceil(x_max - x_min)), int(np.ceil(bottom_edge - top_edge)), shifted, spine_x - x_min)
 
 
 def rect_fractions(rect: PageRect, cols: np.ndarray, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -299,11 +362,11 @@ def rect_fractions(rect: PageRect, cols: np.ndarray, rows: np.ndarray) -> tuple[
     return (cols - rect.x0) / rect.width, (rows - rect.y0) / rect.height
 
 
-def rectify_maps(patches: tuple[Patch, Patch], layout: Layout) -> tuple[np.ndarray, np.ndarray]:
+def rectify_maps(patches: tuple[Patch, ...], layout: Layout) -> tuple[np.ndarray, np.ndarray]:
     """Карты ``cv2.remap``: для каждого пикселя холста — точка итога, откуда он берётся.
 
     Args:
-        patches: Области левой и правой страницы.
+        patches: Области левой и правой страницы (одна — страница кадра без корешка).
         layout: Расклад холста.
 
     Returns:
@@ -319,6 +382,72 @@ def rectify_maps(patches: tuple[Patch, Patch], layout: Layout) -> tuple[np.ndarr
         u, v = rect_fractions(rect, cols[part], rows)
         map_x[:, part], map_y[:, part] = patch.grid(u, v)
     return map_x, map_y
+
+
+def scaled_size(layout: Layout, scale: float) -> tuple[int, int]:
+    """Размер холста, уменьшенного в ``scale`` раз, ``(W, H)`` (вниз до целого: не больше предела стороны сети).
+
+    Args:
+        layout: Расклад холста.
+        scale: Множитель (≤ 1).
+
+    Returns:
+        ``(W, H)``, px.
+    """
+    return max(1, int(layout.width * scale)), max(1, int(layout.height * scale))
+
+
+def rectify_maps_scaled(patches: tuple[Patch, ...], layout: Layout, scale: float) -> tuple[np.ndarray, np.ndarray]:
+    """Карты :func:`rectify_maps` сразу на сетке холста, уменьшенного в ``scale`` раз (вход surya, ``coons_layout``).
+
+    Центр пикселя ``j`` малого холста — точка холста ``(j + 0.5) / scale − 0.5``; разрез по линии корешка — как у
+    :func:`coons_at` (левее ``spine_x`` — левая страница). На кадр 24 Мп с ``scale`` 0.35 — ~4 Мп карты вместо 24.
+
+    Args:
+        patches: Области левой и правой страницы (одна — страница кадра без корешка).
+        layout: Расклад холста (px масштаба итога).
+        scale: Множитель холста (≤ 1).
+
+    Returns:
+        ``(map_x, map_y)`` — по (h, w) float32 малого холста (:func:`scaled_size`), значения — px итога.
+    """
+    w, h = scaled_size(layout, scale)
+    cols = (np.arange(w, dtype=np.float64) + 0.5) / scale - 0.5
+    rows = (np.arange(h, dtype=np.float64) + 0.5) / scale - 0.5
+    map_x = np.empty((h, w), np.float32)
+    map_y = np.empty_like(map_x)
+    split = int(np.searchsorted(cols, layout.spine_x))
+    for patch, rect, part in zip(patches, layout.rects, (slice(0, split), slice(split, w))):
+        if part.stop - part.start <= 0:
+            continue
+        u, v = rect_fractions(rect, cols[part], rows)
+        map_x[:, part], map_y[:, part] = patch.grid(u, v)
+    return map_x, map_y
+
+
+def coons_at(patches: tuple[Patch, ...], layout: Layout, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """Точки итога v2 по Кунсу для точек выпрямленного кадра: левее линии корешка — левая страница, правее — правая.
+
+    Args:
+        patches: Области левой и правой страницы (одна — страница кадра без корешка).
+        layout: Расклад холста.
+        xs: X точек выпрямленного кадра (N,).
+        ys: Y точек (N,).
+
+    Returns:
+        Точки (N, 2) px итога v2.
+    """
+    xs = np.asarray(xs, np.float64)
+    ys = np.asarray(ys, np.float64)
+    out = np.empty((len(xs), 2))
+    left = xs < layout.spine_x
+    # Одна страница — все точки её (и смещённые полем за правый край холста: поверхность продолжается за область).
+    sels = (np.ones_like(left),) if layout.single else (left, ~left)
+    for patch, rect, sel in zip(patches, layout.rects, sels):
+        if sel.any():
+            u, v = rect_fractions(rect, xs[sel], ys[sel])
+            out[sel] = patch.points(u, v)
+    return out
 
 
 def rectify_image(image: np.ndarray, maps: tuple[np.ndarray, np.ndarray], dpi: float) -> np.ndarray:
@@ -382,3 +511,8 @@ def sagitta(curve: ArcCurve) -> float:
     d = b - a
     n = np.array([-d[1], d[0]]) / np.linalg.norm(d)
     return float(np.abs((curve.points - a) @ n).max())
+
+
+def patch_outline(patch: Patch) -> np.ndarray:
+    """Контур области: верх, правая сторона, низ обратно, левая обратно (N, 2)."""
+    return np.vstack([patch.top.points, patch.right.points, patch.bottom.points[::-1], patch.left.points[::-1]])

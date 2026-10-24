@@ -33,6 +33,9 @@ PACK4_PH_WORK="$SCAN_CROPPING_V2_ROOT/ph/pack_4"
 # классам strip/neighbor/maybe и strip_set.csv — отбор глазами 2026-10-21; прогоны v2 по нему — в gutter_strip_check.
 PH_GUTTER_STRIP_SET="$PACK4_PH_WORK/sets/gutter_strip"
 PH_GUTTER_STRIP_WORK="$SCAN_CROPPING_V2_ROOT/ph/gutter_strip_check"
+# Пробные прогоны v2 с выходом выпрямленных страниц (--output-pages) и флагами кадров из сайдкаров: итоги разворотов,
+# страницы, кэш и оверлеи — на SSD hotstore, по выпускам внутри.
+PH_PAGES_WORK="$SCAN_CROPPING_V2_ROOT/ph/pages_try"
 # Стенд research/spread_lines (прямые разворота по кэшу прогонов v2): CSV и картинки — на SSD hotstore.
 SPREAD_LINES_ROOT="/mnt/hotstore/scan_processing/spread_lines"
 # Стенд research/gutter_strip (полоса-вклейка у корешка по кэшу прогонов v2): признаки, листы, оверлеи — SSD.
@@ -67,6 +70,10 @@ SPLINE_RECTIFIED_WORK="${SPLINE_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_fr
 # То же плюс выравнивание освещения и второе преобразование по тексту (research/page_rectify text-run) — SSD.
 TEXT_RECTIFIED_SAMPLE_WORK="${TEXT_RECTIFIED_SAMPLE_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified_sample}"
 TEXT_RECTIFIED_WORK="${TEXT_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified}"
+# Прогон v4 второго преобразования (2026-10-23, по тегу dpi) — вход меры стенда research/gutter_compression — SSD.
+TEXT_RECTIFIED_V4_WORK="${TEXT_RECTIFIED_V4_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified_v4}"
+# Стенд «сжатие букв у корешка» (research/gutter_compression): окна строк, сводки, листы, выпрямление с растяжением — SSD.
+GUTTER_COMPRESSION_ROOT="${GUTTER_COMPRESSION_ROOT:-/mnt/hotstore/scan_processing/gutter_compression}"
 
 # Боевой прогон v2 пака-6 целиком (6-я версия ключей, 2026-10-15/16, 2480 кадров) — вход стенда research/page_cutting.
 PACK6_V6_WORK="$SCAN_CROPPING_V2_ROOT/pack6_v6"
@@ -76,3 +83,9 @@ PAGE_CUTTING_ROOT="${PAGE_CUTTING_ROOT:-/mnt/hotstore/scan_processing/page_cutti
 EDGE_SHARPEN_ROOT="${EDGE_SHARPEN_ROOT:-/mnt/hotstore/scan_processing/edge_sharpen}"
 # scantailor-cli — ScanTailor Advanced без окна (ветка cli, сборка build-cli; Qt offscreen).
 SCANTAILOR_CLI="${SCANTAILOR_CLI:-$HOME/Projects/scantailor-advanced/build-cli/scantailor-cli}"
+
+# surya layout по холсту Кунса против холста по трапециям (run_v2_coons_layout.sh, стенд research/surya_coons):
+# прогоны v2 по полным копиям кэша — на SSD hotstore рядом с прочими прогонами v2; меры и склейки — отдельно.
+SURYA_COONS_PH_RUNS="${SURYA_COONS_PH_RUNS:-$SCAN_CROPPING_V2_ROOT/ph/coons_layout}"
+SURYA_COONS_HP_RUNS="${SURYA_COONS_HP_RUNS:-$SCAN_CROPPING_V2_ROOT/hp_1991_coons}"
+SURYA_COONS_ROOT="${SURYA_COONS_ROOT:-/mnt/hotstore/scan_processing/surya_coons}"

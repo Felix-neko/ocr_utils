@@ -19,13 +19,25 @@ import numpy as np
 from ocr_utils.scan_cropping.image_io import collect_images, imwrite_params, read_dpi, write_image
 from ocr_utils.scan_cropping.v2.pipeline import FrameJob, init_worker, read_bgr, visible_frames
 from ocr_utils.scan_cropping.v2.spread_lines import SpineMethod
-from ocr_utils.units import mm_to_px_float, px_to_mm
-from research.page_rectify.coons import TANGENT_MM, page_patch, plan_layout, rectify_image, rectify_maps, sagitta
+from ocr_utils.units import MM_PER_INCH, mm_to_px_float, px_to_mm
+from ocr_utils.scan_cropping.v2.rectify.coons import (
+    TANGENT_MM,
+    page_patch,
+    plan_layout,
+    rectify_image,
+    rectify_maps,
+    sagitta,
+)
 from research.page_rectify.frames import CachedFrames, cached_frames
 from research.page_rectify.overlay import draw_sheet
 from research.page_rectify.relayout import apply_moves, count_files, plan_moves
-from research.page_rectify.text_field import ACROSS_SMOOTH_MM, FIELD_SMOOTH_MM, FIELD_STEP_MM, GUTTER_SMOOTH_MM
-from research.page_rectify.text_overlay import sheet_analysis, sheet_field, sheet_illumination, sheet_result
+from ocr_utils.scan_cropping.v2.rectify.text_field import (
+    ACROSS_SMOOTH_MM,
+    FIELD_SMOOTH_MM,
+    FIELD_STEP_MM,
+    GUTTER_SMOOTH_MM,
+)
+from ocr_utils.scan_cropping.v2.rectify.sheets import sheet_analysis, sheet_field, sheet_illumination, sheet_result
 from research.page_rectify.text_run import TextParams, text_frame
 
 log = logging.getLogger(__name__)
@@ -73,6 +85,11 @@ class RunConfig:
         tangent_mm: Отрезок у конца стороны для касательной продолжения, мм бумаги.
         skip_if_exists: Пропускать кадры с готовым итогом.
         label: Подпись набора в шапке листа.
+        px_per_mm: Настоящая плотность бумаги на кадре, px/мм (``--px-per-mm`` прогона v2), или None — dpi из тега
+            итога. Тег итога v2 — ``--force-dpi``, а не плотность: у пака-4 ПХ тег 450 при 13.8 px/мм (≈ 350.5 dpi),
+            и все размеры выпрямления в мм выходили в 1.29 раза мельче задуманного. Строки подписи ПХ 1974/01
+            IMG_0078 (27–31 мм) считались по тегу 21–24 мм, не доходили до MIN_RUN_MM, и поле переносило на них волну
+            колонки над ними дугой (0.2–0.4 мм).
     """
 
     input_dir: Path
@@ -85,6 +102,7 @@ class RunConfig:
     tangent_mm: float
     skip_if_exists: bool
     label: str
+    px_per_mm: float | None = None
 
 
 def copy_as_is(src: Path, dst: Path) -> None:
@@ -139,7 +157,8 @@ def load_frame(job: FrameJob, cfg: RunConfig, v2_path: Path, dst: Path, row: dic
         ``(итог, dpi, области)`` или исход кадра, если выпрямлять нельзя (итог уже скопирован).
     """
     image = read_bgr(v2_path)
-    dpi = read_dpi(v2_path)
+    # Размеры выпрямления — в мм бумаги, поэтому при известной плотности кадра dpi — она, а не тег --force-dpi итога.
+    dpi = cfg.px_per_mm * MM_PER_INCH if cfg.px_per_mm else read_dpi(v2_path)
     if dpi is None:
         raise ValueError(f"в итоге v2 нет тега dpi: {v2_path}")
     cf = cached_frames(job.src, cfg.cache, job.key, cfg.bg_veto, cfg.spine_method)
@@ -182,7 +201,7 @@ def rectify_one(job: FrameJob, cfg: RunConfig, v2_path: Path, dst: Path, row: di
     layout = plan_layout(patches, image.shape[:2])
     out = rectify_image(image, rectify_maps(patches, layout), dpi)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    write_image(dst, out, imwrite_params(dst.suffix), dpi)
+    write_image(dst, out, imwrite_params(dst.suffix), int(round(dpi)))
     row.update(
         width=out.shape[1],
         height=out.shape[0],
@@ -235,7 +254,7 @@ def text_one(job: FrameJob, cfg: RunConfig, text: TextParams, v2_path: Path, dst
     image, dpi, cf = loaded
     result = text_frame(image, cf, dpi, text)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    write_image(dst, result.final, imwrite_params(dst.suffix), dpi)
+    write_image(dst, result.final, imwrite_params(dst.suffix), int(round(dpi)))
     dx, dy = result.dense
     row.update(
         width=result.final.shape[1],
@@ -382,6 +401,8 @@ def main() -> None:
               help="Отрезок у конца стороны для касательной продолжения, мм бумаги.")  # fmt: skip
 @click.option("--recursive/--no-recursive", default=True, show_default=True, help="Кадры во вложенных папках.")
 @click.option("--skip-if-exists", is_flag=True, help="Пропускать кадры с готовым итогом.")
+@click.option("--px-per-mm", type=float, default=None,
+              help="Плотность бумаги на кадре, px/мм (--px-per-mm прогона v2); без опции — dpi из тега итога.")  # fmt: skip
 @click.option("--jobs", type=int, default=DEFAULT_JOBS, show_default=True, help="Воркеров пула.")
 def run(
     input_dir: Path,
@@ -397,11 +418,12 @@ def run(
     tangent_mm: float,
     recursive: bool,
     skip_if_exists: bool,
+    px_per_mm: float | None,
     jobs: int,
 ) -> None:
     """Выпрямить итоги прогона v2: область каждой страницы → прямоугольник, поля — продолжением карты."""
     cfg = RunConfig(input_dir, cache, v2_output, output, debug, bg_veto, SpineMethod(spine_method), tangent_mm,
-                    skip_if_exists, label or input_dir.name)  # fmt: skip
+                    skip_if_exists, label or input_dir.name, px_per_mm)  # fmt: skip
     run_pool([(cfg, summary or output.parent / "rectify.csv", sample)], None, recursive, jobs)
 
 
@@ -430,6 +452,9 @@ def run(
               help="Длина изгиба поля поперёк строк, мм: поле не меняется от строки к строке.")  # fmt: skip
 @click.option("--illumination/--no-illumination", default=True, show_default=True,
               help="Выравнивать освещение не-цветных страниц (как Equalize illumination в ScanTailor).")  # fmt: skip
+@click.option("--px-per-mm", "densities", type=(str, float), multiple=True,
+              help="ПОДПИСЬ PX: плотность бумаги набора, px/мм (--px-per-mm его прогона v2); повторяется. Набор без "
+                   "опции — dpi из тега итога (у пака-4 ПХ тег 450 при 13.8 px/мм).")  # fmt: skip
 @click.option("--jobs", type=int, default=DEFAULT_JOBS, show_default=True, help="Воркеров пула.")
 def text_run(
     sets: tuple[tuple[str, Path, Path, Path, int], ...],
@@ -445,15 +470,19 @@ def text_run(
     gutter_smooth_mm: float,
     across_smooth_mm: float,
     illumination: bool,
+    densities: tuple[tuple[str, float], ...],
     jobs: int,
 ) -> None:
     """Выпрямить итоги прогона v2 Кунсом и полем по тексту (оси строк, выровненные стороны блоков), с освещением."""
     configs = [
         (RunConfig(input_dir, cache, v2_output, root / "output" / label, root / "debug" if debug else None, bg_veto,
-                   SpineMethod(spine_method), tangent_mm, skip_if_exists, label),
+                   SpineMethod(spine_method), tangent_mm, skip_if_exists, label, dict(densities).get(label)),
          root / "summary" / f"{label}.csv", sample)
         for label, input_dir, cache, v2_output, sample in sets
     ]  # fmt: skip
+    unknown = set(dict(densities)) - {label for label, *_ in sets}
+    if unknown:
+        raise click.BadParameter(f"плотность для неизвестных наборов: {sorted(unknown)}", param_hint="--px-per-mm")
     text = TextParams(tangent_mm, field_step_mm, field_smooth_mm, gutter_smooth_mm, across_smooth_mm, illumination)
     run_pool(configs, text, recursive, jobs)
 

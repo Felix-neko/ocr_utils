@@ -2,14 +2,20 @@
 
 import numpy as np
 
-from research.page_rectify.coons import Layout, PageRect
-from research.page_rectify.illumination import equalize
-from research.page_rectify.coons import PageRect as Rect
-from research.page_rectify.text_field import (
+from ocr_utils.scan_cropping.v2.rectify.coons import Layout, PageRect
+from ocr_utils.scan_cropping.v2.rectify.illumination import equalize
+from ocr_utils.scan_cropping.v2.rectify.coons import PageRect as Rect
+from ocr_utils.scan_cropping.v2.rectify.text_field import (
     RuleAxis,
     SampleKind,
     Samples,
     FieldMode,
+    PageRegion,
+    PageText,
+    RegionKindR,
+    band_fits_page,
+    band_profile,
+    band_samples,
     barrier_cuts,
     far_zeros,
     field_mode,
@@ -197,11 +203,55 @@ def sloped_lines(ys: list[float], slope_deg: float, x0: float = 100.0, x1: float
 
 def test_field_mode():
     """Режим страницы: 8 строк — полный; три длинные строки на 44 мм по высоте — разреженный; одна строка или две
-    рядом — без поля."""
+    рядом — полоса; одна линейка без строк текста, короткая строка или «строка» с рваной осью — без поля."""
     assert field_mode(8, sloped_lines([100.0 + 30 * i for i in range(8)], 1.0), DPI) is FieldMode.FULL
     assert field_mode(3, sloped_lines([120.0, 380.0, 640.0], 1.0), DPI) is FieldMode.SPARSE
-    assert field_mode(1, sloped_lines([120.0], 1.0), DPI) is FieldMode.NONE
-    assert field_mode(2, sloped_lines([120.0, 300.0], 1.0), DPI) is FieldMode.NONE  # 15 мм по высоте
+    assert field_mode(1, sloped_lines([120.0], 1.0), DPI) is FieldMode.BAND
+    assert field_mode(2, sloped_lines([120.0, 300.0], 1.0), DPI) is FieldMode.BAND  # 15 мм по высоте
+    assert field_mode(1, sloped_lines([120.0], 1.0), DPI, text_lines=0) is FieldMode.NONE  # одна линейка
+    assert field_mode(1, sloped_lines([120.0], 1.0, x1=400.0), DPI) is FieldMode.NONE  # 25 мм < 40
+    noisy = sloped_lines([120.0], 0.0)
+    noisy = Samples(noisy.at, noisy.value + np.where(np.arange(len(noisy)) % 2, 6.0, -6.0), *noisy.astuple()[2:])
+    assert field_mode(1, noisy, DPI) is FieldMode.NONE  # СКО 0.5 мм — край листа, не строка
+    assert field_mode(0, Samples.empty(), DPI) is FieldMode.NONE
+
+
+def test_band_field_one_line():
+    """Режим полосы: одна строка 51 мм внизу левой страницы с наклоном 1.5° и прогибом 0.6 мм выпрямляется, а вдали
+    поле — её изгиб, затухающий по высоте (в 76 мм выше — доля exp(−(76/170)²) ≈ 0.82), без волн; поперёк (dx) — нули;
+    правая страница не задета."""
+    lay = layout()
+    xs = np.arange(100.0, 710.0, 10.0)
+    sag = 0.6 * DPI / 25.4
+    yy = 1000.0 + np.tan(np.radians(1.5)) * (xs - 100) + sag * (1 - ((xs - 400) / 300) ** 2)
+    target = float(np.median(yy))
+    n = len(xs)
+    v = Samples(np.stack([xs, np.full(n, target)], 1), yy - target, np.ones(n), np.stack([xs, yy], 1),
+                np.full(n, SampleKind.LINE), np.zeros(n, int))  # fmt: skip
+    assert field_mode(1, v, DPI) is FieldMode.BAND
+    profile = band_profile(v, DPI)
+    assert np.abs(profile.at(xs) - v.value).max() < 0.05 * DPI / 25.4  # многочлен 2-й степени ловит наклон и прогиб
+    zeros = zero_samples(lay.rects[0], DPI)
+    v_all = v + band_samples(zeros, v, profile, DPI) + zero_samples(lay.rects[1], DPI)
+    h_all = far_zeros(zeros, Samples.empty(), DPI) + zero_samples(lay.rects[1], DPI)
+    field = fit_field(h_all, v_all, lay, DPI, 4.0, 10.0)
+    dx, dy = field.dense(W, H)
+    # Строка выпрямлена: остаток после поля (без постоянной) — меньше 10 % размаха.
+    pred = dy[np.round(v.at[:, 1]).astype(int), xs.astype(int)]
+    rest = (v.value - pred) - (v.value - pred).mean()
+    assert np.ptp(rest) < 0.1 * np.ptp(v.value)
+    # Вдали (в 76 мм выше строки) — тот же изгиб с долей ≈ 0.82, гладкий: от многочлена 2-й степени — до 0.1 мм (у
+    # конца строки многочлен переходит в продление прямой).
+    far_y = int(target - 76 * DPI / 25.4)
+    far = dy[far_y, 100:700]
+    share = float(np.polyfit(profile.at(np.arange(100, 700.0)) - profile.at(np.arange(100, 700.0)).mean(),
+                             far - far.mean(), 1)[0])  # fmt: skip
+    assert 0.7 < share < 0.95
+    cols = np.arange(100, 700.0)
+    assert np.abs(far - np.polyval(np.polyfit(cols, far, 2), cols)).max() < 0.1 * DPI / 25.4
+    assert np.abs(dx[:, : W // 2 - 40]).max() < 0.05 * DPI / 25.4
+    # Правая страница — за полосой смешивания у корешка (до 8 мм от него) — не задета.
+    assert np.abs(dy[:, W // 2 + 120 :]).max() < 0.05 * DPI / 25.4
 
 
 def test_sparse_field_near_lines_only():
@@ -241,3 +291,57 @@ def test_closed_frame_sides_are_rules():
     dark = img.copy()
     dark[:90], dark[1210:], dark[:, :90], dark[:, 1010:] = 0, 0, 0, 0
     assert len(inner_rules(rules, Rect(60, 60, 1040, 1240), dpi, dark, np.zeros(2))) == 0
+
+
+def test_side_tilt_rejects_slanted_sides():
+    from ocr_utils.scan_cropping.v2.rectify.text_field import SIDE_MAX_TILT_DEG, side_tilt
+
+    ys = np.linspace(0, 300, 20)
+    upright = np.stack([100 + 0.01 * ys, ys], 1)  # 0.6° — настоящая отбивка
+    slanted = np.stack([100 + 0.08 * ys, ys], 1)  # 4.6° — центрованные строки ячейки
+    assert side_tilt(upright) <= SIDE_MAX_TILT_DEG < side_tilt(slanted)
+
+
+def test_raised_start_span_superscript():
+    """Цифра сноски в начале строки (низ на 0.4 строчной выше базы, за ней пробел, база к ней поднята) — участок у
+    начала строки; без знака, у тире в начале и при загибе строки (подняты и знак, и соседи) участка нет."""
+    from types import SimpleNamespace
+
+    from ocr_utils.page_layout.text_blocks.baseline_axis import SMOOTH_XH
+    from ocr_utils.scan_cropping.v2.rectify.text_field import raised_start_span
+
+    letters = np.array([[x, 100, x + 7, 110] for x in range(40, 400, 9)], float)  # строчные: высота 10, база 110
+    base = np.stack([np.arange(20.0, 400.0, 6.0), np.full(64, 110.0)], 1)
+    assert raised_start_span(SimpleNamespace(glyphs=letters), base) is None
+    mark = np.array([[22, 96, 26, 106]], float)  # «³»: высота 10, низ на 4 px выше базы, пробел 14 px
+    pulled = base.copy()
+    pulled[:8, 1] -= np.linspace(4, 0, 8)  # сплайн базы поднят к знаку
+    span = raised_start_span(SimpleNamespace(glyphs=np.vstack([mark, letters])), pulled)
+    assert span is not None and span[0] < 20 and span[1] == 26 + SMOOTH_XH * 10
+    dash = np.array([[22, 104, 30, 106]], float)  # тире: высота 0.2 строчной
+    assert raised_start_span(SimpleNamespace(glyphs=np.vstack([dash, letters])), pulled) is None
+    # Загиб начала строки: низы глифов поднимаются к началу линейно — знак на продолжении прямой соседей.
+    curl = np.vstack([mark, letters])
+    curl[:, [1, 3]] -= np.clip((80 - curl[:, :1]) * 0.1, 0, None)
+    assert raised_start_span(SimpleNamespace(glyphs=curl), pulled) is None
+
+
+def test_band_fits_page():
+    """Режим полосы годится для пустой страницы со строкой (и для фото вдали от неё), но не для страницы со схемой или
+    повёрнутым текстом вдали от строки и не для «строки» у нижнего края листа."""
+    rect = PageRect(40, 40, W / 2, H - 40)
+    v = sloped_lines([900.0], 1.0, 100.0, 700.0)
+    cell = 300.0 / 25.4  # клетка карты краски — 1 мм
+    ink = np.zeros((int(H / cell), int(W / cell)), np.float32)
+    ink[76:78, 9:59] = 0.3  # сама строка
+    page = PageText(None, np.zeros(2), 1.0, ink=ink)
+    assert band_fits_page(page, v, rect, DPI)
+    # Схема вдали от строки: 40 × 30 мм с долей краски 0.15 — 180 мм².
+    scheme = ink.copy()
+    scheme[10:40, 10:50] = 0.15
+    assert not band_fits_page(PageText(None, np.zeros(2), 1.0, ink=scheme), v, rect, DPI)
+    # Та же краска — фото (растр): не в счёт.
+    photo = (PageRegion(RegionKindR.RASTER, (10 * cell, 10 * cell, 50 * cell, 40 * cell)),)
+    assert band_fits_page(PageText(None, np.zeros(2), 1.0, regions=photo, ink=scheme), v, rect, DPI)
+    # «Строка» в 3 мм от низа страницы — край листа.
+    assert not band_fits_page(page, sloped_lines([H - 40 - 35.0], 0.0, 100.0, 700.0), rect, DPI)

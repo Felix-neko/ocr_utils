@@ -21,6 +21,23 @@ SAM3_IMGSZ = 1288
 SAM3_CONF = 0.25
 # Текстовые подсказки страницы.
 SAM3_PROMPTS = ("book page", "paper page")
+# Запасные подсказки — только если по основным не взят ни один экземпляр. Цветная обложка, снятая отдельно, для SAM 3
+# не «страница бумаги» (пак-6: РИСК 1993/01 IMG_0176, 1993/02 IMG_0054 — 0 px по основным), а «magazine cover»
+# берёт её точно по краю (уверенность 0.27–0.57). На крышках закрытых подшивок (ХиП 1991 — 5 кадров, ПХ 1975/01
+# IMG_0001) и на разворотах она не срабатывает; «book cover» и «cover» берут и крышки — не годятся (решение
+# пользователя 2026-10-25, замер — /mnt/hotstore/scan_processing/single_page/magazine_cover/table.tsv).
+SAM3_FALLBACK_PROMPTS = ("magazine cover",)
+# Уверенность экземпляра запасной подсказки, не ниже (основной порог SAM 3 — SAM3_CONF 0.25). Прогон по всем 28 кадрам
+# пяти кэшей с пустым проходом SAM 3 (2026-10-25, ``/mnt/hotstore/scan_processing/single_page/magazine_cover/all.tsv``):
+# подсказка сработала на двух голубых обложках РИСК 1993 (0.27–0.70; у IMG_0054 на кадре 0.35, без краски 0.27) и
+# ложно — на закрытой подшивке в синем коленкоре с ярлыком РИСК 1991/02 IMG_0825 (проход по растянутым уровням, 0.25).
+SAM3_FALLBACK_MIN_CONF = 0.3
+# Запасные подсказки зовутся, если основные накрыли меньше этой доли грубой маски книги (решение пользователя
+# 2026-10-25: не только при пустой бумаге — обложку, у которой SAM 3 взял одну плашку, тоже). По 4 739 кадрам пяти
+# кэшей (ПХ 1974/01 и 1975, ХиП 1991, пак-5, пак-6) доля у обычных кадров 0.75–0.87 (1-й перцентиль 0.753), ниже 0.35 —
+# 30 кадров: 28 с пустым проходом и 2 крышки ХиП 1991 с ярлыком (0.30, 0.33; «magazine cover» на них пуста); между 0.35
+# и 0.7 — 8 кадров.
+SAM3_FALLBACK_MIN_SHARE = 0.35
 # Порог доли печати, накрытой экземпляром SAM 3, чтобы взять его в бумагу.
 SAM3_MIN_PRINT = 0.05
 # Экземпляры двух подсказок с IoU не меньше этого — одна страница.
@@ -61,8 +78,12 @@ POCKET_MIN_INSIDE = 0.8
 # IMG_0176, МТС 1990/07 IMG_0055 и ещё 7 кадров).
 POCKET_MIN_PAGE_MM2 = 20000.0
 POCKET_MAX_SHARE = 0.6
-# Версия кэша шага SAM 3 (``sam3.npz``): с правилами пустых страниц и слияния вложенных экземпляров — 2.
-SAM3_CACHE_VERSION = 2
+# Версия кэша шага SAM 3 (``sam3.npz``): с правилами пустых страниц и слияния вложенных экземпляров — 2, с запасными
+# подсказками — 3, с порогом уверенности запасных — 4, запасные при доле книги ниже SAM3_FALLBACK_MIN_SHARE — 5. Кэш
+# версий 2 и 4, где каждый проход накрыл не меньше SAM3_FALLBACK_MIN_SHARE книги, запасные не меняют
+# (``pipeline.sam3_ready``); у версии 3 проход мог дать и запасная подсказка без порога — пересчёт.
+SAM3_CACHE_VERSION = 5
+SAM3_CACHE_COMPATIBLE = (2, 4)
 # Затравки бумаги: пиксели внутри оболочек своей печати, не краска (серое выше локального фона минус INK_DROP).
 INK_DROP = 25
 # Окно локального фона бумаги (серое закрытие), px масштаба сегментации.
@@ -144,51 +165,120 @@ def load_sam3(weights: str | Path = SAM3_WEIGHTS, imgsz: int = SAM3_IMGSZ):
     return SAM3SemanticPredictor(overrides=sam3_overrides(weights, imgsz))
 
 
-def sam3_pages(predictor, bgr: np.ndarray, hulls: np.ndarray, prompts=SAM3_PROMPTS) -> tuple[np.ndarray, np.ndarray]:
+def sam3_pages(
+    predictor,
+    bgr: np.ndarray,
+    hulls: np.ndarray,
+    prompts=SAM3_PROMPTS,
+    fallback_prompts=SAM3_FALLBACK_PROMPTS,
+    book: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Страницы SAM 3 одним проходом: сырое объединение экземпляров и карта меток экземпляров-страниц.
 
     Отбор экземпляров (``select_instance``): с печатью — накрывает не меньше :data:`SAM3_MIN_PRINT` своей печати;
     без печати — не меньше :data:`SAM3_BLANK_MIN_SHARE` самого большого экземпляра кадра и уверенность не ниже
     :data:`SAM3_BLANK_MIN_CONF` (пустые форзацы). В карте меток экземпляры двух подсказок, совпадающие на
     ≥ :data:`SAM3_SAME_IOU` (IoU), — одна страница; мелкий экземпляр внутри выпуклой оболочки крупного (наклейка) —
-    часть крупного (``merge_inserts``); пересечения отдаются экземпляру с большей оценкой.
+    часть крупного (``merge_inserts``); пересечения отдаются экземпляру с большей оценкой. Если основные подсказки
+    накрыли меньше :data:`SAM3_FALLBACK_MIN_SHARE` грубой маски книги (без маски — если не взят ни один экземпляр),
+    к их экземплярам добавляются экземпляры запасных (цветная обложка, снятая отдельно) с уверенностью не ниже
+    :data:`SAM3_FALLBACK_MIN_CONF`, и отбор повторяется по всем вместе: плашка, взятая основными, сливается с
+    обложкой как вложенный экземпляр.
 
     Args:
         predictor: ``SAM3SemanticPredictor``.
         bgr: Кадр BGR (масштаб сегментации).
         hulls: Оболочки своей печати (отбор экземпляров).
-        prompts: Текстовые подсказки.
+        prompts: Основные текстовые подсказки.
+        fallback_prompts: Запасные подсказки (пустой кортеж — без них).
+        book: Грубая маска книги (bool, масштаб сегментации) — от неё доля накрытого основными; None — запасные
+            только при пустом отборе.
 
     Returns:
         ``(сырая маска bool, карта меток uint8: 0 — ничего, 1..N — страницы)``.
     """
     import torch
 
-    h, w = hulls.shape
-    candidates: list[tuple[float, np.ndarray]] = []
     with torch.inference_mode():
         predictor.set_image(bgr)
-        for prompt in prompts:
-            results = predictor(text=[prompt])
-            if not results or results[0].masks is None:
-                continue
-            scores = results[0].boxes.conf.cpu().numpy()
-            for m, sc in zip(results[0].masks.data.cpu().numpy() > 0.5, scores):
-                candidates.append(
-                    (float(sc), cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0)
-                )
+        candidates = sam3_candidates(predictor, prompts, hulls.shape)
+        found = choose_instances(candidates, hulls)
+        if fallback_prompts and covered_share(found, book) < SAM3_FALLBACK_MIN_SHARE:
+            # Запасная подсказка — со своим порогом уверенности: на пороге SAM 3 она берёт и крышку подшивки.
+            fallback = [c for c in sam3_candidates(predictor, fallback_prompts, hulls.shape)
+                        if c[0] >= SAM3_FALLBACK_MIN_CONF]  # fmt: skip
+            if fallback:
+                found = choose_instances(candidates + fallback, hulls)
     # Сбросить картинку предиктора и кэш CUDA: иначе на следующем кадре растёт видеопамять.
     if hasattr(predictor, "reset_image"):
         predictor.reset_image()
     torch.cuda.empty_cache()
-    raw = np.zeros((h, w), bool)
+    raw = np.zeros(hulls.shape, bool)
+    labels = np.zeros(hulls.shape, np.uint8)
+    # Пересечения — экземпляру с большей оценкой: он кладётся последним.
+    for k, (_, m) in sorted(enumerate(found), key=lambda t: t[1][0]):
+        raw |= m
+        labels[m] = k + 1
+    return raw, labels
+
+
+def covered_share(found: list[tuple[float, np.ndarray]], book: np.ndarray | None) -> float:
+    """Доля грубой маски книги, накрытая отобранными экземплярами.
+
+    Args:
+        found: Экземпляры ``(уверенность, маска bool)``.
+        book: Грубая маска книги или None.
+
+    Returns:
+        Доля 0…1; без маски книги (или пустой) — 1, если что-то отобрано, иначе 0.
+    """
+    if book is None or not book.any():
+        return 1.0 if found else 0.0
+    covered = np.zeros(book.shape, bool)
+    for _, m in found:
+        covered |= m
+    return float((covered & book).sum() / book.sum())
+
+
+def sam3_candidates(predictor, prompts, shape: tuple[int, int]) -> list[tuple[float, np.ndarray]]:
+    """Все экземпляры SAM 3 по подсказкам для картинки, уже поданной в предиктор (``set_image``).
+
+    Args:
+        predictor: ``SAM3SemanticPredictor`` с поданной картинкой.
+        prompts: Текстовые подсказки (по одной за вызов).
+        shape: ``(h, w)`` масштаба сегментации, к которому приводятся маски.
+
+    Returns:
+        Список ``(уверенность, маска bool)`` по всем подсказкам подряд.
+    """
+    h, w = shape
+    candidates: list[tuple[float, np.ndarray]] = []
+    for prompt in prompts:
+        results = predictor(text=[prompt])
+        if not results or results[0].masks is None:
+            continue
+        scores = results[0].boxes.conf.cpu().numpy()
+        for m, sc in zip(results[0].masks.data.cpu().numpy() > 0.5, scores):
+            candidates.append((float(sc), cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0))
+    return candidates
+
+
+def choose_instances(candidates: list[tuple[float, np.ndarray]], hulls: np.ndarray) -> list[tuple[float, np.ndarray]]:
+    """Отбор экземпляров-страниц: правила ``select_instance``, склейка дублей разных подсказок, слияние вложенных.
+
+    Args:
+        candidates: ``(уверенность, маска bool)`` по всем подсказкам (``sam3_candidates``).
+        hulls: Оболочки своей печати.
+
+    Returns:
+        Страницы ``(уверенность, маска bool)``; пустой список — ни один экземпляр не взят.
+    """
     found: list[tuple[float, np.ndarray]] = []
     # «Самый большой» — из всех экземпляров кадра: на развороте из двух пустых страниц иначе не от чего отсчитывать.
     largest = max((int(m.sum()) for _, m in candidates), default=0)
     for sc, m in candidates:
         if not select_instance(m, sc, hulls, largest):
             continue
-        raw |= m
         # Тот же экземпляр по другой подсказке — склеить, иначе новая страница.
         dup = [k for k, (_, o) in enumerate(found) if (m & o).sum() / max((m | o).sum(), 1) >= SAM3_SAME_IOU]
         if dup:
@@ -196,12 +286,7 @@ def sam3_pages(predictor, bgr: np.ndarray, hulls: np.ndarray, prompts=SAM3_PROMP
             found[k] = (max(found[k][0], sc), found[k][1] | m)
         else:
             found.append((sc, m))
-    found = merge_inserts(found)
-    labels = np.zeros((h, w), np.uint8)
-    # Пересечения — экземпляру с большей оценкой: он кладётся последним.
-    for k, (_, m) in sorted(enumerate(found), key=lambda t: t[1][0]):
-        labels[m] = k + 1
-    return raw, labels
+    return merge_inserts(found)
 
 
 def select_instance(mask: np.ndarray, score: float, hulls: np.ndarray, largest: int) -> bool:

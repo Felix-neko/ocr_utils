@@ -8,7 +8,7 @@ import numpy as np
 
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
 from ocr_utils.units import px_to_mm
-from research.page_rectify.text_field import MIN_RUN_MM, PageText, line_curve
+from ocr_utils.scan_cropping.v2.rectify.text_field import MIN_RUN_MM, PageText, line_curve
 
 
 @dataclass(frozen=True)

@@ -320,3 +320,75 @@ def test_fill_page_pockets_closed_book_cover_not_added():
     paper = np.zeros((h, w), bool)
     paper[300:340, 900:960] = True  # пятнышко «бумаги» SAM 3
     assert not fill_page_pockets(bgr, paper, book, ~book, np.zeros((h, w), bool)).any()
+
+
+class FakeSam3:
+    """Подставной SAM 3: по каждой подсказке — заданные экземпляры ``(уверенность, маска)``."""
+
+    def __init__(self, answers: dict) -> None:
+        self.answers, self.asked = answers, []
+
+    def set_image(self, bgr) -> None:
+        pass
+
+    def __call__(self, text):
+        import torch
+        from types import SimpleNamespace
+
+        self.asked.append(text[0])
+        found = self.answers.get(text[0], [])
+        if not found:
+            return [SimpleNamespace(masks=None)]
+        masks = torch.tensor(np.stack([m for _, m in found]).astype(np.float32))
+        return [
+            SimpleNamespace(
+                masks=SimpleNamespace(data=masks), boxes=SimpleNamespace(conf=torch.tensor([s for s, _ in found]))
+            )
+        ]
+
+
+def test_sam3_fallback_prompt():
+    """Запасная подсказка зовётся только при пустых основных и берёт обложку с печатью."""
+    from ocr_utils.scan_cropping.v2.paper import sam3_pages
+
+    cover = np.zeros((40, 30), bool)
+    cover[5:35, 5:25] = True
+    hulls = np.zeros_like(cover)
+    hulls[10:20, 8:22] = True
+    # Основные пусты, «magazine cover» ниже своего порога (крышка подшивки на пороге SAM 3) — ничего.
+    fake = FakeSam3({"magazine cover": [(0.25, cover)]})
+    raw, labels = sam3_pages(fake, np.zeros((40, 30, 3), np.uint8), hulls)
+    assert not raw.any() and labels.max() == 0
+    # Основные пусты — берётся «magazine cover» выше её порога.
+    fake = FakeSam3({"magazine cover": [(0.35, cover)]})
+    raw, labels = sam3_pages(fake, np.zeros((40, 30, 3), np.uint8), hulls)
+    assert fake.asked == ["book page", "paper page", "magazine cover"]
+    assert (raw == cover).all() and labels.max() == 1
+    # Основные нашли страницу — запасная не зовётся.
+    fake = FakeSam3({"book page": [(0.9, cover)], "magazine cover": [(0.9, ~cover)]})
+    raw, _ = sam3_pages(fake, np.zeros((40, 30, 3), np.uint8), hulls)
+    assert fake.asked == ["book page", "paper page"] and (raw == cover).all()
+
+
+def test_sam3_fallback_on_small_share():
+    """Основные взяли одну плашку (< 35 % книги) — добавляется «magazine cover», плашка сливается с обложкой."""
+    from ocr_utils.scan_cropping.v2.paper import sam3_pages
+
+    cover = np.zeros((40, 30), bool)
+    cover[5:35, 5:25] = True
+    plaque = np.zeros_like(cover)
+    plaque[8:14, 8:20] = True
+    hulls = plaque.copy()
+    book = cover.copy()
+    image = np.zeros((40, 30, 3), np.uint8)
+    fake = FakeSam3({"book page": [(0.9, plaque)], "magazine cover": [(0.5, cover)]})
+    raw, labels = sam3_pages(fake, image, hulls, book=book)
+    assert fake.asked[-1] == "magazine cover" and (raw == cover).all() and labels.max() == 1
+    # Без маски книги — прежнее поведение: что-то найдено, запасная не зовётся.
+    fake = FakeSam3({"book page": [(0.9, plaque)], "magazine cover": [(0.5, cover)]})
+    raw, _ = sam3_pages(fake, image, hulls)
+    assert "magazine cover" not in fake.asked and (raw == plaque).all()
+    # Основные накрыли книгу — запасная не зовётся.
+    fake = FakeSam3({"book page": [(0.9, cover)], "magazine cover": [(0.5, cover)]})
+    sam3_pages(fake, image, hulls, book=book)
+    assert "magazine cover" not in fake.asked

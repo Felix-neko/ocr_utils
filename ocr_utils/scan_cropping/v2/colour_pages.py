@@ -89,6 +89,60 @@ def page_colour(chroma: np.ndarray, page: np.ndarray) -> PageColour:
     return PageColour(median, share, level)
 
 
+# Тонированная страница: заметная доля фона (не краски) другого цвета, чем бумага страницы, — оливковые, синие, бежевые
+# поля обложек с белыми плашками. Хрома их не отличает: у обложки ПХ 1974/01 IMG_0003 медиана 10.2, а у белой страницы
+# IMG_0087 — 9.5. Выравнивание освещения поднимает такой фон до белого (обложка ПХ осветлялась целиком).
+# Пиксель тонированный — сдвиг (a*, b*) от цвета бумаги страницы больше TINT_DELTA_AB. Замер 2026-10-23 по половинам итогов
+# v2 (ПХ пак-4 1974/01 и 1975, 2222 половины; ХиП 1991, 912): обложки ПХ 0.55–0.81, обложки ХиП 0.36–0.57; текстовые
+# страницы до 0.17 (синяя печать, карточки учёта), полоса с фото 0.28. Признак по ΔE (с яркостью) отвергнут: тень
+# и виньетирование текстовых страниц ХиП давали 164 срабатывания из 912.
+TINT_DELTA_AB = 8.0
+TINT_MIN_SHARE = 0.3
+# Плотность рабочей копии признака, px/мм: фон без букв различим, счёт — миллисекунды.
+TINT_WORK_PX_PER_MM = 2.0
+# Краска — пиксели темнее этого перцентиля L страницы; «бумага» — пиксели светлее PAPER_PERCENTILE.
+TINT_INK_PERCENTILE = 20.0
+TINT_PAPER_PERCENTILE = 85.0
+
+
+def tinted_share(bgr: np.ndarray, page: np.ndarray, px_per_mm: float) -> float:
+    """Доля фона страницы, отличного по цвету от её бумаги (признак тонированной страницы — обложки).
+
+    «Бумага» — медиана (a*, b*) самых светлых пикселей страницы (светлее :data:`TINT_PAPER_PERCENTILE`). Фон — пиксели
+    светлее :data:`TINT_INK_PERCENTILE` (без краски). Тонированный пиксель фона — сдвиг (a*, b*) от бумаги больше
+    :data:`TINT_DELTA_AB`.
+
+    Args:
+        bgr: Картинка BGR (итог v2).
+        page: Маска страницы того же размера (bool).
+        px_per_mm: Плотность картинки, px/мм.
+
+    Returns:
+        Доля тонированного фона 0..1; пустая маска — 0.
+    """
+    if not page.any():
+        return 0.0
+    # Рабочая копия ~2 px/мм по рамке страницы: признак — про поля цвета, буквы ему не нужны.
+    ys, xs = np.nonzero(page)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    factor = min(1.0, TINT_WORK_PX_PER_MM / px_per_mm)
+    size = (max(1, int((x1 - x0) * factor)), max(1, int((y1 - y0) * factor)))
+    small = cv2.resize(bgr[y0:y1, x0:x1], size, interpolation=cv2.INTER_AREA)
+    mask = cv2.resize(page[y0:y1, x0:x1].astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+    if not mask.any():
+        return 0.0
+    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)[mask].astype(np.float32)
+    lightness, a, b = lab[:, 0], lab[:, 1] - 128.0, lab[:, 2] - 128.0
+    # ">=": на ровном поле (ничьи по L) перцентиль совпадает с самим полем, строгое «>» выкинуло бы его целиком.
+    background = lightness >= np.percentile(lightness, TINT_INK_PERCENTILE)
+    paper = lightness >= np.percentile(lightness, TINT_PAPER_PERCENTILE)
+    if not background.any():
+        return 0.0
+    # Цвет бумаги страницы — по самым светлым пикселям; сдвиг цвета фона от него.
+    shift = np.hypot(a - np.median(a[paper]), b - np.median(b[paper]))
+    return float((shift[background] > TINT_DELTA_AB).mean())
+
+
 # Уверенный центр страницы: трапеция, ужатая к центру до этой доли по каждой оси (подсказка пользователя: человек
 # смотрит, какие краски и бумага на центральных 80 % страницы).
 CENTRE_SHARE = 0.8

@@ -7,11 +7,15 @@ import numpy as np
 
 from ocr_utils.page_layout.overlay_frame import LegendEntry, SampleStyle, framed, header_strip
 from ocr_utils.units import mm_to_px_float, px_to_mm
+from ocr_utils.scan_cropping.v2.fill import paper_bbox
 from ocr_utils.scan_cropping.v2.overlay import COLOUR_FRAME
-from research.page_rectify.overlay import FRAME_PX, patch_outline
-from research.page_rectify.text_field import FieldMode, PageText, SampleKind, Samples, line_curve
-from research.page_rectify.text_run import TextResult
+from ocr_utils.scan_cropping.v2.rectify.coons import patch_outline
+from ocr_utils.scan_cropping.v2.rectify.pages import page_areas
+from ocr_utils.scan_cropping.v2.rectify.text_field import FieldMode, PageText, SampleKind, Samples, line_curve
+from ocr_utils.scan_cropping.v2.rectify.text_run import TextResult
 
+# Толщина контура подгоночной области на листе, px.
+FRAME_PX = 2
 # Высота каждой половины листа, px.
 SHEET_HEIGHT = 1400
 GAP = 24
@@ -41,6 +45,16 @@ COLOUR_CUT = (255, 110, 210)  # линия разреза страниц (кор
 CUT_PX = 1
 # Шаг по строкам холста, с которым строится образ линии разреза на итоге, px.
 CUT_STEP_PX = 4
+# Область страницы второго преобразования на холсте Кунса (то, что поле переводит в прямоугольник страницы итога):
+# оранжево-красная, пунктиром — чтобы отличать от сплошной красной подгоночной области первого преобразования.
+COLOUR_SECOND = (0, 90, 255)
+SECOND_PX = 2
+# Пунктир области второго преобразования: штрих и пропуск, px листа (крупнее пунктира линеек).
+SECOND_DASH = (14, 8)
+# Шаг обхода рамки страницы итога при построении её образа на холсте Кунса, px итога.
+SECOND_STEP_PX = 4
+# Поле вокруг холста Кунса на листе, если образ рамки страницы выходит за холст, px холста (белое).
+SECOND_PAD_PX = 8
 BLOCK_ALPHA = 0.25
 FIELD_ALPHA = 0.45
 # Стрелки выборок увеличены во столько раз, иначе смещения в 0.5 мм на листе не видны.
@@ -80,16 +94,20 @@ def polylines(image: np.ndarray, curves: list[np.ndarray], colour, scale: float,
         cv2.addWeighted(layer, alpha, image, 1 - alpha, 0, image)
 
 
-def dashed(image: np.ndarray, curves: list[np.ndarray], colour, scale: float) -> None:
-    """Пунктирные ломаные толщиной 1 px (px полного размера) на картинке листа (на месте).
+def dashed(
+    image: np.ndarray, curves: list[np.ndarray], colour, scale: float, width: int = 1, pattern: tuple = RULE_DASH
+) -> None:
+    """Пунктирные ломаные (px полного размера) на картинке листа (на месте).
 
     Args:
         image: Картинка листа BGR.
         curves: Ломаные (N, 2) в px полного размера.
         colour: Цвет BGR.
         scale: Масштаб листа к полному размеру.
+        width: Толщина, px листа.
+        pattern: Штрих и пропуск, px листа.
     """
-    dash, gap = RULE_DASH
+    dash, gap = pattern
     for curve in curves:
         pts = np.asarray(curve, np.float64) * scale
         if len(pts) < 2:
@@ -99,7 +117,7 @@ def dashed(image: np.ndarray, curves: list[np.ndarray], colour, scale: float) ->
         for start in np.arange(0.0, arc[-1], dash + gap):
             t = np.linspace(start, min(start + dash, arc[-1]), 4)
             seg = np.stack([np.interp(t, arc, pts[:, 0]), np.interp(t, arc, pts[:, 1])], 1)
-            cv2.polylines(image, [np.round(seg).astype(np.int32)], False, colour, 1, cv2.LINE_AA)
+            cv2.polylines(image, [np.round(seg).astype(np.int32)], False, colour, width, cv2.LINE_AA)
 
 
 def axes_of(page: PageText | None) -> list[np.ndarray]:
@@ -135,6 +153,8 @@ def page_note(result: TextResult) -> str:
             state = "в поле"
         elif page.mode is FieldMode.SPARSE:
             state = "мало строк — поле у опор"
+        elif page.mode is FieldMode.BAND:
+            state = "строки полосой — поле по ним с затуханием"
         else:
             state = "цветная — без поля" if page.before is None else "мало строк — без поля"
         notes.append(f"{name}: {page.colour.value}, строк {page.lines}, {state}")
@@ -284,6 +304,8 @@ def cut_on_final(result: TextResult) -> np.ndarray:
     Returns:
         Ломаная (N, 2) px итога сверху вниз.
     """
+    if result.layout.single:
+        return np.zeros((0, 2))
     dx = result.dense[0]
     h, w = dx.shape
     cols = np.arange(w, dtype=np.float32)
@@ -295,27 +317,104 @@ def cut_on_final(result: TextResult) -> np.ndarray:
     return np.array(points)
 
 
+def second_areas(result: TextResult) -> list[np.ndarray]:
+    """Границы областей холста Кунса, которые второе преобразование (поле по тексту) переводит в прямоугольники
+    страниц итога.
+
+    Страница выхода — осевая рамка своей области на итоге (``cut_pages``: ``paper_bbox`` области ``page_areas``).
+    Пиксель итога ``X`` берётся из точки ``X + D(X)`` холста Кунса, поэтому образ рамки страницы на холсте Кунса —
+    обход её контура с переносом каждой точки на ``D(X)``. Там, где поле выпрямляло строки, образ отходит от
+    прямоугольника страницы расклада и может выйти за холст.
+
+    Args:
+        result: Итог выпрямления кадра.
+
+    Returns:
+        Замкнутые ломаные (N, 2) в px холста Кунса — по одной на страницу с непустой областью (левая, правая).
+    """
+    dx, dy = result.dense
+    curves = []
+    for area in page_areas(result.layout, result.dense):
+        box = paper_bbox(area)
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        # Контур рамки по часовой стрелке: верх, правая сторона, низ, левая; правая и нижняя границы включительно.
+        xs = np.arange(x0, x1, SECOND_STEP_PX)
+        ys = np.arange(y0, y1, SECOND_STEP_PX)
+        top = np.column_stack([xs, np.full_like(xs, y0)])
+        side_r = np.column_stack([np.full_like(ys, x1 - 1), ys])
+        bottom = np.column_stack([xs[::-1], np.full_like(xs, y1 - 1)])
+        side_l = np.column_stack([np.full_like(ys, x0), ys[::-1]])
+        ring = np.vstack([top, side_r, bottom, side_l, top[:1]]).astype(np.int64)
+        cx, cy = ring[:, 0], ring[:, 1]
+        # Точка Кунса, из которой итог берёт этот пиксель.
+        curves.append(np.column_stack([cx + dx[cy, cx], cy + dy[cy, cx]]).astype(np.float64))
+    return curves
+
+
+def pad_for(shape: tuple[int, ...], curves: list[np.ndarray]) -> tuple[int, int, int, int]:
+    """Поля, на которые надо расширить картинку, чтобы ломаные целиком в неё попали.
+
+    Args:
+        shape: Форма картинки (высота, ширина, …), px полного размера.
+        curves: Ломаные (N, 2) в px этой картинки; могут выходить за её края.
+
+    Returns:
+        ``(верх, низ, лево, право)`` в px полного размера; нули — расширять не надо.
+    """
+    h, w = shape[:2]
+    if not curves:
+        return 0, 0, 0, 0
+    pts = np.vstack(curves)
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    left = int(np.ceil(-lo[0])) + SECOND_PAD_PX if lo[0] < 0 else 0
+    top = int(np.ceil(-lo[1])) + SECOND_PAD_PX if lo[1] < 0 else 0
+    right = int(np.ceil(hi[0] - (w - 1))) + SECOND_PAD_PX if hi[0] > w - 1 else 0
+    bottom = int(np.ceil(hi[1] - (h - 1))) + SECOND_PAD_PX if hi[1] > h - 1 else 0
+    return top, bottom, left, right
+
+
 def sheet_result(result: TextResult, header: list[str]) -> np.ndarray:
     """04: итог v2 после выравнивания освещения с подгоночными областями страниц | после первого преобразования | итог.
 
     На втором и третьем — оси строк и стороны, найденные на этой же картинке, и линия разреза страниц (на втором —
-    вертикаль корешка, на итоге — её образ после поля).
+    вертикаль корешка, на итоге — её образ после поля). На втором ещё и границы областей, которые второе
+    преобразование переводит в прямоугольники страниц итога (``second_areas``); если они выходят за холст Кунса,
+    холст на листе расширяется белым.
     """
     source, e = fit(result.equalized)
     polylines(source, [np.vstack([patch_outline(p), patch_outline(p)[:1]]) for p in result.patches], COLOUR_FRAME, e,
               FRAME_PX)  # fmt: skip
-    left, f = fit(result.first)
+    second = second_areas(result)
+    top, bottom, pad_l, pad_r = pad_for(result.first.shape, second)
+    # Масштаб холста Кунса — такой, чтобы вместе с полями он лёг в высоту листа; разбор рисуется до расширения
+    # (в своих координатах), поля добавляются уже на уменьшенной картинке.
+    h, w = result.first.shape[:2]
+    f = SHEET_HEIGHT / (h + top + bottom)
+    left = cv2.resize(result.first, (max(1, round(w * f)), max(1, round(h * f))), interpolation=cv2.INTER_AREA)
     right, g = fit(result.final)
     draw_text(left, [p.before for p in result.pages], f)
     draw_text(right, [p.after for p in result.pages], g)
-    spine = np.array([[result.layout.spine_x, 0.0], [result.layout.spine_x, float(result.layout.height - 1)]])
-    polylines(left, [spine], COLOUR_CUT, f, CUT_PX)
-    polylines(right, [cut_on_final(result)], COLOUR_CUT, g, CUT_PX)
+    if not result.layout.single:
+        spine = np.array([[result.layout.spine_x, 0.0], [result.layout.spine_x, float(result.layout.height - 1)]])
+        polylines(left, [spine], COLOUR_CUT, f, CUT_PX)
+    pad = [round(v * f) for v in (top, bottom, pad_l, pad_r)]
+    pad[1] = SHEET_HEIGHT - left.shape[0] - pad[0]  # высота точно как у соседних стадий
+    left = cv2.copyMakeBorder(left, pad[0], max(pad[1], 0), pad[2], pad[3], cv2.BORDER_CONSTANT, value=(255, 255, 255))
+    left = left[:SHEET_HEIGHT]
+    shift = np.array([pad[2], pad[0]], float) / f
+    dashed(left, [c + shift for c in second], COLOUR_SECOND, f, SECOND_PX, SECOND_DASH)
+    cut = cut_on_final(result)
+    if len(cut):
+        polylines(right, [cut], COLOUR_CUT, g, CUT_PX)
     return framed(side_by_side([source, left, right]),
                   header + ["итог v2 после выравнивания освещения | после первого преобразования (Кунс) | итог (Кунс + "
                             "поле по тексту)", measures_line(result)],
-                  [LegendEntry("подгоночная область страницы", COLOUR_FRAME)] + text_legend()
-                  + [LegendEntry("линия разреза страниц (корешок)", COLOUR_CUT)])  # fmt: skip
+                  [LegendEntry("подгоночная область страницы", COLOUR_FRAME),
+                   LegendEntry("область страницы второго преобразования (→ прямоугольник итога)", COLOUR_SECOND,
+                               style=SampleStyle.DASHED)]
+                  + text_legend() + [LegendEntry("линия разреза страниц (корешок)", COLOUR_CUT)])  # fmt: skip
 
 
 def zoom_centres(result: TextResult) -> list[tuple[str, np.ndarray]]:
@@ -334,7 +433,8 @@ def zoom_centres(result: TextResult) -> list[tuple[str, np.ndarray]]:
         if part.size:
             r, c = np.unravel_index(int(np.argmax(part)), part.shape)
             centres.append(("наибольшее поле на странице", np.array([c + max(x0, 0), r + max(y0, 0)], float)))
-    centres.append(("корешок", np.array([result.layout.spine_x, result.layout.height / 2])))
+    if not result.layout.single:
+        centres.append(("корешок", np.array([result.layout.spine_x, result.layout.height / 2])))
     return centres[:4]
 
 
