@@ -288,7 +288,10 @@ def side_curve(
     for row in range(n):
         if kinds[row] is EdgeKind.STEP:
             zone = grid[owner == row]
-            unreliable.append((float(zone.min()), float(zone.max())))
+            # Ряд-ступенька может не владеть ни одним узлом сетки (узкий ряд между соседями) — тогда и недостоверного
+            # участка нет (ПХ 1975/03 IMG_0043_L после выпрямления: разбор падал на min() пустого массива).
+            if zone.size:
+                unreliable.append((float(zone.min()), float(zone.max())))
     return SideCurve(ys=grid, us=out, unreliable=tuple(unreliable), kinds=tuple(kinds), core=core)
 
 

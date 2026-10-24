@@ -15,7 +15,6 @@ from pathlib import Path
 from ocr_utils.db.models import PICTURE_KINDS
 from ocr_utils.scan_markup.rotation import rotate_box
 
-
 # Метка источника в ``info`` области, взятой из базы.
 DB_SOURCE = "db"
 

@@ -43,7 +43,6 @@ from ocr_utils.page_layout.text_blocks.page import AxisKind
 logger = logging.getLogger(__name__)
 
 
-
 def list_tasks(
     root: Path, pages_file: Path | None = None, limit: int | None = None, default_dpi: int | None = None
 ) -> list[PageTask]:

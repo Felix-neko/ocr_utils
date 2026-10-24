@@ -528,6 +528,7 @@ def _bundle(segments: list[Segment], horizontal: bool, tolerance: int) -> list[S
     Returns:
         Связки.
     """
+
     def across(segment: Segment) -> float:
         box = segment.box
         return (box.y0 + box.y1) / 2 if horizontal else (box.x0 + box.x1) / 2

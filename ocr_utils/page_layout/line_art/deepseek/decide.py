@@ -43,7 +43,6 @@ from ocr_utils.page_layout.line_art.deepseek.rules import (
 )
 from ocr_utils.page_layout.line_art.expand import FIGURE_GROW_MM, FORMULA_GROW_MM, grow_to_components
 
-
 # Версия решения по кандидату (правила этого модуля); пишется в JSON полосы (``pack_analysis.final.versions``).
 # Отдельно от ``LINE_ART_VERSION``: классический line art не менялся, его пересчёт в базе разметки не нужен.
 # v2 — пометка на полях (:mod:`marks`); v3 — одиночная черта (:func:`is_thin_stroke`) — не рисунок.

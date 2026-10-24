@@ -154,3 +154,5 @@ reports/loose_rules/
 reports/spread_defects_ve_pack23/
 reports/newspaper_crop/
 reports/finger_repaint/
+# Листы стенда research/photo_bounds (картинки к reports/photo_bounds.md)
+reports/photo_bounds/
