@@ -25,6 +25,7 @@
 ``docker/.env``.
 """
 
+import json
 import logging
 
 from tqdm import tqdm
@@ -118,6 +119,13 @@ LABEL_YEAR_INDEX = "Годовой указатель"
 # обычных полосах проверяет, не оглавление ли перед ней (``pages.force_is_not_toc``). Детектор его не
 # ставит; в базу и обратно ходит теми же путями, что два тега выше.
 LABEL_NOT_TOC = "Не оглавление"
+# Зона контента полосы (``content_boxes``): прямоугольник, вне которого у краёв выпрямленной страницы — мусор. Правится
+# руками и читается назад. CVAT заливает прямоугольники с глобальной прозрачностью (Appearance → Opacity); по умолчанию
+# заливка едва видна, для чистой рамки — Opacity 0 (навык cvat-roundtrip).
+LABEL_CONTENT_BOX = "Зона обрезки"
+# Закрас пальцев (``finger_zones``): только для просмотра. Полилиния — единственный тип CVAT без заливки, контур замкнут
+# повтором первой точки; назад из CVAT не читается.
+LABEL_FINGER_ZONE = "Закрас пальцев"
 
 LABELS = [
     {"name": LABEL_RASTER_COLOR, "type": "rectangle", "color": "#00E676"},  # ярко-зелёный
@@ -145,6 +153,10 @@ LABELS = [
     {"name": LABEL_TOC, "type": "tag", "color": "#00C853"},
     {"name": LABEL_YEAR_INDEX, "type": "tag", "color": "#2962FF"},
     {"name": LABEL_NOT_TOC, "type": "tag", "color": "#B0BEC5"},  # серый: «ничего здесь нет»
+    # Зона обрезки — чёрная рамка: на бумаге читается как рамка и ни с одним цветным прямоугольником не путается.
+    {"name": LABEL_CONTENT_BOX, "type": "rectangle", "color": "#212121"},
+    # Закрас пальцев — малиновый контур (тон 340°, между красным «прочее под удаление» 355° и пурпурной печатью 290°).
+    {"name": LABEL_FINGER_ZONE, "type": "polyline", "color": "#F50057"},
 ]
 
 # Метка -> значение колонки kind в базе и обратно.
@@ -373,6 +385,88 @@ def rect_shapes(
                 models.LabeledShapeRequest(type="rectangle", frame=frame, label_id=label_id, points=[x1, y1, x2, y2])
             )
     return shapes
+
+
+def content_box_shapes(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Предразметка зоны обрезки: ``page.content_box`` -> прямоугольник CVAT с меткой «Зона обрезки».
+
+    Полосы без зоны и без кадра в задаче пропускаются.
+
+    Args:
+        pages: Полосы (с загруженной связью ``content_box``).
+        frames: Номер кадра по имени (:func:`frame_index_by_name`).
+        label_ids: Идентификатор метки по имени.
+
+    Returns:
+        Шейпы ``LabeledShapeRequest``.
+    """
+    from cvat_sdk import models
+
+    label_id = label_ids.get(LABEL_CONTENT_BOX)
+    shapes = []
+    for page in pages:
+        frame, box = frames.get(page.cvat_rel_path), page.content_box
+        if frame is None or box is None or label_id is None:
+            continue
+        x1, y1, x2, y2 = to_cvat_rect(box.x1, box.y1, box.x2, box.y2, page.divisor, page.cvat_width, page.cvat_height)
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            continue
+        shapes.append(
+            models.LabeledShapeRequest(type="rectangle", frame=frame, label_id=label_id, points=[x1, y1, x2, y2])
+        )
+    return shapes
+
+
+def finger_zone_shapes(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Предразметка закраса пальцев: ``page.finger_zones`` -> замкнутые полилинии CVAT (контур без заливки).
+
+    Args:
+        pages: Полосы (с загруженной связью ``finger_zones``).
+        frames: Номер кадра по имени.
+        label_ids: Идентификатор метки по имени.
+
+    Returns:
+        Шейпы ``LabeledShapeRequest`` типа ``polyline``.
+    """
+    from cvat_sdk import models
+
+    label_id = label_ids.get(LABEL_FINGER_ZONE)
+    shapes = []
+    for page in pages:
+        frame = frames.get(page.cvat_rel_path)
+        if frame is None or label_id is None:
+            continue
+        for zone in page.finger_zones:
+            points = polygon_to_cvat(json.loads(zone.polygon), page.divisor, page.cvat_width, page.cvat_height)
+            if len(points) >= 6:
+                shapes.append(
+                    models.LabeledShapeRequest(type="polyline", frame=frame, label_id=label_id, points=points)
+                )
+    return shapes
+
+
+def polygon_to_cvat(polygon: list, divisor: int, cvat_width: int, cvat_height: int) -> list[float]:
+    """Многоугольник px оригинала -> плоский список точек кадра CVAT, замкнутый повтором первой точки.
+
+    Args:
+        polygon: Вершины ``[[x, y], ...]`` px оригинала.
+        divisor: Делитель копии CVAT.
+        cvat_width: Ширина кадра CVAT.
+        cvat_height: Высота кадра CVAT.
+
+    Returns:
+        ``[x0, y0, x1, y1, ..., x0, y0]`` в координатах кадра CVAT (с обрезкой по кадру).
+    """
+    flat: list[float] = []
+    for x, y in [*polygon, polygon[0]] if polygon else []:
+        flat += [min(max(x / divisor, 0.0), cvat_width), min(max(y / divisor, 0.0), cvat_height)]
+    return flat
+
+
+def page_layer_shapes(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:
+    """Слои страниц v2 для заливки: зона обрезки и закрас пальцев."""
+    pages = list(pages)
+    return content_box_shapes(pages, frames, label_ids) + finger_zone_shapes(pages, frames, label_ids)
 
 
 def rotation_tags(pages, frames: dict[str, int], label_ids: dict[str, int]) -> list:

@@ -78,6 +78,9 @@ from ocr_utils.scan_markup.cvat.project import (
     frame_index_by_name,
     frames_with_labels,
     job_states,
+    LABEL_CONTENT_BOX,
+    LABEL_FINGER_ZONE,
+    page_layer_shapes,
     page_tags,
     project_label_ids,
     rect_shapes,
@@ -118,6 +121,9 @@ class PublishParams:
     # Дозалить в существующие задачи теги оглавления (``is_toc`` / ``is_year_index``) — тем же
     # PATCH-ем и с той же идемпотентностью: только на кадры, где таких тегов ещё нет.
     append_tags: bool = False
+    # Дозалить в существующие задачи слои страниц v2 — зону обрезки и контуры закраса пальцев — только на кадры, где
+    # шейпов с этими метками ещё нет.
+    append_page_layers: bool = False
     # Виды прямоугольников, которые идут в ПЕРВИЧНУЮ предразметку (новая задача,
     # ``--force-annotations``, свежие полосы при ``--recreate-stale``). Пусто — все виды из базы.
     # Метки проекта это не сужает: в проекте всегда полный ``LABELS``, отбор касается только того,
@@ -146,6 +152,8 @@ class PublishStats:
     tags_carried: int = 0
     # Дозалито тегов оглавления в существующие задачи по --append-tags.
     tags_appended: int = 0
+    # Дозалито шейпов слоёв страниц (зона обрезки, закрас пальцев) по --append-page-layers.
+    layers_appended: int = 0
     stale_years: list[str] = field(default_factory=list)
 
 
@@ -374,6 +382,29 @@ def _append_tags(task, year_name: str, pages, frames, label_ids, stats: PublishS
     )
 
 
+def _append_page_layers(task, year_name: str, pages, frames, label_ids, stats: PublishStats) -> None:
+    """Дозаливка слоёв страниц v2 (зона обрезки, закрас пальцев) — только на кадры, где этих меток ещё нет.
+
+    Args:
+        task: Задача-год CVAT.
+        year_name: Имя года (для логов).
+        pages: Полосы года.
+        frames: Номер кадра по имени.
+        label_ids: Идентификатор метки по имени.
+        stats: Итоги прогона (дописывается ``layers_appended``).
+    """
+    wanted_ids = {label_ids[label] for label in (LABEL_CONTENT_BOX, LABEL_FINGER_ZONE) if label in label_ids}
+    if len(wanted_ids) != 2:
+        logger.warning("Задача %r: в проекте нет меток слоёв страниц, дозаливка пропущена", year_name)
+        return
+    occupied = frames_with_labels(fetch_shapes_by_frame(task), wanted_ids)
+    fresh = [page for page in pages if page.cvat_rel_path not in occupied]
+    shapes = page_layer_shapes(fresh, frames, label_ids)
+    added = append_shapes(task, shapes)
+    stats.layers_appended += added
+    logger.info("Задача %r: дозалито слоёв страниц %d на %d кадров", year_name, added, len({s.frame for s in shapes}))
+
+
 def _append_kinds(task, year_name: str, pages, frames, label_ids, kinds, stats: PublishStats) -> None:
     """Дозаливка находок заданных видов в существующую задачу — только на кадры, где их ещё нет."""
     wanted_ids = {label_ids[LABEL_BY_KIND[kind]] for kind in kinds if LABEL_BY_KIND[kind] in label_ids}
@@ -487,6 +518,8 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                     frames,
                                     label_ids,
                                     kinds=params.kinds or None,
+                                ) + page_layer_shapes(
+                                    [p for p in _pages if p.cvat_rel_path in _skip], frames, label_ids
                                 )
                                 # Теги переносятся со всех кадров, включая изменившиеся:
                                 # ориентацию разметчик ставит по содержимому полосы, и замена
@@ -550,6 +583,14 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                                 }
                                 fresh_pages = [page for page in pages if page.cvat_rel_path not in changed_names]
                                 _append_tags(task, year.name, fresh_pages, frame_index_by_name(task), label_ids, stats)
+                            if params.append_page_layers:
+                                changed_names = {
+                                    page.cvat_rel_path for _issue, pages_changed, _a in drift for page in pages_changed
+                                }
+                                fresh_pages = [page for page in pages if page.cvat_rel_path not in changed_names]
+                                _append_page_layers(
+                                    task, year.name, fresh_pages, frame_index_by_name(task), label_ids, stats
+                                )
                             continue
 
                 year.cvat_task_id = task.id
@@ -576,7 +617,7 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                     # Отбор по видам — см. ``PublishParams.kinds``.
                     shapes = rect_shapes(
                         ((page, page.rect_regions) for page in pages), frames, label_ids, kinds=params.kinds or None
-                    )
+                    ) + page_layer_shapes(pages, frames, label_ids)
                     tags = page_tags(pages, frames, label_ids)
                     upload_preannotations(task, shapes, tags)
                     stats.shapes += len(shapes)
@@ -592,6 +633,8 @@ def run_publish(params: PublishParams, session_factory) -> PublishStats:
                         _append_kinds(task, year.name, pages, frames, label_ids, params.append_kinds, stats)
                     if params.append_tags:
                         _append_tags(task, year.name, pages, frames, label_ids, stats)
+                    if params.append_page_layers:
+                        _append_page_layers(task, year.name, pages, frames, label_ids, stats)
 
                 # Только те, что реально сопоставились с кадром: полоса, не доехавшая до
                 # задачи, не должна считаться залитой — иначе её пропажа больше нигде

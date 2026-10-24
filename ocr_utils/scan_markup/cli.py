@@ -42,6 +42,8 @@ from ocr_utils.page_layout.raster.regions import (
     SAFETY_MIN_FRAC,
     SURYA_LINEART_P99_MM2,
 )
+from ocr_utils.scan_markup.content_box.layers import LayersParams, run_layers
+from ocr_utils.scan_markup.content_box.methods import TrimParams
 from ocr_utils.scan_markup.detection.run import DetectParams, run_detect
 from ocr_utils.scan_markup.geometry import CVAT_DPI
 from ocr_utils.scan_markup.pen_marks import DEFAULT_WEIGHTS, PEN_CHROMA_THR, fix_pages
@@ -478,6 +480,37 @@ def recolor_command(db_path: Path, pack_name: str, log_level: str, **kwargs) -> 
     )
 
 
+@main.command("page-layers")
+@click.option("--db", "db_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--pack-name", required=True, help="Пак в базе (страницы scan_cropping.v2 --output-pages).")
+@click.option("--pack-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Папка страниц пака (относительные пути полос — от неё).")  # fmt: skip
+@click.option("--pages-meta", "meta_dir", default=None, type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Папка паспортов страниц (--output-pages-meta): флаг обложки, dpi, закрас пальцев.")  # fmt: skip
+@click.option("--top-mm", default=TrimParams.top_mm, show_default=True, help="Отступ зоны контента сверху, мм.")
+@click.option("--bottom-mm", default=TrimParams.bottom_mm, show_default=True, help="Отступ снизу, мм.")
+@click.option("--outer-mm", default=TrimParams.outer_mm, show_default=True, help="Отступ у внешнего края, мм.")
+@click.option("--cut-mm", default=TrimParams.cut_mm, show_default=True, help="Отступ у линии разреза, мм.")
+@click.option("--margin-mm", default=TrimParams.margin_mm, show_default=True, help="Запас вокруг контента, мм.")
+@click.option("--redo", is_flag=True, help="Пересчитать и зоны текущей версии (ручные из CVAT не трогаются никогда).")
+@click.option("--jobs", default=12, show_default=True, help="Процессов пула (разбор страницы ~3–5 с CPU).")
+@click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
+def page_layers_command(db_path: Path, pack_name: str, pack_dir: Path, meta_dir: Path | None, top_mm: float,
+                        bottom_mm: float, outer_mm: float, cut_mm: float, margin_mm: float, redo: bool, jobs: int,
+                        log_level: str) -> None:  # fmt: skip
+    """Зона контента (в CVAT — «Зона обрезки»: отступы с защитой контента, у обложки — вся полоса) и закрас пальцев
+    из паспортов страниц scan_cropping.v2 — в базу; в CVAT их кладёт to-cvat (или --append-page-layers)."""
+    _set_log_level(log_level)
+    params = LayersParams(db_path, pack_name, pack_dir, meta_dir,
+                          trim=TrimParams(top_mm, bottom_mm, outer_mm, cut_mm, margin_mm), redo=redo, jobs=jobs)  # fmt: skip
+    stats = run_layers(params, open_db(db_path))
+    click.echo(
+        f"Полос посчитано: {stats.pages} (зон контента {stats.boxes}, из них обложек {stats.covers}; с закрасом "
+        f"пальцев {stats.finger_pages}); ручных зон сохранено: {stats.kept_manual}; пропущено готовых: "
+        f"{stats.skipped}; ошибок: {stats.failed}."
+    )
+
+
 @main.command("mark-covers")
 @_recolor_options
 @click.option("--log-level", default="INFO", show_default=True, type=click.Choice(LOG_LEVELS, case_sensitive=False))
@@ -763,6 +796,14 @@ def fix_pen_marks_command(
     "по признакам is_toc / is_year_index из базы: PATCH, только на кадры без таких тегов.",
 )
 @click.option(
+    "--append-page-layers/--no-append-page-layers",
+    "append_page_layers",
+    default=False,
+    show_default=True,
+    help="ДОБАВИТЬ в уже существующие задачи слои страниц scan_cropping v2: «Зона обрезки» (прямоугольник) и "
+    "«Закрас пальцев» (контур): PATCH, только на кадры без этих меток.",
+)
+@click.option(
     "--kinds",
     default="",
     show_default=True,
@@ -790,7 +831,8 @@ def to_cvat_command(
         f"Задачи: создано {stats.tasks_created}, уже было {stats.tasks_existing}, "
         f"пересоздано {stats.tasks_rebuilt}. Шейпов залито: {stats.shapes}, перенесено: {stats.shapes_carried}, "
         f"дозалито: {stats.shapes_appended} (на {stats.frames_appended} кадрах).\n"
-        f"Тегов залито: {stats.tags}, перенесено: {stats.tags_carried}, дозалито тегов оглавления: {stats.tags_appended}."
+        f"Тегов залито: {stats.tags}, перенесено: {stats.tags_carried}, дозалито тегов оглавления: {stats.tags_appended}.\n"
+        f"Слоёв страниц (зона обрезки, закрас пальцев) дозалито: {stats.layers_appended}."
     )
     if stats.stale_years:
         click.echo(

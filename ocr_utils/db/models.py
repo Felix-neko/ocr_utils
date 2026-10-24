@@ -401,6 +401,10 @@ class Page(Base):
     rect_regions: Mapped[list["RectRegion"]] = relationship(back_populates="page", cascade="all, delete-orphan")
     masks: Mapped[list["MaskAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")
     points: Mapped[list["PointAnnotation"]] = relationship(back_populates="page", cascade="all, delete-orphan")
+    content_box: Mapped["ContentBox | None"] = relationship(
+        back_populates="page", cascade="all, delete-orphan", uselist=False
+    )
+    finger_zones: Mapped[list["FingerZone"]] = relationship(back_populates="page", cascade="all, delete-orphan")
 
 
 class RectRegion(Base):
@@ -545,3 +549,53 @@ class PointAnnotation(Base):
     cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)
 
     page: Mapped[Page] = relationship(back_populates="points")
+
+
+class ContentBox(Base):
+    """Зона контента полосы (в CVAT — «зона обрезки»): осевой прямоугольник, вне которого у краёв выпрямленной страницы
+    только мусор (тень, кромка стопки, край соседней страницы за линией разреза); координаты ОРИГИНАЛА.
+
+    Отдельная таблица, а не ``rect_regions``: на виды ``rect_regions`` (``RECT_KINDS``, ``PICTURE_KINDS``) завязаны
+    ``scan_cleanup`` и сборка PDF, и зона обрезки, попав туда, стала бы для них «картинкой». Одна зона на полосу.
+    Пока это только разметка: применение (забелить или обрезать вне рамки) — следующей итерацией.
+
+    ``method`` — способ, которым зона посчитана автоматически (``cover`` — обложка, зона во всю полосу; ``cvat`` у
+    правленной руками — прежний способ остаётся в ``method``, а ``source`` становится ``cvat``).
+    """
+
+    __tablename__ = "content_boxes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), index=True, unique=True)
+
+    x1: Mapped[int] = mapped_column(Integer)
+    y1: Mapped[int] = mapped_column(Integer)
+    x2: Mapped[int] = mapped_column(Integer)
+    y2: Mapped[int] = mapped_column(Integer)
+
+    method: Mapped[str] = mapped_column(String(32), default="")
+    version: Mapped[int | None] = mapped_column(Integer, default=None)
+    source: Mapped[str] = mapped_column(String(16), default=SOURCE_AUTO)
+    cvat_shape_id: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    page: Mapped[Page] = relationship(back_populates="content_box")
+
+
+class FingerZone(Base):
+    """Зона закраса пальцев на полосе (из паспорта страницы ``scan_cropping.v2`` ``--output-pages-meta``): закрашено LaMa
+    и не возвращено copy back; многоугольник в координатах ОРИГИНАЛА.
+
+    Только для просмотра: в CVAT — контуром без заливки (метка-полилиния), назад из CVAT не читается. Нужна, чтобы при
+    разметке было видно, где на полосе не исходные пиксели.
+    """
+
+    __tablename__ = "finger_zones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), index=True)
+
+    # Многоугольник JSON: [[x, y], ...] px оригинала.
+    polygon: Mapped[str] = mapped_column(Text)
+    area_mm2: Mapped[float | None] = mapped_column(Float, default=None)
+
+    page: Mapped[Page] = relationship(back_populates="finger_zones")

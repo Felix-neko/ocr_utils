@@ -25,6 +25,8 @@ from ocr_utils.scan_markup.cvat.client import CvatSettings, make_cvat_client
 from ocr_utils.scan_markup.cvat.project import (
     FIELD_BY_TOC_LABEL,
     KIND_BY_LABEL,
+    LABEL_CONTENT_BOX,
+    LABEL_FINGER_ZONE,
     MASK_KIND_BY_LABEL,
     POINT_KIND_BY_LABEL,
     ROTATION_BY_LABEL,
@@ -40,6 +42,8 @@ from ocr_utils.db.models import (
     ROTATED_TEXT_KINDS,
     TABLE_KINDS,
     SOURCE_CVAT,
+    ContentBox,
+    FingerZone,
     Issue,
     MaskAnnotation,
     Pack,
@@ -97,6 +101,9 @@ class ExportStats:
     not_toc_pages: int = 0
     unknown_labels: int = 0
     unmatched_frames: int = 0
+    # Зоны обрезки (по одной на полосу) и полосы, где разметчик оставил их несколько (берётся охват всех).
+    content_boxes: int = 0
+    content_box_conflicts: int = 0
 
 
 def _utcnow() -> datetime:
@@ -210,6 +217,11 @@ def copy_tree(src_session: Session, dst_session: Session, pack_name: str) -> Pac
                         toc_version=src_page.toc_version,
                         toc_detected_at=src_page.toc_detected_at,
                         force_is_not_toc=src_page.force_is_not_toc,
+                        # Закрас пальцев — из паспортов страниц v2, в CVAT только показывается и назад не читается:
+                        # переносится из исходной базы, иначе снимок его бы потерял.
+                        finger_zones=[
+                            FingerZone(polygon=zone.polygon, area_mm2=zone.area_mm2) for zone in src_page.finger_zones
+                        ],
                     )
                 )
             dst_session.flush()
@@ -231,6 +243,38 @@ def shape_to_region(shape, page: Page, full_page_frac: float) -> RectRegion:
         full_page=area >= full_page_frac * page.width * page.height,
         source=SOURCE_CVAT,
         cvat_shape_id=getattr(shape, "id", None),
+    )
+
+
+def shapes_to_content_box(shapes: list, page: Page, stats: "ExportStats") -> ContentBox | None:
+    """Прямоугольники «Зона обрезки» кадра -> одна зона полосы в координатах оригинала.
+
+    Зона на полосе одна. Если разметчик оставил несколько прямоугольников, берётся их общий охват (ничего из
+    отмеченного не теряется), а в итоги пишется конфликт.
+
+    Args:
+        shapes: Прямоугольные шейпы с меткой «Зона обрезки».
+        page: Полоса.
+        stats: Итоги прогона.
+
+    Returns:
+        Зона или None — прямоугольников нет.
+    """
+    if not shapes:
+        return None
+    rects = [rect_to_original(*shape.points[:4], page.divisor, page.width, page.height) for shape in shapes]
+    if len(rects) > 1:
+        stats.content_box_conflicts += 1
+        logger.warning("Полоса %s: зон обрезки %d, беру их общий охват", page.cvat_rel_path, len(rects))
+    stats.content_boxes += 1
+    return ContentBox(
+        x1=min(r[0] for r in rects),
+        y1=min(r[1] for r in rects),
+        x2=max(r[2] for r in rects),
+        y2=max(r[3] for r in rects),
+        method=SOURCE_CVAT,
+        source=SOURCE_CVAT,
+        cvat_shape_id=getattr(shapes[0], "id", None),
     )
 
 
@@ -364,6 +408,7 @@ def import_task(
         regions: list[RectRegion] = []
         masks: list[MaskAnnotation] = []
         points: list[PointAnnotation] = []
+        content_shapes: list = []
 
         for shape in shapes_by_frame.get(frame, []):
             name = label_names.get(shape.label_id)
@@ -389,6 +434,11 @@ def import_task(
             elif shape_type == "points" and name in POINT_KIND_BY_LABEL:
                 points.append(shape_to_point(shape, page))
                 stats.points += 1
+            elif shape_type == "rectangle" and name == LABEL_CONTENT_BOX:
+                content_shapes.append(shape)
+            elif name == LABEL_FINGER_ZONE:
+                # Закрас пальцев только показывается в CVAT; в базе он из паспортов страниц (перенесён copy_tree).
+                continue
             else:
                 stats.unknown_labels += 1
                 logger.debug("Пропускаю шейп типа %r с меткой %r", shape_type, name)
@@ -428,6 +478,7 @@ def import_task(
         page.rect_regions = regions
         page.masks = masks
         page.points = points
+        page.content_box = shapes_to_content_box(content_shapes, page, stats)
         page.reviewed_at = _utcnow()
         stats.pages += 1
 
