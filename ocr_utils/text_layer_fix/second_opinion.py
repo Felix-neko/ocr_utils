@@ -28,7 +28,6 @@ from ocr_utils.text_layer_fix.ocr import TABLE_KINDS, acceptable
 from ocr_utils.text_layer_fix.raster import page_raster, render_gray
 from ocr_utils.text_layer_fix.zones import rotate_crop
 
-
 # Латиница без единой кириллической буквы от этого числа букв — выдумка: в русском журнале
 # повёрнутый текст латиницей не встречается (на паке-1 66 таких «чтений» из 514 принятых:
 # «and special to», «THE PERSON NAMED IN»), а фильтр ``rotated_text`` считает только буквы без

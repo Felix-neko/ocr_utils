@@ -109,7 +109,9 @@ def load_pair(ref: PageRef, layout_root: Path, v16_dir: Path) -> PagePair:
     if cached is None:
         raise FileNotFoundError(f"нет кэша v16 для {ref.label}")
     raw = cached.get("raw", {})
-    return PagePair(ref, b, a, field_from_raw(raw), dict(cached.get("metrics", {})), raw, dict(cached.get("culprits", {})))
+    return PagePair(
+        ref, b, a, field_from_raw(raw), dict(cached.get("metrics", {})), raw, dict(cached.get("culprits", {}))
+    )
 
 
 def list_pages(layout_root: Path, pdfs: set[str] | None = None) -> list[PageRef]:

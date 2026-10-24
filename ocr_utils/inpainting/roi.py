@@ -28,7 +28,6 @@ from typing import Optional
 import cv2
 import numpy as np
 
-
 # ROI вокруг маски увеличиваем в 1.5 раза — сети нужен контекст кромки/фона, иначе
 # дыра «заливается» доминирующим цветом.
 DEFAULT_ROI_SCALE = 1.5

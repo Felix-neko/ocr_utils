@@ -19,7 +19,6 @@ from ocr_utils.inpainting.apply import inpaint_by_groups
 from ocr_utils.inpainting.backends import DEFAULT_SD_MODEL as _DEFAULT_SD_MODEL, SdParams
 from ocr_utils.inpainting.roi import DEFAULT_ROI_SCALE
 
-
 # Реэкспорт: имя модели по умолчанию задано в общем ``inpainting.backends``, а
 # здесь оставлено ради обратной совместимости импорта в ``detect_fingers``.
 DEFAULT_SD_MODEL = _DEFAULT_SD_MODEL

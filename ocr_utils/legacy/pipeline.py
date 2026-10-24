@@ -133,7 +133,7 @@ def _process_one(args: tuple) -> tuple[str, str | None]:
 
     Возвращает (относительный путь, None) при успехе или (относительный путь, текст ошибки) при ошибке.
     """
-    (src_pdf_str, dst_pdf_str, language, upscale_ratio, deskew, clean, rotate_pages) = args
+    src_pdf_str, dst_pdf_str, language, upscale_ratio, deskew, clean, rotate_pages = args
     src_pdf = Path(src_pdf_str)
     dst_pdf = Path(dst_pdf_str)
     rel = src_pdf.name

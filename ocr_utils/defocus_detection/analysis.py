@@ -20,7 +20,6 @@ from ocr_utils.defocus_detection.scoring import DEFAULT_AGGREGATION, DEFAULT_QUA
 from ocr_utils.defocus_detection.tiles import DEFAULT_TILE_SIZE, detail_rms_map, make_grid, printed_mask
 from ocr_utils.defocus_detection.zonal import ZonalResult, zonal_defocus
 
-
 # На сколько понижается приоритет процессов-воркеров. Одного лишь ограничения их числа
 # для отзывчивости интерфейса мало: полтора десятка равноприоритетных счётчиков всё равно
 # конкурируют с рабочим столом за планировщик. С nice рабочий стол вытесняет их сразу,

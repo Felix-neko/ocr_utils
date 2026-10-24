@@ -8,14 +8,14 @@
     # Извлечь изображения из одного PDF
     from pathlib import Path
     from ocr_utils.pdf_utils import extract_images_from_pdf
-    
+
     pdf_path = Path("document.pdf")
     output_dir = Path("output/document")
     extract_images_from_pdf(pdf_path, output_dir)
 
     # Рекурсивно обработать все PDF в директории
     from ocr_utils.pdf_utils import extract_images_recursive
-    
+
     input_dir = Path("/path/to/pdfs")
     output_dir = Path("/path/to/output")
     extract_images_recursive(input_dir, output_dir)

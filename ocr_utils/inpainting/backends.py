@@ -25,7 +25,6 @@ import numpy as np
 
 from ocr_utils.inpainting.roi import mask_bbox
 
-
 BACKEND_LAMA = "lama"
 BACKEND_SD = "sd"
 BACKENDS = (BACKEND_LAMA, BACKEND_SD)
