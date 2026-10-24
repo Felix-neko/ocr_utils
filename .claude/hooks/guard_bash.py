@@ -155,7 +155,9 @@ def check_disks(command: str, simple: list[list[str]]) -> None:
             deny(
                 f"Запись в «{t}»: это корень живой синхронизации Яндекс.Диска, демон переименует новый файл поверх "
                 "исходника скана (уже терялись оригиналы). Результаты писать в /mnt/hotstore/scan_processing или в ~/Projects/mts_markup, "
-                "внутрь переносит пользователь руками при остановленном демоне. См. docs/data_layout.md."
+                "внутрь переносит пользователь руками при остановленном демоне. Единственное исключение — сайдкары "
+                "флагов кадра: только `uv run python -m ocr_utils.frame_flags write|remove <кадр>` (навык frame-flags). "
+                "См. docs/data_layout.md."
             )
     for t in targets:
         if t.startswith(DUMP3):
