@@ -13,7 +13,6 @@
 # Пишет: $PH_PACK1_1990_OUT/{frames_450/,pages/,pages_footer/,motion/,midtone/,glyphs.csv,pass3_scores.csv,lines/,defocus/}.
 
 set -euo pipefail
-set -m
 trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null || true; exit $rc' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

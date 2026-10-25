@@ -7,10 +7,9 @@
 # и $OUT/changed/<смена>/*.jpg; OUT по умолчанию — папка просмотра v15 в ~/Projects/mts_markup.
 
 set -euo pipefail
-set -m
 # Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
 # иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
-trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null || true; exit $rc' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

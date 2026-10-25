@@ -15,7 +15,6 @@
 #
 set -euo pipefail
 
-set -m
 trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null || true; exit $rc' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

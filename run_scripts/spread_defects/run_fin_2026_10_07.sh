@@ -13,10 +13,9 @@
 # Время (замер 2026-10-08, 1 012 кадров): pages ~7 кадр/с — 2.5 мин; pages footer ~4 кадр/с — 4 мин; features ~3 кадр/с — 6 мин.
 
 set -euo pipefail
-set -m
 # Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
 # иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
-trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null || true; exit $rc' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 source "$(dirname "$0")/common.sh"

@@ -21,7 +21,6 @@
 #   systemd-run --user --scope --unit=pack1-rescan-cleanup --collect run_scripts/journal_processing/mts/pack_1_rescan/run_7_cleanup.sh
 set -euo pipefail
 # Пул процессов: при остановке скрипта гасить всю группу, иначе forkserver и воркеры остаются сиротами.
-set -m
 # Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
 # иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
 trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null || true; exit $rc' EXIT

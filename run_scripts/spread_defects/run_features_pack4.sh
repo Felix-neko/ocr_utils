@@ -9,10 +9,9 @@
 # Плитка 256 px и кольцо 3–25 px — под 450 dpi: двоение на 1985/02 IMG_0017 ≈ 5 px.
 
 set -euo pipefail
-set -m
 # Выход: погасить всю группу (воркеры пула), сохранив код выхода; сигналы на время гашения игнорируются,
 # иначе свой же TERM снова зовёт ловушку — рекурсия до переполнения стека bash (SIGSEGV, код 139).
-trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null; exit $rc' EXIT
+trap 'rc=$?; trap - EXIT; trap "" INT TERM; kill -- -$$ 2>/dev/null || true; exit $rc' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 source "$(dirname "$0")/common.sh"
