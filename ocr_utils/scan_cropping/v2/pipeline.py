@@ -194,6 +194,8 @@ class RunParams:
             обрабатывается; остальные флаги — для выхода страниц.
         rectify_passes: Проходов «разбор текста → поле» выпрямления; 0 — только Кунс по подгоночным областям.
         rectify_illumination: Выравнивать освещение страниц в выходе страниц (не-цветных и не запрещённых флагом).
+        gutter_decompression: Растягивать сжатые у корешка буквы разворота в выходе страниц (``gutter_decompression``:
+            модель по ширине букв, страница шире со стороны корешка).
         output_pages_meta: Папка паспортов страниц (``rectify.passport``: исходный кадр, часть, флаги, dpi, цветность,
             контуры закраса пальцев) и масок закраса ``<кадр>_L.fingers.png`` — отдельно от страниц; None — не писать.
         pages_dpi: Тег разрешения страниц или None — настоящая плотность кадра (``scale.px_per_mm`` × 25.4).
@@ -245,6 +247,7 @@ class RunParams:
     use_flags: bool = True
     rectify_passes: int = 3
     rectify_illumination: bool = True
+    gutter_decompression: bool = True
     output_pages_meta: Path | None = None
     pages_dpi: float | None = None
 
@@ -1998,6 +2001,7 @@ def write_rectified_pages(
     from ocr_utils.scan_cropping.v2.rectify.passport import PagePassport, finger_area_mm2, write_passport, zone_contours
     from ocr_utils.scan_cropping.v2.rectify.sheets import sheet_result
     from ocr_utils.scan_cropping.v2.rectify.text_run import PageControl, TextParams, text_frame
+    from ocr_utils.scan_cropping.v2.gutter_decompression.sheet import gutter_sheet, summary_fields
     from ocr_utils.frame_flags.flags import Side
     from ocr_utils.units import MM_PER_INCH
 
@@ -2037,7 +2041,8 @@ def write_rectified_pages(
                                  field=all((single or not job.flags.ignored(side)) and job.flags.text_rectify(side)
                                            for side in sides))
                      for sides in page_sides)  # fmt: skip
-    text = TextParams(illumination=params.rectify_illumination, passes=params.rectify_passes)
+    text = TextParams(illumination=params.rectify_illumination, passes=params.rectify_passes,
+                      gutter_decompression=params.gutter_decompression)  # fmt: skip
     try:
         result = text_frame(out, geometry, dpi, text, controls)
         images = cut_pages(result, parts, dpi, params.fill, params.fill_seam_mm)
@@ -2078,6 +2083,10 @@ def write_rectified_pages(
         # Триптих стенда page_rectify (лист 04): итог v2 с областями | Кунс | итог, оси строк и линия разреза.
         sheets = {OverlayTag.RECTIFY: sheet_result(result, header),
                   OverlayTag.RECTIFIED_PAGES: pages_overlay(result, parts, header)}  # fmt: skip
+        if result.unstretched is not None and result.gutter is not None:
+            # Растяжение у корешка применено хотя бы к одной странице: «было | стало» у корешка.
+            sheets[OverlayTag.GUTTER] = gutter_sheet(result.unstretched, result.final, result.layout, result.canvas,
+                                                     result.gutter, dpi / MM_PER_INCH, header)  # fmt: skip
         for tag, sheet in sheets.items():
             sheet_path = overlay_path(params.debug_dir, job.rel, tag)
             sheet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2087,7 +2096,7 @@ def write_rectified_pages(
         PagesStatus.OK.value,
         "/".join(f"{p.tint:.2f}" for p in result.pages),
         "/".join(f"{v:.0f}" for v in finger_mm2),
-        json.dumps({**result.before.row("before_"), **result.after.row("after_")}),
+        json.dumps({**result.before.row("before_"), **result.after.row("after_"), **summary_fields(result.gutter)}),
     )
 
 

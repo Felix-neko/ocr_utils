@@ -259,7 +259,9 @@ def sheet_field(result: TextResult, header: list[str], dpi: float) -> np.ndarray
     heat_full = cv2.applyColorMap(np.clip(norm_mm / top * 255, 0, 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
     base, f = fit(result.first)
     heat, _ = fit(heat_full)
-    left = cv2.addWeighted(heat, FIELD_ALPHA, base, 1 - FIELD_ALPHA, 0)
+    # Поле — размера холста итога (при растяжении у корешка он шире холста Кунса): модуль ложится на итог.
+    under = base if heat_full.shape[:2] == result.first.shape[:2] else fit(result.final)[0]
+    left = cv2.addWeighted(heat, FIELD_ALPHA, under, 1 - FIELD_ALPHA, 0)
     right = base.copy()
     h, w = dx.shape
     step = mm_to_px_float(GRID_MM, dpi)

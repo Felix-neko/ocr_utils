@@ -77,13 +77,14 @@ def page_areas(layout: Layout, dense: tuple[np.ndarray, np.ndarray]) -> tuple[np
     прямоугольников там, где поле выпрямляло строки.
 
     Args:
-        layout: Расклад холста (прямоугольники страниц встык по линии корешка).
-        dense: Поле ``(D_x, D_y)`` размера холста; нули — только Кунс.
+        layout: Расклад холста Кунса (прямоугольники страниц встык по линии корешка).
+        dense: Поле ``(D_x, D_y)`` размера холста итога (при растяжении у корешка он шире ``layout``) в координаты
+            холста Кунса; нули — только Кунс.
 
     Returns:
-        Маски bool левой и правой страницы размера холста (не пересекаются) или одна маска.
+        Маски bool левой и правой страницы размера холста итога (не пересекаются) или одна маска.
     """
-    h, w = layout.height, layout.width
+    h, w = dense[0].shape
     xs = np.arange(w, dtype=np.float32)[None, :] + dense[0]
     ys = np.arange(h, dtype=np.float32)[:, None] + dense[1]
     if layout.single:
@@ -154,7 +155,7 @@ def cut_pages(
         box = paper_bbox(area)
         if box is None:
             continue
-        spine = result.layout.spine_x if part is PagePart.SPREAD else None
+        spine = result.canvas.spine_x if part is PagePart.SPREAD else None
         image = fill_to_rectangle(result.final, area, method, box=box, px_per_mm=px_per_mm, spine_x=spine,
                                   seam_mm=seam_mm)  # fmt: skip
         if image is not None:
@@ -203,8 +204,8 @@ def cut_line(layout: Layout, dense: tuple[np.ndarray, np.ndarray], step: int = 4
     """Линия разреза на холсте: в каждой ``step``-й строке — первый X, чья точка Кунса правее линии корешка.
 
     Args:
-        layout: Расклад холста.
-        dense: Поле ``(D_x, D_y)``.
+        layout: Расклад холста Кунса.
+        dense: Поле ``(D_x, D_y)`` размера холста итога (в координаты холста Кунса).
         step: Шаг по строкам, px.
 
     Returns:
@@ -212,10 +213,11 @@ def cut_line(layout: Layout, dense: tuple[np.ndarray, np.ndarray], step: int = 4
     """
     if layout.single:
         return np.zeros((0, 2), np.float64)
-    cols = np.arange(layout.width, dtype=np.float32)
+    h, w = dense[0].shape
+    cols = np.arange(w, dtype=np.float32)
     points = []
-    for y in range(0, layout.height, step):
+    for y in range(0, h, step):
         right = cols + dense[0][y] >= layout.spine_x
-        x = int(np.argmax(right)) if right.any() else layout.width - 1
+        x = int(np.argmax(right)) if right.any() else w - 1
         points.append((float(x), float(y)))
     return np.array(points, np.float64)

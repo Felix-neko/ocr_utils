@@ -108,6 +108,7 @@ class OverlayTag(StrEnum):
     # Выход страниц (только при ``--output-pages`` и ``--debug-steps``).
     RECTIFY = "08_rectify"  # триптих: итог v2 с областями | Кунс | Кунс + поле; оси строк, стороны, линия разреза
     RECTIFIED_PAGES = "09_pages"  # выпрямленный разворот: области страниц, линия разреза, рамки записанных страниц
+    GUTTER = "10_gutter"  # растяжение у корешка: «было | стало» у корешка (только если применено к странице)
 
 
 def overlay_path(debug_dir: Path, rel: Path, tag: OverlayTag) -> Path:

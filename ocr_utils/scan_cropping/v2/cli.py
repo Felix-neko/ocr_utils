@@ -215,6 +215,9 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 )
 @click.option("--rectify-illumination/--no-rectify-illumination", default=True, show_default=True,
               help="Выравнивать освещение страниц в --output-pages (кроме цветных и запрещённых флагом).")  # fmt: skip
+@click.option("--gutter-decompression/--no-gutter-decompression", default=True, show_default=True,
+              help="Растягивать сжатые у корешка буквы разворота в --output-pages (модель по ширине букв, страница "
+                   "становится шире со стороны корешка; цветные, игнорируемые и no-text-rectify страницы — нет).")  # fmt: skip
 @click.option("--output-pages-meta", "output_pages_meta", type=click.Path(file_okay=False, path_type=Path), default=None,
               help="Папка паспортов страниц --output-pages (<кадр>_L.json: исходный кадр, часть, флаги, dpi, цветность, "
                    "контуры закраса пальцев) и масок закраса <кадр>_L.fingers.png — отдельно от самих страниц.")  # fmt: skip
@@ -273,6 +276,7 @@ def main(
     use_flags: bool,
     rectify_passes: int,
     rectify_illumination: bool,
+    gutter_decompression: bool,
     output_pages_meta: Path | None,
     pages_dpi: float | None,
     log_level: str,
@@ -328,6 +332,7 @@ def main(
         use_flags=use_flags,
         rectify_passes=rectify_passes,
         rectify_illumination=rectify_illumination,
+        gutter_decompression=gutter_decompression,
         output_pages_meta=output_pages_meta,
         pages_dpi=pages_dpi,
         skip_if_exists=skip_if_exists,

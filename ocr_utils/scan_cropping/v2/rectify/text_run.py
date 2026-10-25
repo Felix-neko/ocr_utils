@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
 
+from ocr_utils.scan_cropping.v2.gutter_decompression.apply import page_plans
+from ocr_utils.scan_cropping.v2.gutter_decompression.widen import (
+    WidenLimits,
+    WidenPlan,
+    add_wide_displacement,
+    widen_displacement,
+)
 from ocr_utils.scan_cropping.v2.colour_pages import TINT_MIN_SHARE, Colour, chroma_of, page_colour, tinted_share
 from ocr_utils.scan_cropping.v2.rectify.coons import (
     TANGENT_MM,
@@ -29,6 +36,7 @@ from ocr_utils.scan_cropping.v2.rectify.text_field import (
     GUTTER_SMOOTH_MM,
     SCALE_WEIGHT,
     FieldMode,
+    PageRegion,
     PageText,
     Samples,
     TextField,
@@ -77,6 +85,11 @@ class TextParams:
             зона отсева выборок), стороны фото — опоры поля; False — рамки растра детектора, опор в фото нет.
         photo_near_mm: Ближе этого к опоре текста вес выборки стороны фото — ``photo_near_weight``, мм.
         photo_near_weight: Вес выборки стороны фото рядом с текстом (доля полного; 1 — без ограничения).
+        gutter_decompression: Растягивать сжатые у корешка буквы разворота по модели, подогнанной к ширине букв
+            (``gutter_decompression``): страница становится шире со стороны корешка, холст итога — шире раскладки
+            Кунса. Только при проходах поля и у разворота; страницы без поля (цветные, игнорируемые,
+            ``no-text-rectify``) не растягиваются.
+        gutter_limits: Пределы и порог применения растяжения у корешка.
     """
 
     tangent_mm: float = TANGENT_MM
@@ -90,6 +103,8 @@ class TextParams:
     photos: bool = True
     photo_near_mm: float = PHOTO_NEAR_MM
     photo_near_weight: float = PHOTO_NEAR_WEIGHT
+    gutter_decompression: bool = True
+    gutter_limits: WidenLimits = WidenLimits()
 
 
 @dataclass(frozen=True)
@@ -150,6 +165,14 @@ class TextResult:
         analyses: Разборы страниц на каждом проходе (нулевой — до поля, последний — итог); None — без поля.
         passes: Меры прямизны текста после каждого прохода (нулевой — после Кунса, последний — итог).
         maps: Составная карта итога ``(map_x, map_y)``: пиксель холста → точка итога v2 (тем же переносятся маски).
+        canvas: Раскладка холста итога: при растяжении у корешка шире ``layout`` (левая страница растёт к корешку,
+            правая сдвинута и растёт), иначе ``layout``. ``dense`` и ``maps`` — размера этого холста; ``dense`` ведёт
+            в координаты холста Кунса (``layout``), поэтому принадлежность пикселя странице и линия разреза
+            по-прежнему считаются по прямоугольникам и корешку ``layout``.
+        gutter: Планы растяжения у корешка левой и правой страницы или None — растяжения не было (выключено, одна
+            страница, нет проходов поля).
+        unstretched: Итог без растяжения у корешка (холст ``layout``) — для листа «было | стало»; None — растяжение
+            не применено ни к одной странице.
     """
 
     image: np.ndarray
@@ -164,6 +187,9 @@ class TextResult:
     analyses: list[list[PageText | None]]
     passes: list[TextMeasures]
     maps: tuple[np.ndarray, np.ndarray]
+    canvas: Layout
+    gutter: tuple[WidenPlan, WidenPlan] | None = None
+    unstretched: np.ndarray | None = None
 
     @property
     def before(self) -> TextMeasures:
@@ -283,7 +309,7 @@ def text_frame(
         pages = [PageState(m, c, b, None, None, 0, FieldMode.NONE, t, not f)
                  for m, c, b, t, f in zip(masks, colours, backgrounds, tints, full)]  # fmt: skip
         return TextResult(image, equalized, first, first, patches, layout, None, zero, pages, [[None] * n],
-                          [TextMeasures()], first_maps)  # fmt: skip
+                          [TextMeasures()], first_maps, layout)  # fmt: skip
     margin = mm_to_px_float(CROP_MARGIN_MM, dpi)
     boxes = [crop_box(rect, first.shape[:2], margin, layout.spine_x, i == 0) for i, rect in enumerate(layout.rects)]
     # Итерации: разбор текста на текущем итоге → поле-приращение → сложение с накопленным смещением. На сильно
@@ -314,13 +340,64 @@ def text_frame(
         total = add_displacement(total, increment.dense(layout.width, layout.height))
         maps = compose_maps(patches, layout, *total)
         current = rectify_image(equalized, maps, dpi)
+    canvas, gutter, unstretched = layout, None, None
+    if params.gutter_decompression and not layout.single:
+        # Растяжение у корешка — по итогу поля (строки горизонтальны): буквы → модели → планы с расширением.
+        px_per_mm = dpi / MM_PER_INCH
+        gutter = page_plans(current, layout, px_per_mm, tuple(not off for off in no_field), params.gutter_limits)
+        if gutter is not None and any(plan.applied for plan in gutter):
+            unstretched = current
+            canvas, shift = widen_displacement(gutter, layout, px_per_mm)
+            total = add_wide_displacement(total, shift)
+            # Кунс — по прежней раскладке: точки X' + D' лежат на холсте Кунса; ширина карты — расширенного холста.
+            maps = compose_maps(patches, replace(layout, width=canvas.width), *total)
+            current = rectify_image(equalized, maps, dpi)
+            # Итог разбирается заново на расширенном холсте (меры итога, оси строк листов); преграды правой
+            # страницы сдвигаются на сдвиг её внешнего края.
+            analyses[-1] = wide_analyses(current, layout, canvas, regions, no_field, dpi)
     pages = [PageState(m, c, b, pb, pa, n, f, t, not off)
              for m, c, b, pb, pa, n, f, t, off in zip(masks, colours, backgrounds, analyses[0], analyses[-1],
                                                       line_counts, modes, tints, full)]  # fmt: skip
     # Меры прямизны строк и сторон на каждом проходе — для шапки листа и сводки (дёшево против разбора).
     passes = [text_measures([p for p in pages_text if p is not None], dpi) for pages_text in analyses]
     return TextResult(image, equalized, first, current, patches, layout, field, total, pages, analyses, passes,
-                      maps)  # fmt: skip
+                      maps, canvas, gutter, unstretched)  # fmt: skip
+
+
+def shifted_region(region: PageRegion, dx: float) -> PageRegion:
+    """Область-преграда разбора, сдвинутая по x на ``dx`` px (рамка и многоугольник)."""
+    x0, y0, x1, y1 = region.box
+    polygon = None if region.polygon is None else np.asarray(region.polygon, np.float64) + np.array([dx, 0.0])
+    return replace(region, box=(x0 + dx, y0, x1 + dx, y1), polygon=polygon)
+
+
+def wide_analyses(image: np.ndarray, layout: Layout, canvas: Layout, regions: list[tuple[PageRegion, ...]],
+                  no_field: list[bool], dpi: float) -> list[PageText | None]:  # fmt: skip
+    """Разбор текста итога, растянутого у корешка, на расширенном холсте.
+
+    Args:
+        image: Итог на расширенном холсте.
+        layout: Раскладка Кунса.
+        canvas: Расширенная раскладка.
+        regions: Преграды разбора страниц на холсте Кунса.
+        no_field: Страницы без поля (не разбираются).
+        dpi: Разрешение.
+
+    Returns:
+        Разборы страниц (None — страница без поля).
+    """
+    margin = mm_to_px_float(CROP_MARGIN_MM, dpi)
+    out = []
+    for i, (rect, regs, off) in enumerate(zip(canvas.rects, regions, no_field)):
+        if off:
+            out.append(None)
+            continue
+        # Левая страница растёт к корешку (внешний край на месте), правая сдвинута целиком на W_L и растёт на W_R.
+        dx = 0.0 if i == 0 else rect.x1 - layout.rects[1].x1
+        moved = tuple(shifted_region(r, dx) for r in regs) if dx else regs
+        box = crop_box(rect, image.shape[:2], margin, canvas.spine_x, i == 0)
+        out.append(analyze_page(image, box, dpi, rect, moved))
+    return out
 
 
 def pass_samples(

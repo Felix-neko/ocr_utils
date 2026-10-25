@@ -60,7 +60,7 @@ def test_cut_pages_fills_to_rectangle():
     image = np.full((100, 200, 3), 230, np.uint8)
     # Правая страница темнее: закрас левой у кривого разреза не должен затянуть её краску.
     image[:, 100:] = 120
-    result = SimpleNamespace(layout=lay, dense=(dx, np.zeros_like(dx)), final=image)
+    result = SimpleNamespace(layout=lay, canvas=lay, dense=(dx, np.zeros_like(dx)), final=image)
     pages = cut_pages(result, [PagePart.LEFT, PagePart.RIGHT], 300.0, FillMethod.PULL_PUSH, 0.0)
     assert [p.part for p in pages] == [PagePart.LEFT, PagePart.RIGHT]
     left_img = pages[0].image

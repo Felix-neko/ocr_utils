@@ -74,6 +74,8 @@ TEXT_RECTIFIED_WORK="${TEXT_RECTIFIED_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames
 TEXT_RECTIFIED_V4_WORK="${TEXT_RECTIFIED_V4_WORK:-$SCAN_CROPPING_V2_ROOT/spline_frames_text_rectified_v4}"
 # Стенд «сжатие букв у корешка» (research/gutter_compression): окна строк, сводки, листы, выпрямление с растяжением — SSD.
 GUTTER_COMPRESSION_ROOT="${GUTTER_COMPRESSION_ROOT:-/mnt/hotstore/scan_processing/gutter_compression}"
+# Полные прогоны v2 с растяжением у корешка (run_v2_gutter_decompression.sh): итоги, страницы, копии кэшей — SSD.
+GUTTER_DECOMPRESSION_ROOT="${GUTTER_DECOMPRESSION_ROOT:-/mnt/hotstore/scan_processing/gutter_decompression_v2}"
 
 # Боевой прогон v2 пака-6 целиком (6-я версия ключей, 2026-10-15/16, 2480 кадров) — вход стенда research/page_cutting.
 PACK6_V6_WORK="$SCAN_CROPPING_V2_ROOT/pack6_v6"
