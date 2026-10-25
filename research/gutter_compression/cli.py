@@ -34,6 +34,7 @@ from research.gutter_compression.profile import (
     side_summary,
 )
 from research.gutter_compression.letters import page_words, paired_windows
+from research.gutter_compression.letter_fit import FitSource
 from research.gutter_compression.letter_profile import spread_letters
 from research.gutter_compression.run import StretchConfig, stretch_frame, summary_row, synth_frame, write_sheet
 from research.gutter_compression.stretch import StretchLimits, StretchMode
@@ -464,6 +465,10 @@ def stretch_one(args: tuple[FrameRef, StretchConfig, Path]) -> dict:
         path = out_dir / "windows" / label / f"{stem}.csv.gz"
         path.parent.mkdir(parents=True, exist_ok=True)
         table.to_csv(path, index=False, float_format="%.4g")
+    for label, table in (("before", out.letters_before), ("after", out.letters_after)):
+        path = out_dir / "letters" / label / f"{stem}.csv.gz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table.to_csv(path, index=False, float_format="%.4g")
     write_sheet(out_dir / "sheets" / f"{stem}.jpg", ref.key, out, ref.frame_set.px_per_mm)
     row["seconds"] = round(time.perf_counter() - t0, 1)
     return row
@@ -503,14 +508,20 @@ def stretch_one(args: tuple[FrameRef, StretchConfig, Path]) -> dict:
 @click.option("--spline-penalty", type=float, default=None,
               help="Амплитуда по высоте — P-сплайн с этим штрафом (шаг shape: 30 — не хуже линии на 99 % сжатых "
                    "сторон); только с --mode widen.")  # fmt: skip
+@click.option("--fit-source", type=click.Choice([f.value for f in FitSource]), default=FitSource.WINDOWS.value,
+              show_default=True,
+              help="По чему подгоняется модель: windows — окна 5 мм; letters — ширина каждой буквы, спад от начала зоны "
+                   "текста (только с --mode widen).")  # fmt: skip
 @click.option("--jobs", type=int, default=DEFAULT_JOBS, show_default=True, help="Воркеров пула.")
 def stretch_run(sets: tuple, key_files: tuple[Path, ...], out_dir: Path, method: str, tilt: bool, max_stretch: float,
                 edge_safety_mm: float, min_amplitude: float, min_excess_mm: float, far_mm: float,
                 position_bias: Path | None, max_body_squeeze: float, mode: str, tilt_max: float | None,
-                spline_penalty: float | None, jobs: int) -> None:  # fmt: skip
-    """Выпрямление с растяжением у корешка по множествам кадров: сводка, окна до/после, листы «было | стало»."""
+                spline_penalty: float | None, fit_source: str, jobs: int) -> None:  # fmt: skip
+    """Выпрямление с растяжением у корешка по множествам кадров: сводка, окна и буквы до/после, листы «было | стало»."""
     if spline_penalty is not None and StretchMode(mode) is not StretchMode.WIDEN:
         raise click.ClickException("--spline-penalty — только с --mode widen")
+    if FitSource(fit_source) is FitSource.LETTERS and StretchMode(mode) is not StretchMode.WIDEN:
+        raise click.ClickException("--fit-source letters — только с --mode widen")
     keys = read_keys(key_files)
     refs = {ref.key: ref for fs in parse_sets(sets) for ref in set_frames(fs)}
     missing = [k for k in keys if k not in refs]
@@ -520,9 +531,10 @@ def stretch_run(sets: tuple, key_files: tuple[Path, ...], out_dir: Path, method:
                         limits=StretchLimits(max_stretch, edge_safety_mm, min_amplitude, max_body_squeeze, min_excess_mm),
                         measure=MeasureParams(far_mm=far_mm),
                         bias=pd.read_csv(position_bias) if position_bias else None, mode=StretchMode(mode),
-                        tilt_max=tilt_max, spline_penalty=spline_penalty)  # fmt: skip
-    log.info("кадров: %d, мера %s, режим %s, наклон %s (предел %s), сплайн %s, пределы %s, поправка на место в строке "
-             "%s", len(keys), method, mode, tilt, tilt_max, spline_penalty, cfg.limits, position_bias)  # fmt: skip
+                        tilt_max=tilt_max, spline_penalty=spline_penalty, fit_source=FitSource(fit_source))  # fmt: skip
+    log.info("кадров: %d, мера %s, подгонка по %s, режим %s, наклон %s (предел %s), сплайн %s, пределы %s, поправка на "
+             "место в строке %s", len(keys), method, fit_source, mode, tilt, tilt_max, spline_penalty, cfg.limits,
+             position_bias)  # fmt: skip
     rows = []
     ctx = get_context("forkserver")
     with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx, initializer=init_worker) as pool:

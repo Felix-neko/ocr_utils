@@ -22,6 +22,8 @@ from ocr_utils.scan_cropping.v2.rectify.text_field import (
 from ocr_utils.scan_cropping.v2.rectify.text_run import TextParams, TextResult, add_displacement, text_frame
 from ocr_utils.units import mm_to_px_float
 from research.gutter_compression.frames import FrameRef, frame_geometry
+from research.gutter_compression.letter_fit import MIN_LETTERS, FitSource, fit_letters, letter_data, letter_summary
+from research.gutter_compression.letter_profile import spread_letters
 from research.gutter_compression.measure import Method, MeasureParams, Side, spread_windows
 from research.gutter_compression.profile import MIN_LINES, CompressionModel, correct_position, fit_model, side_summary
 from research.gutter_compression.shape import MIN_WINDOWS, HeightShape, fit_shape, side_data
@@ -56,6 +58,9 @@ class StretchConfig:
         tilt_max: Предел модуля наклона амплитуды по высоте или None — ``profile.TILT_MAX`` (0.3).
         spline_penalty: Амплитуда по высоте — P-сплайн с этим штрафом (``shape.fit_shape``) или None — линия
             (``use_tilt``) либо константа. Только для режима ``widen``.
+        fit_source: По чему подгоняется модель: окна 5 мм или ширина букв (только ``widen``). По буквам спад
+            отсчитывается от начала зоны текста (наименьшее ``e₀`` стороны), а не от медианного края: полосы
+            постоянного сжатия ``[e₀, e]`` нет.
     """
 
     method: Method = Method.ACF
@@ -67,6 +72,7 @@ class StretchConfig:
     mode: StretchMode = StretchMode.SHIFT
     tilt_max: float | None = None
     spline_penalty: float | None = None
+    fit_source: FitSource = FitSource.WINDOWS
 
 
 Plan = SidePlan | WidenPlan
@@ -90,6 +96,8 @@ class StretchResult:
         measures_after: То же с растяжением (разбор итога заново).
         dx_max_mm: Наибольший |dx| растяжения, мм.
         wide: Раскладка холста итога с растяжением (в режиме ``widen`` — шире раскладки Кунса).
+        letters_before: Буквы строк до растяжения (``letter_profile.spread_letters``).
+        letters_after: Буквы строк после.
     """
 
     result: TextResult
@@ -101,16 +109,20 @@ class StretchResult:
     measures_after: TextMeasures
     dx_max_mm: float
     wide: Layout
+    letters_before: pd.DataFrame
+    letters_after: pd.DataFrame
 
 
-def side_plans(table: pd.DataFrame, result: TextResult, px_per_mm: float, cfg: StretchConfig) -> tuple[Plan, Plan]:
-    """Модели сжатия и планы растяжения обеих страниц по окнам строк итога (режим — ``cfg.mode``).
+def side_plans(table: pd.DataFrame, result: TextResult, px_per_mm: float, cfg: StretchConfig,
+               letters: pd.DataFrame | None = None) -> tuple[Plan, Plan]:  # fmt: skip
+    """Модели сжатия и планы растяжения обеих страниц по окнам или буквам строк итога (режим — ``cfg.mode``).
 
     Args:
-        table: Окна строк итога без растяжения.
+        table: Окна строк итога без растяжения (зона текста, внешний край; модель — при ``cfg.fit_source`` WINDOWS).
         result: Выпрямление.
         px_per_mm: Плотность, px/мм.
         cfg: Параметры.
+        letters: Буквы строк итога без растяжения (нужны при ``cfg.fit_source`` LETTERS).
 
     Returns:
         Планы левой и правой страницы.
@@ -124,12 +136,22 @@ def side_plans(table: pd.DataFrame, result: TextResult, px_per_mm: float, cfg: S
         if len(part) == 0:
             plans.append(planner(CompressionModel(), width_mm, 0.0, cfg.limits))
             continue
+        starts, y_range = text_zone(part, rect)
+        if cfg.fit_source is FitSource.LETTERS:
+            # Спад — от начала зоны текста: концы строк ближе медианного края растягиваются по модели, а не
+            # постоянным сжатием у медианного края (07/IMG_0078 L: полоса 1.25–2.38 мм давала половину прибавки).
+            origin = min(starts)
+            own = letters[letters.side == side.value] if letters is not None and len(letters) else pd.DataFrame()
+            model = letter_side_model(own, rect.y0, rect.height, px_per_mm, origin, cfg)
+            outer = float(part.outer_mm.quantile(0.9)) if "outer_mm" in part else None
+            plans.append(plan_widen(model, width_mm, origin, cfg.limits, outer, starts, y_range))
+            continue
         model = side_model(part, rect.y0, rect.height, cfg)
         # Внешний край текста — 90-й перцентиль внешних концов строк (короткие строки концов абзацев его не задают).
         outer = float(part.outer_mm.quantile(0.9)) if "outer_mm" in part else None
         edge = float(part.edge_mm.median())
         if cfg.mode is StretchMode.WIDEN:
-            plans.append(plan_widen(model, width_mm, edge, cfg.limits, outer, *text_zone(part, rect)))
+            plans.append(plan_widen(model, width_mm, edge, cfg.limits, outer, starts, y_range))
         else:
             plans.append(plan_side(model, width_mm, edge, cfg.limits, outer))
     return plans[0], plans[1]
@@ -184,6 +206,39 @@ def side_model(part: pd.DataFrame, page_top: float, page_height: float, cfg: Str
     fit = fit_shape(data.x, data.y, data.r, HeightShape.SPLINE, cfg.spline_penalty)
     return CompressionModel(float(fit.amplitude(0.5)), fit.length_mm, 0.0, fit.windows, lines, fit.residual, edge,
                             fit.coef)  # fmt: skip
+
+
+def letter_side_model(letters: pd.DataFrame, page_top: float, page_height: float, px_per_mm: float,
+                      origin_mm: float, cfg: StretchConfig) -> CompressionModel:  # fmt: skip
+    """Модель сжатия стороны по ширине букв (``letter_fit.fit_letters``): амплитуда по высоте — P-сплайн, линия или
+    константа, как у :func:`side_model`.
+
+    Args:
+        letters: Буквы стороны.
+        page_top: Верх страницы на холсте, px.
+        page_height: Высота страницы, px.
+        px_per_mm: Плотность, px/мм.
+        origin_mm: Начало спада от корешка (начало зоны текста), мм.
+        cfg: Параметры.
+
+    Returns:
+        Модель с ``edge_mm`` = ``origin_mm`` (нулевая — букв или строк мало).
+    """
+    lines = int(letters.line.nunique()) if len(letters) else 0
+    data = letter_data(letters, page_top, page_height, px_per_mm) if len(letters) else None
+    if data is None or lines < MIN_LINES or len(data.r) < MIN_LETTERS:
+        return CompressionModel(windows=0 if data is None else len(data.r), lines=lines, edge_mm=origin_mm)
+    if cfg.spline_penalty is not None:
+        shape = HeightShape.SPLINE
+    else:
+        shape = HeightShape.LINEAR if cfg.use_tilt else HeightShape.CONST
+    fit = fit_letters(data, shape, origin_mm, cfg.spline_penalty or 0.0)
+    if shape is HeightShape.SPLINE:
+        return CompressionModel(float(fit.amplitude(0.5)), fit.length_mm, 0.0, fit.windows, lines, fit.residual,
+                                origin_mm, fit.coef)  # fmt: skip
+    # Линия Лежандра по z = 2y − 1: B(y) = c₀ + c₁·(2y − 1), то есть амплитуда в середине c₀ и наклон 2·c₁.
+    tilt = 2.0 * fit.coef[1] if shape is HeightShape.LINEAR else 0.0
+    return CompressionModel(fit.coef[0], fit.length_mm, tilt, fit.windows, lines, fit.residual, origin_mm)
 
 
 def shifted_region(region: PageRegion, dx: float) -> PageRegion:
@@ -258,7 +313,8 @@ def stretch_frame(ref: FrameRef, cfg: StretchConfig) -> StretchResult:
     layout = result.layout
     gray = cv2.cvtColor(result.final, cv2.COLOR_BGR2GRAY)
     before = correct_position(spread_windows(gray, layout.rects, layout.spine_x, ppm, cfg.measure), cfg.bias)
-    plans = side_plans(before, result, ppm, cfg)
+    letters_before = spread_letters(gray, layout.rects, layout.spine_x, ppm, cfg.measure)
+    plans = side_plans(before, result, ppm, cfg, letters_before)
     if cfg.mode is StretchMode.WIDEN:
         # Холст итога шире раскладки Кунса; Кунс считается по прежней раскладке (точки X' + D' — в её координатах).
         wide, dx = widen_displacement(plans, layout, ppm)
@@ -274,13 +330,12 @@ def stretch_frame(ref: FrameRef, cfg: StretchConfig) -> StretchResult:
         maps = compose_maps(result.patches, layout, *total)
         moved = np.abs(dx)
     stretched = rectify_image(result.equalized, maps, dpi)
-    after = correct_position(
-        spread_windows(cv2.cvtColor(stretched, cv2.COLOR_BGR2GRAY), wide.rects, wide.spine_x, ppm, cfg.measure),
-        cfg.bias,
-    )
+    gray_after = cv2.cvtColor(stretched, cv2.COLOR_BGR2GRAY)
+    after = correct_position(spread_windows(gray_after, wide.rects, wide.spine_x, ppm, cfg.measure), cfg.bias)
+    letters_after = spread_letters(gray_after, wide.rects, wide.spine_x, ppm, cfg.measure)
     measures_after = reanalyze(stretched, result, dpi, wide if wide is not layout else None)
     return StretchResult(result, stretched, plans, before, after, result.after, measures_after,
-                         float(moved.max()) / ppm, wide)  # fmt: skip
+                         float(moved.max()) / ppm, wide, letters_before, letters_after)  # fmt: skip
 
 
 def summary_row(key: str, out: StretchResult) -> dict:
@@ -314,6 +369,10 @@ def summary_row(key: str, out: StretchResult) -> dict:
                 summ = side_summary(part)
                 row.update({f"{p}_{label}_{k}": summ[k] for k in ("near_acf", "near_stem", "near_comp", "near_height",
                                                                   "mid_acf", "edge_mm")})  # fmt: skip
+        # Ширина букв у края до и после — прямая проверка растяжения, не зависящая от окон.
+        for label, letters in (("before", out.letters_before), ("after", out.letters_after)):
+            part = letters[letters.side == p] if len(letters) else letters
+            row.update({f"{p}_{label}_{k}": v for k, v in letter_summary(part).items()})
     row["canvas_widen_px"] = out.wide.width - out.result.layout.width
     row.update(out.measures_before.row("lines_before_"))
     row.update(out.measures_after.row("lines_after_"))
