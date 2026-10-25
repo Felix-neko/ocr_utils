@@ -5,6 +5,10 @@
 стороны (``page_boundary.fit_side``, ``FitKind.SPLINE``) на том же участке. Справочные — p90 отклонения от сплайна,
 доля длины с отклонением больше :data:`SPIKE_MM`, наибольшие выбросы наружу и внутрь. Отсмотр по поясам
 (ПХ 1975, ХиП-1991, пак-6; ai_slop/stack_edges/ragged.py): до 1,02 ровно, 1,03–1,05 смешано, от 1,05 почти всё рваное.
+
+Вторая мера — ступенчатость: наибольший перепад кромки между соседними участками стороны (прямые по окнам
+:data:`STEP_WIN_MM` по обе стороны точки). Ловит перескок сегментации с края одного листа «веера» на другой: ровная в
+остальном кромка с одной ступенью в 3–4 мм даёт извилистость около 1,04 — ниже порога (ХиП 1991/01 IMG_1017 L).
 """
 
 from __future__ import annotations
@@ -29,6 +33,17 @@ END_SHARE = 0.05
 GAP_MM = 2.0
 # Меньше годных точек на стороне — меры нет.
 MIN_POINTS = 50
+# Ступенчатость: по обе стороны точки стороны — окна STEP_WIN_MM вдоль стороны через промежуток STEP_GAP_MM; в каждом
+# окне — прямая МНК по точкам кромки (второй проход — без точек дальше STEP_CLIP_MM от первой прямой: языки и выемки
+# короче окна не сдвигают её); ступень — разность значений двух прямых в точке. Окно годно, если в нём точек не меньше
+# доли STEP_COVER от плотной кромки (палец, рамка). Порог RAGGED_STEP_MM: ступень веера на ХиП 1991/01 IMG_1017 L —
+# 3.5 мм; плавный изгиб кромки (прогиб до 5 мм на 200 мм) прямые по окнам почти не замечают.
+STEP_WIN_MM = 10.0
+STEP_GAP_MM = 2.0
+STEP_CLIP_MM = 1.0
+STEP_COVER = 0.5
+STEP_GRID_MM = 0.5
+RAGGED_STEP_MM = 2.0
 
 
 @dataclass(frozen=True)
@@ -44,6 +59,7 @@ class RaggedMeasure:
         out_max_mm: Наибольший выброс контура наружу от сплайна (язык), мм.
         in_max_mm: Наибольший выброс внутрь (выемка), мм.
         length_mm: Длина стороны трапеции, мм.
+        step_mm: Ступенчатость — наибольший перепад кромки между соседними участками стороны (:func:`step_of`), мм.
     """
 
     tortuosity: float
@@ -54,6 +70,7 @@ class RaggedMeasure:
     out_max_mm: float
     in_max_mm: float
     length_mm: float
+    step_mm: float = float("nan")
 
     @property
     def ragged(self) -> bool:
@@ -61,17 +78,68 @@ class RaggedMeasure:
         return is_ragged(self)
 
 
-def is_ragged(m: RaggedMeasure | None, threshold: float = RAGGED_TORTUOSITY) -> bool:
+def is_ragged(m: RaggedMeasure | None, threshold: float = RAGGED_TORTUOSITY,
+              step_threshold: float = RAGGED_STEP_MM) -> bool:  # fmt: skip
     """Рваная ли сторона.
 
     Args:
         m: Меры стороны или None (мерить было нечего).
         threshold: Порог извилистости.
+        step_threshold: Порог ступенчатости, мм.
 
     Returns:
-        True — извилистость не ниже порога; без меры — False.
+        True — извилистость не ниже порога или ступенчатость не ниже своего порога; без меры — False.
     """
-    return m is not None and np.isfinite(m.tortuosity) and m.tortuosity >= threshold
+    if m is None:
+        return False
+    tortuous = np.isfinite(m.tortuosity) and m.tortuosity >= threshold
+    stepped = np.isfinite(m.step_mm) and m.step_mm >= step_threshold
+    return bool(tortuous or stepped)
+
+
+def window_line(s: np.ndarray, d: np.ndarray, at: float) -> float:
+    """Значение в точке ``at`` робастной прямой по точкам окна (МНК, второй проход без точек дальше
+    :data:`STEP_CLIP_MM` от первой прямой).
+
+    Args:
+        s: Положение точек вдоль стороны, мм.
+        d: Отклонение кромки от прямой стороны, мм.
+        at: Где взять значение прямой, мм.
+
+    Returns:
+        Значение прямой в ``at``, мм.
+    """
+    coef = np.polyfit(s - at, d, 1)
+    keep = np.abs(d - np.polyval(coef, s - at)) <= STEP_CLIP_MM
+    if keep.sum() >= 3:
+        coef = np.polyfit(s[keep] - at, d[keep], 1)
+    return float(coef[1])
+
+
+def step_of(s: np.ndarray, d: np.ndarray, px_per_mm: float) -> float:
+    """Ступенчатость кромки: наибольший перепад между прямыми по соседним окнам вдоль стороны, мм.
+
+    Args:
+        s: Положение годных точек кромки вдоль стороны, мм (любой порядок).
+        d: Отклонение кромки от прямой стороны в этих точках, мм.
+        px_per_mm: Масштаб маски, px/мм (плотность точек контура — около одной на пиксель длины).
+
+    Returns:
+        Перепад, мм; окон с точками нет — NaN.
+    """
+    order = np.argsort(s)
+    s, d = s[order], d[order]
+    need = max(5, int(STEP_COVER * STEP_WIN_MM * px_per_mm))
+    half = STEP_GAP_MM / 2
+    best = float("nan")
+    for at in np.arange(s[0] + half + STEP_WIN_MM, s[-1] - half - STEP_WIN_MM, STEP_GRID_MM):
+        lo = slice(*np.searchsorted(s, [at - half - STEP_WIN_MM, at - half]))
+        hi = slice(*np.searchsorted(s, [at + half, at + half + STEP_WIN_MM]))
+        if lo.stop - lo.start < need or hi.stop - hi.start < need:
+            continue
+        step = abs(window_line(s[hi], d[hi], at) - window_line(s[lo], d[lo], at))
+        best = step if not np.isfinite(best) else max(best, step)
+    return best
 
 
 def measure_far_side(
@@ -98,6 +166,9 @@ def measure_far_side(
     # Остаток от сплайна, мм: плюс — контур внутри кривой (выемка), минус — наружу (язык).
     r = (d - curve.offset(t)) / px_per_mm
     length_mm = float(np.linalg.norm(prof.b - prof.a)) / px_per_mm
+    # Ступенчатость — по средним 1 − 2·END_SHARE стороны (у углов контур уходит на верх и низ).
+    mid = (t >= END_SHARE) & (t <= 1 - END_SHARE)
+    step = step_of(t[mid] * length_mm, d[mid] / px_per_mm, px_per_mm) if mid.sum() >= MIN_POINTS else float("nan")
     path_mm, spline_mm = contour_lengths(mask, quad, spine_right, exclude, curve, px_per_mm)
     return RaggedMeasure(
         tortuosity=path_mm / spline_mm if spline_mm > 0 else float("nan"),
@@ -108,6 +179,7 @@ def measure_far_side(
         out_max_mm=float(-r.min()),
         in_max_mm=float(r.max()),
         length_mm=length_mm,
+        step_mm=step,
     )
 
 

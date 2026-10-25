@@ -57,7 +57,13 @@ from ocr_utils.scan_cropping.v2.keystone import plan_warp, unwarp_polygons, warp
 from ocr_utils.scan_cropping.v2.overlay import OverlayTag, overlay_path
 from ocr_utils.scan_cropping.v2.page_boundary import FitKind, PageBoundary, fit_boundary
 from ocr_utils.scan_cropping.v2.edge_zones import merge_levels, outer_zones, union_levels_edges
-from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_TORTUOSITY, is_ragged, measure_far_side, page_raw_mask
+from ocr_utils.scan_cropping.v2.ragged_edge import (
+    RAGGED_STEP_MM,
+    RAGGED_TORTUOSITY,
+    is_ragged,
+    measure_far_side,
+    page_raw_mask,
+)
 from ocr_utils.scan_cropping.v2.gutter_strip import Strip, find_strip, spine_line, strip_paper
 from ocr_utils.scan_cropping.v2.page_frames import (
     PageFrame,
@@ -187,6 +193,7 @@ class RunParams:
         refine_ragged: Тонкое уточнение рваных внешних сторон страниц разворота (``ragged_edge`` — детектор по сырой
             маске SAM 3, ``edge_refine`` — сегментация ленты вдоль стороны в полном разрешении).
         ragged_threshold: Порог извилистости сырой маски SAM 3 для детектора рваной стороны.
+        ragged_step_mm: Порог ступенчатости той же кромки (перескок на край другого листа веера), мм.
         output_pages: Папка выхода страниц (``rectify``): итог кадра выпрямляется (Кунс + поле по тексту), режется по
             кривой линии разреза на страницы ``<кадр>_L`` / ``<кадр>_R`` (``_LR`` — без разреза), каждая
             закрашивается до прямоугольника; None — выхода страниц нет.
@@ -241,8 +248,9 @@ class RunParams:
     sam3_levels: bool = False
     dual_levels: bool = True
     levels_edges: bool = True
-    refine_ragged: bool = False
+    refine_ragged: bool = True
     ragged_threshold: float = RAGGED_TORTUOSITY
+    ragged_step_mm: float = RAGGED_STEP_MM
     output_pages: Path | None = None
     use_flags: bool = True
     rectify_passes: int = 3
@@ -1070,7 +1078,7 @@ def cpu_pages(args: tuple[FrameJob, RunParams]) -> str:
         masks = replace(masks, paper=side.paper, side_added=side.added | edge_added, side_cut=side.cut)
         pages = frame_pages(img, book, sam3, paint_seg, masks, job.flags)
     if params.refine_ragged:
-        mark_ragged(work, sam3["raw"], pages, paint_seg, params.ragged_threshold)
+        mark_ragged(work, sam3["raw"], pages, paint_seg, params.ragged_threshold, params.ragged_step_mm)
     save_pages(work, masks, pages)
     save_layout_frames(work, params, img, book, masks, paint_seg, job.flags)
     return job.key
@@ -1094,7 +1102,12 @@ def save_pages(work: WorkPaths, masks: PaperMasks, pages: list[PageQuad]) -> Non
 
 
 def mark_ragged(
-    work: WorkPaths, raw: np.ndarray, pages: list[PageQuad], paint_seg: np.ndarray, threshold: float
+    work: WorkPaths,
+    raw: np.ndarray,
+    pages: list[PageQuad],
+    paint_seg: np.ndarray,
+    threshold: float,
+    step_threshold: float = RAGGED_STEP_MM,
 ) -> list[int]:
     """Детектор рваных внешних сторон разворота по сырой маске SAM 3 → ``ragged.json`` и вход уточнения.
 
@@ -1107,6 +1120,7 @@ def mark_ragged(
         pages: Страницы кадра.
         paint_seg: Зона закраса пальцев (точки там не меряются).
         threshold: Порог извилистости.
+        step_threshold: Порог ступенчатости, мм (``ragged_edge.step_of``).
 
     Returns:
         Номера рваных страниц (0 — левая, 1 — правая).
@@ -1120,7 +1134,7 @@ def mark_ragged(
         for i, name in ((0, "L"), (1, "R")):
             mask = page_raw_mask(raw, two[i].mask, two[1 - i].mask, SEG_PX_PER_MM)
             m = measure_far_side(mask, two[i].quad, i == 0, paint_seg, SEG_PX_PER_MM)
-            ragged = is_ragged(m, threshold)
+            ragged = is_ragged(m, threshold, step_threshold)
             report["sides"].append({"page": name, "ragged": ragged, **({k: round(float(v), 4)
                                     for k, v in asdict(m).items()} if m else {})})  # fmt: skip
             if ragged:
@@ -1159,7 +1173,8 @@ def gpu_refine(job: FrameJob, refiner, params: RunParams) -> None:
         side = {"page": "LR"[i], "chosen": res.chosen, "full_set": res.full_set, "status": res.status,
                 "finger_share": round(res.finger_share, 3),
                 "methods": {n: {"cover": round(r.cover, 3), "rough_mm": round(r.rough_mm, 3), "step_mm": round(r.step_mm, 2),
-                                "ink_out_mm2": round(r.ink_out_mm2, 2), "missed_chunks": r.missed_chunks,
+                                "ink_out_mm2": round(r.ink_out_mm2, 2), "fan_share": round(r.fan_share, 3),
+                                "missed_chunks": r.missed_chunks,
                                 "miss": r.miss, "accepted": r.accepted} for n, r in res.results.items()}}  # fmt: skip
         report["sides"].append(side)
         if res.edge is not None:

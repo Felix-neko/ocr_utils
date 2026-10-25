@@ -33,8 +33,19 @@ COLUMN_TOL_MM = 3.5
 # тренд даёт блок из строк с разным отступом — ячейка таблицы с центрованными строками «млн. руб. / тыс. руб. / и в
 # нату- / ральном / выражении» (ПХ 1974/01 IMG_0029: левые стороны трёх ячеек 3–5° по 12 мм, вместе длиннее 25 мм —
 # общая цель), висячий отступ абзаца, центрованный текст (ХиП 1991/03 и 04 IMG_0152, 7°). Сведённая в вертикаль, такая
-# сторона за 3 мм от линейки таблицы гнула её волной 0.74 мм.
-SIDE_MAX_TILT_DEG = 3.0
+# сторона за 3 мм от линейки таблицы гнула её волной 0.74 мм. Предел поднят с 3° до 6° (решение пользователя
+# 2026-10-25: после Кунса бывают и более наклонные настоящие отбивки — ХиП 1991/01 IMG_1017 L, 3.3°); ячейки таблиц
+# 3–5° теперь проходят — следить за волной линеек таблиц у таких сторон.
+SIDE_MAX_TILT_DEG = 6.0
+# Исключение — длинная сторона блока, выключенного по формату (обе стороны выровнены, почти все ряды на огибающей):
+# наклон у неё — недовыпрямленный Кунсом лист, а не разный отступ строк, и поле должно свести её в вертикаль.
+# ХиП 1991/01 IMG_1017 L: левая сторона блока из 35 рядов прямая (ряды ±0.2 мм от тренда), но наклонена на 3.3°
+# (6.9 → 14.0 мм за 124 мм) при отвесной правой — отбрасывалась, и левая отбивка оставалась наклонной в итоге.
+# Ложные наклонные стороны (ячейки таблиц по 12 мм, висячий отступ, центрованный текст) короче или не выключены по
+# формату.
+JUSTIFIED_SIDE_MIN_MM = 50.0
+JUSTIFIED_CORE_SHARE = 0.8
+JUSTIFIED_MAX_TILT_DEG = 10.0
 # Шаг выборок вдоль оси или стороны, мм; на концах — гуще: самые сильные изгибы строк — на концах, у корешка лист
 # уходит в сгиб на последних 3–5 мм (ХиП 1991/01 IMG_1057), и выборки через 3 мм от начала оси до конца не дотягивались.
 SAMPLE_STEP_MM = 3.0
@@ -1218,7 +1229,8 @@ def aligned_sides(page: PageText, dpi: float) -> list[tuple[int, np.ndarray]]:
 
     Сторона — гладкий тренд по телу блока (``core_left``/``core_right``), без недостоверных участков (``unreliable_*``
     — ступеньки по выносам), не короче :data:`MIN_SIDE_MM` и не наклоннее :data:`SIDE_MAX_TILT_DEG` (наклонный тренд —
-    блок из строк с разным отступом, а не отбивка).
+    блок из строк с разным отступом, а не отбивка). У длинной стороны блока, выключенного по формату
+    (:func:`side_tilt_limit`), предел наклона — :data:`JUSTIFIED_MAX_TILT_DEG`.
 
     Args:
         page: Разбор страницы.
@@ -1246,9 +1258,31 @@ def aligned_sides(page: PageText, dpi: float) -> list[tuple[int, np.ndarray]]:
                 continue
             pts = page.to_canvas(pts)
             pts = pts[outside(pts, zones, margin)]
-            if len(pts) >= 2 and np.ptp(pts[:, 1]) >= min_len and side_tilt(pts) <= SIDE_MAX_TILT_DEG:
+            if len(pts) < 2 or np.ptp(pts[:, 1]) < min_len:
+                continue
+            if side_tilt(pts) <= side_tilt_limit(alignment, stats, float(np.ptp(pts[:, 1])), dpi):
                 sides.append((which, pts[np.argsort(pts[:, 1])]))
     return sides
+
+
+def side_tilt_limit(alignment, stats, length_px: float, dpi: float) -> float:
+    """Предел наклона выровненной стороны блока, градусы.
+
+    Args:
+        alignment: Выключка блока (``text_blocks.alignment.Alignment``: ``left``, ``right``).
+        stats: Меры этой стороны (``SideStats``: ``aligned``, ``core_share``).
+        length_px: Длина стороны по высоте на холсте, px.
+        dpi: Разрешение холста.
+
+    Returns:
+        :data:`JUSTIFIED_MAX_TILT_DEG` — блок выключен по формату (обе стороны выровнены), доля рядов на огибающей
+        этой стороны не меньше :data:`JUSTIFIED_CORE_SHARE` и сторона не короче :data:`JUSTIFIED_SIDE_MIN_MM`;
+        иначе :data:`SIDE_MAX_TILT_DEG`.
+    """
+    justified = alignment.left.aligned and alignment.right.aligned and stats.core_share >= JUSTIFIED_CORE_SHARE
+    if justified and length_px >= mm_to_px_float(JUSTIFIED_SIDE_MIN_MM, dpi):
+        return JUSTIFIED_MAX_TILT_DEG
+    return SIDE_MAX_TILT_DEG
 
 
 def side_tilt(points: np.ndarray) -> float:

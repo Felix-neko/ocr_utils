@@ -298,8 +298,28 @@ def test_side_tilt_rejects_slanted_sides():
 
     ys = np.linspace(0, 300, 20)
     upright = np.stack([100 + 0.01 * ys, ys], 1)  # 0.6° — настоящая отбивка
-    slanted = np.stack([100 + 0.08 * ys, ys], 1)  # 4.6° — центрованные строки ячейки
-    assert side_tilt(upright) <= SIDE_MAX_TILT_DEG < side_tilt(slanted)
+    tilted = np.stack([100 + 0.058 * ys, ys], 1)  # 3.3° — недовыпрямленная Кунсом отбивка (ХиП 1991/01 IMG_1017 L)
+    slanted = np.stack([100 + 0.15 * ys, ys], 1)  # 8.5° — центрованный текст
+    assert side_tilt(upright) <= SIDE_MAX_TILT_DEG
+    assert side_tilt(tilted) <= SIDE_MAX_TILT_DEG < side_tilt(slanted)
+
+
+def test_justified_long_side_allows_more_tilt():
+    """Длинная сторона блока, выключенного по формату, проходит с наклоном до 10°; короткая или блок без выключки
+    по формату — до 6°."""
+    from types import SimpleNamespace
+
+    from ocr_utils.scan_cropping.v2.rectify.text_field import JUSTIFIED_MAX_TILT_DEG, SIDE_MAX_TILT_DEG, side_tilt_limit
+
+    dpi = 600.0
+    side = SimpleNamespace(aligned=True, core_share=1.0)
+    ragged = SimpleNamespace(aligned=False, core_share=0.3)
+    both = SimpleNamespace(left=side, right=side)
+    one = SimpleNamespace(left=side, right=ragged)
+    long_px, short_px = 120 * dpi / 25.4, 20 * dpi / 25.4
+    assert side_tilt_limit(both, side, long_px, dpi) == JUSTIFIED_MAX_TILT_DEG
+    assert side_tilt_limit(both, side, short_px, dpi) == SIDE_MAX_TILT_DEG
+    assert side_tilt_limit(one, side, long_px, dpi) == SIDE_MAX_TILT_DEG
 
 
 def test_raised_start_span_superscript():

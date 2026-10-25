@@ -65,6 +65,13 @@ INK_OUT_MM2 = 5.0
 STEP_WIN_MM = 4.0
 STEP_GAP_MM = 3.0
 STEP_MAX_MM = 1.0
+# Веер: край способа со ступенями (соседние куски ленты легли на края разных листов) сводится к одному листу, если
+# самый длинный участок без ступеней (ступень — как у :func:`step_mm`, больше STEP_MAX_MM) занимает не меньше
+# FAN_TRACK_SHARE годных строк стороны: остальные строки — продолжение участка прямой МНК по его концевым FAN_FIT_MM.
+# ХиП 1991/01 IMG_1017 L: все 8 способов держали один из двух прямых краёв веера на 85–90 % длины, но у угла
+# (9–13 % или 92 % длины) кусок перескакивал на другой лист со ступенью 2.8–5 мм — и ни один способ не принимался.
+FAN_TRACK_SHARE = 0.6
+FAN_FIT_MM = 30.0
 # Согласие: способ годен для выбора, если его край в пределах AGREE_MM от медианы принятых (по медиане строк).
 AGREE_MM = 2.0
 # Промах способа целиком: покрытие длины меньше этого.
@@ -173,6 +180,7 @@ class MethodResult:
         rough_mm: p90 отклонения края от медианы окна :data:`MED_MM`, мм.
         step_mm: Наибольшая ступень края (:func:`step_mm`), мм.
         ink_out_mm2: Краска своей страницы за краем (снаружи новой маски), мм².
+        fan_share: Доля годных строк, заменённых продолжением участка одного листа веера (:func:`fan_track`).
         missed_chunks: Кусков с промахом (пустая маска, маска без столбца страницы, маска «всё» по ленте).
         miss: Промах способа целиком (покрытие меньше :data:`MISS_COVER`).
         accepted: Прошёл приёмку.
@@ -184,6 +192,7 @@ class MethodResult:
     rough_mm: float = float("nan")
     step_mm: float = float("nan")
     ink_out_mm2: float = float("nan")
+    fan_share: float = 0.0
     missed_chunks: int = 0
     miss: bool = False
     accepted: bool = False
@@ -281,6 +290,76 @@ def step_mm(edge: np.ndarray, ppm: float) -> float:
     med = ndi.median_filter(u, size=max(3, int(round(STEP_WIN_MM * ppm)) | 1), mode="nearest")
     gap = max(1, int(round(STEP_GAP_MM * ppm)))
     return float(np.abs(med[2 * gap :] - med[: -2 * gap]).max() / ppm) if len(med) > 2 * gap else 0.0
+
+
+def step_profile(edge: np.ndarray, ppm: float) -> np.ndarray:
+    """Перепад медиан окна :data:`STEP_WIN_MM` до и после каждой строки через :data:`STEP_GAP_MM`, мм (как
+    :func:`step_mm`, но по строкам; пропуски — интерполяцией, у концов — 0).
+
+    Args:
+        edge: Край по строкам (NaN — нет).
+        ppm: Масштаб ленты, px/мм.
+
+    Returns:
+        Перепад по строкам, мм (той же длины, что ``edge``).
+    """
+    out = np.zeros(len(edge))
+    ok = np.isfinite(edge)
+    if ok.sum() < 2:
+        return out
+    idx = np.arange(len(edge))
+    u = np.interp(idx, idx[ok], edge[ok])
+    med = ndi.median_filter(u, size=max(3, int(round(STEP_WIN_MM * ppm)) | 1), mode="nearest")
+    gap = max(1, int(round(STEP_GAP_MM * ppm)))
+    if len(med) > 2 * gap:
+        out[gap : len(med) - gap] = np.abs(med[2 * gap :] - med[: -2 * gap]) / ppm
+    return out
+
+
+def fan_track(edge: np.ndarray, valid: np.ndarray, ppm: float) -> tuple[np.ndarray, float]:
+    """Край способа, сведённый к одному листу веера: самый длинный участок без ступеней и его продолжение.
+
+    Ступени — строки с перепадом (:func:`step_profile`) больше :data:`STEP_MAX_MM`; каждая связная полоса таких строк
+    режет край в строке наибольшего перепада. Участок — строки между резами. Если самый длинный участок занимает не
+    меньше :data:`FAN_TRACK_SHARE` годных строк (``valid``), строки вне его заменяются прямой МНК по концевым
+    :data:`FAN_FIT_MM` участка (лист веера прямой); иначе край не меняется.
+
+    Args:
+        edge: Край по строкам (NaN — нет).
+        valid: Строки, где край нужен (без пальца и концов стороны).
+        ppm: Масштаб ленты, px/мм.
+
+    Returns:
+        (край, доля годных строк, заменённых продолжением; 0 — край не менялся).
+    """
+    st = step_profile(edge, ppm)
+    over = st > STEP_MAX_MM
+    if not over.any() or not valid.any():
+        return edge, 0.0
+    # Резы — строка наибольшего перепада в каждой связной полосе ступеней.
+    labels, n = ndi.label(over)
+    cuts = sorted(int(np.flatnonzero(labels == k)[np.argmax(st[labels == k])]) for k in range(1, n + 1))
+    bounds = [0] + cuts + [len(edge)]
+    segments = [(a, b) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
+    lo, hi = max(segments, key=lambda ab: int((valid[ab[0] : ab[1]] & np.isfinite(edge[ab[0] : ab[1]])).sum()))
+    keep = np.zeros(len(edge), bool)
+    keep[lo:hi] = True
+    good = valid & np.isfinite(edge)
+    if (keep & good).sum() < FAN_TRACK_SHARE * good.sum():
+        return edge, 0.0
+    out = edge.copy()
+    fit = max(2, int(round(FAN_FIT_MM * ppm)))
+    rows = np.arange(len(edge))
+    for side_rows, span in ((rows[:lo], slice(lo, min(lo + fit, hi))), (rows[hi:], slice(max(hi - fit, lo), hi))):
+        if len(side_rows) == 0:
+            continue
+        r, e = rows[span], edge[span]
+        ok = np.isfinite(e)
+        if ok.sum() < 2:
+            continue
+        out[side_rows] = np.polyval(np.polyfit(r[ok], e[ok], 1), side_rows)
+    replaced = good & ~keep
+    return out, float(replaced.sum() / good.sum())
 
 
 class Refiner:
@@ -430,6 +509,14 @@ def judge(res: MethodResult, finger_rows: np.ndarray, ink_band: np.ndarray, ppm:
     valid = ~finger_rows
     valid[:cut] = False
     valid[len(e) - cut :] = False
+    # Веер: перескоки кусков ленты на край соседнего листа — к одному листу (самый длинный участок без ступеней).
+    repaired, res.fan_share = fan_track(res.edge, valid, ppm)
+    if res.fan_share > 0:
+        res.edge = repaired
+        e = repaired.copy()
+        e[:cut] = np.nan
+        e[len(e) - cut :] = np.nan
+        e[finger_rows] = np.nan
     res.cover = float(np.isfinite(e[valid]).mean()) if valid.any() else 0.0
     res.miss = res.cover < MISS_COVER
     if res.miss:
@@ -446,8 +533,14 @@ def judge(res: MethodResult, finger_rows: np.ndarray, ink_band: np.ndarray, ppm:
 
 
 def choose(results: list[MethodResult], ppm: float) -> MethodResult | None:
-    """Лучший из принятых: согласный с медианой принятых (в пределах :data:`AGREE_MM` по медиане строк), наименьшая
-    рваность; при равенстве в пределах 0.05 мм — ближний к странице (край верхнего листа на веере).
+    """Лучший из принятых: группа согласных способов ближнего к странице листа, в ней — наименьшая рваность; при
+    равенстве в пределах 0.05 мм — ближний к странице.
+
+    Принятые способы делятся на группы согласия: края в пределах :data:`AGREE_MM` (по медиане строк) — один лист.
+    Несколько групп — способы легли на края разных листов веера; страница — верхний лист, то есть ближний к странице
+    (решение пользователя 2026-10-22). Выбор по рваности между группами давал случайный лист: ХиП 1991/01 IMG_1017 L —
+    наружный край SAM 3 (0.056 мм) против внутреннего SAM 2.1 (0.112 мм) в сокращённом наборе и внутренний в полном.
+    Способ, ушедший внутрь на печать, отсекает приёмка (знаки своей печати за краем).
 
     Args:
         results: Итоги способов.
@@ -459,11 +552,33 @@ def choose(results: list[MethodResult], ppm: float) -> MethodResult | None:
     ok = [r for r in results if r.accepted]
     if not ok:
         return None
-    consensus = np.nanmedian(np.stack([r.edge for r in ok]), axis=0) if len(ok) > 1 else ok[0].edge
-    agree = [r for r in ok if np.nanmedian(np.abs(r.edge - consensus)) / ppm <= AGREE_MM] or ok
-    best = min(r.rough_mm for r in agree)
-    near = [r for r in agree if r.rough_mm <= best + 0.05]
+    groups = agree_groups(ok, ppm)
+    # Группа ближнего к странице листа: наибольший столбец края (столбцы ленты растут внутрь страницы).
+    group = max(groups, key=lambda g: float(np.nanmedian(np.stack([r.edge for r in g]))))
+    best = min(r.rough_mm for r in group)
+    near = [r for r in group if r.rough_mm <= best + 0.05]
     return max(near, key=lambda r: float(np.nanmedian(r.edge)))
+
+
+def agree_groups(results: list[MethodResult], ppm: float) -> list[list[MethodResult]]:
+    """Группы согласных способов: по возрастанию медианы края, соседние в пределах :data:`AGREE_MM` (медиана
+    модуля разности краёв по строкам) — одна группа.
+
+    Args:
+        results: Принятые итоги.
+        ppm: Масштаб ленты, px/мм.
+
+    Returns:
+        Группы (непустые).
+    """
+    order = sorted(results, key=lambda r: float(np.nanmedian(r.edge)))
+    groups = [[order[0]]]
+    for r in order[1:]:
+        if np.nanmedian(np.abs(r.edge - groups[-1][-1].edge)) / ppm <= AGREE_MM:
+            groups[-1].append(r)
+        else:
+            groups.append([r])
+    return groups
 
 
 def finger_rows_of(core_band: np.ndarray, page_band: np.ndarray, band: Band) -> np.ndarray:

@@ -56,6 +56,9 @@ SECOND_STEP_PX = 4
 # Поле вокруг холста Кунса на листе, если образ рамки страницы выходит за холст, px холста (белое).
 SECOND_PAD_PX = 8
 BLOCK_ALPHA = 0.25
+# Стороны блоков (выровненные и нет) — полупрозрачные: сплошная линия закрывала первые и последние буквы строк
+# (просьба пользователя 2026-10-25).
+SIDE_ALPHA = 0.5
 FIELD_ALPHA = 0.45
 # Стрелки выборок увеличены во столько раз, иначе смещения в 0.5 мм на листе не видны.
 ARROW_GAIN = 5.0
@@ -201,8 +204,8 @@ def draw_text(image: np.ndarray, pages: list[PageText | None], scale: float) -> 
         aligned, ragged, outlines = sides_of(page)
         polylines(image, outlines, COLOUR_BLOCK, scale, 2, BLOCK_ALPHA)
         polylines(image, axes_of(page), COLOUR_AXIS, scale, 1)
-        polylines(image, aligned, COLOUR_ALIGNED, scale, 2)
-        polylines(image, ragged, COLOUR_RAGGED, scale, 1)
+        polylines(image, aligned, COLOUR_ALIGNED, scale, 2, SIDE_ALPHA)
+        polylines(image, ragged, COLOUR_RAGGED, scale, 1, SIDE_ALPHA)
         if page is not None:
             dashed(image, [r.points for r in page.rules], COLOUR_RULE, scale)
 
@@ -211,8 +214,8 @@ def text_legend() -> list[LegendEntry]:
     """Легенда разбора текста."""
     return [
         LegendEntry("базовая линия строки", COLOUR_AXIS),
-        LegendEntry("выровненная сторона блока", COLOUR_ALIGNED),
-        LegendEntry("невыровненная сторона", COLOUR_RAGGED),
+        LegendEntry("выровненная сторона блока", COLOUR_ALIGNED, alpha=SIDE_ALPHA),
+        LegendEntry("невыровненная сторона", COLOUR_RAGGED, alpha=SIDE_ALPHA),
         LegendEntry("граница блока", COLOUR_BLOCK, alpha=BLOCK_ALPHA),
         LegendEntry("линейка (в поле — как строка или сторона)", COLOUR_RULE, style=SampleStyle.DASHED),
     ] + [LegendEntry(REGION_TITLE[k], c, alpha=REGION_ALPHA) for k, c in COLOUR_REGION.items()]

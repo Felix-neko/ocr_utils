@@ -16,7 +16,7 @@ import click
 from ocr_utils.scan_cropping.cropping import CROP_FILL_FADE
 from ocr_utils.scan_cropping.image_io import collect_images
 from ocr_utils.scan_cropping.levels import LEVELS_MAX_BLACK
-from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_TORTUOSITY
+from ocr_utils.scan_cropping.v2.ragged_edge import RAGGED_STEP_MM, RAGGED_TORTUOSITY
 from ocr_utils.scan_cropping.v2.spread_lines import SpineMethod
 from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.coons_layout import CANVAS_MARGIN_MM, LayoutWarp
@@ -177,12 +177,15 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 @click.option("--gutter-strip/--no-gutter-strip", default=True, show_default=True,
               help="Полоса-вклейка у корешка (щель SAM 3 ≥ 7.8 мм) — в бумагу кадра: склейка страниц закрывает щель только "
                    "до ~11.6 мм, белая часть полосы шире иначе закрашивается до прямоугольника.")  # fmt: skip
-@click.option("--refine-ragged/--no-refine-ragged", default=False, show_default=True,
+@click.option("--refine-ragged/--no-refine-ragged", default=True, show_default=True,
               help="Тонкое уточнение рваных внешних сторон страниц разворота: детектор по сырой маске SAM 3, сегментация "
                    "ленты вдоль стороны в полном разрешении (SAM 3 и SAM 2.1 прогона, сокращённый набор способов, при "
                    "неудаче — полный); 2–6 с на рваную сторону.")  # fmt: skip
 @click.option("--ragged-threshold", type=float, default=RAGGED_TORTUOSITY, show_default=True,
               help="Порог извилистости сырой маски SAM 3 внешней стороны страницы для --refine-ragged.")  # fmt: skip
+@click.option("--ragged-step-mm", type=float, default=RAGGED_STEP_MM, show_default=True,
+              help="Порог ступенчатости сырой маски SAM 3 внешней стороны (перескок на край другого листа веера), мм, "
+                   "для --refine-ragged: сторона рваная, если извилистость или ступенчатость не ниже своего порога.")  # fmt: skip
 @click.option("--dual-levels/--no-dual-levels", default=True, show_default=True,
               help="Двойная грубая сегментация: SAM 3 без растяжения уровней — база, в зонах у внешних кромок книги — "
                    "проход по кадру с растянутыми уровнями (+1 проход SAM 3 на кадр); промахи прохода — зона на "
@@ -270,6 +273,7 @@ def main(
     levels_edges: bool,
     refine_ragged: bool,
     ragged_threshold: float,
+    ragged_step_mm: float,
     output_format: str | None,
     force_dpi: int | None,
     output_pages: Path | None,
@@ -326,6 +330,7 @@ def main(
         levels_edges=levels_edges,
         refine_ragged=refine_ragged,
         ragged_threshold=ragged_threshold,
+        ragged_step_mm=ragged_step_mm,
         output_format=output_format,
         force_dpi=force_dpi,
         output_pages=output_pages,

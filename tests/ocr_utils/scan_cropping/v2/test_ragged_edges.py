@@ -182,3 +182,60 @@ def test_union_levels_edges_fills_top_notch_only_near_edges():
     assert out.added_top[50:80, 150:190].all() and (out.inst[50:80, 150:190] == 1).all()
     assert not out.raw[300:320, 60:80].any()  # глубже EDGES_IN_MM — не трогается
     assert not out.raw[10:30].any()  # вне книги — не трогается
+
+
+def test_step_catches_fan_jump_with_low_tortuosity():
+    """Ровная кромка с одним перескоком на 3.5 мм на участке 40 мм (край соседнего листа веера): извилистость ниже
+    порога, ступенчатость — выше, сторона рваная."""
+    mask, quad = page_mask(*LEFT_X)
+    depth = int(3.5 * SEG_PX_PER_MM)
+    mask[700 : 700 + int(40 * SEG_PX_PER_MM), LEFT_X[0] : LEFT_X[0] + depth] = False
+    m = measure_far_side(mask, quad, True, None, SEG_PX_PER_MM)
+    assert m.tortuosity < 1.05
+    assert m.step_mm > 2.5 and is_ragged(m)
+
+
+def test_step_ignores_smooth_bow():
+    """Плавный прогиб кромки на 5 мм по всей длине стороны — не ступень."""
+    mask, quad = page_mask(*LEFT_X)
+    ys = np.arange(TOP, BOT)
+    bow = (5.0 * SEG_PX_PER_MM * (1 - ((ys - (TOP + BOT) / 2) / ((BOT - TOP) / 2)) ** 2)).astype(int)
+    for y, b in zip(ys, bow):
+        mask[y, LEFT_X[0] : LEFT_X[0] + b] = False
+    m = measure_far_side(mask, quad, True, None, SEG_PX_PER_MM)
+    assert m.step_mm < 0.5 and not is_ragged(m)
+
+
+def test_fan_track_extends_main_sheet_over_end_jump():
+    """Край одного листа на 88 % длины и перескок на соседний лист у угла (ступень 4 мм): остаток — продолжение прямой
+    основного участка, ступени нет."""
+    from ocr_utils.scan_cropping.v2.edge_refine import fan_track, step_mm
+
+    ppm = 17.9
+    rows = np.arange(3000)
+    edge = 300 + rows * 0.03  # прямой наклонный край листа
+    edge[2640:] -= 4 * ppm  # у конца — край соседнего листа наружу
+    valid = np.ones(len(rows), bool)
+    out, share = fan_track(edge, valid, ppm)
+    assert 0.05 < share < 0.2
+    assert step_mm(out, ppm) < 0.5
+    assert abs(out[2900] - (300 + 2900 * 0.03)) < 1.0
+
+
+def test_fan_track_leaves_two_equal_sheets_alone():
+    """Два листа поровну (ступень посередине): основного листа нет — край не меняется (способ не примут)."""
+    from ocr_utils.scan_cropping.v2.edge_refine import fan_track
+
+    ppm = 17.9
+    edge = np.full(3000, 300.0)
+    edge[1500:] += 4 * ppm
+    out, share = fan_track(edge, np.ones(3000, bool), ppm)
+    assert share == 0.0 and np.array_equal(out, edge)
+
+
+def test_choose_prefers_top_sheet_of_fan_over_smoother_outer_sheet():
+    """Принятые способы на двух листах веера: берётся группа ближнего к странице листа, даже если наружный ровнее."""
+    edge = np.full(100, 300.0)
+    outer = MethodResult(Method(Engine.SAM3, 4), edge, rough_mm=0.05, accepted=True)
+    inner = MethodResult(Method(Engine.SAM2, 4), edge + 5 * 17.9, rough_mm=0.11, accepted=True)
+    assert choose([outer, inner], ppm=17.9) is inner
