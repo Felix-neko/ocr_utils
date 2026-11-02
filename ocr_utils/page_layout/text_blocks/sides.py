@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
+from ocr_utils.page_layout.text_blocks import fast_stats
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.page_layout.text_blocks.alignment import ALIGN_TOL_MM, INDENT_MIN_MM, block_frame
 from ocr_utils.page_layout.text_blocks.blocks import GRID_STEP_MM, TAIL_BLEND_GLYPHS, TRIM_MM, BlockEnvelope, Row
@@ -358,7 +359,7 @@ def _is_full(block: TextBlock, points: np.ndarray) -> bool:
     Returns:
         ``True``, если строка покрывает ширину блока.
     """
-    y = float(np.median(points[:, 1]))
+    y = float(fast_stats.median(points[:, 1]))
     left = _core_curve(block.envelope, SideKind.LEFT)
     right = _core_curve(block.envelope, SideKind.RIGHT)
     trim = mm_to_px(TRIM_MM, block.dpi)
@@ -434,7 +435,7 @@ def edge_axis(block: TextBlock, top: bool) -> EdgeAxis | None:
     else:
         ref_xs, ref_ys = base[:, 0], base[:, 1]
     # Интервал — медиана расхождения на общем участке; вне его np.interp берёт концевое значение опоры.
-    gap = float(np.median(own[:, 1] - np.interp(own[:, 0], ref_xs, ref_ys)))
+    gap = float(fast_stats.median(own[:, 1] - np.interp(own[:, 0], ref_xs, ref_ys)))
     pitch = max(block.pitch_px, 1e-6)
     sign_ok = gap < 0 if top else gap > 0
     if not sign_ok or not EXTEND_MIN_PITCHES <= abs(gap) / pitch <= EXTEND_MAX_PITCHES:
@@ -551,7 +552,7 @@ def end_tangent(points: np.ndarray, dpi: float, at_start: bool) -> tuple[np.ndar
     reach = mm_to_px(END_TANGENT_MM, dpi)
     near = xs <= xs[0] + reach if at_start else xs >= xs[-1] - reach
     if near.sum() >= 2 and np.ptp(xs[near]) > 0:
-        slope = float(np.polyfit(xs[near], ys[near], 1)[0])
+        slope = float(fast_stats.polyfit(xs[near], ys[near], 1)[0])
     elif xs[-1] - xs[0] > 0:
         slope = float((ys[-1] - ys[0]) / (xs[-1] - xs[0]))
     else:
@@ -929,7 +930,7 @@ def _theil_sen(xs: np.ndarray, ys: np.ndarray) -> float:
     i, j = np.triu_indices(len(xs), 1)
     dx = xs[j] - xs[i]
     ok = np.abs(dx) > 1e-6
-    return float(np.median((ys[j] - ys[i])[ok] / dx[ok])) if ok.any() else 0.0
+    return float(fast_stats.median((ys[j] - ys[i])[ok] / dx[ok])) if ok.any() else 0.0
 
 
 def side_measures(sides: BlockSides, dpi: float) -> tuple[SideMeasure, ...]:
@@ -1144,7 +1145,7 @@ def _fit_robust(v: np.ndarray, u: np.ndarray, tol: float) -> tuple[np.ndarray, n
         ``(coefficients, fitted)``: коэффициенты полинома (``np.polyval``) и значения в ``v``.
     """
     slope = _theil_sen(v, u)
-    line = np.array([slope, float(np.median(u - slope * v))])
+    line = np.array([slope, float(fast_stats.median(u - slope * v))])
     best, best_in = line, int((np.abs(u - np.polyval(line, v)) <= tol).sum())
     if len(v) >= 5:
         rng = np.random.default_rng(RANSAC_SEED)
@@ -1153,10 +1154,10 @@ def _fit_robust(v: np.ndarray, u: np.ndarray, tol: float) -> tuple[np.ndarray, n
             pick = rng.choice(len(v), 3, replace=False)
             if np.ptp(v[pick]) <= 0:
                 continue
-            coef = np.polyfit(v[pick], u[pick], 2)
+            coef = fast_stats.polyfit(v[pick], u[pick], 2)
             inliers = np.abs(u - np.polyval(coef, v)) <= tol
             if inliers.sum() > parabola_in and inliers.sum() >= 3:
-                parabola, parabola_in = np.polyfit(v[inliers], u[inliers], 2), int(inliers.sum())
+                parabola, parabola_in = fast_stats.polyfit(v[inliers], u[inliers], 2), int(inliers.sum())
         if parabola is not None and parabola_in >= best_in + PARABOLA_GAIN_ROWS:
             best = parabola
     return best, np.polyval(best, v)
@@ -1198,7 +1199,7 @@ def _fit_local(v: np.ndarray, u: np.ndarray, inward: float, start: np.ndarray, t
             if window.size < 3:
                 window = order
             slope = float(np.clip(_theil_sen(v[window], u[window]), base_slope - turn, base_slope + turn))
-            intercept = float(np.median(u[window] - slope * v[window]))
+            intercept = float(fast_stats.median(u[window] - slope * v[window]))
             new[index] = slope * v[index] + intercept
         fitted = new
     return fitted
@@ -1341,7 +1342,7 @@ def fill_side_gaps(
     levels, inverse = np.unique(v[green], return_inverse=True)
     if levels.size < 2:
         return None
-    values = np.array([float(np.median(u[green][inverse == index])) for index in range(levels.size)])
+    values = np.array([float(fast_stats.median(u[green][inverse == index])) for index in range(levels.size)])
     curve = PchipInterpolator(levels, values)
     out_v: list[np.ndarray] = []
     out_u: list[np.ndarray] = []

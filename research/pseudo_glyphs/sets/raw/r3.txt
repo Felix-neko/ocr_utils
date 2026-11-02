@@ -1,0 +1,182 @@
+# Раунд r3 (2026-10-25): пояса fired 200 (поровну по причинам правил), doubt 120 (правила молчат, у края или
+# далеко и CRAFT < 0.4), edge_dark 80; листы /mnt/hotstore/scan_processing/pseudo_glyphs/hp1991/sheets/r3/.
+1 default SH
+1 TH
+2 TH
+3 TH
+4 TH
+6 CV
+7 CV
+10 TH
+11 TH
+12 TH
+14 TH
+15 TH
+16 TH
+17 CV
+18 CV
+19 TH
+20 TH
+21 TH
+22 TH
+25 TH
+26 CV
+27 CV
+35 TH
+2 default SH
+62 TH
+71 TH
+72 PN цифра от руки на обложке
+78 TH
+3 default SP
+81 SH
+82 SH
+83 SH
+84 SH
+86 NU сноска перед «См.:»
+89 TH
+90 U смазанная строка
+94 FG линейка таблицы
+95 FG линейка таблицы
+96 FG рисунок
+102 TH
+107 U чёрный штрих под линейкой
+114 SH
+115 SH
+117 SH
+119 SH
+120 SH
+4 default SH
+137 TH
+5 default SH
+166 TH
+171 TH
+184 TH
+196 TH
+6 default SP
+202 SH
+203 SH
+205 TH
+207 TH
+208 TH
+210 SH
+211 TH
+212 SH
+215 FG рисунок
+216 TH
+217 TH
+218 SH
+219 TH
+222 SH
+223 BR кавычка заголовка
+224 FG рисунок
+225 TH
+226 SH
+229 SH
+230 TH
+236 CV
+238 TH
+239 TH
+7 default SP
+241 G срезанная краем буква
+242 FG линейка
+243 TH
+245 FG линейка
+247 PN
+248 TH
+249 HY тире
+250 G
+252 PU
+255 TH
+258 TH
+260 FG рисунок
+261 TH
+264 SH
+265 TH
+267 TH
+268 TH
+270 G
+273 SH
+275 TH
+276 SH
+278 SH
+279 TH
+280 TH
+8 default SP
+282 TH
+283 HY тире в начале строки
+286 TH
+287 TH
+289 SH
+292 CV
+293 G срезанная краем буква
+295 TH
+298 HY тире в начале строки
+299 TH
+300 TH
+301 SH
+302 TH
+303 HY тире
+304 FG значок-рука
+305 SH
+306 TH
+307 SH
+309 TH
+311 TH
+312 TH
+313 TH
+314 SH
+315 TH
+318 SH
+319 CV
+9 default HY
+321 G
+322 G
+325 G
+326 SH
+327 SH
+329 SH
+330 G
+331 G
+332 SH
+334 G
+335 G
+337 G
+342 SH
+343 G
+345 SH
+346 G
+348 SH
+351 PU
+352 NU
+353 U скобка или крючок у края
+356 SH
+358 G
+359 G
+10 default HY
+361 SH
+363 G
+365 G
+367 G
+369 G
+370 PU
+371 NU номер страницы срезан краем
+372 G
+373 SH
+374 SH
+375 SH
+378 SH
+379 PN
+381 PN
+382 G
+383 G
+384 SH
+387 G
+388 SH
+390 G
+391 SH
+393 SH
+395 G
+398 PN
+399 G
+400 PN

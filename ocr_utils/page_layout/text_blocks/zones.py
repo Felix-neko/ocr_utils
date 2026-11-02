@@ -29,13 +29,14 @@ from enum import Enum
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI, fast_stats
 from ocr_utils.page_layout.text_blocks.capsules import Capsule, contact_of
 from ocr_utils.page_layout.text_blocks.typeset import (
     BASELINE_SHIFT_KEGL,
     STRONG_GAP_KEGL,
     STRONG_RATIO,
     STRONG_TALL_RATIO,
+    closest_kegls,
 )
 from ocr_utils.page_layout.text_blocks.pieces import (
     AXIS_MIN_LETTERS,
@@ -292,7 +293,7 @@ def neighbour_slopes(pieces: list[Piece]) -> np.ndarray:
         own = own[own < len(long_index)]
         if own.size < SLOPE_MIN_NEIGHBOURS:
             continue
-        out[index] = float(np.clip(np.median(slopes[own]), -limit, limit))
+        out[index] = float(np.clip(fast_stats.median(slopes[own]), -limit, limit))
     return out
 
 
@@ -454,11 +455,19 @@ def _verdict_of(
     Returns:
         ``LinkVerdict.ACCEPTED`` или причина отказа.
     """
-    heights = sorted((max(left.x_h, 1e-6), max(right.x_h, 1e-6)))
+    # Разный кегль запрещает сцепку по ближним концам диапазонов кегля (``Piece.kegl_range``): у куска из одной-двух
+    # букв кегль — диапазон, и медиана страницы вместо него отбивала «ОБ» от «ОПЕРАТИВНО…» (1973/03 IMG_0116_2R).
+    kegls = closest_kegls(left.kegl_range, right.kegl_range)
+    # Кусок без букв (одни точки, тире, соринки — ``kegl_range`` = None) меряется по-прежнему иксом: соринка в 3 px
+    # через 150 px пустоты иначе цеплялась к строке шапки «ТЕХНИЧЕСКОЕ» (икс 41), ось уходила до «ФЕВРАЛЬ», и месяц
+    # вставал в ряд шапки (1967/02 IMG_0054_2R); точка у слова (икс куска — медиана страницы) проходит, как прежде.
+    pair = kegls if kegls is not None else (left.x_h, right.x_h)
+    heights = sorted((max(pair[0], 1e-6), max(pair[1], 1e-6)))
     if heights[1] > scale.link_height_ratio * heights[0]:
         return LinkVerdict.HEIGHT
     # Кегль у стыка — по крайним буквам: усреднённый икс сращённого куска разницу прячет.
-    # Сор через пустоту не сцепляется: обрывки карандашной черты и пометки на полях.
+    # Сор через пустоту не сцепляется: обрывки карандашной черты и пометки на полях. Мерка — икс кусков, а не
+    # кегль: по кеглю прописных «ГДР» (42 px) вся строка «снабжения в» (21 px) сходила за сор (1969/02 IMG_0097_1L).
     reference = max(left.x_h, right.x_h)
     if (_is_speck(left, reference) or _is_speck(right, reference)) and (
         right.x0 - left.x1 > SPECK_MAX_GAP_XH * reference
@@ -659,7 +668,7 @@ def joint_step(left: Piece, right: Piece) -> tuple[float, bool] | None:
         letters = ~piece.marks
         if not letters.any():
             return None
-        ends.append((piece.x0 if at_start else piece.x1, float(np.median(piece.anchors[letters, 1])), None))
+        ends.append((piece.x0 if at_start else piece.x1, float(fast_stats.median(piece.anchors[letters, 1])), None))
     (lx, ly, ls), (rx, ry, rs) = ends
     slopes = [value for value in (ls, rs) if value is not None]
     if not slopes:

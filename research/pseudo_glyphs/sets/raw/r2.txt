@@ -1,0 +1,161 @@
+# Раунд r2 (2026-10-25): пояса edge_dark 80, edge_wide 40, far_big 80, grey_big 80, tall 40, row_edge 40, far 40;
+# листы /mnt/hotstore/scan_processing/pseudo_glyphs/hp1991/sheets/r2/sheet_001..010.jpg.
+# CV — полоса края листа или подложки (обложки) сверху и снизу вырезки; PN — пометки от руки (карандаш, чернила,
+# номера на обложке, библиотечный штамп).
+1 default G
+8 HY
+10 PU
+12 SH
+13 SH
+15 HY
+17 SH
+18 U пунктир у рамки заголовка
+24 HY
+27 SH
+28 HY тире
+29 PU
+30 HY
+31 HY
+35 SH
+37 SH
+38 SH
+39 HY
+40 HY
+2 default G
+41 SH
+43 SH
+44 HY
+46 HY
+47 NU
+50 SH
+51 SH
+55 SH
+58 HY
+59 NU
+60 SH
+61 SH
+62 HY
+63 HY
+64 SH
+65 SH
+67 FG рисунок
+68 SH
+69 HY
+70 HY
+71 HY
+72 TH
+74 SH
+75 HY
+77 CV
+79 PU
+3 default CV
+82 PN цифра от руки на обложке
+83 TH
+84 SH
+91 PN
+92 U напечатанное заглавие слито с цифрами от руки
+93 G срезанные краем буквы
+95 PN
+97 PN
+99 SP
+104 PN
+106 PN штамп с номером от руки
+108 G срезанные краем буквы
+109 G
+110 PN
+111 PN
+115 PN цифра от руки слита с «Индекс»
+116 SH
+117 FG
+119 PN
+4 default G
+121 PU
+122 PU
+123 PU
+128 SH
+131 PU
+135 SH
+137 PU
+139 PU
+141 PU
+144 PU
+145 PU
+146 NU
+147 PU
+148 PU
+149 SH
+150 SH
+155 PU
+160 PU
+5 default G
+161 PU
+162 TH
+163 PU
+167 PU
+181 PU
+186 PU
+189 SH
+199 PU
+6 default G
+203 SH
+207 PN буква от руки на обложке
+211 SP
+221 PN цифры от руки
+222 SH
+231 PN библиотечный штамп
+233 SH
+7 default G
+244 NU
+245 BR
+247 FG рисунок
+248 FG рисунок
+249 SP
+252 SH
+254 PN
+257 PN
+259 PN
+260 BR
+263 FG рисунок
+264 U
+277 SH
+280 NU
+8 default SH
+300 FG диаграмма
+303 FG линейка таблицы
+308 G
+316 G
+317 TH
+9 default SH
+323 G
+324 HY
+328 HY
+329 G
+331 G
+339 G
+340 G
+352 HY
+354 TH
+359 TH
+10 default G
+364 PU
+365 PU
+366 SH
+368 PU
+371 PU
+373 PU
+374 PU
+375 PU
+376 PU
+380 PU
+381 PU
+382 PU
+385 PU
+386 PU
+387 PU
+389 PU
+392 PU
+393 SH
+394 PU
+395 HY
+399 PU
+400 SH

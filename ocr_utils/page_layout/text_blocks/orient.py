@@ -71,7 +71,7 @@ def back_points(points: np.ndarray, size: tuple[int, int], rotate_cw: int) -> np
 
 
 def _back_curve(curve: np.ndarray | None, size: tuple[int, int], zone: OrientedZone) -> np.ndarray | None:
-    """Кривая из выпрямленного кадра в координаты страницы: обратный поворот, сортировка по x, сдвиг.
+    """Кривая из выпрямленного кадра в координаты страницы: обратный поворот, сортировка вдоль строки, сдвиг.
 
     Args:
         curve: Точки ``(n, 2)`` в выпрямленном кадре или ``None``.
@@ -84,22 +84,58 @@ def _back_curve(curve: np.ndarray | None, size: tuple[int, int], zone: OrientedZ
     if curve is None:
         return None
     moved = back_points(np.asarray(curve, dtype=np.float64), size, zone.rotate_cw)
-    return moved[np.argsort(moved[:, 0])] + np.array([zone.box[0], zone.box[1]], dtype=np.float64)
+    return moved[np.argsort(moved[:, _along(zone)], kind="stable")] + np.array(
+        [zone.box[0], zone.box[1]], dtype=np.float64
+    )
+
+
+def _along(zone: OrientedZone) -> int:
+    """Координата страницы, вдоль которой идёт строка области: 1 (y) у боковой, 0 (x) у прямой и перевёрнутой."""
+    return 1 if zone.sideways else 0
+
+
+def _back_boxes(boxes: np.ndarray | None, size: tuple[int, int], zone: OrientedZone) -> np.ndarray | None:
+    """Боксы глифов ``(n, 4)`` из выпрямленного кадра в координаты страницы.
+
+    Поворот на кратный 90° угол переводит прямоугольник со сторонами вдоль осей снова в такой же: углы поворачиваются
+    обратно, рамка — по их охвату. Порядок боксов — вдоль строки на странице (по y у боковой области).
+
+    Args:
+        boxes: Боксы ``x0, y0, x1, y1`` в выпрямленном кадре или ``None``.
+        size: Размер исходной вырезки области.
+        zone: Область.
+
+    Returns:
+        Боксы на странице или ``None``.
+    """
+    if boxes is None or len(boxes) == 0:
+        return boxes
+    boxes = np.asarray(boxes, dtype=np.float64)
+    a = back_points(boxes[:, [0, 1]], size, zone.rotate_cw)
+    b = back_points(boxes[:, [2, 3]], size, zone.rotate_cw)
+    out = np.column_stack([np.minimum(a[:, 0], b[:, 0]), np.minimum(a[:, 1], b[:, 1]),
+                           np.maximum(a[:, 0], b[:, 0]), np.maximum(a[:, 1], b[:, 1])])  # fmt: skip
+    out += np.array([zone.box[0], zone.box[1], zone.box[0], zone.box[1]], dtype=np.float64)
+    along = _along(zone)
+    return out[np.argsort(out[:, along] + out[:, along + 2], kind="stable")]
 
 
 def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
     """Ось строки из выпрямленного кадра в координаты страницы.
 
-    Точки поворачиваются обратно, сортируются по x (после поворота порядок мог смениться) и
-    сдвигаются на начало области. Меры формы строки (сагитта, наклон, изгиб) пересчитываются:
-    они мерились в выпрямленном кадре и там верны, но знак наклона относится к другому кадру.
+    Точки поворачиваются обратно, сортируются вдоль строки на странице (по x, у боковой области — по y) и
+    сдвигаются на начало области. Меры формы строки (сагитта, наклон, изгиб) у прямой и перевёрнутой области
+    пересчитываются (знак наклона относится к другому кадру), у боковой — остаются мерами кадра, где строка прямая.
+    Ориентация строки — ``LineAxis.rotate_cw``; базовая линия (``base_points``) поворачивается по ней.
     """
     from dataclasses import replace
 
     from ocr_utils.page_layout.text_blocks.lines import _shape_stats
 
     points = back_points(np.asarray(axis.points, dtype=np.float64), size, zone.rotate_cw)
-    points = points[np.argsort(points[:, 0])]
+    # Порядок точек — вдоль строки на странице: у боковой области по y (по x точки вертикальной оси шли то вверх, то
+    # вниз — ось ломалась в ломаную-пилу).
+    points = points[np.argsort(points[:, _along(zone)], kind="stable")]
     points = points + np.array([zone.box[0], zone.box[1]], dtype=np.float64)
     # Участки перескока — по x выпрямленного кадра: у прямой области (поворот 0 или 180) переводятся
     # теми же преобразованиями, что и точки; у боковой в x страницы они не ложатся и отбрасываются.
@@ -108,15 +144,22 @@ def back_axis(axis, size: tuple[int, int], zone: OrientedZone):
         for start, stop in axis.jump_spans:
             ends = back_points(np.array([[start, 0.0], [stop, 0.0]]), size, zone.rotate_cw)[:, 0] + zone.box[0]
             jumps += ((float(ends.min()), float(ends.max())),)
-    sagitta, slope, bend, resid = _shape_stats(points, axis.dpi, axis.mark_spans if not zone.sideways else (), jumps)
+    if zone.sideways:
+        # Меры формы вертикальной строки — те, что мерились в кадре, где она прямая: в координатах страницы ``y(x)``
+        # у неё нет.
+        sagitta, slope, bend, resid = axis.sagitta_mm, axis.slope_deg, axis.bend_mm, axis.resid_parabola_mm
+    else:
+        sagitta, slope, bend, resid = _shape_stats(points, axis.dpi, axis.mark_spans, jumps)
     return replace(
         axis,
         points=points,
         body_points=_back_curve(axis.body_points, size, zone),
-        body_lift=axis.body_lift if not zone.sideways and zone.rotate_cw == 0 else None,
+        # Сдвиг базовой линии хранится в кадре прямой строки; на страницу его поворачивает ``LineAxis.base_points``
+        # по ``rotate_cw``.
+        body_lift=axis.body_lift,
+        rotate_cw=(axis.rotate_cw + zone.rotate_cw) % 360,
         centre_points=_back_curve(axis.centre_points, size, zone),
-        # Боксы глифов после поворота на 90° уже не боксы: вторая ось посчитана в выпрямленном кадре.
-        glyphs=None,
+        glyphs=_back_boxes(axis.glyphs, size, zone),
         sagitta_mm=sagitta,
         slope_deg=slope,
         bend_mm=bend,
@@ -259,4 +302,13 @@ def back_leader(leader, size: tuple[int, int], zone: OrientedZone):
     )
 
 
-__all__ = ["back_axis", "back_block", "back_gutter", "back_leader", "back_points", "upright"]
+def sideways_block(block) -> bool:
+    """Блок из боковой области: строки вертикальны на странице (``LineAxis.sideways`` у осей его рядов).
+
+    Такие блоки обходят меры, построенные на горизонтальных рядах страницы: выключку, защиту сторон
+    (``edge_guard``), кандидатов фильтра псевдоглифов у концов рядов (``pseudo_glyphs``).
+    """
+    return any(axis.sideways for row in block.rows for axis in row.axes)
+
+
+__all__ = ["back_axis", "back_block", "back_gutter", "back_leader", "back_points", "sideways_block", "upright"]

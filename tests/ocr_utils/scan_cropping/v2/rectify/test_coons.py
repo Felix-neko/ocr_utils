@@ -102,3 +102,29 @@ def test_extrapolation_monotone():
     # Шов на корешке: соседние столбцы по обе стороны отличаются не больше чем на пару пикселей.
     split = int(np.ceil(layout.spine_x))
     assert np.abs(map_y[:, split] - map_y[:, split - 1]).max() < 2.0
+
+
+def test_u_warp_reparametrizes_along_page():
+    """Таблица ``u_warp`` переводит долю ширины в долю дуги: точка с u = 0.5 берётся с дуги при t = 0.3; концы на месте."""
+    from dataclasses import replace
+
+    patch = patches_of(spread(0.0))[0]
+    warped = replace(patch, u_warp=(np.array([0.0, 0.5, 1.0]), np.array([0.0, 0.3, 1.0])))
+    v = np.array([0.0, 0.0, 0.0])
+    np.testing.assert_allclose(warped.points(np.array([0.0, 0.5, 1.0]), v),
+                               patch.points(np.array([0.0, 0.3, 1.0]), v), atol=1e-9)  # fmt: skip
+    # Сетка совпадает с поточечной формулой и с таблицей.
+    u = np.linspace(-0.2, 1.2, 9)
+    gx, gy = warped.grid(u, np.array([0.5]))
+    pts = warped.points(u, np.full_like(u, 0.5))
+    np.testing.assert_allclose(gx[0], pts[:, 0], atol=1e-2)
+    np.testing.assert_allclose(gy[0], pts[:, 1], atol=1e-2)
+
+
+def test_plan_layout_takes_given_widths():
+    """Заданные ширины страниц: прямоугольники встык по корешку, высоты прежние."""
+    patches = patches_of(spread(0.0))
+    layout = plan_layout(patches, (400, 500), widths=(180.0, 190.0))
+    left, right = layout.rects
+    assert np.isclose(left.width, 180.0) and np.isclose(right.width, 190.0)
+    assert np.isclose(left.x1, right.x0) and np.isclose(left.height, 300.0)

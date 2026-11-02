@@ -12,7 +12,7 @@ import numpy as np
 from ocr_utils.scan_cropping.v2.gutter_strip import Strip
 from ocr_utils.scan_cropping.v2.page_boundary import CURVE_SAMPLES, EXTEND, SPINE_ZONE_MM
 from ocr_utils.scan_cropping.v2.page_boundary_adaptive import fit_boundary_adaptive
-from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PageQuad
+from ocr_utils.scan_cropping.v2.page_pose import SEG_PX_PER_MM, PagePose, PageQuad
 from ocr_utils.scan_cropping.v2.page_sides import Side
 from ocr_utils.scan_cropping.v2.spread_lines import Line
 from ocr_utils.scan_cropping.v2.trapezoid import fit_enclosing_quad
@@ -43,6 +43,9 @@ class PageFrame:
         far: Внешняя сторона (N, 2) сверху вниз.
         spine: Внутренняя сторона — отрезок линии корешка ``[[x, y_верх], [x, y_низ]]``.
         knots: Добавленные узлы сплайна на изгибах верха и низа (K, 2).
+        pose: Положение страницы (``page_pose.PagePose``: плоско / приподнята / опущена) или None — неизвестно
+            (область из кэша холста surya, стенды); у наклонённой страницы масштаб по высоте не считается
+            (``rectify.page_scale``). В кэш (``FRAME_FIELDS``) и отпечаток не входит.
     """
 
     top: np.ndarray
@@ -50,6 +53,7 @@ class PageFrame:
     far: np.ndarray
     spine: np.ndarray
     knots: np.ndarray
+    pose: PagePose | None = None
 
     def polygon(self) -> np.ndarray:
         """Замкнутый контур: верх (внешний угол → корешок), сторона у корешка, низ обратно, внешняя сторона обратно."""
@@ -173,9 +177,9 @@ def spread_frames(
         boundary, fits = fit_boundary_adaptive(mask, quad, spine_right, SEG_PX_PER_MM, exclude, text,
                                                fold_points=fold, edge_exclude=edge_exclude,
                                                spine_zone_mm=None if strip is not None else SPINE_ZONE_MM)  # fmt: skip
-        frames_raw.append((boundary, fits, spine_right, limit))
+        frames_raw.append((boundary, fits, spine_right, limit, page.pose))
     out_parts = []
-    for boundary, fits, spine_right, limit in frames_raw:
+    for boundary, fits, spine_right, limit, _ in frames_raw:
         outer_top = boundary.top[0] if spine_right else boundary.top[-1]
         outer_bot = boundary.bottom[0] if spine_right else boundary.bottom[-1]
         # Конец верха и низа: вспомогательная линия (через полосу — отрезок) или сразу линия корешка (касательная).
@@ -192,9 +196,9 @@ def spread_frames(
             out_parts[0][i] = np.vstack([out_parts[0][i], hit])
             out_parts[1][i] = np.vstack([out_parts[1][i], hit])
     frames = []
-    for top, bottom, far, knots in out_parts:
+    for (top, bottom, far, knots), raw in zip(out_parts, frames_raw):
         spine_side = np.array([top[-1], bottom[-1]])
-        frames.append(PageFrame(top, bottom, far, spine_side, knots))
+        frames.append(PageFrame(top, bottom, far, spine_side, knots, raw[4]))
     return frames
 
 
@@ -218,7 +222,7 @@ def single_frame(page: PageQuad, paint: np.ndarray, core_zone: np.ndarray, text:
                                            edge_exclude=core_zone, spine_zone_mm=None)  # fmt: skip
     knots = [boundary.curves[s].points(np.asarray(f.added, np.float64)) for s, f in fits.items() if len(f.added)]
     return PageFrame(boundary.top, boundary.bottom, boundary.left, boundary.right,
-                     np.vstack(knots) if knots else np.zeros((0, 2)))  # fmt: skip
+                     np.vstack(knots) if knots else np.zeros((0, 2)), page.pose)  # fmt: skip
 
 
 # Поля области в файле кэша (ключи ``<поле><номер страницы>``).

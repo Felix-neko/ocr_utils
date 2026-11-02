@@ -107,6 +107,9 @@ class LayoutOptions:
 
     # Surya: искать ли блоки вообще. Без неё детекторы работают по одним пикселям.
     use_surya: bool = True
+    # Повёрнутый текст искать и внутри таблиц (исключается только растр): боковые заголовки граф. В паке-1 таблицы
+    # из разбора исключены, и по умолчанию так и осталось; во втором преобразовании v2 таблицы разбираются.
+    rotated_in_tables: bool = False
     # Первая полоса выпуска — обложка: ответ известен заранее, пиксели не читаются.
     first_page_is_cover: bool = False
 
@@ -468,7 +471,7 @@ class PageLayout:
             zones = rotated_zones(
                 image.bitonal_at(work_dpi),
                 work_dpi,
-                raster_work + table_work,
+                raster_work + ([] if self.options.rotated_in_tables else table_work),
                 art_work,
                 gray=image.gray_at(min(ROTATED_READ_DPI, image.dpi)),
                 gray_dpi=min(ROTATED_READ_DPI, image.dpi),

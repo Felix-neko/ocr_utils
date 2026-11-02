@@ -2,10 +2,41 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 import numpy as np
 
-# Глифы ниже этой доли медианы (точки, запятые, тире) в кегль и низ не входят.
+from ocr_utils.page_layout.text_blocks import fast_stats
+
+# Глифы ниже этой доли мерки (точки, запятые, тире) в кегль и низ не входят. Мерка — медиана высот
+# (``KeglTrust.LEGACY``) или их верхний квартиль (``KeglTrust.RELIABLE``, см. ``MARK_REFERENCE_PERCENTILE``).
 MARK_SHARE = 0.45
+
+
+class KeglTrust(Enum):
+    """Когда кегль куска строки или группы глифов считается замеренным (запреты сращивания по разнице кегля)."""
+
+    # Как до v9 разбора: кегль — по любой горстке глифов, у куска строки меньше трёх букв — медиана страницы
+    # (``pieces.pieces_of``), мелочь отсекается долей медианы.
+    LEGACY = "legacy"
+    # Кегль замерен, только если после отсева мелочи осталось не меньше ``MIN_RELIABLE_GLYPHS`` глифов; иначе он
+    # неизвестен, и запреты по разнице кегля молчат (запрещается только при двух известных и точно разных
+    # кеглях). Геометрия сцепки (зоны поиска, допуски) по-прежнему берёт ``Piece.x_h`` с медианой страницы.
+    RELIABLE = "reliable"
+
+
+# Способ по умолчанию; читается при каждом вызове, стенд может переключить его присваиванием.
+DEFAULT_KEGL_TRUST = KeglTrust.RELIABLE
+# Кегль группы глифов достоверен от стольких глифов без мелочи: у одной-двух букв не понять, строчные это,
+# прописные или буквы с выносными (разброс до двух раз при пороге запрета 1.3–1.8). «ОБ» в «ОБ ОПЕРАТИВНО-
+# СБЫТОВОЙ РАБОТЕ» (1973/03 IMG_0116_2R) с медианой страницы 12 px вместо своих 26 отбивалось от строки.
+MIN_RELIABLE_GLYPHS = 3
+# Мерка мелочи у ``KeglTrust.RELIABLE`` — этот процентиль высот, а не медиана: у оси «СК» (1967/02 IMG_0095_2R)
+# высоты 2, 2, 2, 20, 21 — три соринки делали медиану 2 px, и кегль оси выходил 2 при буквах 20 px.
+MARK_REFERENCE_PERCENTILE = 75.0
+# У одной-двух букв строчная — не ниже этой доли самой высокой из них: буква с выносными («р», «у») или прописная
+# выше строчной не больше чем вдвое.
+UNKNOWN_LOW_SHARE = 0.5
 # Низы двух групп глифов ближе стольких меньших кеглей — одна базовая линия: логотип «50 лет» (1967/10)
 # стоит на одной линии (2 px при кегле 16), подпись рядом с заголовком — нет (6–20 px).
 BASELINE_SHIFT_KEGL = 0.25
@@ -52,8 +83,84 @@ BARRIER_MIN_SPAN_KEGL = 6.0
 
 
 def _kept(heights: np.ndarray) -> np.ndarray:
-    """Маска глифов без мелочи: не ниже ``MARK_SHARE`` медианы."""
-    return heights >= MARK_SHARE * np.median(heights) if heights.size else np.zeros(0, dtype=bool)
+    """Маска глифов без мелочи: не ниже ``MARK_SHARE`` мерки (медиана или верхний квартиль, см. ``KeglTrust``).
+
+    Args:
+        heights: Высоты глифов.
+
+    Returns:
+        Булев вектор «глиф — не мелочь» той же длины.
+    """
+    if not heights.size:
+        return np.zeros(0, dtype=bool)
+    if DEFAULT_KEGL_TRUST is KeglTrust.RELIABLE:
+        reference = float(fast_stats.percentile(heights, MARK_REFERENCE_PERCENTILE))
+    else:
+        reference = float(fast_stats.median(heights))
+    return heights >= MARK_SHARE * reference
+
+
+def kegl_range(glyphs: np.ndarray | None) -> tuple[float, float] | None:
+    """Кегль группы глифов диапазоном ``(низ, верх)`` для запретов по разнице кегля; ``None`` — глифов нет.
+
+    У ``KeglTrust.LEGACY`` — прежний :func:`glyphs_kegl` точкой. У ``KeglTrust.RELIABLE``: от
+    ``MIN_RELIABLE_GLYPHS`` глифов без мелочи — медиана их высот точкой; у одной-двух букв кегль не замерен, но и не
+    произволен: самая высокая буква — строчная, прописная или с выносным, и строчная лежит между
+    ``UNKNOWN_LOW_SHARE`` её высоты и самой высотой. Одиночная «Г» (18 px) из «Год издания» не может быть набором
+    «СНАБЖЕНИЕ» (54 px) кем бы ни была (1966/03 IMG_0105_2R), а «ОБ» (26 px) у «ОПЕРАТИВНО…» (25 px) — может.
+
+    Args:
+        glyphs: Боксы ``(n, 4)`` — ``x0, y0, x1, y1`` (пиксели рабочей копии) или ``None``.
+
+    Returns:
+        ``(низ, верх)`` в пикселях рабочей копии; у замеренного кегля низ равен верху. ``None`` — сравнить нечем.
+    """
+    if glyphs is None or len(glyphs) == 0:
+        return None
+    if DEFAULT_KEGL_TRUST is KeglTrust.LEGACY:
+        value = glyphs_kegl(glyphs)
+        return (value, value) if value > 0 else None
+    heights = glyphs[:, 3] - glyphs[:, 1]
+    return heights_range(heights[_kept(heights)])
+
+
+def heights_range(heights: np.ndarray) -> tuple[float, float] | None:
+    """Диапазон кегля по высотам букв уже без мелочи (см. :func:`kegl_range`).
+
+    Args:
+        heights: Высоты букв (пиксели рабочей копии).
+
+    Returns:
+        ``(низ, верх)``; ``None`` — букв нет.
+    """
+    if heights.size == 0:
+        return None
+    if heights.size >= MIN_RELIABLE_GLYPHS:
+        value = float(fast_stats.median(heights))
+        return value, value
+    top = float(heights.max())
+    return UNKNOWN_LOW_SHARE * top, top
+
+
+def closest_kegls(first: tuple[float, float] | None, second: tuple[float, float] | None) -> tuple[float, float] | None:
+    """Самые близкие друг к другу кегли из двух диапазонов — по ним меряется разница набора без ложных запретов.
+
+    Args:
+        first: Диапазон кегля первой стороны (:func:`kegl_range`) или ``None``.
+        second: Второй.
+
+    Returns:
+        ``(кегль первой, кегль второй)``: если диапазоны перекрываются — одно и то же число (разницы нет), иначе
+        ближние концы. ``None`` — у одной из сторон сравнить нечем.
+    """
+    if first is None or second is None:
+        return None
+    if first[1] < second[0]:
+        return first[1], second[0]
+    if second[1] < first[0]:
+        return first[0], second[1]
+    common = max(first[0], second[0])
+    return common, common
 
 
 def glyphs_kegl(glyphs: np.ndarray | None) -> float:
@@ -69,7 +176,7 @@ def glyphs_kegl(glyphs: np.ndarray | None) -> float:
         return 0.0
     heights = glyphs[:, 3] - glyphs[:, 1]
     heights = heights[_kept(heights)]
-    return float(np.median(heights)) if heights.size else 0.0
+    return float(fast_stats.median(heights)) if heights.size else 0.0
 
 
 def glyphs_bottom(glyphs: np.ndarray | None) -> float | None:
@@ -84,7 +191,7 @@ def glyphs_bottom(glyphs: np.ndarray | None) -> float | None:
     if glyphs is None or len(glyphs) == 0:
         return None
     heights = glyphs[:, 3] - glyphs[:, 1]
-    return float(np.median(glyphs[_kept(heights), 3]))
+    return float(fast_stats.median(glyphs[_kept(heights), 3]))
 
 
 def axes_glyphs(axes) -> np.ndarray:
@@ -122,7 +229,7 @@ def axes_kegl(axes) -> float:
         Кегль.
     """
     values = [value for value in (axis_kegl(axis) for axis in axes) if value > 0]
-    return float(np.median(values)) if values else 0.0
+    return float(fast_stats.median(values)) if values else 0.0
 
 
 def same_baseline(first: np.ndarray, second: np.ndarray, low: float) -> bool:
@@ -136,8 +243,21 @@ def same_baseline(first: np.ndarray, second: np.ndarray, low: float) -> bool:
     Returns:
         ``True`` — одна линия, или сравнить нечем (у группы нет глифов).
     """
-    bottoms = (glyphs_bottom(first), glyphs_bottom(second))
-    return None in bottoms or abs(bottoms[0] - bottoms[1]) <= BASELINE_SHIFT_KEGL * low
+    return bottoms_close(glyphs_bottom(first), glyphs_bottom(second), low)
+
+
+def bottoms_close(first: float | None, second: float | None, low: float) -> bool:
+    """Одна ли базовая линия у двух наборов по их низам (:func:`glyphs_bottom`): ближе ``BASELINE_SHIFT_KEGL`` кегля.
+
+    Args:
+        first: Низ первого набора; ``None`` — глифов нет.
+        second: Низ второго.
+        low: Меньший кегль наборов.
+
+    Returns:
+        ``True`` — одна линия, или сравнить нечем.
+    """
+    return first is None or second is None or abs(first - second) <= BASELINE_SHIFT_KEGL * low
 
 
 def side_glyphs(glyphs: np.ndarray, indices: np.ndarray) -> np.ndarray:
@@ -174,7 +294,11 @@ def different_sets(left: np.ndarray, right: np.ndarray, gap: float) -> bool:
     """
     if len(left) == 0 or len(right) == 0:
         return False
-    low, high = sorted((glyphs_kegl(left), glyphs_kegl(right)))
+    # Сторона из одной-двух букв кегля не мерит — она даёт диапазон, и разница меряется по ближним концам.
+    kegls = closest_kegls(kegl_range(left), kegl_range(right))
+    if kegls is None:
+        return False
+    low, high = sorted(kegls)
     if low < MIN_KEGL_PX or high < LARGE_KEGL_PX:
         return False
     shift = abs(glyphs_bottom(left) - glyphs_bottom(right))
@@ -266,6 +390,9 @@ __all__ = [
     "different_sets",
     "glyphs_bottom",
     "glyphs_kegl",
+    "closest_kegls",
+    "heights_range",
+    "kegl_range",
     "normal_edge",
     "same_baseline",
     "set_cuts",

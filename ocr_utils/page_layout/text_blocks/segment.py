@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
-from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, LINKING_ZONES, RENDER_DPI, WORK_DPI
+from ocr_utils.page_layout.text_blocks import LINKING_DEFAULT, LINKING_ZONES, RENDER_DPI, WORK_DPI, fast_stats
 from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, gutter_filled
+from ocr_utils.page_layout.text_blocks.glyph_merge import merged_components
 from ocr_utils.page_layout.text_blocks.leaders import flatten_axis, inside_spans, leaders_of, spans_at
 from ocr_utils.page_layout.text_blocks.pieces import is_low_mark
 from ocr_utils.page_layout.text_blocks.typeset import glyphs_kegl, set_cuts
@@ -92,6 +94,30 @@ CUT_MIN_GLYPHS = 1.9
 CUT_MAX_WIDTH_GLYPHS = 4.0
 CUT_WAIST_SHARE = 0.3
 CUT_PART_GLYPHS = 0.6
+
+
+class TallGlyphCut(Enum):
+    """Какие высокие глифы :func:`_cut_tall_glyphs` режет по перемычке как сросшиеся из букв двух рядов."""
+
+    # Не резать вовсе (для сравнения «было | стало»).
+    NONE = "none"
+    # Как до 2026-11-01: только по высоте против медианы сгустка. На паке-1 (622 полосы P∪N∪C) так
+    # режется 576 глифов на 278 полосах, и почти все — целые буквы: «Д», «Ц», «ф», «%» среди строчных,
+    # прописные крупного заголовка, раздробленного Оцу («Т» в «МАТЕРИАЛЬНО-ТЕХНИЧЕСКОЕ»).
+    HEIGHT = "height"
+    # По высоте и по геометрии двух рядов (:func:`_on_two_levels`): у верхней и нижней половинки есть
+    # соседние буквы своего уровня, и уровни разнесены по высоте, как соседние строки.
+    TWO_LEVELS = "two_levels"
+
+
+# Способ по умолчанию; читается при каждом вызове, стенд может переключить его присваиванием.
+DEFAULT_TALL_GLYPH_CUT = TallGlyphCut.HEIGHT
+# Соседи половинки глифа (:func:`_on_two_levels`) ищутся по горизонтали не дальше стольких медианных
+# ширин букв сгустка от края глифа: в 1969/02 IMG_0101_1L у «у»» + «Ш» соседи «к» сверху и «С-60» снизу
+# стоят вплотную, а буквы через слово уже могут принадлежать другой строке колонки.
+CUT_NEIGHBOR_WIDTHS = 3.0
+# Сосед половинки — не ниже стольких медианных высот ближних букв (знаки и обломки — не соседи).
+CUT_NEIGHBOR_GLYPHS = 0.8
 SPLIT_MIN_LETTERS = 3
 # ...и по двум, если в сгустке есть глиф выше стольких букв сгустка (сросшиеся буквы двух рядов).
 SPLIT_BRIDGE_GLYPHS = 1.6
@@ -318,7 +344,7 @@ def candidates_of(stats: np.ndarray, scale: Scale, dpi: float) -> list[int]:
     # галочка, и, пришитый к строке, он сдвигал её край и отрывал следующую строку в свой блок (1972/06 IMG_0105_1L).
     # Ширина картинки — по рамке фона (нулевая компонента разметки покрывает весь кадр).
     if out:
-        typical = float(np.median(heights[out]))
+        typical = float(fast_stats.median(heights[out]))
         width = float(stats[0, cv2.CC_STAT_LEFT] + stats[0, cv2.CC_STAT_WIDTH])
         edge = mm_to_px(NARROW_EDGE_MM, dpi)
         out += [
@@ -414,7 +440,7 @@ def component_mask(work: np.ndarray, scale: Scale) -> np.ndarray:
             keep[index] = True
     heights = stats[1:, cv2.CC_STAT_HEIGHT][keep[1:]]
     if heights.size:
-        median_height = float(np.median(heights))
+        median_height = float(fast_stats.median(heights))
         limit = BRIDGE_HEIGHT_RATIO * median_height
         frame_limit = FRAME_HEIGHT_RATIO * median_height
         for index in np.nonzero(keep)[0]:
@@ -507,7 +533,7 @@ def _thin_rule(ink: np.ndarray, k: float, spans: list[tuple[float, float]] | Non
     thickness = thickness[thickness > 0]
     if thickness.size == 0:
         return False
-    return float(np.median(thickness)) <= mm_to_px(RULE_MAX_THICKNESS_MM, RENDER_DPI)
+    return float(fast_stats.median(thickness)) <= mm_to_px(RULE_MAX_THICKNESS_MM, RENDER_DPI)
 
 
 def _segments_at_scale(
@@ -560,7 +586,7 @@ def _segments_at_scale(
     ]
     # Типичная высота строки страницы: по ней ограничивается окно второго прохода центр-линии,
     # иначе у сгустка из двух слипшихся строк окно накрывает обе и ось идёт между ними.
-    typical_height = float(np.median(heights)) if heights else 0.0
+    typical_height = float(fast_stats.median(heights)) if heights else 0.0
 
     def build(spans: list[list[int]]) -> list[Segment]:
         """Собрать строки из готовых наборов кусков (общий хвост обоих проходов)."""
@@ -664,7 +690,12 @@ def _cut_tall_glyphs(mask: np.ndarray, scale: Scale) -> np.ndarray:
     Returns:
         Та же маска или её копия с обнулённой строкой перемычки у каждого такого глифа.
     """
-    count, components, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    # Буквы — со склейкой меток (:func:`glyph_merge.merged_components`): оторванная Оцу ветвь «к» (3 px при
+    # теле 10) иначе тянула медиану сгустка «ко-» вниз до 3 px, и целая «к» резалась как сросшийся глиф
+    # двух строк (1968/05 IMG_0074_1L). Разрез идёт по краске всей склеенной буквы.
+    if DEFAULT_TALL_GLYPH_CUT is TallGlyphCut.NONE:
+        return mask
+    count, components, stats, _ = merged_components(mask)
     if count <= 1:
         return mask
     # Кегль — по буквам своего сгустка RLSA, а не страницы: буквы крупного заголовка высоки против
@@ -683,8 +714,8 @@ def _cut_tall_glyphs(mask: np.ndarray, scale: Scale) -> np.ndarray:
         own_blob[index] = False
         if own_blob.sum() < 3:
             continue
-        glyph = float(np.median(heights[own_blob]))
-        width = float(np.median(widths[own_blob]))
+        glyph = float(fast_stats.median(heights[own_blob]))
+        width = float(fast_stats.median(widths[own_blob]))
         if heights[index] < CUT_MIN_GLYPHS * glyph or widths[index] > CUT_MAX_WIDTH_GLYPHS * width:
             continue
         x0, y0 = stats[index, cv2.CC_STAT_LEFT], stats[index, cv2.CC_STAT_TOP]
@@ -705,10 +736,89 @@ def _cut_tall_glyphs(mask: np.ndarray, scale: Scale) -> np.ndarray:
             continue
         if above[-1] - above[0] + 1 < CUT_PART_GLYPHS * glyph or below[-1] - below[0] + 1 < CUT_PART_GLYPHS * glyph:
             continue
+        if DEFAULT_TALL_GLYPH_CUT is TallGlyphCut.TWO_LEVELS:
+            # Горизонтальный охват краски каждой половинки — от него меряются соседи (см. _on_two_levels).
+            upper_cols = np.flatnonzero(own[:waist].any(axis=0))
+            lower_cols = np.flatnonzero(own[waist + 1 :].any(axis=0))
+            letters = sized & (heights < CUT_MIN_GLYPHS * glyph)
+            letters[index] = False
+            if not _on_two_levels(
+                (x0 + int(upper_cols[0]), x0 + int(upper_cols[-1]) + 1),
+                (x0 + int(lower_cols[0]), x0 + int(lower_cols[-1]) + 1),
+                y0 + waist,
+                (x0, y0, w, h),
+                stats,
+                letters,
+                width,
+            ):
+                continue
         if out is mask:
             out = mask.copy()
         out[y0 + waist, x0 : x0 + w][own[waist]] = 0
     return out
+
+
+def _on_two_levels(
+    upper_span: tuple[int, int],
+    lower_span: tuple[int, int],
+    waist_y: int,
+    box: tuple[int, int, int, int],
+    stats: np.ndarray,
+    letters: np.ndarray,
+    width: float,
+) -> bool:
+    """Стоят ли половинки высокого глифа на двух разных рядах букв (сросшиеся буквы соседних строк).
+
+    Верхняя половинка — краска глифа выше строки перемычки, нижняя — ниже. Сосед половинки — обычная буква
+    (не высокая и не ниже ``CUT_NEIGHBOR_GLYPHS`` мерки), не перекрытая по x с краской СВОЕЙ половинки, не
+    дальше ``CUT_NEIGHBOR_WIDTHS`` медианных ширин от её края, с серединой по высоте внутри половинки.
+    Перекрытие считается по половинке, а не по всему глифу: в 1969/02 IMG_0101_1L широкая «Ш» нижней строки
+    заходит под «к» верхней, и сосед «у»» по боксу глифа терялся. Глиф двух рядов имеет соседей у обеих
+    половинок, и уровни их середин разнесены не меньше ``SPLIT_LEVEL_HEIGHTS`` мерок. У целой буквы
+    («Д» с выносным, «ф», прописная заголовка) все соседи стоят на одном уровне: у одной половинки соседей
+    нет, либо середины соседей обеих половинок почти совпадают (перемычка «Т» — у середины строки).
+
+    Args:
+        upper_span: ``(x0, x1)`` краски верхней половинки (px маски, x1 — не включая).
+        lower_span: То же для нижней половинки.
+        waist_y: Ордината строки перемычки (px маски).
+        box: ``(x0, y0, w, h)`` бокс глифа (px маски).
+        stats: Статистика компонент (``connectedComponentsWithStats`` или склеенная), строка 0 — фон.
+        letters: Булев вектор по меткам: какие компоненты годятся в соседи (буквы не меньше нижней
+            границы масштаба, не высокие и не сам глиф).
+        width: Медианная ширина буквы сгустка (px).
+
+    Returns:
+        ``True``, если у обеих половинок есть соседи своего уровня и уровни разнесены как строки.
+    """
+    _, y0, _, h = box
+    lefts = stats[:, cv2.CC_STAT_LEFT].astype(np.float64)
+    rights = lefts + stats[:, cv2.CC_STAT_WIDTH]
+    heights = stats[:, cv2.CC_STAT_HEIGHT].astype(np.float64)
+    centres = stats[:, cv2.CC_STAT_TOP] + heights / 2.0
+    reach = CUT_NEIGHBOR_WIDTHS * width
+    # Просвет по горизонтали до краски половинки: слева — от правого края соседа, справа — до левого;
+    # перекрытые с половинкой по x (буквы над и под ней) в её соседи не идут.
+    near_upper = letters & (centres >= y0) & (centres < waist_y)
+    near_lower = letters & (centres > waist_y) & (centres < y0 + h)
+    for span, near in ((upper_span, near_upper), (lower_span, near_lower)):
+        gap = np.maximum(span[0] - rights, lefts - span[1])
+        near &= (gap >= 0) & (gap <= reach)
+    if not near_upper.any() or not near_lower.any():
+        return False
+    # Мерка — медианная высота соседей обеих половинок; обломки и знаки ниже ``CUT_NEIGHBOR_GLYPHS`` мерки
+    # в соседи не идут: знак над строкой иначе сходит за букву верхнего уровня («С» в «Сдали» 1969/02
+    # IMG_0101_1L, сосед 4 × 7 px при букве 10).
+    glyph = float(fast_stats.median(heights[near_upper | near_lower]))
+    near_upper &= heights >= CUT_NEIGHBOR_GLYPHS * glyph
+    near_lower &= heights >= CUT_NEIGHBOR_GLYPHS * glyph
+    if not near_upper.any() or not near_lower.any():
+        return False
+    # Уровни — медианы середин соседей каждой половинки; разнесены, как соседние ряды (см. _two_levels).
+    return (
+        float(fast_stats.median(centres[near_lower]) - fast_stats.median(centres[near_upper]))
+        >= SPLIT_LEVEL_HEIGHTS * glyph
+    )
 
 
 def _two_levels(
@@ -734,7 +844,7 @@ def _two_levels(
         low = np.abs(ys - lower) < np.abs(ys - upper)
         if low.all() or not low.any():
             return None
-        upper, lower = float(np.median(ys[~low])), float(np.median(ys[low]))
+        upper, lower = float(fast_stats.median(ys[~low])), float(fast_stats.median(ys[low]))
     if lower - upper < SPLIT_LEVEL_HEIGHTS * glyph:
         return None
     if int(low.sum()) < min_letters or int((~low).sum()) < min_letters:
@@ -763,7 +873,8 @@ def _split_two_rows(
     Returns:
         ``(число меток, карта меток, статистика)`` после разрезания.
     """
-    letters, components, letter_stats, centroids = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    # Буквы — со склейкой меток: кегль сгустка и голоса уровней меряются по целым буквам.
+    letters, components, letter_stats, centroids = merged_components(mask)
     if letters <= 1:
         return stats.shape[0], labels, stats
     # Сгусток каждой буквы — по любому её пикселю (как ``pieces.letters_of``).
@@ -788,7 +899,7 @@ def _split_two_rows(
         sized = heights[own][heights[own] >= scale.min_height]
         if sized.size < 2 * SPLIT_MIN_LETTERS:
             continue
-        glyph = float(np.median(sized))
+        glyph = float(fast_stats.median(sized))
         if stats[blob, cv2.CC_STAT_HEIGHT] < SPLIT_MIN_HEIGHT_RATIO * glyph:
             continue
         centres = centroids[own, 1]
@@ -886,6 +997,9 @@ def _glyph_boxes(
     """
     own = np.isin(labels[y0:y1, x0:x1], span)
     glyphs = ((mask[y0:y1, x0:x1] > 0) & own).astype(np.uint8)
+    # Без склейки меток (:mod:`glyph_merge`): здесь ищутся сами мелкие знаки — точки и запятые (:func:`_mark_spans`) —
+    # и зона конца строки. Склейка тут меняла концы осей и через них сборку блоков: заголовок «Статья 20.» прилипал
+    # к абзацу над ним (ХиП 1991/07 IMG_0071_L), раздел «VI.» — тоже (06/IMG_0430_L).
     count, _, stats, _ = cv2.connectedComponentsWithStats(glyphs, 8)
     if count <= 1:
         return np.zeros((0, 4), dtype=np.float64)
@@ -915,7 +1029,8 @@ def _glyph_rects(
     """
     own = np.isin(labels[y0:y1, x0:x1], span)
     glyphs = ((mask[y0:y1, x0:x1] > 0) & own).astype(np.uint8)
-    count, _, stats, _ = cv2.connectedComponentsWithStats(glyphs, 8)
+    # Буквы — со склейкой меток (точка «i», кратка «й», оторванная ветвь «к»): бокс — у целой буквы.
+    count, _, stats, _ = merged_components(glyphs)
     if count <= 1:
         return np.zeros((0, 4), dtype=np.float64)
     lefts = stats[1:, cv2.CC_STAT_LEFT].astype(np.float64) + x0
@@ -940,7 +1055,7 @@ def _mark_spans(boxes: np.ndarray) -> tuple[tuple[float, float], ...]:
     """
     if boxes.shape[0] == 0:
         return ()
-    x_h = float(np.median(boxes[:, 3]))
+    x_h = float(fast_stats.median(boxes[:, 3]))
     return tuple((float(box[0]), float(box[1])) for box in boxes if is_low_mark(float(box[2]), float(box[3]), x_h))
 
 
@@ -970,7 +1085,7 @@ def _segment_of(
     x1 = int((members[:, cv2.CC_STAT_LEFT] + members[:, cv2.CC_STAT_WIDTH]).max())
     y1 = int((members[:, cv2.CC_STAT_TOP] + members[:, cv2.CC_STAT_HEIGHT]).max())
     width = x1 - x0
-    h_line = float(np.median(members[:, cv2.CC_STAT_HEIGHT]))
+    h_line = float(fast_stats.median(members[:, cv2.CC_STAT_HEIGHT]))
     if h_line > max_height or h_line < scale.min_height:
         return None
     if width < scale.aspect * h_line or width < min_length:
@@ -1064,7 +1179,7 @@ def _split_at_gutters(
     cy = (y0 + y1) / 2.0
     lefts = members[:, cv2.CC_STAT_LEFT]
     rights = lefts + members[:, cv2.CC_STAT_WIDTH]
-    glyph = float(np.median(members[:, cv2.CC_STAT_HEIGHT]))
+    glyph = float(fast_stats.median(members[:, cv2.CC_STAT_HEIGHT]))
     for gx0, gx1, gy0, gy1 in separators:
         if gx0 <= 0 or not (centres.min() < gx0 and centres.max() > gx1):
             continue
@@ -1080,7 +1195,7 @@ def _split_at_gutters(
                 continue
             # Остальные пробелы строки: просвет между соседними по x буквами, кроме самого межколонника.
             spaces = _spaces(lefts, rights, SPLIT_SPACE_MIN_GLYPH * glyph, float(before.max()))
-            if spaces.size and gap < SPLIT_SPACE_RATIO * float(np.median(spaces)):
+            if spaces.size and gap < SPLIT_SPACE_RATIO * float(fast_stats.median(spaces)):
                 continue
         # Та же мера, что и при сцепке: доля СТОЛБЦОВ межколонника с краской на высоте строки.
         # По площади мера была слишком чувствительной — одна точка давала «краска есть».
@@ -1202,7 +1317,7 @@ def _text_rows(body: list[Segment]) -> list[Segment]:
     """
     if len(body) < BODY_MIN_SEGMENTS:
         return []
-    median_height = float(np.median([segment.height for segment in body]))
+    median_height = float(fast_stats.median([segment.height for segment in body]))
     eligible = [
         segment for segment in body if segment.height <= BODY_HEIGHT_RATIO * median_height and segment.xs.size > 0
     ]
@@ -1339,7 +1454,7 @@ def _body_sized(body: list[Segment], large: list[Segment]) -> list[Segment]:
     """
     if len(body) < BODY_MIN_SEGMENTS:
         return body
-    median_height = float(np.median([segment.height for segment in body]))
+    median_height = float(fast_stats.median([segment.height for segment in body]))
     out = []
     for segment in body:
         if segment.height <= BODY_HEIGHT_RATIO * median_height:
@@ -1371,18 +1486,9 @@ def refined_centreline(ink: np.ndarray, height_px: float) -> tuple[np.ndarray, n
         return xs, ys, weights
     anchor = smooth_median(ys, max(3, int(SMOOTH_HEIGHTS * height_px) | 1))
     half = max(2.0, CENTRE_WINDOW_HEIGHTS * height_px)
-    rows = np.arange(ink.shape[0], dtype=np.float64)[:, None]
-    mask = ink > 0
-    out_y, out_w = np.empty(xs.size), np.empty(xs.size)
-    for index, (x, centre) in enumerate(zip(xs.astype(int), anchor)):
-        column = mask[:, x]
-        near = column & (np.abs(rows[:, 0] - centre) <= half)
-        count = near.sum()
-        if count == 0:
-            out_y[index], out_w[index] = ys[index], weights[index]
-            continue
-        out_y[index] = float((rows[:, 0] * near).sum() / count)
-        out_w[index] = float(count)
+    # Центр масс каждого столбца в полосе вокруг линии первого прохода — ядром Numba (цикл по столбцам в Python
+    # был заметной долей разбора); у столбца без краски в полосе остаётся первый проход.
+    out_y, out_w = fast_stats.refined_columns(ink > 0, xs.astype(int), anchor, half, ys, weights)
     return xs, out_y, out_w
 
 
@@ -1400,7 +1506,7 @@ def _edge_line(xs: np.ndarray, ys: np.ndarray, base: np.ndarray, height_px: floa
     if int(base.sum()) < MIN_END_COLUMNS:
         return None
     steady = smooth_median(ys[base], max(3, int(END_FIT_SMOOTH_HEIGHTS * height_px) | 1))
-    slope, intercept = np.polyfit(xs[base], steady, 1)
+    slope, intercept = fast_stats.polyfit(xs[base], steady, 1)
     return float(slope), float(intercept)
 
 
@@ -1543,7 +1649,7 @@ def _flatten_ends(
     """
     if xs.size < MIN_END_COLUMNS or height_px <= 0 or boxes.shape[0] == 0:
         return ys
-    x_h = float(np.median(boxes[:, 3]))
+    x_h = float(fast_stats.median(boxes[:, 3]))
     fit = END_FIT_HEIGHTS * height_px
     # Границы зон переводятся в координаты центр-линии: рабочая копия → рендер от начала сегмента.
     left = (_end_zone(boxes, x_h, at_start=True) - x0) * k
@@ -1561,11 +1667,11 @@ def _flatten_ends(
         if int(base.sum()) < MIN_END_COLUMNS or not zone.any():
             continue
         steady = smooth_median(out[base], max(3, int(END_FIT_SMOOTH_HEIGHTS * height_px) | 1))
-        slope = float(np.polyfit(xs[base], steady, 1)[0])
+        slope = float(fast_stats.polyfit(xs[base], steady, 1)[0])
         # Наклон зажимается, а прямая проводится через МЕДИАНУ опоры: подогнанный по шумной опоре
         # свободный член уводит продолжение на десятки пикселей.
         slope = float(np.clip(slope, -np.tan(np.radians(END_SLOPE_LIMIT_DEG)), np.tan(np.radians(END_SLOPE_LIMIT_DEG))))
-        intercept = float(np.median(steady - slope * xs[base]))
+        intercept = float(fast_stats.median(steady - slope * xs[base]))
         limit = END_FLAT_TOLERANCE_HEIGHTS * height_px
         predicted = slope * xs[zone] + intercept
         out[zone] = np.clip(out[zone], predicted - limit, predicted + limit)
@@ -1717,6 +1823,11 @@ def segments_of(
     # Крупная «строка», в которой корпус нашёл несколько рядов один над другим, — склейка рядов
     # через рисунок или вензель: ей не верим, и корпусные ряды она не поглощает.
     large_all = [segment for segment in large_all if not _multi_row(segment, body)]
+    # Крупная строка, склеенная из разного набора, режется ДО проверки накрытия корпусом: иначе её чужой хвост
+    # пропадал вместе с ней. «МАТЕРИАЛЬНО» + номер «12» шапки (1969/12 IMG_0102_2R): корпусная строка
+    # «МАТЕРИАЛЬНО» накрыла 77 % склейки, склейка выбыла целиком, номер остался без оси, и его краска ушла в край
+    # ряда «ТЕХНИЧЕСКОЕ» до самого «Декабрь».
+    large_all = [part for segment in large_all for part in split_segment(segment)]
     body = _body_sized(body, large_all)
     # Крупный масштаб добавляет только то, чего корпус не нашёл (заголовки, логотип).
     large = [segment for segment in large_all if not _covered(segment, body)]

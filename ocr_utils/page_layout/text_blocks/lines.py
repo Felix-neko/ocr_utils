@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 from scipy.signal import savgol_filter
 
-from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI, fast_stats
 from ocr_utils.page_layout.text_blocks.engines.base import EngineLine
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
@@ -70,13 +70,27 @@ class LineAxis:
     # ``body_points`` плюс этот сдвиг (:attr:`base_points`). ``None`` — базы нет (нет второй оси или строка из
     # повёрнутой области: там сдвиг не вертикален в координатах страницы).
     body_lift: float | None = None
+    # На сколько повёрнута по часовой область, в которой строка разбиралась прямой (``hints.OrientedZone.rotate_cw``):
+    # 0 — строка горизонтальна на странице, 90 и 270 — вертикальна (точки идут сверху вниз), 180 — перевёрнута.
+    rotate_cw: int = 0
+
+    @property
+    def sideways(self) -> bool:
+        """Строка вертикальна на странице (разбиралась в боковой области, поворот 90 или 270)."""
+        return self.rotate_cw in (90, 270)
 
     @property
     def base_points(self) -> np.ndarray | None:
-        """Базовая линия строки ``(M, 2)`` — по низу букв без выносных (:mod:`baseline_axis`); ``None`` — нет."""
+        """Базовая линия строки ``(M, 2)`` — по низу букв без выносных (:mod:`baseline_axis`); ``None`` — нет.
+
+        Сдвиг ``body_lift`` меряется вниз в кадре, где строка прямая; на странице он повёрнут обратно поворотом
+        области: у вертикальной строки (90) — вправо по x, (270) — влево, у перевёрнутой (180) — вверх.
+        """
         if self.body_points is None or self.body_lift is None:
             return None
-        return self.body_points + np.array([0.0, self.body_lift])
+        lift = {0: (0.0, self.body_lift), 90: (self.body_lift, 0.0), 180: (0.0, -self.body_lift),
+                270: (-self.body_lift, 0.0)}[self.rotate_cw % 360]  # fmt: skip
+        return self.body_points + np.array(lift)
 
     @property
     def x0(self) -> float:
@@ -88,7 +102,7 @@ class LineAxis:
 
     @property
     def cy(self) -> float:
-        return float(np.median(self.points[:, 1]))
+        return float(fast_stats.median(self.points[:, 1]))
 
     @property
     def length_mm(self) -> float:
@@ -134,7 +148,7 @@ def resample(points: np.ndarray, step_px: float) -> np.ndarray:
     for cell in np.unique(index):
         own = ys[index == cell]
         out_x.append(float(grid[cell] + step_px / 2.0))
-        out_y.append(float(np.median(own)))
+        out_y.append(float(fast_stats.median(own)))
     # Концы — на концах данных: иначе крайние точки уходят на полшага наружу справа и внутрь слева.
     out_x[0] = x_first
     out_x[-1] = x_last if len(out_x) > 1 else out_x[-1]
@@ -145,7 +159,7 @@ def smooth_axis(points: np.ndarray, window_px: float) -> np.ndarray:
     """Сглаживание оси: медиана окном (выбросы) и Савицкий–Голей (гладкость), окно в пикселях."""
     if points.shape[0] < MIN_POINTS:
         return points
-    step = float(np.median(np.diff(points[:, 0]))) if points.shape[0] > 1 else 1.0
+    step = float(fast_stats.median(np.diff(points[:, 0]))) if points.shape[0] > 1 else 1.0
     window = max(3, int(round(window_px / max(step, 1e-6))) | 1)
     ys = smooth_median(points[:, 1], window)
     if ys.size > window:
@@ -198,7 +212,7 @@ def _shape_stats(
     resid_parabola = 0.0
     if fit is not None:
         # Остаток от параболы: подгоняем её заново по тем же точкам и берём размах.
-        coeffs = np.polyfit(xs - xs.mean(), ys, 2)
+        coeffs = fast_stats.polyfit(xs - xs.mean(), ys, 2)
         resid_quad = ys - np.polyval(coeffs, xs - xs.mean())
         resid_parabola = float(resid_quad.max() - resid_quad.min())
     return (

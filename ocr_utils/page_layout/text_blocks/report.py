@@ -137,6 +137,8 @@ def page_json(analysis: PageAnalysis) -> dict:
         # Защита выровненных сторон от сора (``edge_guard``): выступы первого разбора и итоговые (помечены
         # недостоверными), был ли второй проход, какие детекторы голосовали, выброшенная краска (пиксели рендера).
         "edge_guard": analysis.edge_guard.to_json() if analysis.edge_guard is not None else None,
+        # Фильтр псевдоглифов (``pseudo_glyphs``): режим, повторные разборы, закрашенные компоненты с причинами.
+        "pseudo_glyphs": analysis.pseudo_glyphs.to_json() if analysis.pseudo_glyphs is not None else None,
         "axes": [
             {
                 "column": axis.column,

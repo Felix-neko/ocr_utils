@@ -23,6 +23,7 @@ from ocr_utils.scan_cropping.v2.rectify.text_field import (
     fit_field,
     inner_rules,
     orphan_rules,
+    vertical_groups,
     zero_samples,
 )
 
@@ -365,3 +366,35 @@ def test_band_fits_page():
     assert band_fits_page(PageText(None, np.zeros(2), 1.0, regions=photo, ink=scheme), v, rect, DPI)
     # «Строка» в 3 мм от низа страницы — край листа.
     assert not band_fits_page(page, sloped_lines([H - 40 - 35.0], 0.0, 100.0, 700.0), rect, DPI)
+
+
+def vertical_piece(x0: float, y0: float, y1: float, slope: float = 0.0) -> np.ndarray:
+    """Точки куска вертикальной строки ``x = x0 + slope·(y − y0)`` с шагом 10 px по y."""
+    ys = np.arange(y0, y1 + 1e-9, 10.0)
+    return np.stack([x0 + slope * (ys - y0), ys], axis=1)
+
+
+def test_vertical_groups_join_pieces_of_one_tilted_line_but_not_a_neighbour():
+    """Куски одной наклонной строки через промежуток — одна строка; соседняя строка в 4 мм — отдельно."""
+    slope = 0.01
+    a = vertical_piece(300.0, 100.0, 400.0, slope)
+    b = vertical_piece(300.0 + slope * 500.0, 500.0, 800.0, slope)  # продолжение через промежуток 100 px
+    c = vertical_piece(300.0 + 4.0 * DPI / 25.4, 100.0, 800.0)  # соседняя строка
+    groups = vertical_groups([a, b, c], DPI)
+    assert sorted(groups) == [[0, 1], [2]]
+
+
+def test_free_vertical_target_aligns_pieces_of_one_line():
+    """Куски одной вертикальной строки со ступенькой 10 px встают в одну вертикаль: цель строки свободная и общая."""
+    a, b = vertical_piece(400.0, 100.0, 450.0), vertical_piece(410.0, 650.0, 1000.0)
+    pts = np.concatenate([a, b])
+    target = float(np.median(pts[:, 0]))
+    at = np.stack([np.full(len(pts), target), pts[:, 1]], axis=1)
+    h = Samples(at, pts[:, 0] - target, np.ones(len(pts)), pts, np.full(len(pts), SampleKind.VERTICAL),
+                np.zeros(len(pts), int))  # fmt: skip
+    field = fit_field(h, Samples.empty(), layout(), DPI, 4.0, 40.0)
+    dx, _ = field.dense(W, H)
+    # Точка итога X берётся из X + dx(X): строка вертикальна, если X + dx одинаков вдоль неё.
+    upper = 400.0 - dx[275, 400]
+    lower = 410.0 - dx[825, 410]
+    assert abs(upper - lower) < 2.0

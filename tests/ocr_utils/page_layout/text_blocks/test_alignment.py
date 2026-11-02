@@ -89,7 +89,9 @@ def test_overlapping_pieces_are_not_linked():
         # Буквы куска — десять одинаковой высоты: кегль у стыка тот же, что икс.
         sizes = np.tile([7.0, 10.0], (10, 1))
         marks = np.zeros(10, dtype=bool)
-        return SimpleNamespace(x0=x0, x1=x1, cy=cy, x_h=10.0, height=18.0, leader_dots=0, sizes=sizes, marks=marks)
+        return SimpleNamespace(
+            x0=x0, x1=x1, cy=cy, x_h=10.0, kegl_range=(10.0, 10.0), height=18.0, leader_dots=0, sizes=sizes, marks=marks
+        )
 
     word, next_word, rule = piece(500, 600, 143.5), piece(606, 663, 143.7), piece(109, 909, 145.0)
     allowed = zones.LinkVerdict.ACCEPTED

@@ -69,7 +69,7 @@ def cached_frames(src: Path, work_dir: Path, key: str, bg_veto: bool, spine_meth
     zone_seg = book_zone(original, fingers["core"], book["book"])
     lines = frame_spread_lines(pages, book["book"], zone_seg, paint_seg, spine_method)
     if lines is None:
-        return SpreadGeometry(None, box, seg_scale, equations)
+        return SpreadGeometry(None, box, seg_scale, equations, shape)
     core_seg = cv2.resize(fingers["core"].astype(np.uint8), img.shape[1::-1], interpolation=cv2.INTER_NEAREST) > 0
     fit = spread_fit(img, sam3["inst"], book["book"], pages, lines, polys, paint_seg, core_seg, seg_scale[1])
-    return SpreadGeometry(None if fit is None else fit.frames, box, seg_scale, equations)
+    return SpreadGeometry(None if fit is None else fit.frames, box, seg_scale, equations, shape)

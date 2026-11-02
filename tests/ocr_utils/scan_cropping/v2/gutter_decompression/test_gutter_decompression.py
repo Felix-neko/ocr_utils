@@ -185,3 +185,55 @@ def test_page_plans_ignores_fold_line_at_spine() -> None:
         base = int((15 + 3.2 * row) * PPM)
         clean[base - 15 : base + 1, x : x + 2] = 40
     assert not any(p.applied for p in page_plans(clean, layout, PPM, (True, True)))
+
+
+def test_widen_only_within_reach_of_text_start() -> None:
+    """Длинный спад (12 мм): растяжение только в ``reach_mm`` от начала зоны текста, глубже — чистый сдвиг на W."""
+    model = const_model(0.3, 12.0, 3.0)
+    limits = WidenLimits(reach_mm=20.0)
+    plan = plan_widen(model, 110.0, 100.0, limits, (3.0,) * Y_NODES, (0.0, 1.0))
+    assert plan.applied and plan.widen_mm > 0
+    u = np.arange(0.0, 110.0 + 0.01, 0.01)
+    for y in (0.0, 0.5, 1.0):
+        t = widen_output_of_source(plan, u, y)
+        assert np.all(np.diff(t) > 0)
+        assert np.allclose(t[u < 3.0], u[u < 3.0])
+        deep = u > 3.0 + 20.0
+        assert np.allclose(t[deep] - u[deep], plan.widen_mm, atol=1e-9)
+    # Без предела зоны тот же спад растягивает и глубину страницы: в 40 мм от корешка наклон больше 1.
+    free = plan_widen(model, 110.0, 100.0, WidenLimits(reach_mm=float("inf")), (3.0,) * Y_NODES, (0.0, 1.0))
+    t = widen_output_of_source(free, u, 0.5)
+    k = np.searchsorted(u, 40.0)
+    assert (t[k + 1] - t[k]) / (u[k + 1] - u[k]) > 1.0 + 1e-3
+    assert free.widen_mm > plan.widen_mm
+
+
+def test_anchored_starts_by_blocks() -> None:
+    """Начало зоны по блокам: внутри блока — его начало, между блоками — переход, не дальше предела."""
+    from ocr_utils.scan_cropping.v2.gutter_decompression.widen import BlockAnchor, anchored_starts
+
+    anchors = [BlockAnchor(0.05, 0.45, 2.0, True), BlockAnchor(0.55, 0.95, 4.0, False), BlockAnchor(0.6, 0.7, 30.0, False)]
+    starts = np.array(anchored_starts(anchors, cap_mm=3.0))
+    nodes = np.linspace(0.0, 1.0, Y_NODES)
+    assert np.allclose(starts[(nodes >= 0.05) & (nodes <= 0.45)], 2.0)
+    # Второй блок — 4 мм, но не дальше предела 3 мм; третий внутри второго не уводит начало дальше.
+    assert np.allclose(starts[(nodes >= 0.55) & (nodes <= 0.95)], 3.0)
+    gap = (nodes > 0.45) & (nodes < 0.55)
+    assert np.all(np.diff(starts[gap]) >= 0) and starts[gap].min() >= 2.0 and starts[gap].max() <= 3.0
+    assert anchored_starts([], 3.0) == ()
+
+
+def test_aligned_side_at_zone_start_stays_straight() -> None:
+    """Выровненная сторона на начале зоны остаётся прямой при любой амплитуде по высоте; при огибающей, гуляющей
+    ближе стороны, — изгибается."""
+    model = CompressionModel(HeightShape.LINEAR, (0.45, -0.3), 4.0, 1.9)
+    side = 1.94
+    anchored = plan_widen(model, 110.0, 100.0, WidenLimits(), (side,) * Y_NODES, (0.0, 1.0))
+    wobbly = tuple(0.7 if k % 7 == 3 else side for k in range(Y_NODES))
+    envelope = plan_widen(model, 110.0, 100.0, WidenLimits(), wobbly, (0.0, 1.0))
+    u = np.arange(0.0, 110.0, 0.01)
+    ys = np.linspace(0.0, 1.0, Y_NODES)
+    moved = [np.interp(side, u, widen_output_of_source(anchored, u, float(y))) for y in ys]
+    bent = [np.interp(side, u, widen_output_of_source(envelope, u, float(y))) for y in ys]
+    assert np.ptp(moved) < 1e-6
+    assert np.ptp(bent) > 0.3

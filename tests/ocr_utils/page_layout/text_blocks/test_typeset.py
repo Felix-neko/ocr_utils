@@ -8,7 +8,7 @@ from ocr_utils.page_layout.text_blocks.barriers import BarrierLines
 from ocr_utils.page_layout.text_blocks.baseline_axis import _foreign_glyphs, _hits_foreign
 from ocr_utils.page_layout.text_blocks.lines import LineAxis
 from ocr_utils.page_layout.text_blocks.segment import Segment, split_segment
-from ocr_utils.page_layout.text_blocks.typeset import barrier_between, different_sets
+from ocr_utils.page_layout.text_blocks.typeset import barrier_between, different_sets, glyphs_bottom, glyphs_kegl
 
 
 def word(x0: float, count: int, height: float, bottom: float) -> np.ndarray:
@@ -83,12 +83,17 @@ def test_split_segment_keeps_heading_with_wide_spaces() -> None:
     assert len(split_segment(_segment(glyphs))) == 1
 
 
+def _foreign_of_first(boxes: list[np.ndarray]) -> np.ndarray:
+    """Чужие глифы для первой оси из ``boxes`` (кегль и низ осей — как в ``extend_to_ink``)."""
+    return _foreign_glyphs(boxes, [glyphs_kegl(own) for own in boxes], [glyphs_bottom(own) for own in boxes], 0)
+
+
 def test_extension_stops_at_glyph_of_another_line() -> None:
     """Продление оси шапки задевает «Год издания» на другой линии — отменяется; половинка той же строки — не чужая."""
     masthead, small, half = word(0, 6, 43, 190), word(240, 4, 22, 167), word(240, 4, 43, 190)
-    foreign = _foreign_glyphs([masthead, small], 0)
+    foreign = _foreign_of_first([masthead, small])
     assert _hits_foreign(foreign, 190.0, 300.0, 170.0, 0.6 * 43)
-    assert len(_foreign_glyphs([masthead, half], 0)) == 0
+    assert len(_foreign_of_first([masthead, half])) == 0
 
 
 def test_barrier_between_ignores_short_stroke_and_finds_toc_rule() -> None:

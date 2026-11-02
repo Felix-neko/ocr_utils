@@ -21,12 +21,28 @@ class SpreadGeometry:
         box: Рамка вырезки итога ``(x0, y0, x1, y1)`` в px кадра или None — бумага не найдена.
         seg_scale: Масштаб сегментации относительно кадра по X и Y.
         equations: Блоки surya ``Equation`` (многоугольники в px кадра).
+        frame_shape: ``(H, W)`` кадра, px, или None — неизвестен (главная точка снимка тогда — центр итога).
     """
 
     frames: list[PageFrame] | None
     box: tuple[int, int, int, int] | None
     seg_scale: tuple[float, float]
     equations: tuple[np.ndarray, ...] = ()
+    frame_shape: tuple[int, int] | None = None
+
+    def principal_point(self, output_shape: tuple[int, int]) -> np.ndarray:
+        """Главная точка снимка (центр кадра) в px итога; без размера кадра — центр итога.
+
+        Args:
+            output_shape: ``(H, W)`` итога.
+
+        Returns:
+            Точка ``(x, y)``.
+        """
+        if self.frame_shape is None:
+            return np.array([output_shape[1] / 2, output_shape[0] / 2], np.float64)
+        h, w = self.frame_shape
+        return self.frame_to_output(np.array([[w / 2, h / 2]], np.float64))[0]
 
     def frame_to_output(self, points: np.ndarray) -> np.ndarray:
         """Точки (N, 2) px кадра → px итога (минус левый верхний угол рамки вырезки)."""

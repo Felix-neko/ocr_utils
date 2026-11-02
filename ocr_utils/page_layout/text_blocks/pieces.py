@@ -25,8 +25,9 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ocr_utils.page_layout.text_blocks import WORK_DPI
+from ocr_utils.page_layout.text_blocks import WORK_DPI, fast_stats
 from ocr_utils.page_layout import mm_to_px, px_to_mm
+from ocr_utils.page_layout.text_blocks import typeset
 
 # Длинный кусок: не меньше двух букв и шириной хотя бы в столько высот строчной. Два критерия
 # вместе: дефис и тире тонкие, но широкие (отношение сторон 3), а буква у них одна — ось по ней
@@ -152,9 +153,27 @@ class Piece:
         return self.letters >= LONG_MIN_LETTERS and self.width >= LONG_ASPECT_XH * max(self.x_h, 1e-6)
 
     @property
+    def kegl_range(self) -> tuple[float, float] | None:
+        """Кегль куска диапазоном для запрета сцепки по разнице кегля (см. ``typeset.kegl_range``).
+
+        У ``LEGACY`` — ``x_h`` точкой (у куска меньше трёх букв это медиана страницы). У ``RELIABLE`` — по высотам
+        своих букв без мелочи: от трёх букв точкой, у одной-двух — диапазоном; у слитого куска — по буквам обоих.
+        Геометрия зон поиска берёт ``x_h`` и от этого не зависит.
+        """
+        if typeset.DEFAULT_KEGL_TRUST is typeset.KeglTrust.LEGACY:
+            return self.x_h, self.x_h
+        # Низкие метки (точки, запятые, дефисы) и крошки ниже ``typeset.MARK_SHARE`` икса куска — не буквы: кусок из
+        # одних меток кегля не даёт вовсе (``None``), иначе точка за словом отбивалась бы как «разный кегль», а
+        # крошка на поле — до проверки на сор.
+        heights = self.sizes[:, 1].astype(np.float64)
+        letters = ~self.marks & (heights >= typeset.MARK_SHARE * self.x_h)
+        heights = heights[letters]
+        return typeset.heights_range(heights[typeset._kept(heights)])
+
+    @property
     def cy(self) -> float:
         """Уровень куска: медиана якорей, то есть ось строки, а не середина бокса."""
-        return float(np.median(self.anchors[:, 1]))
+        return float(fast_stats.median(self.anchors[:, 1]))
 
     def axis(self) -> tuple[np.ndarray, float]:
         """Коэффициенты МНК-оси по якорям букв и центр абсцисс, от которого они отсчитаны."""
@@ -229,8 +248,8 @@ def is_low_mark(width: float, height: float, x_h: float) -> bool:
 def _line_at(xs: np.ndarray, ys: np.ndarray, at: np.ndarray) -> np.ndarray:
     """Прямая МНК по ``(xs, ys)``, посчитанная в точках ``at``; при вырождении — медиана ``ys``."""
     if xs.size < 2 or float(xs.max() - xs.min()) < 1e-6:
-        return np.full(at.shape, float(np.median(ys)))
-    return np.polyval(np.polyfit(xs, ys, 1), at)
+        return np.full(at.shape, float(fast_stats.median(ys)))
+    return np.polyval(fast_stats.polyfit(xs, ys, 1), at)
 
 
 def _glued_groups(boxes: np.ndarray, x_h: float) -> np.ndarray:
@@ -301,7 +320,7 @@ def _hangs_leave_one_out(xs: np.ndarray, bottoms: np.ndarray, body: np.ndarray, 
         if others.size >= DESCENDER_LOO_LINE_LETTERS:
             level = float(_line_at(xs[others], bottoms[others], xs[index : index + 1])[0])
         else:
-            level = float(np.median(bottoms[others]))
+            level = float(fast_stats.median(bottoms[others]))
         drops[position] = bottoms[index] - level
     worst = int(np.argmax(drops))
     hangs[members[worst]] = bool(drops[worst] > limit)
@@ -450,7 +469,7 @@ def fit_axis(anchors: np.ndarray) -> tuple[np.ndarray, float]:
     if xs.size == 1 or float(xs.max() - xs.min()) < 1e-6:
         return np.array([float(ys.mean())]), centre
     degree = 2 if xs.size >= AXIS_PARABOLA_LETTERS else 1
-    return np.polyfit(xs - centre, ys, degree), centre
+    return fast_stats.polyfit(xs - centre, ys, degree), centre
 
 
 def end_direction(
@@ -493,7 +512,7 @@ def end_direction(
         tip_x, tip_y = float(xs[-1]), float(ys[-1])
     slope = 0.0
     if own.sum() >= 2 and float(xs[own].max() - xs[own].min()) > 1e-6:
-        slope = float(np.polyfit(xs[own], ys[own], 1)[0])
+        slope = float(fast_stats.polyfit(xs[own], ys[own], 1)[0])
     # Наклон конца зажимается вокруг наклона всего куска: сам по себе он слишком шумен.
     if span > 1e-6 and xs.size >= 3:
         chord = float((ys[-1] - ys[0]) / span)
@@ -541,7 +560,7 @@ def pieces_of(
         if int(owner) in chosen:
             order[int(owner)].append(position)
     # Икс страницы — медиана высот всех букв: у куска из двух букв своя медиана ненадёжна.
-    page_x_h = float(np.median(boxes[:, 3])) if boxes.shape[0] else mm_to_px(2.0, dpi)
+    page_x_h = float(fast_stats.median(boxes[:, 3])) if boxes.shape[0] else mm_to_px(2.0, dpi)
     # Подъём якоря над базовой линией — ОДИН на всю полосу. Он сдвигает уровни всех кусков на
     # одну и ту же величину, поэтому их сравнение между собой не портит вовсе; возьми его от
     # собственного икса куска — и кусок из одних прописных снова уехал бы вверх, потому что его
@@ -553,7 +572,7 @@ def pieces_of(
         if not own:
             continue
         piece_boxes = boxes[own]
-        x_h = float(np.median(piece_boxes[:, 3])) if len(own) >= 3 else page_x_h
+        x_h = float(fast_stats.median(piece_boxes[:, 3])) if len(own) >= 3 else page_x_h
         x_h = max(x_h, 1.0)
         anchors, marks = anchors_of(piece_boxes, x_h, lift=lift)
         keep = np.argsort(anchors[:, 0])
@@ -571,7 +590,7 @@ def pieces_of(
                 x1=x0 + float(stats[index, cv2.CC_STAT_WIDTH]),
                 y1=y0 + float(stats[index, cv2.CC_STAT_HEIGHT]),
                 x_h=x_h,
-                letter_w=float(np.median(piece_boxes[:, 2])),
+                letter_w=float(fast_stats.median(piece_boxes[:, 2])),
                 leader_dots=_leader_dots(anchors, marks, piece_boxes, leaders),
             )
         )
@@ -670,7 +689,7 @@ def end_kegl_any(piece: Piece, at_start: bool) -> float | None:
     if kegl is not None:
         return kegl
     heights = _end_letters(piece, at_start)
-    return float(np.median(heights)) if heights.size else None
+    return float(fast_stats.median(heights)) if heights.size else None
 
 
 def end_tall(piece: Piece, at_start: bool) -> float | None:
@@ -714,7 +733,7 @@ def pitch_of(pieces: list[Piece], dpi: float = WORK_DPI) -> float:
     Returns:
         Шаг в пикселях рабочей копии.
     """
-    x_h = float(np.median([piece.x_h for piece in pieces])) if pieces else mm_to_px(2.0, dpi)
+    x_h = float(fast_stats.median([piece.x_h for piece in pieces])) if pieces else mm_to_px(2.0, dpi)
     fallback = PITCH_FALLBACK_XH * max(x_h, 1.0)
     long_pieces = [piece for piece in pieces if piece.long]
     if len(long_pieces) < 3:
@@ -736,7 +755,7 @@ def pitch_of(pieces: list[Piece], dpi: float = WORK_DPI) -> float:
             gaps.append(float(distance.min()))
     if not gaps:
         return fallback
-    pitch = float(np.median(gaps))
+    pitch = float(fast_stats.median(gaps))
     if not (mm_to_px(PITCH_MIN_MM, dpi) <= pitch <= mm_to_px(PITCH_MAX_MM, dpi)):
         return fallback
     return pitch
@@ -746,7 +765,7 @@ def page_x_height(pieces: list[Piece], dpi: float = WORK_DPI) -> float:
     """Высота строчной буквы страницы: медиана по кускам (мера всех порогов сцепки)."""
     if not pieces:
         return mm_to_px(2.0, dpi)
-    return float(np.median([piece.x_h for piece in pieces]))
+    return float(fast_stats.median([piece.x_h for piece in pieces]))
 
 
 __all__ = [

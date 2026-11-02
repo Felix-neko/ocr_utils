@@ -32,6 +32,13 @@ from ocr_utils.page_layout.text_blocks.blocks import (
     style_distance,
 )
 from ocr_utils.page_layout.text_blocks.columns import inside_gutter
+from ocr_utils.page_layout.text_blocks.flush_split import (
+    far_pair,
+    flush_change,
+    signature_continues,
+    split_by_flush,
+    split_far_pieces,
+)
 from ocr_utils.page_layout.text_blocks.smooth_envelope import _glyph, envelope_smooth
 from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, axes_kegl, barrier_between, same_baseline
 
@@ -61,6 +68,10 @@ TYPE_MIN_GLYPHS = 5
 # над и под просветом в пределах стольких высот (через одну короткую строку — конец записи) идут строки через
 # весь просвет (:func:`_bridged`).
 SAME_LINE_WIDE_GAP_HEIGHTS = 4.0
+# Короткий кусок строки (не длиннее стольких высот ряда) без замеренных глифов — хвост «с.—», «1990.—»: кегль у него
+# запасной (доля высоты ряда, :func:`blocks.row_glyph_size`) и с настоящим кеглем строки не сравним, набор куска
+# сверяется только по жирности (:func:`_line_style_distance`).
+TAIL_MAX_HEIGHTS = 4.0
 BRIDGE_ROWS_HEIGHTS = 3.5
 BODY_KEGL_MAX_MM = 2.5
 
@@ -137,7 +148,7 @@ def merge_same_line(rows: list[Row], dpi: float, barriers=None, gutters: list | 
                 bridged = _bridged(a, b, out)
                 if gap > limit and not (gap <= SAME_LINE_WIDE_GAP_HEIGHTS * max(a.height, b.height) and bridged):
                     continue
-                if style_distance(a, b) >= SAME_STYLE_DISTANCE:
+                if _line_style_distance(a, b) >= SAME_STYLE_DISTANCE:
                     continue
                 # Просвет, перекрытый строками сверху и снизу, — пробел внутри строки: ни межколонник (столбец широких
                 # пробелов библиографии по формату принимался за межколонник — ХиП 1991/01 IMG_1016), ни разный кегль
@@ -151,6 +162,30 @@ def merge_same_line(rows: list[Row], dpi: float, barriers=None, gutters: list | 
             if changed:
                 break
     return sorted(out, key=lambda row: row.y)
+
+
+def _line_style_distance(a: Row, b: Row) -> float:
+    """Балл разницы набора двух кусков одной строки: как :func:`blocks.style_distance`, но у короткого куска без
+    замеренных глифов кегль в балл не входит — только жирность.
+
+    Хвост строки библиографии «143 с.—» (ХиП 1991/01 IMG_1030 R, итог второго преобразования) — два знака и тире: глифов
+    по нему не намерилось, запасной кегль (0.8 высоты ряда — тире и точка поднимают ряд) против настоящего кегля строки
+    дал балл 0.53 при пороге 0.5. Хвост стал отдельным рядом на той же высоте, и левая сторона блока списка
+    рассыпалась (доля строк на тренде 0, выключка «рваная» вместо «влево»).
+
+    Args:
+        a: Первый кусок.
+        b: Второй кусок.
+
+    Returns:
+        Балл от нуля, порог «разный набор» — ``SAME_STYLE_DISTANCE``.
+    """
+    short_unmeasured = any(row.glyph_h <= 0 and (row.x1 - row.x0) <= TAIL_MAX_HEIGHTS * row.height for row in (a, b))
+    if not short_unmeasured:
+        return style_distance(a, b)
+    if a.weight > 0 and b.weight > 0:
+        return max(a.weight, b.weight) / min(a.weight, b.weight) - 1.0
+    return 0.0
 
 
 def _bridged(a: Row, b: Row, rows: list[Row]) -> bool:
@@ -287,7 +322,22 @@ def _joined(a: Row, b: Row) -> Row:
     )
 
 
-def reach_components(rows: list[Row]) -> list[list[Row]]:
+def _barrier_apart(a: Row, b: Row, barriers) -> bool:
+    """Разделены ли два ряда линейкой-барьером: отрезок между серединами рядов пересекает её.
+
+    Args:
+        a, b: Ряды.
+        barriers: Линейки-барьеры (``barriers.BarrierLines``) или ``None``.
+
+    Returns:
+        ``True`` — ряды по разные стороны линейки.
+    """
+    if barriers is None or barriers.empty:
+        return False
+    return barriers.crosses(((a.x0 + a.x1) / 2.0, a.y), ((b.x0 + b.x1) / 2.0, b.y))
+
+
+def reach_components(rows: list[Row], ink: np.ndarray | None = None, barriers=None) -> list[list[Row]]:
     """Разбить группу на части, связанные «дотягиванием»: ряд связан с ближайшим выше, с которым перекрыт по x.
 
     Правило пользователя: слияние по горизонтали допустимо, только если строки одной части хоть в
@@ -296,6 +346,10 @@ def reach_components(rows: list[Row]) -> list[list[Row]]:
 
     Args:
         rows: Ряды группы сверху вниз.
+        ink: Краска текста рендера ``RENDER_DPI`` — для проверки далёких кусков одной высоты
+            (``flush_split.far_pair``); ``None`` — ряды одной высоты связываются всегда, как прежде.
+        barriers: Линейки-барьеры (``barriers.BarrierLines``) или ``None``: ряды, отрезок между серединами которых
+            пересекает линейку (графы таблицы по разные стороны вертикальной линейки), не связываются.
 
     Returns:
         Части сверху вниз (одна — если группа связна).
@@ -314,7 +368,14 @@ def reach_components(rows: list[Row]) -> list[list[Row]]:
             # связаны всегда: бок о бок другого набора боевой ход уже развёл по потокам, а внутри
             # группы соседи на одной высоте — одна строка.
             same_line = abs(row.y - other.y) < SAME_LINE_OVERLAP * min(row.height, other.height)
+            # ...кроме далёких кусков, к которым соседи дотягиваются порознь (подпись справа и «г. Ереван» слева):
+            # их уже развёл ``split_far_pieces``, и связь «одна строка» срастила бы их снова.
+            same_line = same_line and not far_pair(row, other, rows, WORK_DPI, ink)
             if same_line or min(other.x1, row.x1) - max(other.x0, row.x0) > 0:
+                # Через линейку-барьер ряды не связываются: числа соседних граф таблицы на одной высоте — разные
+                # блоки (ХиП 1991/02 IMG_1110_R «—2400 … —3960»); ищется следующий сосед выше.
+                if _barrier_apart(row, other, barriers):
+                    continue
                 parent[legacy._root(parent, index)] = legacy._root(parent, above)
                 break
     parts: dict[int, list[Row]] = {}
@@ -328,7 +389,15 @@ def _extent(rows: list[Row]) -> tuple[float, float]:
     return min(row.x0 for row in rows), max(row.x1 for row in rows)
 
 
-def _rejoinable(upper: list[Row], lower: list[Row], rules: list, dpi: float, barriers, body_height: float) -> bool:
+def _rejoinable(
+    upper: list[Row],
+    lower: list[Row],
+    rules: list,
+    dpi: float,
+    barriers,
+    body_height: float,
+    page_rows: list[Row] | None = None,
+) -> bool:
     """Можно ли склеить два блока в один: один под другим вплотную, края сходятся, набор один, черты между ними нет.
 
     Args:
@@ -338,6 +407,8 @@ def _rejoinable(upper: list[Row], lower: list[Row], rules: list, dpi: float, bar
         dpi: Разрешение рабочей копии.
         barriers: Линейки-барьеры (уже без подчёркиваний).
         body_height: Медианная высота ряда страницы (кегль корпуса): крупный набор меряется в своих высотах.
+        page_rows: Все ряды страницы или None — для запрета по смене выключки (``flush_split.flush_change``: кусок
+            строки из другой группы не считается строкой вправо).
 
     Returns:
         ``True`` — это один блок, разрезанный ложно.
@@ -351,7 +422,9 @@ def _rejoinable(upper: list[Row], lower: list[Row], rules: list, dpi: float, bar
     limit = GAP_HEIGHTS_REJOIN * min(last.height, first.height) if large else REJOIN_GAP_PITCHES * pitch
     if not 0 < gap <= limit:
         return False
-    if style_distance(last, first) >= REJOIN_STYLE:
+    # Внутри подписи (фамилия жирным над светлыми регалиями, второй автор) набор склейке не мешает
+    # (:func:`flush_split.signature_continues`, способ ``ALIGN_RIGHT``).
+    if style_distance(last, first) >= REJOIN_STYLE and not signature_continues(upper, lower, dpi):
         return False
     (ux0, ux1), (lx0, lx1) = _extent(upper), _extent(lower)
     overlap = min(ux1, lx1) - max(ux0, lx0)
@@ -364,6 +437,10 @@ def _rejoinable(upper: list[Row], lower: list[Row], rules: list, dpi: float, bar
     # Конец абзаца (короткий последний ряд верхнего) и абзацный отступ (первый ряд нижнего) сдвигают
     # только одну сторону; строки заголовка по центру — центр.
     if not (same_left or same_right or same_centre):
+        return False
+    # Совпадение крайних краёв групп ничего не говорит, если одна из групп короткая и выключена к другой стороне:
+    # абзац по формату и подпись авторов вправо под ним совпадают правыми краями (ХиП 1991/01 IMG_1008).
+    if flush_change(upper, lower, gap, pitch, dpi, page_rows=page_rows):
         return False
     span = (int(min(ux0, lx0)), int(max(ux1, lx1)))
     if legacy._rule_between(last, first, rules, span):
@@ -394,6 +471,8 @@ def rejoin(groups: list[list[Row]], rules: list, dpi: float, barriers, body_heig
         Группы после склеек.
     """
     out = [list(group) for group in groups if group]
+    # Ряды страницы (склейки их не меняют) — для поиска кусков строк в разных группах.
+    page_rows = [row for group in out for row in group]
     changed = True
     while changed:
         changed = False
@@ -409,7 +488,7 @@ def rejoin(groups: list[list[Row]], rules: list, dpi: float, barriers, body_heig
             if not below:
                 continue
             _, j = min(below)
-            if _rejoinable(upper, out[j], rules, dpi, barriers, body_height):
+            if _rejoinable(upper, out[j], rules, dpi, barriers, body_height, page_rows):
                 out[i] = upper + out[j]
                 del out[j]
                 changed = True
@@ -562,8 +641,13 @@ def smooth_groups(
     groups: list[list[Row]] = []
     for _, span, rows in pieces:
         rows = merge_overlapping_pieces(rows, barriers, gutters)
+        # Ряд из далёких кусков, к которым соседи дотягиваются порознь (подпись справа и «г. Ереван» слева на одной
+        # высоте), — два ряда (:func:`flush_split.split_far_pieces`).
+        rows = split_far_pieces(rows, ink, span, dpi, leaders, barriers)
         for group in column_groups(rows, span, rules, dpi, body_height, barriers):
-            groups.extend(reach_components(merge_same_line(group, dpi, barriers, gutters)))
+            for part in reach_components(merge_same_line(group, dpi, barriers, gutters), ink, barriers):
+                # Подпись вправо, дотянувшаяся до абзаца по x, — отдельной частью (:func:`flush_split.split_by_flush`).
+                groups.extend(split_by_flush(part, dpi))
     groups = resolve_shared_rows(rejoin(groups, rules, dpi, barriers, body_height))
     # Куски одной строки, попавшие в одну группу только после склейки ложных разрезов (до неё они были в разных
     # группах и сливаться не могли): строка библиографии с широкими пробелами шла в блок двумя рядами на одной

@@ -108,12 +108,36 @@ class Patch:
         bottom: Низ слева направо.
         left: Левая сторона сверху вниз.
         right: Правая сторона сверху вниз.
+        u_warp: Параметр вдоль страницы по её плоскости или None — доля длины дуги (прежнее поведение). Пара
+            монотонных таблиц ``(u, t)``: доля ширины прямоугольника ``u`` → доля длины дуги верха и низа ``t``
+            (``rectify.page_scale``: перспективный перепад масштаба снят, буквы у ближнего к камере края не шире,
+            чем у корешка). Концы — ``(0, 0)`` и ``(1, 1)``; за ``[0, 1]`` — продолжение крайним наклоном.
     """
 
     top: ArcCurve
     bottom: ArcCurve
     left: ArcCurve
     right: ArcCurve
+    u_warp: tuple[np.ndarray, np.ndarray] | None = None
+
+    def arc_of(self, u: np.ndarray) -> np.ndarray:
+        """Доли длины дуги верха и низа для долей ширины ``u`` (без ``u_warp`` — те же доли).
+
+        Args:
+            u: Доли ширины прямоугольника (любые, вне ``[0, 1]`` — продолжение крайним наклоном таблицы).
+
+        Returns:
+            Доли длины дуги той же формы.
+        """
+        u = np.asarray(u, np.float64)
+        if self.u_warp is None:
+            return u
+        us, ts = self.u_warp
+        out = np.interp(u, us, ts)
+        # За концами таблицы ``np.interp`` держит крайнее значение — продолжение наклоном крайнего отрезка.
+        head, tail = (ts[1] - ts[0]) / (us[1] - us[0]), (ts[-1] - ts[-2]) / (us[-1] - us[-2])
+        out = np.where(u < us[0], ts[0] + (u - us[0]) * head, out)
+        return np.where(u > us[-1], ts[-1] + (u - us[-1]) * tail, out)
 
     def corners(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Углы по верху и низу: левый верхний, правый верхний, левый нижний, правый нижний."""
@@ -155,7 +179,8 @@ class Patch:
         c00, c10, c01, c11 = self.corners()
         left, right = self.sides_at(v[:, 0])
         # Сумма линейных по ``v`` (верх-низ) и по ``u`` (стороны) минус билинейная по углам.
-        ruled_v = (1 - v) * self.top.at(u[:, 0]) + v * self.bottom.at(u[:, 0])
+        t = self.arc_of(u[:, 0])
+        ruled_v = (1 - v) * self.top.at(t) + v * self.bottom.at(t)
         ruled_u = (1 - u) * left + u * right
         bilinear = (1 - u) * (1 - v) * c00 + u * (1 - v) * c10 + (1 - u) * v * c01 + u * v * c11
         return ruled_v + ruled_u - bilinear
@@ -176,7 +201,8 @@ class Patch:
         u = np.asarray(u, np.float64)
         v = np.asarray(v, np.float64)
         c00, c10, c01, c11 = self.corners()
-        top, bottom = self.top.at(u), self.bottom.at(u)
+        t = self.arc_of(u)
+        top, bottom = self.top.at(t), self.bottom.at(t)
         left, right = self.sides_at(v)
         out = []
         for c in (0, 1):
@@ -260,7 +286,12 @@ class Layout:
         return len(self.rects) == 1
 
 
-def plan_layout(patches: tuple[Patch, ...], shape: tuple[int, int], margin_px: float | None = None) -> Layout:
+def plan_layout(
+    patches: tuple[Patch, ...],
+    shape: tuple[int, int],
+    margin_px: float | None = None,
+    widths: tuple[float, ...] | None = None,
+) -> Layout:
     """Прямоугольники страниц и холст.
 
     Ширина прямоугольника — средняя длина верха и низа, высота — длина стороны у корешка: тогда точки линии корешка
@@ -273,20 +304,22 @@ def plan_layout(patches: tuple[Patch, ...], shape: tuple[int, int], margin_px: f
         patches: Области левой и правой страницы в px итога (одна — страница кадра без корешка).
         shape: ``(H, W)`` итога.
         margin_px: Поле холста вокруг прямоугольников, px; None — поля до краёв итога (выход страниц).
+        widths: Ширины прямоугольников страниц, px (``rectify.page_scale``: по масштабу высоты страницы), или None —
+            средняя длина верха и низа.
 
     Returns:
         Расклад холста.
     """
     h, w = shape
     if len(patches) == 1:
-        return plan_single(patches[0], shape, margin_px)
+        return plan_single(patches[0], shape, margin_px, None if widths is None else widths[0])
     left, right = patches
     # Корешок — средний X концов стороны у корешка обеих страниц.
     spine_pts = np.vstack([left.right.points[[0, -1]], right.left.points[[0, -1]]])
     xs = float(spine_pts[:, 0].mean())
     rects = []
-    for patch, is_left in ((left, True), (right, False)):
-        width = (patch.top.length + patch.bottom.length) / 2
+    for k, (patch, is_left) in enumerate(((left, True), (right, False))):
+        width = (patch.top.length + patch.bottom.length) / 2 if widths is None else widths[k]
         spine_side = patch.right if is_left else patch.left
         y0 = float(spine_side.points[0, 1])
         x0, x1 = (xs - width, xs) if is_left else (xs, xs + width)
@@ -307,7 +340,9 @@ def plan_layout(patches: tuple[Patch, ...], shape: tuple[int, int], margin_px: f
     return shifted_layout(rects, x_min, x_max, top_edge, bottom_edge, xs)
 
 
-def plan_single(patch: Patch, shape: tuple[int, int], margin_px: float | None = None) -> Layout:
+def plan_single(
+    patch: Patch, shape: tuple[int, int], margin_px: float | None = None, width: float | None = None
+) -> Layout:
     """Расклад холста одной страницы: прямоугольник и поля, как у :func:`plan_layout`, без корешка.
 
     Ширина прямоугольника — средняя длина верха и низа, высота — средняя длина боковых сторон; верх — на средней высоте
@@ -317,12 +352,13 @@ def plan_single(patch: Patch, shape: tuple[int, int], margin_px: float | None = 
         patch: Область страницы в px итога.
         shape: ``(H, W)`` итога.
         margin_px: Поле холста вокруг прямоугольника, px; None — поля до краёв итога.
+        width: Ширина прямоугольника, px, или None — средняя длина верха и низа.
 
     Returns:
         Расклад холста с одним прямоугольником.
     """
     h, w = shape
-    width = (patch.top.length + patch.bottom.length) / 2
+    width = (patch.top.length + patch.bottom.length) / 2 if width is None else width
     height = (patch.left.length + patch.right.length) / 2
     x1 = float(patch.right.points[[0, -1], 0].mean())
     y0 = float((patch.left.points[0, 1] + patch.right.points[0, 1]) / 2)

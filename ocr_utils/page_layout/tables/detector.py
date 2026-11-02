@@ -33,6 +33,7 @@ from dataclasses import dataclass, replace
 import cv2
 import numpy as np
 
+from ocr_utils.page_layout.tables import curve
 from ocr_utils.page_layout.tables import kind as kind_module
 from ocr_utils.page_layout.tables import loose_filter, quality, refine, rules
 from ocr_utils.page_layout.tables.ruling import (
@@ -55,6 +56,7 @@ from ocr_utils.page_layout.geometry import (
     intersection,
 )
 from ocr_utils.page_layout.surya.blocks import FIGURE_LABELS, FORM_LABELS, TABLE_LABELS, LayoutBlocks
+from ocr_utils.units import mm_to_px as paper_mm_to_px
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,15 @@ TEXT_MAX_WIDTH_MM = 12.0
 
 # Сирая горизонталь не короче этой доли ширины полосы — линейка колонтитула, не штрих схемы.
 PAGE_RULE_SPAN = 0.5
+
+# Полоса тени у края вырезки — не штрих схемы. Вырезка страницы холста ``scan_cropping.v2`` (``rectify.page_regions``)
+# режется по линии корешка, и тень сгиба остаётся у самого края: на копии 150 dpi это столбец шириной 1–2 px с серым
+# 37–192 при бумаге ~250. Бинаризация режет его на полосы высотой 5–41 мм — «крупнее буквы», то есть штриховая краска.
+# Склейка ``DIAGRAM_GLUE_MM`` сшивала полосу с рисунком в 4–5 мм от корешка, и рамка рисунка уходила по полосе вверх до
+# заголовка и вниз на 59 мм (ХиП 1991/06 IMG_0419, левая страница, стенд research/line_art_boxes). Компонента, прижатая
+# к краю картинки и не толще этого поперёк края, из штриховой краски снимается; рисунок у края толще полосы.
+# 1 мм — 6 px при 150 dpi.
+EDGE_STRIP_MM = 1.0
 
 # Схема не выходит за Figure-блок surya дальше этого запаса. Потолок, а не граница: область
 # surya неточна на миллиметры, а не на колонку текста.
@@ -302,6 +313,16 @@ def line_art_mask(binary: np.ndarray, dpi: int, lines: "Lines | None" = None) ->
     заливка схемы с дилатацией 5 мм прилипала к линейке колонтитула в 4 мм над схемой и
     делала рамку шириной с полосу (1973/07 с.66). Сирая — ни с чем не пересекается; во всю
     полосу — не короче ``PAGE_RULE_SPAN`` её ширины. У таблиц такие линейки и так не в ядре.
+
+    Полосы тени у края картинки (тоньше ``EDGE_STRIP_MM``) тоже не штрих: см. :func:`edge_strips`.
+
+    Args:
+        binary: Бинарная полоса (краска 255).
+        dpi: Её разрешение.
+        lines: Линейки полосы (для выреза сирых линеек во всю полосу) или ``None``.
+
+    Returns:
+        Маска штриховой краски (255 — краска) того же размера.
     """
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     if count <= 1:
@@ -310,6 +331,9 @@ def line_art_mask(binary: np.ndarray, dpi: int, lines: "Lines | None" = None) ->
     max_w = mm_to_px(TEXT_MAX_WIDTH_MM, dpi)
     big = (stats[:, cv2.CC_STAT_HEIGHT] > max_h) | (stats[:, cv2.CC_STAT_WIDTH] > max_w)
     big[0] = False
+    # Полосы тени у края вырезки (тень сгиба у корешка, обрез) — не штрих: компонента, касающаяся левого или правого
+    # края и не шире EDGE_STRIP_MM, или верхнего или нижнего и не выше его (см. EDGE_STRIP_MM).
+    big &= ~edge_strips(stats, binary.shape, paper_mm_to_px(EDGE_STRIP_MM, dpi))
     art = np.where(big[labels], 255, 0).astype(np.uint8)
     if lines is not None:
         width = binary.shape[1]
@@ -323,6 +347,31 @@ def line_art_mask(binary: np.ndarray, dpi: int, lines: "Lines | None" = None) ->
             rule = segment.box
             art[max(0, rule.y0 - pad) : rule.y1 + pad, max(0, rule.x0 - pad) : rule.x1 + pad] = 0
     return art
+
+
+def edge_strips(stats: np.ndarray, shape: tuple[int, int], strip_px: int) -> np.ndarray:
+    """Какие компоненты — полосы у края картинки (тень сгиба у корешка, обрез), а не штрих.
+
+    Args:
+        stats: ``stats`` из ``cv2.connectedComponentsWithStats`` С строкой фона (нулевая строка — фон).
+        shape: ``(высота, ширина)`` картинки, px.
+        strip_px: Предельная толщина полосы поперёк края, px.
+
+    Returns:
+        Маска той же длины, что ``stats``: ``True`` — компонента касается левого или правого края и не шире
+        ``strip_px``, или верхнего или нижнего и не выше ``strip_px``; у фона всегда ``False``.
+    """
+    height, width = shape
+    x, y = stats[:, cv2.CC_STAT_LEFT], stats[:, cv2.CC_STAT_TOP]
+    w, h = stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT]
+    # Касание вертикального края: левый край компоненты в нулевом столбце или правый — в последнем.
+    side = ((x == 0) | (x + w >= width)) & (w <= strip_px)
+    # Касание горизонтального края — то же по строкам.
+    flat = ((y == 0) | (y + h >= height)) & (h <= strip_px)
+    strips = side | flat
+    if len(strips):
+        strips[0] = False  # фон не компонента
+    return strips
 
 
 def grow_diagram(art: np.ndarray, box: Box, dpi: int, barriers: list[Box], figure: "Box | None" = None) -> Box:
@@ -424,7 +473,10 @@ def _find(
     art: "np.ndarray | None" = None
 
     def signs_of(box: Box):
-        crop = gray[box.slice]
+        # Вырезка выпрямляется вдоль изогнутых горизонтальных линеек (``curve.straightened``): прямой поиск линеек
+        # ``find_lines`` рвёт дугу на куски, и сетка признаков получает лишние ряды (ХиП 1991/02 IMG_1161, стр. 116 —
+        # таблица на изогнутом низу холста Кунса, TABLES_VERSION 8). Без изгиба вырезка как есть.
+        crop = curve.straightened(gray[box.slice], dpi)
         # Признаки — по ячейкам, куда помещается буква: параллельные штрихи ближе 2 мм склеены в связки
         # (``verify.table_features``). Ими решаются и вид находки, и вердикт «таблица ли это».
         return verification.table_features(crop, find_lines(crop, dpi), dpi)

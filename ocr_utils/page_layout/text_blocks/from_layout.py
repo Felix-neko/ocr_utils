@@ -32,6 +32,10 @@ from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone
 # Боковая врезка тоньше этого в миллиметрах бумаги отдельной областью не делается: разбирать в
 # ней нечего, а вырезка в три пикселя только мешает.
 MIN_ZONE_MM = 4.0
+# Припуск к рамке боковой врезки поперёк строк, с каждой стороны, мм: рамка детектора идёт впритык к цепочке глифов
+# (2–3.7 мм поперёк на паке-1), и без припуска врезка не проходила ``MIN_ZONE_MM`` — подпись к фото длиной 120 мм
+# (1971/03 IMG_0143_2R) терялась вместе с осью; из 20 полос с зонами вертикальные оси были только на 3.
+ZONE_PAD_MM = 1.5
 
 
 def hints_of(
@@ -126,9 +130,7 @@ def build(
         allowed = np.ones((height, width), dtype=bool)
         for x0, y0, x1, y1 in forbidden:
             allowed[max(0, y0) : max(0, y1), max(0, x0) : max(0, x1)] = False
-    limit = mm_to_px(MIN_ZONE_MM, dpi)
-    zones = [OrientedZone((0, 0, width, height), 0)]
-    zones += [OrientedZone((x0, y0, x1, y1), 90) for x0, y0, x1, y1 in sideways if min(x1 - x0, y1 - y0) >= limit]
+    zones = [OrientedZone((0, 0, width, height), 0), *sideways_zones(sideways, width, height, dpi)]
     return LayoutHints(
         text_allowed=allowed,
         zones=tuple(zones) if len(zones) > 1 else (),
@@ -136,6 +138,36 @@ def build(
         rules=tuple(tuple((float(x), float(y)) for x, y in points) for points in (rules or ())),
         dpi=dpi,
     )
+
+
+def sideways_zones(
+    sideways: list[tuple[int, int, int, int]], width: int, height: int, dpi: float = WORK_DPI
+) -> list[OrientedZone]:
+    """Боковые области разбора из рамок повёрнутого текста: припуск поперёк строк, отсев тонких.
+
+    Рамка расширяется на ``ZONE_PAD_MM`` с обеих сторон по короткой стороне (поперёк вертикальных строк) в пределах
+    страницы; уже ``MIN_ZONE_MM`` после этого — выбрасывается.
+
+    Args:
+        sideways: Рамки повёрнутого текста ``(x0, y0, x1, y1)``, пиксели рабочей копии.
+        width, height: Размер рабочей копии.
+        dpi: Её разрешение.
+
+    Returns:
+        Области с поворотом 90.
+    """
+    from ocr_utils.page_layout import mm_to_px
+
+    limit, pad = mm_to_px(MIN_ZONE_MM, dpi), int(round(mm_to_px(ZONE_PAD_MM, dpi)))
+    out = []
+    for x0, y0, x1, y1 in sideways:
+        if x1 - x0 <= y1 - y0:
+            x0, x1 = max(0, x0 - pad), min(width, x1 + pad)
+        else:
+            y0, y1 = max(0, y0 - pad), min(height, y1 + pad)
+        if min(x1 - x0, y1 - y0) >= limit:
+            out.append(OrientedZone((int(x0), int(y0), int(x1), int(y1)), 90))
+    return out
 
 
 def _box(box, scale: float) -> tuple[int, int, int, int]:
@@ -148,4 +180,4 @@ def _box(box, scale: float) -> tuple[int, int, int, int]:
     )
 
 
-__all__ = ["MIN_ZONE_MM", "build", "hints_of"]
+__all__ = ["MIN_ZONE_MM", "ZONE_PAD_MM", "build", "hints_of", "sideways_zones"]

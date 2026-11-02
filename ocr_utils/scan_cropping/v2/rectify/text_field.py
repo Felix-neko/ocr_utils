@@ -14,10 +14,12 @@ from scipy.spatial import cKDTree
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.baseline_axis import SMOOTH_XH, X_CLASS_TOLERANCE, line_x_height
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
-from ocr_utils.page_layout.text_blocks.hints import LayoutHints, masked_ink
+from ocr_utils.page_layout.text_blocks.from_layout import sideways_zones
+from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans
 from ocr_utils.page_layout.text_blocks.lines import clean_run
 from ocr_utils.page_layout.text_blocks.page import PageAnalysis, analyse_gray
+from ocr_utils.page_layout.text_blocks.pseudo_glyphs import PseudoMode
 from ocr_utils.units import mm_to_px, mm_to_px_float, px_to_mm
 from ocr_utils.scan_cropping.v2.rectify.coons import Layout, Patch, PageRect, coons_at
 
@@ -28,6 +30,17 @@ MIN_RUN_MM = 25.0
 # увода отбивки после Кунса (до 2.6 мм — ХиП 1991/07 IMG_0090).
 MIN_SIDE_MM = 8.0
 COLUMN_TOL_MM = 3.5
+# Вертикальная строка (боковая область разбора) короче этого — не опора поля, мм. Короче, чем у горизонтальных
+# (:data:`MIN_RUN_MM`): повёрнутый текст — это шапки граф и подписи осей, строки в 15–40 мм (МТС 1969/06 IMG_0138_1L:
+# «Секция № 3» — 17 мм); у короче 15 мм база на 2–3 буквах наклон уже не держит.
+VERTICAL_MIN_MM = 15.0
+# Куски одной вертикальной строки (разбор рвёт длинную строку на пробелах): кусок продолжает соседний, если его ближний
+# конец отстоит от прямой соседа, продолженной через промежуток не длиннее VERTICAL_GAP_MM, не дальше VERTICAL_JOIN_MM.
+# Соседние строки стоят в шаге строк (от 3 мм) — допуск меньше; без связки у кусков разные цели, и ступенька между
+# ними на снимке оставалась ступенькой (МТС 1971/06 IMG_0146_2R: куски 71 и 45 мм через 65 мм, ступенька 1 мм, по
+# продолжению прямой верхнего куска — 0.05 мм).
+VERTICAL_JOIN_MM = 1.0
+VERTICAL_GAP_MM = 80.0
 # Наклон выровненной стороны (прямая МНК по её точкам) больше этого — не отбивка, а ложная сторона, градусы. После
 # Кунса настоящие стороны почти отвесны (24 кадра ПХ 1974/01 и ХиП 1991: вне таблиц 297 из 298 — до 1.94°); наклонный
 # тренд даёт блок из строк с разным отступом — ячейка таблицы с центрованными строками «млн. руб. / тыс. руб. / и в
@@ -73,6 +86,30 @@ SUPERSCRIPT_NEIGHBOURS = 4
 DUPLICATE_RADIUS_MM = 2.0
 # Шаг узлов сетки поля, мм.
 FIELD_STEP_MM = 4.0
+# Фильтр псевдоглифов разбора текста второго преобразования (``text_blocks.pseudo_glyphs``): кромка листа и тень сгиба,
+# нитки прошивки, полоса обложки, карандаш и сор у края закрашиваются до разбора, правило «ряд ближе 0.3 мм к краю
+# картинки — обрезан» выключено. По умолчанию — правила + CRAFT по местным вырезкам: в прогоне v2 их судит CRAFT-сервер
+# на GPU в главном процессе (``text_blocks.craft_service``, оценщик процесса воркера ставит инициализатор пула), вне
+# прогона — CRAFT на CPU этого процесса. На разметке ХиП 1991 полнота 0.94 при вреде 1 из 513 знаков, одни правила —
+# 0.85 и 2 из 513 (``reports/pseudo_glyphs.md``). Режим процесса меняет :func:`set_pseudo_mode` (ключи v2
+# ``--pseudo-glyphs``, ``--pseudo-craft``).
+PSEUDO_MODE = PseudoMode.RULES_CRAFT
+_pseudo_mode = PSEUDO_MODE
+
+
+def set_pseudo_mode(mode: PseudoMode) -> None:
+    """Режим фильтра псевдоглифов для всех следующих :func:`analyze_page` этого процесса.
+
+    Разбор текста зовётся глубоко внутри выпрямления (``text_run.text_frame``) в воркере пула; режим прогона задаётся
+    здесь один раз на кадр, а не протягивается аргументом через все слои.
+
+    Args:
+        mode: Режим (``OFF`` — как до фильтра, с правилом 0.3 мм).
+    """
+    global _pseudo_mode
+    _pseudo_mode = PseudoMode(mode)
+
+
 # Длина, на которой поле ещё может заметно гнуться, мм: жёсткость тонкой пластины ``λ = (L / шаг)^4 · κ``. Синтетика
 # (волна строк ±0.5 мм, строки через 3.4 мм): при 10 мм поле снимает волну периода 50 мм на 96 %, 100 мм — на 100 %,
 # 25 мм — на 60 %; при 20 мм — 60 % и 95 %, 17 % (тест ``test_text_field``).
@@ -200,6 +237,7 @@ class SampleKind(StrEnum):
 
     LINE = "line"  # ось строки → горизонталь (составляющая dy)
     SIDE = "side"  # выровненная сторона блока → вертикаль (составляющая dx)
+    VERTICAL = "vertical"  # база вертикальной строки (боковая область) → вертикаль (составляющая dx)
     ZERO = "zero"  # страница без поля: смещение 0 (обе составляющие)
     BAND = "band"  # режим полосы: продление изгиба опор вдали от них (:func:`band_samples`)
 
@@ -278,6 +316,7 @@ class RegionKindR(StrEnum):
     TABLE = "table"  # таблица
     LINE_ART = "line_art"  # схема, рисунок, график
     EQUATION = "equation"  # формула (surya ``Equation`` из кэша v2)
+    ROTATED_TEXT = "rotated_text"  # повёрнутый (вертикальный) текст: подпись к фото, боковой заголовок графы
 
 
 class FieldMode(StrEnum):
@@ -322,7 +361,7 @@ class PageRegion:
 
 
 def page_regions(
-    canvas: np.ndarray, box: tuple[int, int, int, int], dpi: float, photos: bool = True
+    canvas: np.ndarray, box: tuple[int, int, int, int], dpi: float, photos: bool = True, rotated: bool = False
 ) -> tuple[PageRegion, ...]:
     """Растр, таблицы и line art страницы детекторами ``page_layout`` по пикселям (без surya; ~0.5–1.5 с).
 
@@ -335,6 +374,9 @@ def page_regions(
         box: Вырезка страницы ``(x0, y0, x1, y1)``.
         dpi: Разрешение холста.
         photos: Уточнять растр до фото; False — рамки детектора как есть (прежнее поведение).
+        rotated: Искать повёрнутый (вертикальный) текст, и внутри таблиц тоже (``LayoutOptions.rotated_in_tables``):
+            области ``ROTATED_TEXT`` разбираются боковыми областями (:func:`analyze_page`). Зоны внутри line art
+            (подписи на схеме) не берутся. Проверка зон чтением tesseract — ~0.3–1 с на страницу.
 
     Returns:
         Области на холсте.
@@ -344,7 +386,8 @@ def page_regions(
 
     x0, y0, x1, y1 = box
     image = PageImage.from_array(canvas[y0:y1, x0:x1], dpi=dpi, variant=Variant.SCAN, cache_name="page_rectify")
-    layout = PageLayout(image, {Find.RASTER, Find.TABLES, Find.LINE_ART}, LayoutOptions(use_surya=False)).process(None)
+    finds = {Find.RASTER, Find.TABLES, Find.LINE_ART} | ({Find.ROTATED_TEXT} if rotated else set())
+    layout = PageLayout(image, finds, LayoutOptions(use_surya=False, rotated_in_tables=rotated)).process(None)
     from ocr_utils.page_layout.raster.photo_edges import find_photos
 
     out = []
@@ -367,7 +410,42 @@ def page_regions(
                 rect = p.box if polygon is None else (float(polygon[:, 0].min()), float(polygon[:, 1].min()),
                                                       float(polygon[:, 0].max()), float(polygon[:, 1].max()))  # fmt: skip
                 out.append(PageRegion(kind, rect, polygon, p if p.corners is not None else None))
+    for region in layout.rotated_text_not_in_tables_regions if rotated else ():
+        if region.info.get("inside_line_art"):
+            continue
+        b = region.box
+        out.append(PageRegion(RegionKindR.ROTATED_TEXT, (b.x0 + x0, b.y0 + y0, b.x1 + x0, b.y1 + y0)))
     return tuple(out)
+
+
+def rotated_areas(
+    regions: tuple[PageRegion, ...], offset: np.ndarray, dpi: float, size: tuple[int, int]
+) -> tuple[OrientedZone, ...]:
+    """Области разбора для страницы с повёрнутым текстом (``LayoutHints.zones``), px рабочей копии вырезки.
+
+    Первой идёт вся страница прямой областью, за ней боковые (``from_layout.sideways_zones``: припуск поперёк строк,
+    отсев тонких): боковая гасит свой текст у страницы, и вертикальная строка не разбирается как горизонтальная.
+
+    Args:
+        regions: Области страницы на холсте.
+        offset: Левый верхний угол вырезки на холсте.
+        dpi: Разрешение холста.
+        size: Ширина и высота вырезки, px холста.
+
+    Returns:
+        Области; пусто — повёрнутого текста нет (разбор одной прямой областью).
+    """
+    f = WORK_DPI / dpi
+    w, h = int(size[0] * f), int(size[1] * f)
+    boxes = []
+    for region in regions:
+        if region.kind is not RegionKindR.ROTATED_TEXT:
+            continue
+        x0, y0, x1, y1 = region.box
+        boxes.append((max(int(np.floor((x0 - offset[0]) * f)), 0), max(int(np.floor((y0 - offset[1]) * f)), 0),
+                      min(int(np.ceil((x1 - offset[0]) * f)), w), min(int(np.ceil((y1 - offset[1]) * f)), h)))  # fmt: skip
+    sideways = sideways_zones(boxes, w, h, WORK_DPI)
+    return (OrientedZone((0, 0, w, h), 0), *sideways) if sideways else ()
 
 
 def output_to_canvas(points: np.ndarray, maps: tuple[np.ndarray, np.ndarray], step: int = 8) -> np.ndarray:
@@ -482,7 +560,12 @@ def crop_box(
 
 
 def analyze_page(
-    canvas: np.ndarray, box: tuple[int, int, int, int], dpi: float, rect: PageRect, regions: tuple[PageRegion, ...] = ()
+    canvas: np.ndarray,
+    box: tuple[int, int, int, int],
+    dpi: float,
+    rect: PageRect,
+    regions: tuple[PageRegion, ...] = (),
+    pseudo: PseudoMode | None = None,
 ) -> PageText:
     """Разбор текста страницы: вырезка → серый → 300 dpi → ``analyse_gray`` с движком по краске (CPU).
 
@@ -492,18 +575,24 @@ def analyze_page(
         dpi: Разрешение холста.
         rect: Прямоугольник страницы на холсте (линейки у его сторон отбрасываются — :func:`inner_rules`).
         regions: Растр, таблицы и line art страницы (линейки в рисунках и фото отбрасываются, вне таблиц — только
-            сироты: :func:`orphan_rules`).
+            сироты: :func:`orphan_rules`); повёрнутый текст (``ROTATED_TEXT``) — боковыми областями разбора
+            (:func:`rotated_areas`).
+        pseudo: Режим фильтра псевдоглифов; ``None`` — режим процесса (:func:`set_pseudo_mode`, по умолчанию
+            ``PSEUDO_MODE``).
 
     Returns:
         Разбор и привязка к холсту.
     """
+    mode = _pseudo_mode if pseudo is None else PseudoMode(pseudo)
     x0, y0, x1, y1 = box
     part = canvas[y0:y1, x0:x1]
     # Без забеливания цвета: в ХиП и ПХ «цветные элементы» — это в основном цветная печать, а фото чёрно-белые, так что
     # забеливание по цвету стирало текст (01/IMG_1088) и от ложных строк на фото не защищало (решение 2026-10-22).
     gray = cv2.cvtColor(part, cv2.COLOR_BGR2GRAY)
     f = RENDER_DPI / dpi
-    gray300 = thicken_strokes(cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_AREA))
+    # Серый 300 dpi без утолщения — для тона кандидатов фильтра псевдоглифов (утолщение min-фильтром темнит серое).
+    raw300 = cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    gray300 = thicken_strokes(raw300)
     offset = np.array([x0, y0], np.float64)
     # Рисунки и фото — преграды разбора: строка через рамку не сцепляется, блок по её горизонтальным рёбрам делится.
     # Без этого узкая колонка у рисунка и полная ширина под ним собирались в один блок, и правая сторона выходила
@@ -511,14 +600,24 @@ def analyze_page(
     barriers = region_barriers(regions, offset, dpi, (x1 - x0, y1 - y0))
     # Краска горизонтальных линеек гасится до разбора: линейка не срастается со словом в одну строку (:func:`rule_ink`).
     gray300 = masked_ink(gray300, ~rule_ink(gray, dpi))
-    analysis = analyse_gray(gray300, InkEngine(), hints=LayoutHints(barriers=barriers))
+    # Фильтр псевдоглифов — в итоговом разборе: при преградах первый проход нужен только для линий раздела.
+    # Повёрнутый текст — боковыми областями: вертикальные строки разбираются прямыми в повёрнутой вырезке.
+    zones = rotated_areas(regions, offset, dpi, (x1 - x0, y1 - y0))
+    all_rules = find_rules(gray, dpi, offset)
+    # Горизонтальные линейки — барьеры боковых областей: их краска уже погашена, и без подсказки вертикальная строка
+    # сшивалась через линейку с текстом соседней графы (МТС 1969/06 IMG_0138_1L).
+    side_rules = side_barriers(all_rules, offset, dpi) if zones else ()
+    hints = LayoutHints(barriers=barriers, zones=zones, side_rules=side_rules)
+    analysis = analyse_gray(gray300, InkEngine(), hints=hints, pseudo=PseudoMode.OFF if barriers else mode,
+                            raw300=raw300)  # fmt: skip
     if barriers:
         # Второй проход: линии раздела над и под рисунком — между последним рядом обтекания и первым рядом на всю
         # ширину (по рядам первого прохода; рамка рисунка с текстом не совпадает до строки).
-        cuts = barrier_cuts(barriers, analysis.axes, (x1 - x0) * WORK_DPI / dpi)
-        analysis = analyse_gray(gray300, InkEngine(), hints=LayoutHints(barriers=barriers, rules=cuts))
+        cuts = barrier_cuts(barriers, [a for a in analysis.axes if not a.sideways], (x1 - x0) * WORK_DPI / dpi)
+        analysis = analyse_gray(gray300, InkEngine(), hints=replace(hints, rules=cuts), pseudo=mode,
+                                raw300=raw300)  # fmt: skip
     # Рабочая копия — ``analysis.dpi`` (150): px холста на px копии = dpi холста / dpi копии.
-    rules = orphan_rules(find_rules(gray, dpi, offset), gray, offset, dpi, regions)
+    rules = orphan_rules(all_rules, gray, offset, dpi, regions)
     rules = inner_rules(rules, rect, dpi, gray, offset)
     scale = dpi / analysis.dpi
     # Фото с чётким краем — заново на этом холсте (поле прохода сдвигает их на миллиметры): стороны — опоры поля.
@@ -530,6 +629,28 @@ def analyze_page(
         photos = tuple(p for p in find_photos(cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY), seeds, dpi)
                        if p.corners is not None)  # fmt: skip
     return PageText(analysis, offset, scale, rules, regions, ink_map(gray, dpi), photos)
+
+
+def side_barriers(
+    rules: tuple[Rule, ...], offset: np.ndarray, dpi: float
+) -> tuple[tuple[tuple[float, float], ...], ...]:
+    """Горизонтальные линейки страницы — линейки-барьеры боковых областей разбора (``LayoutHints.side_rules``).
+
+    Берутся все горизонтальные линейки :func:`find_rules` (и не сироты: графы таблиц с вертикальной шапкой разделены
+    именно линейками таблицы). В прямой области они не действуют — только в повёрнутых вырезках, где встают поперёк
+    вертикальных строк.
+
+    Args:
+        rules: Линейки страницы (px холста).
+        offset: Левый верхний угол вырезки на холсте.
+        dpi: Разрешение холста.
+
+    Returns:
+        Ломаные ``((x, y), ...)`` в px рабочей копии :data:`WORK_DPI` вырезки.
+    """
+    f = WORK_DPI / dpi
+    return tuple(tuple((float(x), float(y)) for x, y in (rule.points - offset) * f)
+                 for rule in rules if rule.axis is RuleAxis.HORIZONTAL)  # fmt: skip
 
 
 def ink_map(gray: np.ndarray, dpi: float) -> np.ndarray:
@@ -1197,6 +1318,9 @@ def line_samples(page: PageText, dpi: float) -> tuple[Samples, int]:
     zones, margin = no_text_zones(page.regions), mm_to_px_float(RULE_ZONE_MARGIN_MM, dpi)
     parts, count = [], 0
     for axis in page.analysis.axes:
+        # Вертикальные строки (боковые области) — не горизонтали поля: их опора — вертикаль (:func:`vertical_samples`).
+        if axis.sideways:
+            continue
         pts = line_curve(axis)
         if axis.base_points is not None and len(pts) >= 2:
             # Участок базы, поднятый цифрой сноски в начале строки, — не опора (:func:`raised_start_span`).
@@ -1222,6 +1346,88 @@ def line_samples(page: PageText, dpi: float) -> tuple[Samples, int]:
                              np.full(len(pts), len(parts))))  # fmt: skip
         count += 1
     return sum(parts, Samples.empty()), count
+
+
+def vertical_samples(page: PageText, dpi: float) -> Samples:
+    """Выборки по вертикальным строкам (боковые области разбора): точка базовой линии должна встать на медианный x
+    своей строки.
+
+    Повёрнутый текст — шапки граф таблиц, подписи осей, боковые рубрики — держит составляющую ``dx`` там, где
+    выровненных сторон блоков нет: таблица с вертикальной шапкой выпрямлялась только по горизонтальным строкам и
+    линейкам. Цель у каждой строки своя — медиана x, но в подгонке она свободная (``fit_component``): строка задаёт
+    полю форму и наклон, а не положение. Строки внутри рисунка или фото отбрасываются. База вертикальной строки (``LineAxis.base_points``) уже повёрнута на страницу.
+
+    Args:
+        page: Разбор страницы.
+        dpi: Разрешение холста.
+
+    Returns:
+        Выборки составляющей ``dx`` вида :attr:`SampleKind.VERTICAL`.
+    """
+    min_len, step = mm_to_px_float(VERTICAL_MIN_MM, dpi), mm_to_px_float(SAMPLE_STEP_MM, dpi)
+    end_step, end_zone = mm_to_px_float(END_STEP_MM, dpi), mm_to_px_float(END_ZONE_MM, dpi)
+    zones, margin = no_text_zones(page.regions), mm_to_px_float(RULE_ZONE_MARGIN_MM, dpi)
+    pieces = []
+    for axis in page.analysis.axes:
+        if not axis.sideways:
+            continue
+        base = axis.base_points
+        pts = np.asarray(axis.points if base is None else base, np.float64)
+        if len(pts) < 2:
+            continue
+        pts = page.to_canvas(pts)
+        pts = pts[outside(pts, zones, margin)]
+        if len(pts) < 2 or np.ptp(pts[:, 1]) < min_len:
+            continue
+        # Шаг — по y (вдоль строки), как у сторон блоков; точки, легшие передискретизацией в рисунок, — не опоры.
+        pts = resample(pts, 1, step, end_step, end_zone)
+        pts = pts[outside(pts, zones, margin)]
+        if len(pts) >= 2:
+            pieces.append(pts)
+    parts = []
+    for group in vertical_groups(pieces, dpi):
+        # Строка из кусков — один набор с одной группой (сложение наборов разводит номера групп): цель — медиана x всей
+        # строки, в подгонке она свободная и общая на строку.
+        pts = np.concatenate([pieces[i] for i in group])
+        target = float(np.median(pts[:, 0]))
+        at = np.stack([np.full(len(pts), target), pts[:, 1]], axis=1)
+        parts.append(Samples(at, pts[:, 0] - target, np.ones(len(pts)), pts, np.full(len(pts), SampleKind.VERTICAL),
+                             np.zeros(len(pts), int)))  # fmt: skip
+    return sum(parts, Samples.empty())
+
+
+def vertical_groups(pieces: list[np.ndarray], dpi: float) -> list[list[int]]:
+    """Куски одной вертикальной строки: кусок присоединяется к соседу по вертикали, если лежит на продолжении его прямой.
+
+    Пара связывается, когда куски не перекрываются по y, промежуток между ними не длиннее :data:`VERTICAL_GAP_MM`, а
+    ближний конец каждого отстоит от прямой МНК ``x(y)`` другого, продолженной через промежуток, не дальше
+    :data:`VERTICAL_JOIN_MM`. Связность — транзитивная (строка из трёх и более кусков).
+
+    Args:
+        pieces: Точки кусков (N, 2) px холста, упорядоченные по y.
+        dpi: Разрешение холста.
+
+    Returns:
+        Индексы кусков по строкам.
+    """
+    tol, gap = mm_to_px_float(VERTICAL_JOIN_MM, dpi), mm_to_px_float(VERTICAL_GAP_MM, dpi)
+    lines = [np.polyfit(pts[:, 1], pts[:, 0], 1) for pts in pieces]
+    owner = list(range(len(pieces)))
+    for i, upper in enumerate(pieces):
+        for j, lower in enumerate(pieces):
+            # Пара ``upper`` над ``lower`` с промежутком не длиннее ``gap``.
+            if i == j or not 0 <= lower[0, 1] - upper[-1, 1] <= gap:
+                continue
+            down = abs(np.polyval(lines[i], lower[0, 1]) - lower[0, 0])
+            up = abs(np.polyval(lines[j], upper[-1, 1]) - upper[-1, 0])
+            if max(down, up) <= tol:
+                # Слияние групп: все куски группы ``j`` переходят к владельцу группы ``i``.
+                old, new = owner[j], owner[i]
+                owner = [new if o == old else o for o in owner]
+    groups: dict[int, list[int]] = {}
+    for index, o in enumerate(owner):
+        groups.setdefault(o, []).append(index)
+    return [sorted(g) for g in groups.values()]
 
 
 def aligned_sides(page: PageText, dpi: float) -> list[tuple[int, np.ndarray]]:
@@ -1708,7 +1914,8 @@ def fit_component(
         grid: Сетка узлов.
         bending: Энергия изгиба с жёсткостью (``Grid.bending``).
         dpi: Разрешение холста (пороги — в мм).
-        free_targets: Цели строк (``SampleKind.LINE``, по ``group``) — свободные неизвестные.
+        free_targets: Цели строк (``SampleKind.LINE``, по ``group``) — свободные неизвестные. Цели вертикальных строк
+            (``SampleKind.VERTICAL``) свободны всегда.
         scale_weight: Вес штрафа за изменение масштаба по вертикали (разности узлов поля по y).
 
     Returns:
@@ -1721,7 +1928,12 @@ def fit_component(
     if scale_weight > 0:
         d1y = sparse.kron(first_diff(grid.ny), sparse.identity(grid.nx))
         q = q + scale_weight * (d1y.T @ d1y)
-    lines = (samples.kind == SampleKind.LINE) if free_targets else np.zeros(len(samples), bool)
+    # Свободные цели: у горизонтальных строк — по ``free_targets``, у вертикальных (:func:`vertical_samples`) — всегда.
+    # Вертикальная строка разбита разбором на куски, и жёсткая медиана у каждого куска держала его на месте против
+    # общего поворота поля: выпрямленная прочими опорами строка выходила ступенькой из наклонных кусков (МТС 1971/06
+    # IMG_0146_2R: размах x строки 0.5 мм без вертикальных выборок и 1.65 мм с жёсткими целями). Со свободной целью
+    # строка задаёт полю только свою форму и наклон.
+    lines = (samples.kind == SampleKind.VERTICAL) | ((samples.kind == SampleKind.LINE) & free_targets)
     groups, index = np.unique(samples.group[lines], return_inverse=True)
     if len(groups):
         # Столбец на строку: выборка строки g получает в уравнение поправку её цели c_g.

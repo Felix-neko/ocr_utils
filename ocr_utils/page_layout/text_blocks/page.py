@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
+from functools import partial
 from enum import Enum
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
-from ocr_utils.page_layout.text_blocks.alignment import Alignment, Side, alignment_of, cut_rows
+from ocr_utils.page_layout.text_blocks.alignment import AlignKind, Alignment, Side, alignment_of, cut_rows
 from ocr_utils.page_layout.text_blocks.baseline_axis import body_axes, extend_to_ink, use_body
 from ocr_utils.page_layout.text_blocks.axes_fix import fixed_axes
 from ocr_utils.page_layout.text_blocks.blocks import (
@@ -26,11 +27,13 @@ from ocr_utils.page_layout.text_blocks.blocks import (
 from ocr_utils.page_layout.text_blocks.hyphens import hyphens_mask
 from ocr_utils.page_layout.text_blocks.edge_guard import EdgeGuardReport, mark_unreliable, page_bumps, second_pass_gray
 from ocr_utils.page_layout.text_blocks.engines.base import Engine
+from ocr_utils.page_layout.text_blocks.pseudo_glyphs import PseudoMode, PseudoParams, PseudoReport, filter_page
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, masked_ink, zone_mask
 from ocr_utils.page_layout.text_blocks.lines import SMOOTH_HEIGHTS, LineAxis, axes_of, with_column, with_jump_spans
 from ocr_utils.page_layout.text_blocks.metrics import pitch_of, points_without_marks, row_jumps_of
 from ocr_utils.page_layout.orientation.detectors.ink_axis import glyph_mask
-from ocr_utils.page_layout.text_blocks.columns import gutters_of, mark_cut_lines, zones_of
+from ocr_utils.page_layout.text_blocks.barriers import BarrierLines
+from ocr_utils.page_layout.text_blocks.columns import gutters_of, mark_cut_lines, rule_polylines, zones_of
 from ocr_utils.page_layout.text_blocks.leaders import leaders_mask, leaders_of
 from ocr_utils.page_layout.text_blocks.page_numbers import column_block, inside_numbers, leader_numbers, number_columns
 
@@ -67,10 +70,26 @@ class PageAnalysis:
     note: str = ""
     # Защита выровненных сторон от сора (:mod:`edge_guard`): выступы, второй проход, выброшенная краска.
     edge_guard: EdgeGuardReport | None = None
+    # Фильтр псевдоглифов (:mod:`pseudo_glyphs`): закрашенные компоненты с причинами, число повторных разборов.
+    pseudo_glyphs: PseudoReport | None = None
 
     @property
     def key(self) -> str:
         return f"{self.name}_p{self.page:03d}_{self.variant}_{self.engine}"
+
+
+class RuleBarriers(str, Enum):
+    """Вертикальные линейки из краски страницы как линейки-барьеры для сборки рядов и блоков (:func:`_analyse_plain`)."""
+
+    # Только линейки подсказок (``LayoutHints.rules``): вертикальная линейка из краски запрещает лишь сцепку кусков
+    # строки внутри сегментации (``columns.rule_separators``), а ряды и блоки собираются через неё.
+    OFF = "off"
+    # И вертикальные линейки краски страницы (``columns.rule_polylines``): графы таблицы — отдельные ряды и блоки.
+    INK = "ink"
+
+
+# Способ по умолчанию; читается при каждом разборе, стенд может переключить его присваиванием.
+DEFAULT_RULE_BARRIERS = RuleBarriers.INK
 
 
 class AxisKind(Enum):
@@ -95,6 +114,9 @@ def analyse_gray(
     axis: AxisKind = AxisKind.CENTRE,
     blocks_mode: BlocksMode | None = None,
     glyph_maps: dict | None = None,
+    pseudo: PseudoMode = PseudoMode.OFF,
+    raw300: np.ndarray | None = None,
+    pseudo_params: PseudoParams | None = None,
 ) -> PageAnalysis:
     """Разбор страницы по серому рендеру ``RENDER_DPI`` с защитой выровненных сторон блоков от сора.
 
@@ -102,7 +124,7 @@ def analyse_gray(
     выступы (:func:`edge_guard.page_bumps`). Если даны карты детекторов символов ``glyph_maps`` и выступы есть,
     краска за аномальными сторонами, которую хотя бы один детектор считает сором, закрашивается, и полоса
     разбирается заново (второй проход). Выступы, оставшиеся по итогу, ВСЕГДА помечаются недостоверными участками
-    сторон. Полосы с повёрнутыми областями защита пропускает: стороны блоков там не левые и правые в координатах
+    сторон. Блоки повёрнутых областей защита и фильтр обходят: стороны их блоков не левые и правые в координатах
     страницы.
 
     Args:
@@ -110,28 +132,59 @@ def analyse_gray(
             blocks_mode: Как у :func:`_analyse_plain`.
         glyph_maps: Карты детекторов символов полосы (:func:`glyph_maps.load_maps`) — ``детектор → карта 0…1`` в
             пикселях ``gray300``; ``None`` — без второго прохода, только пометка выступов.
+        pseudo: Фильтр псевдоглифов до защиты сторон (:func:`pseudo_glyphs.filter_page`): кромка листа и тень сгиба,
+            нитки, полоса обложки, карандаш, сор закрашиваются, и полоса разбирается заново. По умолчанию выключен —
+            правила держатся на тоне и крае картинки фото-скана и на бинарных полосах FineReader ничего не дают.
+        raw300: Серый ``RENDER_DPI`` без утолщения штрихов — по нему меряется тон кандидатов; ``None`` — по ``gray300``.
+        pseudo_params: Пороги фильтра; ``None`` — по умолчанию.
 
     Returns:
         :class:`PageAnalysis` с отчётом защиты сторон ``edge_guard``.
     """
     options = dict(dpi=dpi, smooth_line=smooth_line, smooth_block=smooth_block, coarse_factor=coarse_factor,
                    dilate=dilate, name=name, page=page, variant=variant, hints=hints, axis=axis,
-                   blocks_mode=blocks_mode)  # fmt: skip
+                   blocks_mode=blocks_mode, edge_cut=PseudoMode(pseudo) is PseudoMode.OFF)  # fmt: skip
     analysis = _analyse_plain(gray300, engine, **options)
-    width = int(round(gray300.shape[1] * dpi / RENDER_DPI))
-    height = int(round(gray300.shape[0] * dpi / RENDER_DPI))
-    if any(area.rotate_cw != 0 for area in (hints or LayoutHints()).zones_or_page(width, height)):
-        return analysis
+    # Полосы с повёрнутыми областями проходят фильтр и защиту наравне с прочими: блоки боковых областей их обходят
+    # сами (у них нет выровненных сторон, ``_unaligned``; кандидатов у концов рядов — ``pseudo_glyphs``). Прежде
+    # одна боковая подпись выключала фильтр и защиту для всей страницы.
+    pseudo_report = None
+    if PseudoMode(pseudo) is not PseudoMode.OFF:
+        # Псевдоглифы — до защиты сторон: она ищет выступы уже по разбору без них.
+        analysis, gray300, pseudo_report = filter_page(analysis, gray300, raw300, PseudoMode(pseudo),
+                                                       partial(_analyse_plain, engine=engine, **options), pseudo_params)  # fmt: skip
+        analysis = replace(analysis, pseudo_glyphs=pseudo_report)
     first = page_bumps(analysis.blocks, analysis.alignments)
     final, dropped, second = first, [], False
     if glyph_maps and first:
         filtered, dropped = second_pass_gray(gray300, analysis.blocks, analysis.dpi, first, glyph_maps)
         if dropped:
             # Повторный разбор полосы без сора; выступы ищутся заново по новым границам.
-            analysis = _analyse_plain(filtered, engine, **options)
+            analysis = replace(_analyse_plain(filtered, engine, **options), pseudo_glyphs=pseudo_report)
             final, second = page_bumps(analysis.blocks, analysis.alignments), True
     report = EdgeGuardReport(tuple(first), tuple(final), second, tuple(glyph_maps or ()), tuple(dropped))
     return replace(analysis, blocks=mark_unreliable(analysis.blocks, final), edge_guard=report)
+
+
+def page_barriers(
+    hints: LayoutHints, work: np.ndarray, dpi: float, rule_barriers: RuleBarriers | None = None
+) -> BarrierLines:
+    """Линейки-барьеры сборки рядов и блоков: из подсказок и (у ``RuleBarriers.INK``) вертикальные линейки краски.
+
+    Args:
+        hints: Подсказки разбора.
+        work: Серая рабочая копия страницы (``dpi``).
+        dpi: Её разрешение.
+        rule_barriers: Брать ли линейки краски; ``None`` — модульное умолчание :data:`DEFAULT_RULE_BARRIERS`.
+
+    Returns:
+        Набор линеек в пикселях рабочей копии.
+    """
+    base = hints.barrier_lines
+    mode = RuleBarriers(DEFAULT_RULE_BARRIERS if rule_barriers is None else rule_barriers)
+    if mode is RuleBarriers.OFF:
+        return base
+    return BarrierLines.of([*base.lines, *rule_polylines(work, dpi)])
 
 
 def _analyse_plain(
@@ -148,6 +201,8 @@ def _analyse_plain(
     hints: LayoutHints | None = None,
     axis: AxisKind = AxisKind.CENTRE,
     blocks_mode: BlocksMode | None = None,
+    edge_cut: bool = True,
+    rule_barriers: RuleBarriers | None = None,
 ) -> PageAnalysis:
     """Разбор страницы по серому рендеру ``RENDER_DPI`` без защиты сторон (её добавляет :func:`analyse_gray`).
 
@@ -169,6 +224,11 @@ def _analyse_plain(
         blocks_mode: Способ группировки строк в блоки и их границы (``blocks.BlocksMode``); ``None`` —
             ``blocks.DEFAULT_BLOCKS_MODE``. У ``SMOOTH`` перед сборкой блоков оси-выбросы крупного
             набора заменяются (:func:`axes_fix.fixed_axes`), и в разборе остаются уже заменённые оси.
+        edge_cut: Ряды, подходящие к краю картинки ближе ``alignment.EDGE_TOUCH_MM``, считать обрезанными (выключку
+            не мерят, участки сторон недостоверны). С фильтром псевдоглифов выключается: правило 0.3 мм пользователь
+            отверг, краску у края снимает фильтр (``reports/pseudo_glyphs.md``).
+        rule_barriers: Вертикальные линейки краски — барьеры сборки рядов и блоков (:func:`page_barriers`); ``None``
+            — модульное умолчание :data:`DEFAULT_RULE_BARRIERS`. Боковые области берут их всегда (``_analyse_areas``).
 
     Returns:
         :class:`PageAnalysis` со всеми кривыми в пикселях рабочей копии.
@@ -248,7 +308,7 @@ def _analyse_plain(
         coarse_factor,
         dilate,
         page_leaders,
-        hints.barrier_lines,
+        page_barriers(hints, work, dpi, rule_barriers),
         mode,
     )
     # Участки перескока на соседнюю строку — по готовым рядам (им нужен шаг строк); в осях и рядах
@@ -256,12 +316,13 @@ def _analyse_plain(
     axes, blocks = marked_jumps(axes, blocks)
     # Ряды, обрезанные краем картинки (страница уходит в сгиб или за вырезку), выключку не мерят, а участки сторон
     # у них — недостоверные: где кончается такая строка, неизвестно.
-    blocks = [mark_cut_rows(block, width) for block in blocks]
+    cut_width = width if edge_cut else None
+    blocks = [mark_cut_rows(block, cut_width) for block in blocks] if edge_cut else list(blocks)
     # Колонки номеров страниц оглавления — отдельными блоками (номера в 1–3 цифры оси не получают).
     blocks = list(blocks) + [
         column_block(column, len(blocks) + i, dpi) for i, column in enumerate(number_columns(numbers, dpi))
     ]
-    alignments = [alignment_of(block, width, number_leaders) for block in blocks]
+    alignments = [alignment_of(block, cut_width, number_leaders) for block in blocks]
     share = ink_share(axes, ink, dpi)
     return PageAnalysis(
         name=name,
@@ -369,11 +430,13 @@ def _analyse_areas(
             continue
         # Подсказки области — в координатах её выпрямленной вырезки: рамки-запреты и линейки-барьеры.
         # Маска разрешённого текста уже применена к вырезке и дальше не нужна.
-        area_hints = LayoutHints(
-            barriers=_shifted_barriers(hints.barriers, area),
-            rules=hints.barrier_lines.in_area(area.box, area.rotate_cw, _forward_points).as_tuples(),
-            dpi=dpi,
-        )
+        rules = hints.barrier_lines.in_area(area.box, area.rotate_cw, _forward_points).as_tuples()
+        if area.sideways:
+            # Боковой области — ещё и её собственные линейки (горизонтальные на странице): в повёрнутой вырезке они
+            # встают поперёк строк и не дают сшить вертикальные строки через линейку (МТС 1969/06 IMG_0138_1L).
+            side = BarrierLines.of(hints.side_rules).in_area(area.box, area.rotate_cw, _forward_points)
+            rules = (*rules, *side.as_tuples())
+        area_hints = LayoutHints(barriers=_shifted_barriers(hints.barriers, area), rules=rules, dpi=dpi)
         # Движок с подсказками (``InkEngine``) получает подсказки ОБЛАСТИ: со страничными он резал
         # бы вырезку по чужим координатам.
         area_engine = engine.with_hints(area_hints) if hasattr(engine, "with_hints") else engine
@@ -391,11 +454,17 @@ def _analyse_areas(
             hints=area_hints,
             axis=axis,
             blocks_mode=blocks_mode,
+            # Линейки краски боковой вырезки (вертикальные в ней — горизонтальные на странице) делят её строки
+            # всегда; где краску линеек погасили до разбора (v2), их приносит ``side_rules``.
+            rule_barriers=RuleBarriers.INK if area.sideways else None,
         )
         axes.extend(back_axis(line, size, area) for line in inner.axes)
         for block, alignment in zip(inner.blocks, inner.alignments):
             blocks.append(back_block(block, size, area))
-            alignments.append(alignment)
+            # Выключка боковой области мерилась в кадре прямой строки: «левый» и «правый» край там — верх и низ
+            # страницы, смотря куда читать. Наружу — без выровненных сторон (их не берут ни защита сторон, ни поле
+            # выпрямления).
+            alignments.append(_unaligned(alignment) if area.sideways else alignment)
         gutters.extend(item for item in (back_gutter(g, size, area) for g in inner.gutters) if item is not None)
         leaders.extend(item for item in (back_leader(item, size, area) for item in inner.leaders) if item is not None)
         if not area.sideways and area.rotate_cw == 0:
@@ -419,6 +488,16 @@ def _analyse_areas(
         seconds=time.monotonic() - started,
         ink_share=ink_share(axes, ink, dpi),
         note=f"областей {len(areas)}",
+    )
+
+
+def _unaligned(alignment: Alignment) -> Alignment:
+    """Выключка блока боковой области наружу: вид ``RAGGED``, ни одна сторона не выровнена (меры сторон — как есть)."""
+    return Alignment(
+        kind=AlignKind.RAGGED,
+        left=replace(alignment.left, aligned=False),
+        right=replace(alignment.right, aligned=False),
+        center_share=alignment.center_share,
     )
 
 

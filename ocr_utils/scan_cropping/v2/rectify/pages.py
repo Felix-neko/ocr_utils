@@ -11,6 +11,9 @@ import numpy as np
 from ocr_utils.frame_flags.flags import FrameFlags, Side
 from ocr_utils.scan_cropping.v2.fill import FillMethod, fill_to_rectangle, paper_bbox
 from ocr_utils.scan_cropping.v2.rectify.coons import Layout, PageRect
+
+# ``unfolded`` — именем модуля: стенд ``research/border_fill`` подменяет ``pages.unfolded``.
+from ocr_utils.scan_cropping.v2.rectify.fold import unfolded
 from ocr_utils.scan_cropping.v2.rectify.text_run import TextResult
 from ocr_utils.scan_cropping.v2.single_page import FrameKind
 from ocr_utils.units import MM_PER_INCH
@@ -74,7 +77,8 @@ def page_areas(layout: Layout, dense: tuple[np.ndarray, np.ndarray]) -> tuple[np
     Пиксель холста ``X`` составная карта берёт из точки ``X + D(X)`` холста Кунса (``D`` — накопленное поле по
     тексту). Пиксель принадлежит странице, если эта точка лежит в прямоугольнике страницы расклада Кунса. Поле у
     каждой страницы своё, поэтому линия разреза между областями — кривая, а сами области слегка отходят от
-    прямоугольников там, где поле выпрямляло строки.
+    прямоугольников там, где поле выпрямляло строки. Полоса складки карты у корешка (повтор концов строк,
+    :func:`unfolded`) не входит ни в одну область и закрашивается.
 
     Args:
         layout: Расклад холста Кунса (прямоугольники страниц встык по линии корешка).
@@ -93,7 +97,9 @@ def page_areas(layout: Layout, dense: tuple[np.ndarray, np.ndarray]) -> tuple[np
     # Полуоткрытые интервалы: левая — до линии корешка не включая, правая — от неё; общих пикселей нет.
     in_left = inside(left, xs, ys) & (xs < layout.spine_x)
     in_right = inside(right, xs, ys) & (xs >= layout.spine_x)
-    return in_left, in_right
+    # Повтор у корешка: пиксель, чья точка-источник уже показана ближе к своему внешнему краю, — не страница.
+    forward, backward = unfolded(xs)
+    return in_left & forward, in_right & backward
 
 
 def inside(rect: PageRect, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:

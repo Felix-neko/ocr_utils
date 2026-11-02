@@ -33,9 +33,10 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 
+from ocr_utils.page_layout.text_blocks import fast_stats
 from ocr_utils.page_layout import mm_to_px
 from ocr_utils.page_layout.text_blocks.lines import LineAxis
-from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, glyphs_kegl, same_baseline
+from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, bottoms_close, glyphs_bottom, glyphs_kegl
 
 # Шаг сетки кривой, мм бумаги (как у первой оси: ``lines.AXIS_STEP_MM``).
 GRID_STEP_MM = 1.0
@@ -153,12 +154,12 @@ def line_x_height(glyphs: np.ndarray) -> float:
     heights = glyphs[:, 3] - glyphs[:, 1]
     # Соринки, точки и запятые — не «этаж» строчных: без них нижний этаж строки из одних прописных —
     # сами прописные (у такой строки высота строчной и есть высота прописной).
-    letters = heights[heights >= SPECK_HEIGHT_SHARE * float(np.median(heights))]
+    letters = heights[heights >= SPECK_HEIGHT_SHARE * float(fast_stats.median(heights))]
     heights = letters if letters.size else heights
     # Низший «этаж» высот — строчные без выносных; прописные, цифры и выносные выше.
-    floor = float(np.percentile(heights, X_HEIGHT_QUANTILE))
+    floor = float(fast_stats.percentile(heights, X_HEIGHT_QUANTILE))
     low = heights[heights <= X_HEIGHT_SPREAD * floor]
-    return float(np.median(low)) if low.size else floor
+    return float(fast_stats.median(low)) if low.size else floor
 
 
 def _second_difference(count: int) -> sparse.csr_matrix:
@@ -347,12 +348,12 @@ def _robust_line_at(xs: np.ndarray, ys: np.ndarray, x: float) -> float:
     """Значение в точке ``x`` прямой Тейла–Сена по точкам ``(xs, ys)``: наклон — медиана попарных наклонов, сдвиг —
     медиана остатков; треть выбросов её не сдвигает (МНК уводят и одна-две)."""
     if xs.size < 2 or np.ptp(xs) < 1e-6:
-        return float(np.median(ys))
+        return float(fast_stats.median(ys))
     i, j = np.triu_indices(xs.size, 1)
     dx = xs[j] - xs[i]
     ok = np.abs(dx) > 1e-6
-    slope = float(np.median((ys[j] - ys[i])[ok] / dx[ok])) if ok.any() else 0.0
-    return float(np.median(ys - slope * xs) + slope * x)
+    slope = float(fast_stats.median((ys[j] - ys[i])[ok] / dx[ok])) if ok.any() else 0.0
+    return float(fast_stats.median(ys - slope * xs) + slope * x)
 
 
 def _clean_reference(ref_x: np.ndarray, ref_bottom: np.ndarray, x_height: float) -> tuple[np.ndarray, np.ndarray]:
@@ -450,8 +451,8 @@ def _raised(tops: np.ndarray, x_height: float) -> np.ndarray:
 def _line_at(xs: np.ndarray, ys: np.ndarray, x: float) -> float:
     """Значение в точке ``x`` прямой МНК по точкам ``(xs, ys)``; при одной абсциссе — медиана."""
     if np.ptp(xs) < 1e-6:
-        return float(np.median(ys))
-    slope, intercept = np.polyfit(xs, ys, 1)
+        return float(fast_stats.median(ys))
+    slope, intercept = fast_stats.polyfit(xs, ys, 1)
     return float(slope * x + intercept)
 
 
@@ -483,7 +484,7 @@ def _neighbours(fits: list[BaselineFit | None], axes: list[LineAxis]) -> list[li
                     best = min(best, distance)
         if np.isfinite(best):
             gaps.append(best)
-    pitch = float(np.median(gaps)) if gaps else 0.0
+    pitch = float(fast_stats.median(gaps)) if gaps else 0.0
     out: list[list[tuple[int, float]]] = []
     for index, axis in enumerate(axes):
         found: list[tuple[int, float]] = []
@@ -632,7 +633,7 @@ def _body_lift(axis: LineAxis, fit: BaselineFit, base: np.ndarray) -> float:
     if x_class.sum() >= MIN_SAMPLES:
         centres = 0.5 * (glyphs[x_class, 0] + glyphs[x_class, 2])
         measured = np.interp(centres, fit.grid, base) - glyphs[x_class, 1]
-        return float(np.median(measured)) / 2.0
+        return float(fast_stats.median(measured)) / 2.0
     return fit.x_height / 2.0
 
 
@@ -685,13 +686,17 @@ def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineA
         Оси с продлёнными ``body_points``.
     """
     boxes = [axes_glyphs([axis]) for axis in axes]
+    # Кегль и низ набора каждой оси — один раз на страницу: чужие глифы ищутся для каждой пары осей, и пересчёт
+    # медиан в каждой паре был самым долгим местом разбора (194 оси — 37 тыс. медиан).
+    kegls = [glyphs_kegl(own) for own in boxes]
+    bottoms = [glyphs_bottom(own) for own in boxes]
     out: list[LineAxis] = []
     for index, axis in enumerate(axes):
         points = axis.body_points
         if points is None or points.shape[0] < 2 or axis.glyphs is None:
             out.append(axis)
             continue
-        foreign = _foreign_glyphs(boxes, index)
+        foreign = _foreign_glyphs(boxes, kegls, bottoms, index)
         x_h = line_x_height(axis.glyphs)
         new = points
         for at_end in (False, True):
@@ -718,22 +723,28 @@ def extend_to_ink(axes: list[LineAxis], ink: np.ndarray, k: float) -> list[LineA
     return out
 
 
-def _foreign_glyphs(boxes: list[np.ndarray], index: int) -> np.ndarray:
+def _foreign_glyphs(boxes: list[np.ndarray], kegls: list[float], bottoms: list[float | None], index: int) -> np.ndarray:
     """Глифы осей на ДРУГОЙ базовой линии, чем ось ``index``: по ним продление оси не идёт.
+
+    Та же проверка, что :func:`typeset.same_baseline` с меньшим кеглем пары, но по заранее посчитанным кеглю и низу
+    каждой оси (:func:`typeset.bottoms_close`).
 
     Args:
         boxes: Боксы глифов каждой оси страницы ``(n, 4)``.
+        kegls: Кегль каждой оси (:func:`typeset.glyphs_kegl`; 0 — глифов нет).
+        bottoms: Низ набора каждой оси (:func:`typeset.glyphs_bottom`; ``None`` — глифов нет).
         index: Номер оси.
 
     Returns:
         Боксы чужих глифов ``(m, 4)``.
     """
-    own = boxes[index]
-    kegl = glyphs_kegl(own)
+    kegl, bottom = kegls[index], bottoms[index]
     foreign = [
         other
         for number, other in enumerate(boxes)
-        if number != index and len(other) and not same_baseline(own, other, min(kegl, glyphs_kegl(other)) or kegl)
+        if number != index
+        and len(other)
+        and not bottoms_close(bottom, bottoms[number], min(kegl, kegls[number]) or kegl)
     ]
     return np.concatenate(foreign) if foreign else np.zeros((0, 4))
 

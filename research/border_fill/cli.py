@@ -643,3 +643,113 @@ def stack_strips(strips: list[np.ndarray]) -> np.ndarray:
     width = max(s.shape[1] for s in strips)
     rows = [np.hstack([s, np.full((s.shape[0], width - s.shape[1], 3), 255, np.uint8)]) for s in strips]
     return np.vstack(rows)
+
+
+def parse_issue_px(text: str) -> dict[str, float]:
+    """Плотность по выпускам из строки ``01=17.9,02=17.1``: ключ — первые символы имени папки выпуска.
+
+    Args:
+        text: Пары ``префикс=px/мм`` через запятую.
+
+    Returns:
+        Префикс → px/мм.
+    """
+    out = {}
+    for pair in filter(None, (p.strip() for p in text.split(","))):
+        prefix, value = pair.split("=")
+        out[prefix.strip()] = float(value)
+    return out
+
+
+@main.command("pages")
+@click.option("--run", "run_dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Папка набора прогона v2 с выходом страниц (output/ и cache/ внутри, по выпускам).")  # fmt: skip
+@click.option("--photos", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Корень исходных фото набора (выпуски внутри; только чтение).")  # fmt: skip
+@click.option("--px-per-mm", "px_text", required=True,
+              help="Плотность по выпускам: «01=17.9,02=17.1,…» (префикс имени папки выпуска).")  # fmt: skip
+@click.option("--out-dir", type=click.Path(file_okay=False, path_type=Path), required=True, help="Куда писать.")
+@click.option("--issues", default="", help="Выпуски через запятую (префиксы); пусто — все с итогами.")
+@click.option("--jobs", default=6, show_default=True,
+              help="Число процессов: кадр ~25 с CPU и ~3 ГБ ОЗУ; рядом идёт прогон v2 на 12 воркерах.")  # fmt: skip
+def pages_cmd(run_dir: Path, photos: Path, px_text: str, out_dir: Path, issues: str, jobs: int) -> None:
+    """Страницы второго преобразования: повтор у корешка и варианты закраса — ``pages.csv`` и ¼ картинки ``pages/``."""
+    from research.border_fill.pages import PageRow, frame_pages_task
+
+    px_of = parse_issue_px(px_text)
+    wanted = [p.strip() for p in issues.split(",") if p.strip()]
+    thumbs = out_dir / "pages"
+    thumbs.mkdir(parents=True, exist_ok=True)
+    tasks = []
+    for issue_dir in sorted(p for p in (run_dir / "output").iterdir() if p.is_dir()):
+        prefix = next((k for k in px_of if issue_dir.name.startswith(k)), None)
+        if prefix is None or (wanted and not any(issue_dir.name.startswith(w) for w in wanted)):
+            continue
+        for tiff in sorted(issue_dir.glob("*.tiff")):
+            tasks.append((run_dir / "output", run_dir / "cache", photos, issue_dir.name, tiff.stem, px_of[prefix],
+                          thumbs))  # fmt: skip
+    log.info("кадров: %d", len(tasks))
+    rows = []
+    start = time.time()
+    with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver"), initializer=init_worker) as pool:
+        for i, frame_rows in enumerate(pool.map(frame_pages_task, tasks), 1):
+            rows.extend(frame_rows)
+            if i % 20 == 0:
+                log.info("%d / %d, %.0f с", i, len(tasks), time.time() - start)
+    with open(out_dir / "pages.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(PageRow.__dataclass_fields__))
+        writer.writeheader()
+        writer.writerows(asdict(r) for r in rows)
+    bad = [r for r in rows if r.message]
+    log.info("готово: %d строк, ошибок %d", len(rows), len(bad))
+
+
+@main.command("pages-sheets")
+@click.option("--pages-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True,
+              help="Выход команды pages.")  # fmt: skip
+@click.option("--by", type=click.Choice(["fold", "blot", "trail"]), default="blot", show_default=True,
+              help="Чем упорядочить страницы: площадь повтора, кляксы или шлейф варианта A.")  # fmt: skip
+@click.option("--top", default=30, show_default=True, help="Сколько страниц на листы.")
+@click.option("--plain-only/--all-pages", default=True, show_default=True, help="Только обычные страницы.")
+def pages_sheets_cmd(pages_dir: Path, by: str, top: int, plain_only: bool) -> None:
+    """Листы «0_fold | A | B | C | D» по страницам с наибольшей мерой: ``sheets_pages_<by>_NN.jpg``."""
+    from research.border_fill.pages import PageVariant
+
+    with open(pages_dir / "pages.csv") as f:
+        rows = [r for r in csv.DictReader(f) if not r["message"]]
+    column = {"fold": "fold_mm2", "blot": "blot_mm2", "trail": "trail_mm2"}[by]
+    base = [r for r in rows if r["variant"] == PageVariant.BASE.value and (r["plain"] == "True" or not plain_only)]
+    base.sort(key=lambda r: -float(r[column]))
+    by_key = {(r["key"], r["side"], r["variant"]): r for r in rows}
+    height = 700
+    cells = []
+    for r in base[:top]:
+        strip = []
+        for v in PageVariant:
+            name = f"{r['key'].replace('/', '__')}_{r['side']}_{v.value}.jpg"
+            img = cv2.imdecode(np.fromfile(str(pages_dir / "pages" / name), np.uint8), cv2.IMREAD_COLOR)
+            other = by_key.get((r["key"], r["side"], v.value))
+            if img is None or other is None:
+                continue
+            img = cv2.resize(img, (int(img.shape[1] * height / img.shape[0]), height), interpolation=cv2.INTER_AREA)
+            caption = f"{v.value}: клякс {float(other['blot_mm2']):.0f} мм², шлейф {float(other['trail_mm2']):.0f} мм²"
+            strip.append(framed(img, [caption], []))
+        if not strip:
+            continue
+        h = max(c.shape[0] for c in strip)
+        strip = [np.vstack([c, np.full((h - c.shape[0], c.shape[1], 3), 255, np.uint8)]) for c in strip]
+        pad = np.full((h, 12, 3), 255, np.uint8)
+        row_img = np.hstack([x for c in strip for x in (c, pad)])
+        title = f"{r['key']} {r['side']}: повтор {float(r['fold_mm2']):.0f} мм² (до {float(r['fold_width_mm']):.1f} мм)"
+        cells.append(framed(row_img, [title], []))
+    legend = [LegendEntry("0_fold — прежняя область (с повтором у корешка); A — без складки, боевой закрас;", (0, 0, 0)),
+              LegendEntry("B — опора без краски по Сауволе; C — без тёмного относительно бумаги; D — строже пороги",
+                          (0, 0, 0))]  # fmt: skip
+    for n in range(0, len(cells), 3):
+        group = cells[n : n + 3]
+        w = max(c.shape[1] for c in group)
+        group = [np.hstack([c, np.full((c.shape[0], w - c.shape[1], 3), 255, np.uint8)]) for c in group]
+        sheet = framed(np.vstack(group), [f"страницы по {column}, {n + 1}–{n + len(group)}"], legend)
+        out = pages_dir / f"sheets_pages_{by}_{n // 3 + 1:02d}.jpg"
+        cv2.imencode(".jpg", sheet, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tofile(str(out))
+    log.info("листов: %d", -(-len(cells) // 3))

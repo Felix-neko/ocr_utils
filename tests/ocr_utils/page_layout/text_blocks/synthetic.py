@@ -265,3 +265,43 @@ def glyph_line_page(
 def bow_dy(xs: np.ndarray, width: int, amplitude: float) -> np.ndarray:
     """Сдвиг строк вниз дугой :func:`bowed` в точках ``xs`` (пиксели 300 dpi)."""
     return amplitude * (1.0 - ((xs - width / 2.0) / (width / 2.0)) ** 2)
+
+
+def signature_page(shape: tuple[int, int] = PAGE_SHAPE, seed: int = 7, gap_steps: float = 1.3) -> np.ndarray:
+    """Письмо с подписью: абзац по формату, подпись авторов вправо, «г. Город» влево на высоте последней строки подписи.
+
+    Вёрстка повторяет ХиП 1991/01 IMG_1008, с. 59: концовка абзаца у левого края, подпись отбита промежутком
+    ``gap_steps`` шагов строк, её строки разной длины прижаты к правому краю, город — короткая строка у левого края на
+    высоте последней строки подписи; ниже через два шага — следующий абзац по формату.
+
+    Args:
+        shape: Размер страницы (пиксели 300 dpi).
+        seed: Зерно генератора длин слов.
+        gap_steps: Промежуток от концовки абзаца до подписи, в шагах строк.
+
+    Returns:
+        Серое изображение страницы.
+    """
+    image = paper(shape)
+    generator = random.Random(seed)
+    x0, x1 = MARGIN, shape[1] - MARGIN
+    y = MARGIN
+    # Абзац по формату: первая строка с отступом, последняя — короткая концовка у левого края.
+    for row in range(9):
+        _draw_line(image, generator, x0 + (40 if row == 0 else 0), x1, y, True)
+        y += LINE_STEP
+    _draw_line(image, generator, x0, x0 + 260, y, False)
+    y += int(round(gap_steps * LINE_STEP))
+    # Подпись вправо: строки разной длины у правого края.
+    for length in (300, 820, 620, 360, 400):
+        last = y
+        _draw_line(image, generator, x1 - length, x1, y, True)
+        y += LINE_STEP
+    # Город влево — на высоте последней строки подписи.
+    _draw_line(image, generator, x0, x0 + 200, last + 4, False)
+    y += LINE_STEP
+    # Следующий абзац по формату.
+    for row in range(6):
+        _draw_line(image, generator, x0 + (40 if row == 0 else 0), x1, y, True)
+        y += LINE_STEP
+    return image

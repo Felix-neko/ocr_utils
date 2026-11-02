@@ -124,6 +124,23 @@ class BarrierLines:
                 return True
         return False
 
+    def vertical_at(self, y: float) -> list[float]:
+        """X вертикальных кусков линеек на высоте ``y`` (куски, накрывающие ``y`` по вертикали).
+
+        Args:
+            y: Высота, пиксели рабочей копии.
+
+        Returns:
+            X точек пересечения кусков с горизонталью ``y``.
+        """
+        out = []
+        for a, b in self._pieces():
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            if abs(dy) <= abs(dx) or not min(a[1], b[1]) <= y <= max(a[1], b[1]):
+                continue
+            out.append(float(a[0] + (y - a[1]) * dx / dy))
+        return out
+
     def separators(self) -> list[tuple[int, int, int, int]]:
         """Вертикальные куски линеек как полосы запрета сцепки ``(x0, x1, y0, y1)``.
 

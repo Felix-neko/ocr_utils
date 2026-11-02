@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from ocr_utils.page_layout.text_blocks import flush_split as F
 from ocr_utils.page_layout.text_blocks import sides as sd
 from ocr_utils.page_layout.text_blocks.blocks import _row_axis
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
@@ -129,8 +130,10 @@ def _extent(sides: sd.BlockSides, side: sd.SideKind) -> float:
     return float(np.ptp(xs)) if xs.size else 0.0
 
 
-def test_short_last_row_is_extended_and_bottom_spans_the_block():
+def test_short_last_row_is_extended_and_bottom_spans_the_block(monkeypatch):
     """Подпись справа в последней строке: ось продлена по предпоследней, низ — во всю ширину блока."""
+    # Способ ``ALIGN_RIGHT_GAP`` отделил бы строку вправо под абзацем в свой блок; здесь проверяется продление оси.
+    monkeypatch.setattr(F, "DEFAULT_FLUSH_SPLIT", F.FlushSplit.ALIGN_GAP)
     block = _block(_whitened(column_page(columns=1, justify="both"), [(-1, 0.0, 0.7)]))
     edge = sd.edge_axis(block, top=False)
     assert edge.extended and edge.reference == len(block.rows) - 2
@@ -142,8 +145,10 @@ def test_short_last_row_is_extended_and_bottom_spans_the_block():
     assert abs(measures[sd.SideKind.LEFT].tilt_deg) < 1.0
 
 
-def test_indented_first_row_is_extended_and_top_spans_the_block():
+def test_indented_first_row_is_extended_and_top_spans_the_block(monkeypatch):
     """Абзацный отступ первой строки: ось продлена влево по второй, верх — во всю ширину."""
+    # Отступ в 0.3 ширины у ``ALIGN_RIGHT_GAP`` — строка вправо над абзацем, свой блок; здесь проверяется продление оси.
+    monkeypatch.setattr(F, "DEFAULT_FLUSH_SPLIT", F.FlushSplit.ALIGN_GAP)
     block = _block(_whitened(column_page(columns=1, justify="both"), [(0, 0.0, 0.3)]))
     edge = sd.edge_axis(block, top=True)
     assert edge.extended and edge.reference == 1 and edge.gap < 0

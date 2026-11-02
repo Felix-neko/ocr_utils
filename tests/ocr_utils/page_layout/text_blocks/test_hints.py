@@ -8,7 +8,8 @@ import pytest
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.engines.ink import InkEngine
-from ocr_utils.page_layout.text_blocks.from_layout import build
+from ocr_utils.page_layout import mm_to_px
+from ocr_utils.page_layout.text_blocks.from_layout import ZONE_PAD_MM, build
 from ocr_utils.page_layout.text_blocks.hints import LayoutHints, OrientedZone, barrier_rules, barrier_separators
 from ocr_utils.page_layout.text_blocks.orient import back_points
 from ocr_utils.page_layout.text_blocks.from_text_layer import hints_of
@@ -85,8 +86,60 @@ def test_build_puts_the_whole_page_first():
     """Область «вся полоса» идёт первой, боковые врезки — за ней: последующие старше."""
     hints = build(forbidden=[], barriers=[(1, 2, 3, 4)], sideways=[(10, 10, 60, 200)], width=600, height=800)
     assert hints.zones[0].box == (0, 0, 600, 800) and hints.zones[0].rotate_cw == 0
-    assert hints.zones[1].sideways and hints.zones[1].box == (10, 10, 60, 200)
+    # Боковая врезка расширена поперёк строк на ZONE_PAD_MM с обеих сторон (9 px рабочей копии 150 dpi).
+    assert hints.zones[1].sideways and hints.zones[1].box == (1, 10, 69, 200)
     assert hints.barriers == ((1, 2, 3, 4),)
+
+
+def test_build_pads_a_narrow_zone_across_its_lines():
+    """Рамка детектора впритык к цепочке глифов (3 мм поперёк) проходит порог благодаря припуску поперёк строк."""
+    narrow = mm_to_px(3.0, WORK_DPI)
+    hints = build(forbidden=[], barriers=[], sideways=[(100, 50, 100 + narrow, 400)], width=600, height=800)
+    pad = int(round(mm_to_px(ZONE_PAD_MM, WORK_DPI)))
+    assert len(hints.zones) == 2
+    assert hints.zones[1].box == (100 - pad, 50, 100 + narrow + pad, 400)
+
+
+def test_sideways_axes_run_down_the_page_with_their_baseline():
+    """Ось вертикальной строки идёт по y без пилы, помнит поворот области, а её база сдвинута поперёк — по x."""
+    upright_page = column_page(columns=1)
+    sideways = np.rot90(upright_page, 1)
+    width, height = _work_size(sideways)
+    analysis = analyse_gray(sideways, InkEngine(), hints=LayoutHints(zones=(OrientedZone((0, 0, width, height), 90),)))
+    assert analysis.axes
+    for axis in analysis.axes:
+        assert axis.sideways and axis.rotate_cw == 90
+        assert np.all(np.diff(np.asarray(axis.points)[:, 1]) >= 0), "точки вертикальной оси — сверху вниз"
+        base = axis.base_points
+        if base is not None:
+            shift = base - np.asarray(axis.body_points)
+            assert np.allclose(shift[:, 1], 0.0) and np.allclose(shift[:, 0], axis.body_lift)
+    # Блоки боковой области без выровненных сторон: выключку там меряли в кадре прямой строки.
+    assert all(not a.left.aligned and not a.right.aligned for a in analysis.alignments)
+
+
+def test_side_rules_split_vertical_lines_only_in_sideways_areas():
+    """Линейка из ``side_rules`` поперёк вертикальных строк делит их; в прямой области та же линейка ничего не делит."""
+    from ocr_utils.page_layout.text_blocks.barriers import BarrierLines
+
+    upright_page = column_page(columns=1)
+    sideways = np.rot90(upright_page, 1)
+    width, height = _work_size(sideways)
+    zones = (OrientedZone((0, 0, width, height), 90),)
+    # Горизонтальная линейка страницы посередине — поперёк вертикальных строк боковой области.
+    rule = ((0.0, height / 2), (float(width), height / 2))
+    plain = analyse_gray(sideways, InkEngine(), hints=LayoutHints(zones=zones))
+    split = analyse_gray(sideways, InkEngine(), hints=LayoutHints(zones=zones, side_rules=(rule,)))
+    lines = BarrierLines.of((rule,))
+    crossing = [a for a in plain.axes if lines.crosses(tuple(a.points[0]), tuple(a.points[-1]))]
+    assert crossing, "без линейки вертикальные строки идут через середину"
+    assert len(split.axes) > len(plain.axes)
+    assert not [a for a in split.axes if lines.crosses(tuple(a.points[0]), tuple(a.points[-1]))]
+    # Прямая страница: ``side_rules`` на неё не действуют.
+    width, height = _work_size(upright_page)
+    across = ((width / 2, 0.0), (width / 2, float(height)))
+    straight = analyse_gray(upright_page, InkEngine(), hints=LayoutHints(side_rules=(across,)))
+    assert len(straight.axes) == len(analyse_gray(upright_page, InkEngine()).axes)
 
 
 def test_build_drops_a_hair_thin_zone():

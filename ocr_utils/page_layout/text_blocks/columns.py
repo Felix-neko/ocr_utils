@@ -988,6 +988,30 @@ def _segment_separators(gutter: Gutter) -> list[tuple[int, int, int, int]]:
     return out
 
 
+def rule_polylines(gray: np.ndarray, dpi: float = WORK_DPI) -> list[np.ndarray]:
+    """Вертикальные линейки страницы ломаными по их оси — линейки-барьеры (``barriers.BarrierLines``).
+
+    Те же линейки, что у :func:`rule_separators` (морфологический ``tables.ruling.find_lines``), но не полосами запрета
+    сцепки, а ломаными ``(x, y0) → (x, y1)``: так их проверяют и шаги после сегментации — сборка рядов
+    (``blocks._split_by_barrier``), слияние кусков одной строки (``regroup._divided``), абзацы через графу. Без этого
+    оси левой и правой графы таблицы, раздельные после сцепки, сходились в один ряд и один блок (ХиП 1991/02
+    IMG_1106_L: «Уменьшение объема производства…» | «неполученная прибыль…»).
+
+    Args:
+        gray: Серая рабочая копия страницы.
+        dpi: Её разрешение.
+
+    Returns:
+        Ломаные ``(2, 2)`` в пикселях рабочей копии.
+    """
+    out = []
+    for item in find_lines(gray, int(round(dpi))).vertical:
+        box = item.box
+        x = (box.x0 + box.x1) / 2.0
+        out.append(np.array([[x, float(box.y0)], [x, float(box.y1)]], dtype=np.float64))
+    return out
+
+
 def rule_separators(gray: np.ndarray, dpi: float = WORK_DPI) -> list[tuple[int, int, int, int]]:
     """Вертикальные линейки полосами ``(x0, x1, y0, y1)`` — такие же запреты сцепки, как межколонник.
 

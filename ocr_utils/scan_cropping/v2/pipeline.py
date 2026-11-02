@@ -65,6 +65,8 @@ from ocr_utils.scan_cropping.v2.ragged_edge import (
     page_raw_mask,
 )
 from ocr_utils.scan_cropping.v2.gutter_strip import Strip, find_strip, spine_line, strip_paper
+from ocr_utils.scan_cropping.v2.gutter_decompression.widen import WidenLimits
+from ocr_utils.scan_cropping.v2.rectify.page_scale import ScaleParams
 from ocr_utils.scan_cropping.v2.page_frames import (
     PageFrame,
     frames_digest,
@@ -201,8 +203,20 @@ class RunParams:
             обрабатывается; остальные флаги — для выхода страниц.
         rectify_passes: Проходов «разбор текста → поле» выпрямления; 0 — только Кунс по подгоночным областям.
         rectify_illumination: Выравнивать освещение страниц в выходе страниц (не-цветных и не запрещённых флагом).
+        rotated_text: Повёрнутый (вертикальный) текст страниц выхода — боковыми областями разбора текста.
         gutter_decompression: Растягивать сжатые у корешка буквы разворота в выходе страниц (``gutter_decompression``:
             модель по ширине букв, страница шире со стороны корешка).
+        gutter_reach_mm: Зона растяжения у корешка от начала зоны текста, мм (``WidenLimits.reach_mm``): глубже
+            страница только сдвигается.
+        page_scale: Ширина прямоугольника страницы и параметр Кунса вдоль страницы — по перспективному масштабу её
+            высоты (``rectify.page_scale``); False — по длине дуги верха и низа.
+        scale_max_shrink: Наибольшее сужение страницы мерой масштаба (доля ширины по дуге).
+        scale_max_grow: Наибольшее расширение страницы мерой масштаба (доля ширины по дуге).
+        pseudo_glyphs: Фильтр псевдоглифов в разборе текста выхода страниц (``text_blocks.pseudo_glyphs``): краска у
+            края (кромка листа, тень сгиба, нитки, обложка) и карандаш снимаются до разбора, правило 0.3 мм выключено;
+            False — прежний разбор.
+        pseudo_craft: Спорных кандидатов фильтра судит CRAFT по местным вырезкам: сервер на GPU в главном процессе
+            (``text_blocks.craft_service``; без CUDA — CPU в воркерах); False — одни правила.
         output_pages_meta: Папка паспортов страниц (``rectify.passport``: исходный кадр, часть, флаги, dpi, цветность,
             контуры закраса пальцев) и масок закраса ``<кадр>_L.fingers.png`` — отдельно от страниц; None — не писать.
         pages_dpi: Тег разрешения страниц или None — настоящая плотность кадра (``scale.px_per_mm`` × 25.4).
@@ -255,7 +269,14 @@ class RunParams:
     use_flags: bool = True
     rectify_passes: int = 3
     rectify_illumination: bool = True
+    rotated_text: bool = True
     gutter_decompression: bool = True
+    gutter_reach_mm: float = WidenLimits.reach_mm
+    page_scale: bool = True
+    scale_max_shrink: float = ScaleParams.max_shrink
+    scale_max_grow: float = ScaleParams.max_grow
+    pseudo_glyphs: bool = True
+    pseudo_craft: bool = True
     output_pages_meta: Path | None = None
     pages_dpi: float | None = None
 
@@ -451,6 +472,44 @@ def init_worker() -> None:
     np._core.multiarray._set_madvise_hugepage(False)  # type: ignore[attr-defined]
     cv2.setNumThreads(1)
     threadpoolctl.threadpool_limits(1)
+
+
+def init_worker_craft(requests, replies: list, slots) -> None:
+    """Инициализатор воркера с клиентом CRAFT-сервера главного процесса (фильтр псевдоглифов выхода страниц).
+
+    Args:
+        requests: Общая очередь запросов к серверу.
+        replies: Очереди ответов по слотам.
+        slots: Очередь свободных слотов.
+    """
+    from ocr_utils.page_layout.text_blocks.craft_service import init_client
+
+    init_worker()
+    init_client(requests, replies, slots)
+
+
+def craft_on_gpu(params: RunParams) -> bool:
+    """Судить спорных кандидатов фильтра псевдоглифов CRAFT-сервером на GPU в главном процессе.
+
+    Нужно, если выход страниц идёт с фильтром и CRAFT (``pseudo_glyphs``, ``pseudo_craft``); без CUDA или без весов —
+    нет: тогда воркеры считают CRAFT на CPU сами (локальная модель на воркер, ~0.3 с на вырезку) — с предупреждением.
+
+    Args:
+        params: Параметры прогона.
+
+    Returns:
+        True — поднимать сервер.
+    """
+    if params.output_pages is None or not (params.pseudo_glyphs and params.pseudo_craft):
+        return False
+    from ocr_utils.page_layout.text_blocks.pseudo_glyphs import LocalCraft
+
+    import torch
+
+    if not torch.cuda.is_available() or not LocalCraft().available:
+        log.warning("CRAFT фильтра псевдоглифов: нет CUDA или весов — CRAFT на CPU в воркерах")
+        return False
+    return True
 
 
 def read_bgr(path: Path) -> np.ndarray:
@@ -1709,7 +1768,7 @@ def finish_frame(job: FrameJob, params: RunParams, t0: float) -> FrameStats:
             x0, y0, x1, y1 = box
             finger_out = (paint & ~returned)[y0:y1, x0:x1]
         pages_out = write_rectified_pages(job, params, out, status, box, fit, seg_scale, polys, labels, finger_out,
-                                          frame_kind_of(pages))  # fmt: skip
+                                          frame_kind_of(pages), shape)  # fmt: skip
     if params.debug_dir is not None:
         dbg = overlay_path(params.debug_dir, job.rel, OverlayTag.MAIN)
         dbg.parent.mkdir(parents=True, exist_ok=True)
@@ -1987,6 +2046,7 @@ def write_rectified_pages(
     labels: list[str] | None,
     fingers: np.ndarray | None = None,
     kind: tuple[FrameKind, int | None] = (FrameKind.SPREAD, None),
+    frame_shape: tuple[int, int] | None = None,
 ) -> PagesOutcome:
     """Выход страниц кадра: выпрямление итога, разрез на страницы по флагам, закрас до прямоугольника, запись.
 
@@ -2006,6 +2066,8 @@ def write_rectified_pages(
             None; переносится на страницы и пишется в паспорт (``--output-pages-meta``).
         kind: Вид кадра и место широкой страницы кадра ``SLIVER`` (``frame_kind_of``): одна страница пишется
             частью ``_P`` (у ``SLIVER`` — частью своей стороны), без страницы — ничего.
+        frame_shape: ``(H, W)`` кадра — главная точка снимка для перспективного масштаба страниц
+            (``rectify.page_scale``); None — центр итога.
 
     Returns:
         Исход выхода страниц для сводки.
@@ -2015,8 +2077,10 @@ def write_rectified_pages(
     from ocr_utils.scan_cropping.v2.rectify.pages import PagePart, PagesStatus, cut_pages, page_mask_of, wanted_parts
     from ocr_utils.scan_cropping.v2.rectify.passport import PagePassport, finger_area_mm2, write_passport, zone_contours
     from ocr_utils.scan_cropping.v2.rectify.sheets import sheet_result
+    from ocr_utils.scan_cropping.v2.rectify.text_field import set_pseudo_mode
     from ocr_utils.scan_cropping.v2.rectify.text_run import PageControl, TextParams, text_frame
     from ocr_utils.scan_cropping.v2.gutter_decompression.sheet import gutter_sheet, summary_fields
+    from ocr_utils.scan_cropping.v2.rectify.page_scale import scale_fields
     from ocr_utils.frame_flags.flags import Side
     from ocr_utils.units import MM_PER_INCH
 
@@ -2038,7 +2102,7 @@ def write_rectified_pages(
     # при 13.8 px/мм ≈ 350 dpi: поле считалось бы в 1.29 раза мельче задуманного). Тег страниц — --pages-dpi или она же.
     dpi = params.scale.px_per_mm * MM_PER_INCH
     tag_dpi = int(round(params.pages_dpi or dpi))
-    geometry = SpreadGeometry(fit.frames, box, seg_scale, equations_of(polys, labels or []))
+    geometry = SpreadGeometry(fit.frames, box, seg_scale, equations_of(polys, labels or []), frame_shape)
     # Флаги кадра → запреты страницам: без освещения — по ``no-illumination-*``; без поля по строкам — игнорируемая (её
     # текст не тянет поле) и помеченная ``no-text-rectify-*`` (передняя обложка, страница-картинка). Флаг обложки сам
     # ничего не выключает: задней обложке с анонсом книг выпрямление строк нужно; цветные и тонированные страницы
@@ -2056,8 +2120,17 @@ def write_rectified_pages(
                                  field=all((single or not job.flags.ignored(side)) and job.flags.text_rectify(side)
                                            for side in sides))
                      for sides in page_sides)  # fmt: skip
+    # Чужое в вырезке разбора страницы (полоса повтора у корешка, концы строк соседней) закрашивается тем же способом,
+    # что докрас страниц до прямоугольника.
     text = TextParams(illumination=params.rectify_illumination, passes=params.rectify_passes,
-                      gutter_decompression=params.gutter_decompression)  # fmt: skip
+                      rotated_text=params.rotated_text,
+                      gutter_decompression=params.gutter_decompression,
+                      gutter_limits=WidenLimits(reach_mm=params.gutter_reach_mm), fill=params.fill,
+                      fill_seam_mm=params.fill_seam_mm, page_scale=params.page_scale,
+                      scale_params=ScaleParams(max_shrink=params.scale_max_shrink,
+                                               max_grow=params.scale_max_grow))  # fmt: skip
+    # Режим фильтра псевдоглифов разбора текста — на процесс воркера (разбор зовётся глубоко внутри ``text_frame``).
+    set_pseudo_mode(pseudo_mode_of(params))
     try:
         result = text_frame(out, geometry, dpi, text, controls)
         images = cut_pages(result, parts, dpi, params.fill, params.fill_seam_mm)
@@ -2095,8 +2168,8 @@ def write_rectified_pages(
     if params.debug_dir is not None and params.debug_steps:
         header = [f"{job.rel} — выход страниц: Кунс + поле по тексту ({params.rectify_passes} прох.), "
                   f"{dpi:.0f} dpi, флаги: {job.flags.label() or 'нет'}"]  # fmt: skip
-        # Триптих стенда page_rectify (лист 04): итог v2 с областями | Кунс | итог, оси строк и линия разреза.
-        sheets = {OverlayTag.RECTIFY: sheet_result(result, header),
+        # Триптих стенда page_rectify (лист 04): итог v2 с областями | Кунс | итог по записанным страницам с докрасом.
+        sheets = {OverlayTag.RECTIFY: sheet_result(result, header, images),
                   OverlayTag.RECTIFIED_PAGES: pages_overlay(result, parts, header)}  # fmt: skip
         if result.unstretched is not None and result.gutter is not None:
             # Растяжение у корешка применено хотя бы к одной странице: «было | стало» у корешка.
@@ -2111,7 +2184,14 @@ def write_rectified_pages(
         PagesStatus.OK.value,
         "/".join(f"{p.tint:.2f}" for p in result.pages),
         "/".join(f"{v:.0f}" for v in finger_mm2),
-        json.dumps({**result.before.row("before_"), **result.after.row("after_"), **summary_fields(result.gutter)}),
+        json.dumps(
+            {
+                **result.before.row("before_"),
+                **result.after.row("after_"),
+                **summary_fields(result.gutter),
+                **scale_fields(result.scales, dpi / MM_PER_INCH),
+            }
+        ),
     )
 
 
@@ -2369,11 +2449,30 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
     in_flight = max(2, 2 * params.jobs)
     ctx = get_context("forkserver")
     gpu_lock = threading.RLock()
+    # CRAFT фильтра псевдоглифов — одна модель на GPU в главном процессе; воркеры шлют спорные вырезки по очереди
+    # (``text_blocks.craft_service``), у каждого воркера своя очередь ответов.
+    craft_gpu = craft_on_gpu(params)
+    if craft_gpu:
+        from ocr_utils.page_layout.text_blocks.craft_service import CraftServer, gpu_scorer, make_channels
+
+        channels = make_channels(ctx, params.jobs)
+        initializer, initargs = init_worker_craft, channels
+    else:
+        channels, initializer, initargs = None, init_worker, ()
+    server = None
     with (
-        ProcessPoolExecutor(params.jobs, mp_context=ctx, initializer=init_worker) as pool,
+        ProcessPoolExecutor(params.jobs, mp_context=ctx, initializer=initializer, initargs=initargs) as pool,
         ThreadPoolExecutor(max(1, params.finger_threads), thread_name_prefix="fingers") as threads,
         GpuModels(with_lama=True, with_layout=True) as models,
     ):
+        if craft_gpu:
+            # CRAFT (fp16) грузится после моделей v2; поток-обслуживатель берёт ту же блокировку GPU, что и шаги кадра.
+            scorer = gpu_scorer()
+            if scorer is not None:
+                server = CraftServer(scorer, channels[0], channels[1], gpu_lock).start()
+                log.info("CRAFT-сервер фильтра псевдоглифов запущен (GPU, fp16)")
+            else:
+                log.warning("CRAFT-сервер не поднялся — воркеры уйдут на правила по таймауту")
         # SAM 2.1 Hiera-L для вето фона: +~1 ГБ видеопамяти к ~7.4 ГБ остальных моделей.
         sam2 = Sam2Background() if params.bg_veto or params.refine_ragged else None
         predictor = load_sam3()
@@ -2389,7 +2488,26 @@ def run_batch(files: list[Path], params: RunParams) -> list[FrameStats]:
             stream.drain(block=False)
         while stream.busy:
             stream.drain(block=True)
+        if server is not None:
+            log.info("CRAFT-сервер: вырезок %d, захватов GPU %d", server.served, server.batches)
+            server.stop()
     return sorted(stream.stats + skipped, key=lambda r: r.key)
+
+
+def pseudo_mode_of(params: RunParams):
+    """Режим фильтра псевдоглифов выхода страниц по параметрам прогона (``pseudo_glyphs``, ``pseudo_craft``).
+
+    Args:
+        params: Параметры прогона.
+
+    Returns:
+        ``text_blocks.pseudo_glyphs.PseudoMode``.
+    """
+    from ocr_utils.page_layout.text_blocks.pseudo_glyphs import PseudoMode
+
+    if not params.pseudo_glyphs:
+        return PseudoMode.OFF
+    return PseudoMode.RULES_CRAFT if params.pseudo_craft else PseudoMode.RULES
 
 
 def frame_jobs(files: list[Path], params: RunParams) -> tuple[list[FrameJob], list[FrameStats]]:

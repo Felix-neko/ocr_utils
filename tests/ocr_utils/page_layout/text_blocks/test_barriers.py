@@ -170,3 +170,65 @@ def test_barrier_through_word_gaps_stops_linking() -> None:
     for block in split.blocks:
         for row in block.rows:
             assert not (row.x0 < 400 * SCALE and row.x1 > 800 * SCALE)
+
+
+def _table_page() -> tuple[np.ndarray, float, float]:
+    """Таблица в две графы без межколонника: вертикальная линейка посередине, текст вплотную к ней с обеих сторон,
+    горизонтальная черта таблицы поперёк обеих граф между рядами.
+
+    Returns:
+        Страница 300 dpi, x вертикальной линейки и y горизонтальной черты в пикселях рабочей копии.
+    """
+    import random
+
+    from tests.ocr_utils.page_layout.orientation.synthetic import GLYPH_H, INK, LINE_STEP, MARGIN, paper
+    from tests.ocr_utils.page_layout.text_blocks.synthetic import _draw_line
+
+    height, width, rule_x = 1400, 1200, 600
+    image = paper((height, width))
+    generator = random.Random(1)
+    ys = list(range(MARGIN, height - MARGIN - GLYPH_H, LINE_STEP))
+    for y in ys:
+        # Графы прижаты к линейке: просвет 14 px рендера (≈ 1.2 мм) — меньше межколонника.
+        _draw_line(image, generator, MARGIN, rule_x - 14, y, True)
+        _draw_line(image, generator, rule_x + 14, width - MARGIN, y, True)
+    top, bottom = ys[0] - LINE_STEP // 2, ys[-1] + GLYPH_H + LINE_STEP // 2
+    image[top:bottom, rule_x - 2 : rule_x + 2] = INK
+    # Горизонтальная черта таблицы между средними рядами.
+    middle = len(ys) // 2
+    line_y = (ys[middle - 1] + GLYPH_H + ys[middle]) // 2
+    image[line_y - 2 : line_y + 2, MARGIN : width - MARGIN] = INK
+    return image, rule_x * SCALE, line_y * SCALE
+
+
+def _spanning_rows(analysis, x: float) -> int:
+    """Сколько рядов блоков накрывают вертикаль ``x`` (ряд идёт через обе графы)."""
+    return sum(row.x0 < x - 5 and row.x1 > x + 5 for block in analysis.blocks for row in block.rows)
+
+
+def _blocks_over(analysis, y: float) -> int:
+    """Сколько блоков имеют ряды и над уровнем ``y``, и под ним."""
+    return sum(min(row.y for row in b.rows) < y < max(row.y for row in b.rows) for b in analysis.blocks)
+
+
+def test_ink_rules_split_cells_of_horizontal_text_by_vertical_rules_only(monkeypatch) -> None:
+    """``RuleBarriers.INK``: вертикальная линейка таблицы делит графы горизонтального текста на свои ряды и блоки;
+    горизонтальная черта таблицы барьером не становится — блок каждой графы проходит через неё."""
+    from ocr_utils.page_layout.text_blocks import page as P
+    from ocr_utils.page_layout.text_blocks.columns import rule_polylines
+
+    image, rule_x, line_y = _table_page()
+    assert P.DEFAULT_RULE_BARRIERS is P.RuleBarriers.INK
+    # Барьеры краски — только вертикальные линейки.
+    gray = np.asarray(image[::2, ::2])
+    polylines = rule_polylines(gray, WORK_DPI)
+    assert len(polylines) == 1 and abs(polylines[0][0, 0] - rule_x) < 4
+    monkeypatch.setattr(P, "DEFAULT_RULE_BARRIERS", P.RuleBarriers.OFF)
+    plain = analyse_gray(image, InkEngine())
+    monkeypatch.setattr(P, "DEFAULT_RULE_BARRIERS", P.RuleBarriers.INK)
+    ink = analyse_gray(image, InkEngine())
+    assert _spanning_rows(plain, rule_x) > 0
+    assert _spanning_rows(ink, rule_x) == 0
+    # Без ``INK`` — один блок на обе графы, с ним — по блоку на графу, оба через горизонтальную черту.
+    assert _blocks_over(plain, line_y) == 1
+    assert _blocks_over(ink, line_y) == 2

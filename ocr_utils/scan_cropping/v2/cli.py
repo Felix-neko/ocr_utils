@@ -22,6 +22,8 @@ from ocr_utils.scan_cropping.v2.border_fill import SEAM_MM
 from ocr_utils.scan_cropping.v2.coons_layout import CANVAS_MARGIN_MM, LayoutWarp
 from ocr_utils.scan_cropping.v2.fill import FillMethod, ReplicateParams
 from ocr_utils.scan_cropping.v2.fingers import LAMA_HOLE_MAX_PX, LIGHT_INCREMENT
+from ocr_utils.scan_cropping.v2.gutter_decompression.widen import WidenLimits
+from ocr_utils.scan_cropping.v2.rectify.page_scale import ScaleParams
 from ocr_utils.scan_cropping.v2.pipeline import (
     CORE_GROW_MM,
     CROP_FILL_BLUR_MM,
@@ -218,9 +220,40 @@ def frame_scale(px_per_mm: float | None, dpi: float | None) -> Scale:
 )
 @click.option("--rectify-illumination/--no-rectify-illumination", default=True, show_default=True,
               help="Выравнивать освещение страниц в --output-pages (кроме цветных и запрещённых флагом).")  # fmt: skip
+@click.option("--rotated-text/--no-rotated-text", default=True, show_default=True,
+              help="Искать в --output-pages повёрнутый (вертикальный) текст, в таблицах тоже, и разбирать его "
+                   "боковыми областями (подписи к фото, боковые заголовки граф).")  # fmt: skip
 @click.option("--gutter-decompression/--no-gutter-decompression", default=True, show_default=True,
               help="Растягивать сжатые у корешка буквы разворота в --output-pages (модель по ширине букв, страница "
                    "становится шире со стороны корешка; цветные, игнорируемые и no-text-rectify страницы — нет).")  # fmt: skip
+@click.option("--gutter-reach-mm", type=float, default=WidenLimits.reach_mm, show_default=True,
+              help="Зона растяжения у корешка от начала зоны текста, мм: глубже страница только сдвигается на "
+                   "расширение (последние 5 мм амплитуда спадает до нуля).")  # fmt: skip
+@click.option("--page-scale/--no-page-scale", default=True, show_default=True,
+              help="Ширина страницы и параметр выпрямления вдоль неё в --output-pages — по перспективному масштабу "
+                   "высоты страницы на снимке (вне 20 мм у корешка); --no-page-scale — по длине дуги верха и низа "
+                   "(страница ближе к камере выходит шире). Приподнятые и опущенные страницы — всегда по дуге.")  # fmt: skip
+@click.option(
+    "--scale-max-shrink",
+    type=float,
+    default=ScaleParams.max_shrink,
+    show_default=True,
+    help="Наибольшее сужение страницы мерой масштаба, доля ширины по дуге.",
+)
+@click.option(
+    "--scale-max-grow",
+    type=float,
+    default=ScaleParams.max_grow,
+    show_default=True,
+    help="Наибольшее расширение страницы мерой масштаба, доля ширины по дуге.",
+)
+@click.option("--pseudo-glyphs/--no-pseudo-glyphs", default=True, show_default=True,
+              help="Фильтр псевдоглифов в разборе текста --output-pages (кромка листа и тень сгиба, нитки, полоса "
+                   "обложки, карандаш, сор у края); --no-pseudo-glyphs — прежний разбор с правилом 0.3 мм у края.")  # fmt: skip
+@click.option("--pseudo-craft/--no-pseudo-craft", default=True, show_default=True,
+              help="Спорные серые кандидаты фильтра псевдоглифов судит CRAFT по местным вырезкам — сервер на GPU в главном "
+                   "процессе (fp16, под общей блокировкой GPU; без CUDA — CPU в воркерах); --no-pseudo-craft — одни "
+                   "правила (reports/pseudo_glyphs.md).")  # fmt: skip
 @click.option("--output-pages-meta", "output_pages_meta", type=click.Path(file_okay=False, path_type=Path), default=None,
               help="Папка паспортов страниц --output-pages (<кадр>_L.json: исходный кадр, часть, флаги, dpi, цветность, "
                    "контуры закраса пальцев) и масок закраса <кадр>_L.fingers.png — отдельно от самих страниц.")  # fmt: skip
@@ -280,7 +313,14 @@ def main(
     use_flags: bool,
     rectify_passes: int,
     rectify_illumination: bool,
+    rotated_text: bool,
     gutter_decompression: bool,
+    gutter_reach_mm: float,
+    page_scale: bool,
+    scale_max_shrink: float,
+    scale_max_grow: float,
+    pseudo_glyphs: bool,
+    pseudo_craft: bool,
     output_pages_meta: Path | None,
     pages_dpi: float | None,
     log_level: str,
@@ -337,7 +377,14 @@ def main(
         use_flags=use_flags,
         rectify_passes=rectify_passes,
         rectify_illumination=rectify_illumination,
+        rotated_text=rotated_text,
         gutter_decompression=gutter_decompression,
+        gutter_reach_mm=gutter_reach_mm,
+        page_scale=page_scale,
+        scale_max_shrink=scale_max_shrink,
+        scale_max_grow=scale_max_grow,
+        pseudo_glyphs=pseudo_glyphs,
+        pseudo_craft=pseudo_craft,
         output_pages_meta=output_pages_meta,
         pages_dpi=pages_dpi,
         skip_if_exists=skip_if_exists,

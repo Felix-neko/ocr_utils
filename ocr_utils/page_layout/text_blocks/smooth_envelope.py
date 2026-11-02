@@ -384,7 +384,13 @@ def _within_rows(polygon: np.ndarray, rows: list[Row], dpi: float) -> bool:
     )
 
 
-def smooth_envelope(rows: list[Row], dpi: float, reference_deg: float | None) -> SmoothEnvelope | None:
+def smooth_envelope(
+    rows: list[Row],
+    dpi: float,
+    reference_deg: float | None,
+    known_left: np.ndarray | None = None,
+    known_right: np.ndarray | None = None,
+) -> SmoothEnvelope | None:
     """Огибающая с гладкими сторонами: левая и правая — :func:`smooth_sides.side_curve`, верх и низ — полосы крайних строк.
 
     Края строк — не уже концов их осей (:func:`_axis_span`). Контур обходится как у боевой огибающей:
@@ -395,6 +401,8 @@ def smooth_envelope(rows: list[Row], dpi: float, reference_deg: float | None) ->
         rows: Ряды блока сверху вниз.
         dpi: Разрешение рабочей копии.
         reference_deg: Наклон корпуса полосы (для продолжения осей крайних строк, :func:`_guides`).
+        known_left, known_right: Флаги строк ``(n,)`` с известным левым и правым краем (``smooth_sides.side_curve``):
+            строки с неизвестным краем в подгонку стороны и её тренд не идут; ``None`` — известны все.
 
     Returns:
         :class:`SmoothEnvelope`; ``None`` — ни одна сторона не выровнена.
@@ -409,8 +417,11 @@ def smooth_envelope(rows: list[Row], dpi: float, reference_deg: float | None) ->
     offsets = [_offsets(row) for row in rows]
     tops = np.array([row.y - up - margin for row, (up, _) in zip(rows, offsets)])
     bottoms = np.array([row.y + down + margin for row, (_, down) in zip(rows, offsets)])
-    right = side_curve(ys, rights + margin, tops, bottoms, pitch, dpi)
-    left = side_curve(ys, -(lefts - margin), tops, bottoms, pitch, dpi)
+    # Строки с неизвестным краем (флаги передаёт вызывающий; по умолчанию известны все) сторону не подгоняют. Правило
+    # «край ближе 0.3 мм к краю картинки — неизвестен» сюда намеренно не подключено (отвергнуто пользователем: вместо
+    # него — фильтр псевдоглифов ``pseudo_glyphs``).
+    right = side_curve(ys, rights + margin, tops, bottoms, pitch, dpi, known_right)
+    left = side_curve(ys, -(lefts - margin), tops, bottoms, pitch, dpi, known_left)
     # Ни одна сторона не выровнена (подпись автора по центру, заголовок) — гладким сторонам не за что
     # держаться: блок строится ступенчатым объединением полос строк.
     # Сторона считается выровненной, если на ней не меньше ``SMOOTH_MIN_ALIGNED`` строк и не меньше
@@ -442,8 +453,14 @@ def smooth_envelope(rows: list[Row], dpi: float, reference_deg: float | None) ->
     core_right = np.column_stack([right.core[rows_span] - margin, grid[rows_span]]) if right.core is not None else None
     trapezoid = is_trapezoid(rows, core_left, core_right)
     return SmoothEnvelope(
-        core_left=core_left if not trapezoid and _usable(core_left) else robust_core(rows, True, reference_deg),
-        core_right=core_right if not trapezoid and _usable(core_right) else robust_core(rows, False, reference_deg),
+        core_left=(
+            core_left if not trapezoid and _usable(core_left) else robust_core(rows, True, reference_deg, known_left)
+        ),
+        core_right=(
+            core_right
+            if not trapezoid and _usable(core_right)
+            else robust_core(rows, False, reference_deg, known_right)
+        ),
         left=left_side,
         right=right_side,
         top=top,
@@ -533,7 +550,9 @@ def is_trapezoid(rows: list[Row], core_left: np.ndarray | None, core_right: np.n
     return abs(tilts[0] - tilts[1]) > TRAPEZOID_DEG
 
 
-def robust_core(rows: list[Row], left: bool, reference_deg: float | None = None) -> np.ndarray:
+def robust_core(
+    rows: list[Row], left: bool, reference_deg: float | None = None, known: np.ndarray | None = None
+) -> np.ndarray:
     """Тренд стороны по краям строк для мер выключки там, где гладкой стороны нет: прямая с наклоном корпуса через медиану краёв.
 
     Мерить выключку от самой стороны нельзя — она идёт по краям тех же строк, отклонения нулевые, и
@@ -546,6 +565,7 @@ def robust_core(rows: list[Row], left: bool, reference_deg: float | None = None)
         rows: Ряды блока сверху вниз.
         left: Левая сторона (иначе правая).
         reference_deg: Наклон корпуса полосы, градусы; ``None`` — вертикаль.
+        known: Флаги рядов с известным краем: медиана сдвига — только по ним, если такие есть; ``None`` — по всем.
 
     Returns:
         Кривая ``(N, 2)`` — ``(x, y)`` на ординатах рядов.
@@ -555,7 +575,8 @@ def robust_core(rows: list[Row], left: bool, reference_deg: float | None = None)
     # Край строки сдвигается вдоль строки: x = x0 + tan(наклон) · y — наклон строк переходит в наклон стороны
     # с обратным знаком (строки вниз вправо — сторона влево вниз).
     slope = -np.tan(np.radians(reference_deg)) if reference_deg is not None else 0.0
-    shift = float(np.median(xs - slope * ys))
+    use = np.ones(len(rows), dtype=bool) if known is None or not np.any(known) else np.asarray(known, dtype=bool)
+    shift = float(np.median((xs - slope * ys)[use]))
     return np.column_stack([shift + slope * ys, ys])
 
 

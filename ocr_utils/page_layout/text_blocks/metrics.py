@@ -23,6 +23,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ocr_utils.page_layout.text_blocks import fast_stats
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 
 # Оси короче этого (пиксели рабочей копии) в мерах не участвуют: у обрывка в две буквы ни хорды,
@@ -252,7 +253,7 @@ def _side_slope(xs: np.ndarray, ys: np.ndarray, gap: float) -> float | None:
     """Наклон одной стороны, если по ней его можно мерить: от трёх точек на охвате от ``gap / 3``."""
     if xs.size < 3 or np.ptp(xs) < gap / 3.0:
         return None
-    return float(np.polyfit(xs, ys, 1)[0])
+    return float(fast_stats.polyfit(xs, ys, 1)[0])
 
 
 def _joint_step(xs: np.ndarray, ys: np.ndarray, at: float, gap: float, reach: float) -> float | None:
@@ -387,7 +388,7 @@ def half_rows_of(blocks: list[dict]) -> tuple[int, int]:
         if ys.size < 3:
             continue
         steps = np.diff(ys)
-        median = float(np.median(steps))
+        median = float(fast_stats.median(steps))
         if median > 0:
             bad += int((steps < HALF_ROW_SHARE * median).sum())
     return bad, total
@@ -420,7 +421,7 @@ def pitch_of(blocks: list[dict]) -> float:
         ys = np.sort(np.array([row["y"] for row in block.get("rows", [])], dtype=np.float64))
         if ys.size >= 2:
             steps.extend(np.diff(ys).tolist())
-    return float(np.median(steps)) if steps else 0.0
+    return float(fast_stats.median(steps)) if steps else 0.0
 
 
 def metrics_of(page: dict) -> PageMetrics:
@@ -576,7 +577,7 @@ def jump_span(axis: np.ndarray, neighbour: np.ndarray, left: float, right: float
         xs = np.linspace(left, right, CROSS_SAMPLES)
     gap = np.interp(xs, axis[:, 0], axis[:, 1]) - np.interp(xs, neighbour[:, 0], neighbour[:, 1])
     edge = max(ROW_JUMP_EDGE_POINTS, int(round(ROW_JUMP_EDGE_SHARE * xs.size)))
-    first, last = float(np.median(gap[:edge])), float(np.median(gap[-edge:]))
+    first, last = float(fast_stats.median(gap[:edge])), float(fast_stats.median(gap[-edge:]))
     tol = ROW_JUMP_SPAN_TOL_PITCHES * pitch
     if abs(last - first) >= ROW_JUMP_PITCH_SHARE * pitch:
         # Переход: от первого ухода с левого уровня до последней точки не на правом.
@@ -633,9 +634,9 @@ def row_jumps_of(axes: list[np.ndarray], pitch: float) -> list[RowJump]:
                 continue
             grid = np.linspace(left, right, CROSS_SAMPLES)
             gap = np.interp(grid, axis[:, 0], axis[:, 1]) - np.interp(grid, neighbour[:, 0], neighbour[:, 1])
-            if abs(float(np.median(gap))) > ROW_JUMP_REACH_PITCHES * pitch:
+            if abs(float(fast_stats.median(gap))) > ROW_JUMP_REACH_PITCHES * pitch:
                 continue
-            drift = float(np.percentile(gap, high) - np.percentile(gap, low))
+            drift = float(fast_stats.percentile(gap, high) - fast_stats.percentile(gap, low))
             if best is None or drift < best.drift:
                 middle = (left + right) / 2.0
                 best = RowJump(
@@ -837,7 +838,7 @@ def gutter_crossings_of(axes: list[dict], glyphs: np.ndarray, dpi: float) -> lis
                 continue
             # Остальные пробелы строки: пустота должна быть заметно шире их медианы.
             others = spaces[spaces != end - start] if spaces.size > 1 else spaces[:0]
-            if others.size and end - start < CROSSING_SPACE_RATIO * float(np.median(others)):
+            if others.size and end - start < CROSSING_SPACE_RATIO * float(fast_stats.median(others)):
                 continue
             if inked[:start].sum() < side or inked[end:].sum() < side:
                 continue
@@ -846,7 +847,7 @@ def gutter_crossings_of(axes: list[dict], glyphs: np.ndarray, dpi: float) -> lis
             y = float(np.interp((gx0 + gx1) / 2.0, curve[:, 0], curve[:, 1]))
             # Наклон строки у пустоты — по участку оси шириной в две пустоты.
             around = (curve[:, 0] >= gx0 - (gx1 - gx0)) & (curve[:, 0] <= gx1 + (gx1 - gx0))
-            slope = float(np.polyfit(curve[around, 0], curve[around, 1], 1)[0]) if around.sum() >= 2 else 0.0
+            slope = float(fast_stats.polyfit(curve[around, 0], curve[around, 1], 1)[0]) if around.sum() >= 2 else 0.0
             top, bottom = _empty_extent(glyphs, gx0 + shrink, gx1 - shrink, y, slope, reach)
             if _common_width(glyphs, gx0, gx1, y, slope, top, bottom, gx1 - gx0) < common:
                 continue

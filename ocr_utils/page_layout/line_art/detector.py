@@ -44,13 +44,14 @@ line art» её не включает, а на эталоне из 221 обла�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from ocr_utils.page_layout.geometry import Box, HintBox, TableBox, hint_likely, hint_source, intersection
 from ocr_utils.page_layout.line_art.classes import ObjectClass
 from ocr_utils.page_layout.line_art.expand import FIGURE_GROW_MM, FORMULA_GROW_MM, grow_to_components
+from ocr_utils.page_layout.line_art.strokes import cover_strokes
 from ocr_utils.page_layout.line_art.features import (
     FULL_PAGE_FRAC,
     PageFindings,
@@ -433,7 +434,7 @@ def detect_formulas(inputs: LineArtInputs) -> list[Region]:
 
 
 def detect_line_art(inputs: LineArtInputs) -> list[Region]:
-    """Полный ход: затравки + пиксели → области line art.
+    """Полный ход: затравки + пиксели → области line art, к рамкам вида рисунка добраны отдельные штрихи.
 
     Args:
         inputs: Вход детектора.
@@ -443,7 +444,17 @@ def detect_line_art(inputs: LineArtInputs) -> list[Region]:
     """
     if inputs.bitonal is None or inputs.bitonal.size == 0:
         return []
-    return to_regions(find_line_art(inputs), inputs)
+    regions = to_regions(find_line_art(inputs), inputs)
+    if not regions:
+        return regions
+    # Отдельные штрихи рисунка (лучи, линии движения, дым, капли, точки) мельче ворот пятна — добираются к рамкам вида
+    # рисунка вне растра и таблиц (line_art.strokes, LINE_ART_VERSION 8; с v9 — не на колонку текста).
+    covered = cover_strokes([r.box for r in regions], inputs.bitonal, inputs.dpi, list(inputs.excluded_boxes))
+    page_area = max(1, inputs.bitonal.shape[0] * inputs.bitonal.shape[1])
+    return [
+        replace(r, box=box, full_page=box.area >= FULL_PAGE_FRAC * page_area, info={**r.info, "strokes_added": added})
+        for r, (box, added) in zip(regions, covered)
+    ]
 
 
 __all__ = [

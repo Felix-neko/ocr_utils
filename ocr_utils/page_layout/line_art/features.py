@@ -56,6 +56,7 @@ import cv2
 import numpy as np
 
 from ocr_utils.page_layout.raster.boxes import merge_boxes
+from ocr_utils.units import mm_to_px
 
 # Разрешение, для которого названы все размеры ниже.
 REFERENCE_DPI = 600
@@ -242,6 +243,38 @@ FULL_PAGE_FRAC = 0.75
 HEADING_MAX_HEIGHT_PX = int(1.5 * PITCH_PX)
 HEADING_TEXT_COVER = 0.9
 
+# A′. СЛИПШИЕСЯ БУКВЫ БЕЗ SURYA. Правило A опирается на текстовые блоки surya, а у вызовов без surya
+# (``scan_cropping.v2`` выход страниц: ``rectify.page_regions`` зовёт разбор с ``use_surya=False``) их нет — и рамками
+# line art становились слипшиеся буквы заголовков (25 рамок на 1096 страницах ХиП 1991, выпуски 01–07) и две
+# строки основного текста, сцепленные выносными элементами (6 рамок). В ``rectify`` такая рамка выкидывает строки из
+# опор поля и режет текстовые блоки по своим рёбрам на всю ширину вырезки. Без surya пятно признаётся буквами по
+# соседям в его строке (стенд research/line_art_boxes, разметка ``sets/hp_1991_base.csv``): из 31 таких рамок
+# снято 24, ни один из 23 рисунков, 6 логотипов и 8 орнаментов не потерян. Правило работает ТОЛЬКО без текстовых
+# блоков: на путях с surya (разметка пака, финальные PDF) результат прежний.
+#
+# Пятно не выше LETTER_BOX_MAX_MM может быть слипшимися буквами: заголовок ХиП 1991 — 4–6 мм, две строки основного
+# текста — 6–7 мм, жирная буква с соседней — до 9 мм. Логотипы рубрик и рисунки — от 12 мм.
+LETTER_BOX_MAX_MM = 10.0
+# Компонента краски — буква (или слипшиеся буквы слова) при высоте в этих пределах, ширине не больше
+# LETTER_MAX_WIDTH_MM и вытянутости (ширина / высота) не больше LETTER_MAX_ASPECT: у заголовков слипаются пары и
+# тройки букв шириной 10–20 мм («НАЛ» в «ПРИ НАЛИЧИИ»), а отрезок линейки тоньше 1 мм в буквы не попадает.
+LETTER_MIN_HEIGHT_MM = 1.0
+LETTER_MAX_HEIGHT_MM = 8.0
+LETTER_MAX_WIDTH_MM = 25.0
+LETTER_MAX_ASPECT = 6.0
+# Буква-сосед — зазор по горизонтали до пятна не больше max(высота пятна, LETTER_REACH_MM).
+LETTER_REACH_MM = 3.0
+# Буквы только с одной стороны (пятно в начале или конце строки) — текст, если их не меньше двух и пятно не выше
+# этой доли их медианной высоты: орнамент рубрики «КАК ЭТО РЕШИТЬ» 10–11 мм у букв 5 мм (1.9–2.2) остаётся,
+# слипшиеся буквы заголовка — 1.0–1.3.
+LETTER_ONE_SIDE_RATIO = 1.4
+# Сосед — буква той же строки, если он не ниже этой доли высоты пятна (две слипшиеся строки текста 6 мм при буквах
+# 2.5 мм — 0.42; штриховка внутри рисунка 1–2 мм у куска контура 9 мм — 0.1–0.2) и его верх или низ совпадает с
+# верхом или низом пятна с допуском LETTER_ALIGN_SHARE высоты соседа (буквы строки стоят на одной линии, штрихи —
+# вразброс). Без этих условий терялись куски контура рисунков у штриховки (ХиП 1991/01 IMG_1045_R — кромка зайца).
+LETTER_MIN_SHARE = 0.35
+LETTER_ALIGN_SHARE = 0.3
+
 # B. ОТКРЫТАЯ ЛОМАНАЯ ИЗ ЛИНЕЕК. Обломок тонкой рамки полосы выходных данных (L из вертикали
 # и горизонтали, 1977/01 0050_1L) — одно пятно с рамкой во всю высоту. Почти вся его краска
 # лежит в длинных (от двух шагов строк) горизонтальных и вертикальных прогонах, а «толщина»
@@ -308,6 +341,16 @@ class LineArtParams:
     open_frame_max_thick_px: int = OPEN_FRAME_MAX_THICK_PX
     box_hole_min_px: int = BOX_HOLE_MIN_PX
     seed_min_boxes: int = SEED_MIN_BOXES
+    # Правило A′ (слипшиеся буквы без surya): размеры — px при этом dpi (из мм в ``params_for_dpi``), доли — как есть.
+    letter_box_max_px: int = mm_to_px(LETTER_BOX_MAX_MM, REFERENCE_DPI)
+    letter_min_height_px: int = mm_to_px(LETTER_MIN_HEIGHT_MM, REFERENCE_DPI)
+    letter_max_height_px: int = mm_to_px(LETTER_MAX_HEIGHT_MM, REFERENCE_DPI)
+    letter_max_width_px: int = mm_to_px(LETTER_MAX_WIDTH_MM, REFERENCE_DPI)
+    letter_reach_px: int = mm_to_px(LETTER_REACH_MM, REFERENCE_DPI)
+    letter_max_aspect: float = LETTER_MAX_ASPECT
+    letter_one_side_ratio: float = LETTER_ONE_SIDE_RATIO
+    letter_min_share: float = LETTER_MIN_SHARE
+    letter_align_share: float = LETTER_ALIGN_SHARE
 
 
 def params_for_dpi(dpi: int | None, **overrides) -> LineArtParams:
@@ -348,6 +391,12 @@ def params_for_dpi(dpi: int | None, **overrides) -> LineArtParams:
         open_frame_run_px=length(OPEN_FRAME_RUN_PX),
         open_frame_max_thick_px=length(OPEN_FRAME_MAX_THICK_PX),
         box_hole_min_px=area(BOX_HOLE_MIN_PX),
+        # Правило A′ задано в мм бумаги — переводится по dpi полосы напрямую.
+        letter_box_max_px=mm_to_px(LETTER_BOX_MAX_MM, dpi),
+        letter_min_height_px=mm_to_px(LETTER_MIN_HEIGHT_MM, dpi),
+        letter_max_height_px=mm_to_px(LETTER_MAX_HEIGHT_MM, dpi),
+        letter_max_width_px=mm_to_px(LETTER_MAX_WIDTH_MM, dpi),
+        letter_reach_px=mm_to_px(LETTER_REACH_MM, dpi),
     )
     return replace(params, **overrides) if overrides else params
 
@@ -490,6 +539,67 @@ def is_glued_heading(box, text_boxes, params: LineArtParams) -> bool:
     if box[3] - box[1] > params.heading_max_height_px:
         return False
     return bool(text_boxes) and _overlaps_any(box, text_boxes, params.heading_text_cover)
+
+
+def letter_boxes(stats: np.ndarray, params: LineArtParams) -> np.ndarray:
+    """Рамки компонент краски размером с букву (или слипшиеся буквы слова) — соседи для правила A′.
+
+    Args:
+        stats: ``stats`` из ``cv2.connectedComponentsWithStats`` БЕЗ строки фона.
+        params: Пороги (``letter_*``).
+
+    Returns:
+        Массив ``(N, 4)`` рамок ``x0, y0, x1, y1`` (int64): высота в пределах ``letter_min_height_px`` …
+        ``letter_max_height_px``, ширина не больше ``letter_max_width_px`` и ``letter_max_aspect`` высот.
+    """
+    if len(stats) == 0:
+        return np.zeros((0, 4), np.int64)
+    w, h = stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT]
+    keep = (h >= params.letter_min_height_px) & (h <= params.letter_max_height_px)
+    keep &= (w <= params.letter_max_width_px) & (w <= params.letter_max_aspect * h)
+    x, y = stats[keep, cv2.CC_STAT_LEFT], stats[keep, cv2.CC_STAT_TOP]
+    return np.stack([x, y, x + w[keep], y + h[keep]], axis=1).astype(np.int64)
+
+
+def letters_in_row(box, letters: np.ndarray, params: LineArtParams) -> bool:
+    """Правило A′ (без surya): лежит ли пятно внутри строки букв — слипшиеся буквы заголовка или двух строк текста.
+
+    Пятно — текст, если оно не выше ``letter_box_max_px`` и у него есть буквы-соседи с обеих сторон; или только с
+    одной, но не меньше двух и пятно не выше ``letter_one_side_ratio`` их медианной высоты. Сосед — буква, у которой:
+    центр по высоте в пределах пятна; зазор по горизонтали до пятна не больше ``max(высота пятна, letter_reach_px)``;
+    высота не меньше ``letter_min_share`` высоты пятна; верх или низ на линии верха или низа пятна с допуском
+    ``letter_align_share`` её высоты. Буквы внутри рамки пятна (в том числе само пятно) не считаются.
+
+    Args:
+        box: Рамка пятна ``(x0, y0, x1, y1)``, px полосы.
+        letters: Рамки букв полосы (:func:`letter_boxes`).
+        params: Пороги.
+
+    Returns:
+        ``True`` — пятно похоже на слипшиеся буквы строки.
+    """
+    x0, y0, x1, y1 = (int(v) for v in box)
+    height = y1 - y0
+    if height > params.letter_box_max_px or len(letters) == 0:
+        return False
+    reach = max(height, params.letter_reach_px)
+    heights = letters[:, 3] - letters[:, 1]
+    centre_y = (letters[:, 1] + letters[:, 3]) / 2
+    # Буквы той же строки: на линии верха или низа пятна, не слишком низкие, центр в полосе пятна.
+    tolerance = params.letter_align_share * heights
+    aligned = (np.abs(letters[:, 1] - y0) <= tolerance) | (np.abs(letters[:, 3] - y1) <= tolerance)
+    in_band = (centre_y >= y0) & (centre_y <= y1) & aligned & (heights >= params.letter_min_share * height)
+    # Буквы внутри рамки пятна — его же части, соседями не считаются.
+    inside = (letters[:, 0] >= x0) & (letters[:, 2] <= x1) & (letters[:, 1] >= y0) & (letters[:, 3] <= y1)
+    left = in_band & ~inside & (letters[:, 2] <= x0 + 1) & (letters[:, 2] >= x0 - reach)
+    right = in_band & ~inside & (letters[:, 0] >= x1 - 1) & (letters[:, 0] <= x1 + reach)
+    if left.any() and right.any():
+        return True
+    # Соседи только с одной стороны: их не меньше двух, а пятно не намного выше их.
+    side = left if left.sum() >= right.sum() else right
+    if side.sum() < 2:
+        return False
+    return height <= params.letter_one_side_ratio * float(np.median(heights[side]))
 
 
 def has_planar_blob(mask: np.ndarray, params: LineArtParams) -> bool:
@@ -668,7 +778,8 @@ def analyse_gray(
             связных штрихов нет. Пиксельные проверки к ним применяются те же; подсказка, которую
             не подтвердили ни пиксели, ни детектор таблиц, проходит ещё правило C (двумерное
             пятно и ``min_fill``).
-        text_boxes: Текстовые блоки полосы (surya) для правила A — слипшаяся строка заголовка.
+        text_boxes: Текстовые блоки полосы (surya) для правила A — слипшаяся строка заголовка. Пусто (вызов без
+            surya) — вместо него правило A′: пятно-кандидат с буквами-соседями в своей строке (:func:`letters_in_row`).
 
     Returns:
         Находки страницы вместе со счётчиком причин отбраковки.
@@ -691,6 +802,8 @@ def analyse_gray(
         lefts = body[:, cv2.CC_STAT_LEFT]
         tops = body[:, cv2.CC_STAT_TOP]
         fills = areas / np.maximum(widths * heights, 1)
+        # Буквы полосы — соседи для правила A′; нужны только без текстовых блоков surya (с ними работает правило A).
+        letters = letter_boxes(body, params) if not text_boxes else None
 
         majors = np.maximum(widths, heights)
         minors = np.maximum(1, np.minimum(widths, heights))
@@ -711,9 +824,11 @@ def analyse_gray(
             )
             touches = box[0] <= 1 or box[1] <= 1 or box[2] >= width - 1 or box[3] >= height - 1
             mask = (labels[box[1] : box[3], box[0] : box[2]] == index + 1).astype(np.uint8)
-            # Правила A и B — только для пятен: у затравок и скоплений линеек свои проверки.
+            # Правила A, A′ и B — только для пятен: у затравок и скоплений линеек свои проверки.
             if is_glued_heading(box, text_boxes, params):
                 candidate, reason = None, "слипшаяся строка заголовка"
+            elif letters is not None and letters_in_row(box, letters, params):
+                candidate, reason = None, "слипшиеся буквы строки (без surya)"
             elif is_open_frame(mask, box, int(areas[index]), params):
                 candidate, reason = None, "открытая ломаная из линеек"
             else:

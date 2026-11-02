@@ -54,6 +54,32 @@ def test_curved_cut_follows_field():
     assert left[20].nonzero()[0].max() > left[80].nonzero()[0].max()
 
 
+def test_fold_at_spine_is_left_out_of_both_pages():
+    lay = layout()
+    # Поле левой страницы сдвигает содержимое влево (+8 px), правой — вправо (−12 px), скачок за 2 px на X = 92..94:
+    # столбцы итога 94..111 снова берут точки Кунса 82..99 левой страницы, уже показанные в столбцах 74..91.
+    cols = np.arange(200, dtype=np.float32)
+    row = np.where(cols < 92, 8.0, np.where(cols < 94, 8.0 - 10.0 * (cols - 91), -12.0)).astype(np.float32)
+    dx = np.repeat(row[None, :], 100, axis=0)
+    left, right = page_areas(lay, (dx, np.zeros_like(dx)))
+    assert not (left & right).any()
+    # Левая страница — до скачка; полоса повтора не её и не правой.
+    assert left[50, 91] and not left[50, 92:111].any()
+    assert not right[50, 92:112].any()
+    # Правая начинается там, где источник впервые правее корешка и правее всего показанного слева.
+    assert right[50, 112] and right[50, 150]
+
+
+def test_monotone_field_keeps_areas():
+    lay = layout()
+    dx = np.repeat(np.linspace(-4, 4, 200, dtype=np.float32)[None, :], 100, axis=0)
+    zero = np.zeros_like(dx)
+    left, right = page_areas(lay, (dx, zero))
+    xs = np.arange(200, dtype=np.float32)[None, :] + dx
+    assert (left[10:90] == ((xs >= 10) & (xs < 100))[0][None, :]).all()
+    assert (right[10:90] == ((xs >= 100) & (xs < 190))[0][None, :]).all()
+
+
 def test_cut_pages_fills_to_rectangle():
     lay = layout()
     dx = np.repeat(np.linspace(-6, 6, 100, dtype=np.float32)[:, None], 200, axis=1)

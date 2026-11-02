@@ -21,10 +21,12 @@ from skimage.morphology import skeletonize
 
 from ocr_utils.page_layout.text_blocks import RENDER_DPI, WORK_DPI
 from ocr_utils.page_layout.text_blocks.columns import DOT_FILL_SHARE, bounds_at, gutter_filled, inside_gutter
+from ocr_utils.page_layout.text_blocks.glyph_merge import merged_components
 from ocr_utils.page_layout.text_blocks.leaders import inside_spans, spans_at
 from ocr_utils.page_layout.text_blocks.lines import LineAxis, with_column
 from ocr_utils.page_layout.text_blocks.pieces import ANCHOR_ABOVE_BASELINE_XH, DESCENDER_MIN_XH, is_low_mark
 from ocr_utils.page_layout.text_blocks.typeset import axes_glyphs, axis_kegl, barrier_between, same_baseline
+from ocr_utils.page_layout.text_blocks import typeset
 from ocr_utils.page_layout import mm_to_px, px_to_mm
 from ocr_utils.scan_markup.curved_lines.fitting import smooth_median
 
@@ -76,6 +78,27 @@ SIDE_STYLE_DISTANCE = 0.75
 # обычного ``BLOCK_GAP_PITCHES`` шагов, и на тексте ничего не меняет.
 SAME_STYLE_DISTANCE = 0.5
 SAME_STYLE_GAP_GLYPHS = 4.0
+
+
+class RowStyleSplit(str, Enum):
+    """Чем режется ряд на месте широкого просвета (:func:`_split_by_measure`, проход по боксам глифов).
+
+    ``KEGL`` — прежнее: только разница кегля (``ROW_GLYPH_RATIO``). ``STYLE`` — ещё и балл набора «кегль +
+    жирность» (:func:`_pieces_style_distance`): подпись автора стоит на высоте строки заголовка того же или
+    близкого кегля, но вдвое светлее («Б. АРДАШНИКОВ,» 14 px, жирность 2.0 у заголовка 19 px, жирность 4.9 —
+    отношение кегля 1.36 ниже порога, балл 1.77; 1969/05 IMG_0072_2R).
+    """
+
+    KEGL = "kegl"
+    STYLE = "style"
+
+
+DEFAULT_ROW_STYLE_SPLIT = RowStyleSplit.STYLE
+# Порог балла набора для разреза ряда в широком просвете (``RowStyleSplit.STYLE``); кегль обоих кусков обязан
+# быть замерен (у куска из одной-двух букв жирность — шум). Замер по 622 полосам P∪N∪C пака-1: 123 пары кусков через
+# широкий просвет, которые кегль не разрезал; у шести подписей рядом с жирным заголовком балл 0.92–1.75, у остальных
+# не выше 0.61 (корпус перед «(ГДР)» — 0.61, шапка «МАТЕРИАЛЬНО- | НОЯБРЬ» — 0.57), медиана 0.10.
+ROW_STYLE_DISTANCE = 0.75
 # Для оси хватает трёх глифов: «доцент,» — шесть букв, а у ряда порог ``MIN_GLYPHS_FOR_SIZE``.
 AXIS_MIN_GLYPHS = 3
 # Полоса оси для замера глифа — столько её высот в каждую сторону от ординаты.
@@ -166,6 +189,30 @@ OFFSET_MM = 8.0
 # Если центры короткого и длинного рядов совпадают в пределах этого (мм), они набраны по одному
 # центру и делить их нельзя.
 CENTRE_TOL_MM = 4.0
+
+
+class HangingList(str, Enum):
+    """Узнавать ли продолжение висячего списка в правиле «короткий ряд отодвинут от обеих кромок» (:func:`_weak_overlap`).
+
+    Пояснения к формуле набраны висячими метками: «Q — объем поставки…», под ним «поставки, руб.;» — по тексту после
+    тире. Когда метка «Q» входит в ряд (достоверный кегль, ``typeset.KeglTrust.RELIABLE``), левый край длинного ряда
+    уходит на метку, строка-продолжение оказывается отодвинутой от обеих его кромок на 8–9 мм и уходит в свой блок как
+    подпись (1975/02 IMG_0066_1L, 1974/03 IMG_0136_1L). ``ALIGN`` — такая строка, начатая ровно под словом за
+    висячей меткой длинного ряда, остаётся в блоке; ``OFF`` — прежнее правило.
+    """
+
+    OFF = "off"
+    ALIGN = "align"
+
+
+DEFAULT_HANGING_LIST = HangingList.ALIGN
+# Висячая метка — начало длинного ряда не длиннее этого (мм): «где ΔП —» 18 мм, «где C₁ —» 16 мм, «Q —» 9 мм.
+HANG_LABEL_MM = 25.0
+# Метку от текста отделяет просвет между боксами глифов не уже этого (мм): тире в маску глифов не входит, и
+# просвет «Q␣—␣объем» — 5.4–6.4 мм против 1.5–2.7 мм обычного пробела.
+HANG_GAP_MM = 4.0
+# Начало короткого ряда совпадает с началом слова за меткой в пределах этого (мм).
+HANG_ALIGN_MM = 1.0
 # Вертикальный разрыв больше стольких межстрочных интервалов делит колонку на два блока.
 # 2.5, а не 3: в шапке статьи логотип рубрики, заголовок и подзаголовок идут с разными
 # интервалами, и при 3 они слипались в один блок с пустотами внутри (1973/06 с.65). В корпусе
@@ -648,7 +695,7 @@ def axis_glyph_height(axis: LineAxis, ink: np.ndarray, k: float, dpi: float) -> 
 
 
 def _split_by_measure(
-    group: list[LineAxis], ink: np.ndarray, k: float, dpi: float, by_boxes: bool
+    group: list[LineAxis], ink: np.ndarray, k: float, dpi: float, by_boxes: bool, style: bool = False
 ) -> list[list[LineAxis]]:
     """Разрезать набранный ряд там, где через пустоту соседствуют оси разного кегля.
 
@@ -667,6 +714,8 @@ def _split_by_measure(
         dpi: Разрешение рабочей копии.
         by_boxes: Мера кегля — по боксам глифов осей (``typeset.axis_kegl``), а не по краске
             (:func:`axis_glyph_height`, молчит у букв выше ``GLYPH_MAX_MM``).
+        style: Резать широкий просвет и по баллу набора «кегль + жирность» не ниже ``ROW_STYLE_DISTANCE``
+            (:class:`RowStyleSplit`), если разница кегля одна до порога не дотягивает.
 
     Returns:
         Части ряда слева направо; без разрезов — ``[group]`` как есть (тот же объект).
@@ -693,22 +742,96 @@ def _split_by_measure(
     # Кегль мерится по кускам между кандидатами целиком: у куска из нескольких осей глифов больше.
     bounds = [0, *cuts, len(ordered)]
     pieces = [ordered[start:end] for start, end in zip(bounds[:-1], bounds[1:])]
-    heights = [
-        float(np.median([axis_kegl(axis) if by_boxes else axis_glyph_height(axis, ink, k, dpi) for axis in piece]))
-        for piece in pieces
-    ]
+    ranges = [_piece_measure(piece, ink, k, dpi, by_boxes) for piece in pieces]
     out: list[list[LineAxis]] = [list(pieces[0])]
-    for previous, current, piece, is_wide in zip(heights[:-1], heights[1:], pieces[1:], wide):
-        low, high = sorted((previous, current))
+    for previous, current, piece, is_wide in zip(ranges[:-1], ranges[1:], pieces[1:], wide):
+        # Разница — по ближним концам диапазонов кегля (у куска из одной-двух букв кегль — диапазон).
+        kegls = typeset.closest_kegls(previous, current)
+        low, high = sorted(kegls) if kegls is not None else (0.0, 0.0)
         ratio = ROW_GLYPH_RATIO if is_wide else ROW_GLYPH_STRONG_RATIO
         # Молчащая мера ничего не режет: глифов не набралось — куски остаются одним рядом.
-        if low > 0 and high >= ratio * low:
+        cut = low > 0 and high >= ratio * low
+        # Широкий просвет между кусками разного набора при близком кегле: подпись рядом с жирным заголовком.
+        # Жирность мерится только тогда, когда кегль обоих кусков известен.
+        if not cut and style and is_wide and low > 0:
+            cut = _pieces_style_distance(out[-1], piece, (low, high), ink, k) >= ROW_STYLE_DISTANCE
+        if cut:
             out.append(list(piece))
         else:
             out[-1].extend(piece)
     if len(out) == 1:
         return [group]
     return out
+
+
+def piece_weight(piece: list[LineAxis], ink: np.ndarray, k: float) -> float:
+    """Жирность куска ряда — :func:`stroke_weight` краски в полосе его осей (пиксели рабочей копии).
+
+    Полоса — от левого края первой оси до правого края последней, по высоте — оси с припуском
+    ``ROW_PAD_HEIGHTS``, как у полосы ряда в :func:`rows_of`.
+
+    Args:
+        piece: Оси куска.
+        ink: Краска рендера ``RENDER_DPI``.
+        k: Во сколько раз рендер крупнее рабочей копии.
+
+    Returns:
+        Толщина штриха в пикселях рабочей копии; 0.0 — краски нет.
+    """
+    y0 = min(axis.cy - (0.5 + ROW_PAD_HEIGHTS) * axis.height for axis in piece)
+    y1 = max(axis.cy + (0.5 + ROW_PAD_HEIGHTS) * axis.height for axis in piece)
+    x0 = min(axis.x0 for axis in piece)
+    x1 = max(axis.x1 for axis in piece)
+    band = ink[max(0, int(y0 * k)) : int(y1 * k) + 1, max(0, int(x0 * k)) : int(x1 * k) + 1]
+    return stroke_weight(band) / k
+
+
+def _pieces_style_distance(
+    left: list[LineAxis], right: list[LineAxis], kegls: tuple[float, float], ink: np.ndarray, k: float
+) -> float:
+    """Балл разницы набора двух кусков ряда — как :func:`style_distance` рядов: (r_кегль − 1) + (r_жирность − 1).
+
+    Args:
+        left: Оси левого куска.
+        right: Оси правого куска.
+        kegls: ``(меньший, больший)`` кегль кусков (ближние концы диапазонов, ``typeset.closest_kegls``).
+        ink: Краска рендера ``RENDER_DPI``.
+        k: Во сколько раз рендер крупнее рабочей копии.
+
+    Returns:
+        Балл от нуля; жирность, не намерившаяся у одного из кусков, в балл не входит.
+    """
+    score = kegls[1] / kegls[0] - 1.0
+    weights = sorted((piece_weight(left, ink, k), piece_weight(right, ink, k)))
+    if weights[0] > 0:
+        score += weights[1] / weights[0] - 1.0
+    return score
+
+
+def _piece_measure(
+    piece: list[LineAxis], ink: np.ndarray, k: float, dpi: float, by_boxes: bool
+) -> tuple[float, float] | None:
+    """Кегль куска ряда диапазоном для :func:`_split_by_measure`; ``None`` — мера молчит (кусок не режется по кеглю).
+
+    По краске — медиана :func:`axis_glyph_height` осей куска точкой. По боксам у ``typeset.KeglTrust.LEGACY`` —
+    медиана ``typeset.axis_kegl`` осей точкой; у ``RELIABLE`` — ``typeset.kegl_range`` по глифам всех осей куска:
+    у куска из одной-двух букв (или из букв и соринок, «СК» с тремя пылинками у 1967/02 IMG_0095_2R) — диапазон.
+
+    Args:
+        piece: Оси куска.
+        ink: Краска рендера ``RENDER_DPI``.
+        k: Во сколько раз рендер крупнее рабочей копии.
+        dpi: Разрешение рабочей копии.
+        by_boxes: Мера по боксам глифов (иначе по краске).
+
+    Returns:
+        ``(низ, верх)`` в пикселях рабочей копии или ``None``.
+    """
+    if not by_boxes or typeset.DEFAULT_KEGL_TRUST is typeset.KeglTrust.LEGACY:
+        values = [axis_kegl(axis) if by_boxes else axis_glyph_height(axis, ink, k, dpi) for axis in piece]
+        value = float(np.median(values))
+        return (value, value) if value > 0 else None
+    return typeset.kegl_range(axes_glyphs(piece))
 
 
 def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float) -> list[list[LineAxis]]:
@@ -718,7 +841,8 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
     (54 px) оставалась в одном ряду с «Год издания». Второй проход меряет кегль по боксам глифов у ВСЕХ осей
     ряда — две разные меры в одном ряду дали бы ложную разницу («АСУ МТС», 1972/12 IMG_0130_1L). Разрезы
     первого прохода остаются все; новый разрез второго отменяется, если части стоят на одной базовой линии
-    при просвете до ``SAME_BASELINE_MAX_GAP_KEGL`` меньшего кегля: логотип «50 лет» (1967/10 IMG_0032_1L).
+    при просвете до ``SAME_BASELINE_MAX_GAP_KEGL`` меньшего кегля: логотип «50 лет» (1967/10 IMG_0032_1L). Второй проход
+    режет широкий просвет и по баллу набора «кегль + жирность», если так велит ``DEFAULT_ROW_STYLE_SPLIT``.
 
     Args:
         group: Оси одного ряда.
@@ -730,7 +854,9 @@ def _split_by_glyph(group: list[LineAxis], ink: np.ndarray, k: float, dpi: float
         Части ряда слева направо; без разрезов — ``[group]``.
     """
     old = _split_by_measure(group, ink, k, dpi, by_boxes=False)
-    new = _split_by_measure(group, ink, k, dpi, by_boxes=True)
+    new = _split_by_measure(
+        group, ink, k, dpi, by_boxes=True, style=DEFAULT_ROW_STYLE_SPLIT is RowStyleSplit.STYLE
+    )
     # Разрезы — по первой оси каждой части (части — отрезки одного и того же упорядоченного по x ряда).
     starts = {id(part[0]) for part in old[1:]}
     for previous, part in zip(new[:-1], new[1:]):
@@ -847,6 +973,15 @@ def rows_of(
                     x_lo = max(x_lo, (gx0 + gx1) / 2.0)
                 elif gx0 >= right_bound - 1:
                     x_hi = min(x_hi, (gx0 + gx1) / 2.0)
+        # Край ряда не заходит за вертикальную линейку-барьер (графа таблицы): текст стоит вплотную к линейке, и
+        # край по краске проходил по ней в соседнюю графу — ряды двух граф перекрывались по x и сходились в один блок
+        # (ХиП 1991/02 IMG_1106_L, линейка x 290, ряды 76–316 и 265–700).
+        if barriers is not None and not barriers.empty:
+            for bx in barriers.vertical_at(y):
+                if bx <= row_x0:
+                    x_lo = max(x_lo, bx)
+                elif bx >= row_x1:
+                    x_hi = min(x_hi, bx)
         left = ink_edge(ink, int(x_lo * k), int(x_hi * k), y0, y1, "left")
         right = ink_edge(ink, int(x_lo * k), int(x_hi * k), y0, y1, "right")
         if left is None or right is None:
@@ -1069,7 +1204,9 @@ def body_line(
     # Окно едет вдоль оси: в каждом столбце краска берётся только в ±half от оси (как у профилей).
     centres = np.interp(np.arange(left, right) / k, axis_points[:, 0], axis_points[:, 1]) * k - top
     crop &= np.abs(np.arange(crop.shape[0])[:, None] - centres[None, :]) <= half * k
-    count, _, stats, _ = cv2.connectedComponentsWithStats(crop.astype(np.uint8), 8)
+    # Буквы — со склейкой меток (:func:`glyph_merge.merged_components`): точка «i», кратка «й» не идут
+    # отдельными «буквами» в икс ряда.
+    count, _, stats, _ = merged_components(crop)
     if count <= 1:
         return None
     widths = stats[1:, cv2.CC_STAT_WIDTH] / k
@@ -1148,7 +1285,8 @@ def glyph_metrics(
         band[:, skip] = False
         if not band.any():
             return 0.0, 0.0
-    count, _, stats, _ = cv2.connectedComponentsWithStats(band.astype(np.uint8), 8)
+    # Глифы — со склейкой меток: оторванная ветвь «к», точка «i» не тянут медиану высоты вниз.
+    count, _, stats, _ = merged_components(band)
     low, high = mm_to_px(GLYPH_MIN_MM, dpi) * k, mm_to_px(GLYPH_MAX_MM, dpi) * k
     widths, heights = [], []
     for index in range(1, count):
@@ -1512,8 +1650,40 @@ def _weak_overlap(previous: Row, row: Row, reference: float) -> bool:
     centres = ((short.x0 + short.x1) / 2.0, (long_row.x0 + long_row.x1) / 2.0)
     if abs(centres[0] - centres[1]) <= mm_to_px(CENTRE_TOL_MM, dpi):
         return False
+    # Продолжение пояснения висячего списка стоит под текстом после метки длинного ряда — это не подпись.
+    if DEFAULT_HANGING_LIST is HangingList.ALIGN and _under_hanging_text(short, long_row, dpi):
+        return False
     offset = mm_to_px(OFFSET_MM, dpi)
     return short.x0 - long_row.x0 > offset and long_row.x1 - short.x1 > offset
+
+
+def _under_hanging_text(short: Row, long_row: Row, dpi: float) -> bool:
+    """Начат ли короткий ряд ровно под словом, которое в длинном ряду идёт за висячей меткой («Q —», «где C₁ —»).
+
+    Метка — начало длинного ряда до ``HANG_LABEL_MM`` от его левого края, отделённое от текста просветом между боксами
+    глифов не уже ``HANG_GAP_MM`` (тире в маску глифов не входит). Короткий ряд должен начинаться в пределах
+    ``HANG_ALIGN_MM`` от первого глифа после такого просвета.
+
+    Args:
+        short: Короткий ряд (кандидат в подпись).
+        long_row: Длинный соседний ряд.
+        dpi: Разрешение рабочей копии.
+
+    Returns:
+        ``True`` — короткий ряд продолжает пояснение висячего списка.
+    """
+    boxes = axes_glyphs(list(long_row.axes))
+    if len(boxes) < 2:
+        return False
+    boxes = boxes[np.argsort(boxes[:, 0])]
+    # Правый край всего, что левее, — чтобы перекрытые боксы (точка «i», индекс) не давали ложных просветов.
+    reach = np.maximum.accumulate(boxes[:, 2])
+    starts = boxes[1:, 0]
+    gaps = starts - reach[:-1]
+    label = long_row.x0 + mm_to_px(HANG_LABEL_MM, dpi)
+    hanging = (gaps >= mm_to_px(HANG_GAP_MM, dpi)) & (starts <= label)
+    tol = mm_to_px(HANG_ALIGN_MM, dpi)
+    return bool(np.any(hanging & (np.abs(starts - short.x0) <= tol)))
 
 
 def split_blocks(

@@ -76,6 +76,10 @@ class LayoutHints:
         rules: Линейки-барьеры — ломаные ``((x, y), ...)``, возможно изогнутые (непристроенные
             линейки детектора таблиц, ``PageLayout.loose_rules``): через них не сращиваются ни
             строки, ни ряды, ни блоки (см. :mod:`barriers`).
+        side_rules: Линейки-барьеры только для БОКОВЫХ областей (``zones`` с поворотом 90 / 270), тот же вид, что у
+            ``rules``. Горизонтальная линейка страницы в повёрнутой вырезке встаёт поперёк вертикальной строки: строки
+            по обе стороны от неё не сшиваются (МТС 1969/06 IMG_0138_1L). В прямой области такие линейки не
+            действуют — там их роль решают свои правила (рамки рисунков, ``barrier_cuts`` v2).
         dpi: Разрешение, в котором заданы координаты; служит только проверкой на несовпадение.
     """
 
@@ -83,12 +87,19 @@ class LayoutHints:
     zones: tuple[OrientedZone, ...] = ()
     barriers: tuple[tuple[int, int, int, int], ...] = ()
     rules: tuple[tuple[tuple[float, float], ...], ...] = ()
+    side_rules: tuple[tuple[tuple[float, float], ...], ...] = ()
     dpi: float = WORK_DPI
 
     @property
     def empty(self) -> bool:
         """Нечего подсказывать: разбор пойдёт ровно как без подсказок."""
-        return self.text_allowed is None and not self.zones and not self.barriers and not self.rules
+        return (
+            self.text_allowed is None
+            and not self.zones
+            and not self.barriers
+            and not self.rules
+            and not self.side_rules
+        )
 
     @property
     def barrier_lines(self) -> "BarrierLines":

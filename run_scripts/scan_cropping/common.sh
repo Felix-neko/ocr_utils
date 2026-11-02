@@ -76,6 +76,22 @@ TEXT_RECTIFIED_V4_WORK="${TEXT_RECTIFIED_V4_WORK:-$SCAN_CROPPING_V2_ROOT/spline_
 GUTTER_COMPRESSION_ROOT="${GUTTER_COMPRESSION_ROOT:-/mnt/hotstore/scan_processing/gutter_compression}"
 # Полные прогоны v2 с растяжением у корешка (run_v2_gutter_decompression.sh): итоги, страницы, копии кэшей — SSD.
 GUTTER_DECOMPRESSION_ROOT="${GUTTER_DECOMPRESSION_ROOT:-/mnt/hotstore/scan_processing/gutter_decompression_v2}"
+# Перепрогон того же с областями страниц без складки карты у корешка (повтор концов строк, rectify/pages.unfolded,
+# 2026-10-25): отдельная папка, прежний прогон оставлен для сравнения; кэш ХиП 1991 — копия кэша прежнего прогона.
+GUTTER_DECOMPRESSION_FOLD_ROOT="${GUTTER_DECOMPRESSION_FOLD_ROOT:-/mnt/hotstore/scan_processing/gutter_decompression_v2_fold}"
+# Перепрогон на коде 2026-10-26: фильтр псевдоглифов с CRAFT на GPU, серии строк без отступов (SKIP_INDENT), line art
+# с добором штрихов (LINE_ART 9) и переносом рамок за полем; кэш ХиП 1991 — копия кэша прогона *_fold.
+GUTTER_DECOMPRESSION_CRAFT_ROOT="${GUTTER_DECOMPRESSION_CRAFT_ROOT:-/mnt/hotstore/scan_processing/gutter_decompression_v2_craft}"
+# Перепрогон 2026-10-26 (вечер): плюс таблицы с изогнутыми линейками (tables/curve, TABLES 8, LINE_ART 10) и деление блоков
+# по смене выключки (text_blocks flush_split, TEXT_BLOCKS 5); кэш ХиП 1991 — копия кэша прогона *_craft.
+GUTTER_DECOMPRESSION_TABLES_ROOT="${GUTTER_DECOMPRESSION_TABLES_ROOT:-/mnt/hotstore/scan_processing/gutter_decompression_v2_tables}"
+# Перепрогон 2026-10-26 (ночь): плюс слияние короткого хвоста строки без глифов со своей строкой (text_blocks regroup,
+# TEXT_BLOCKS 6; ХиП 1991/01 IMG_1030 R); кэш ХиП 1991 — копия кэша прогона *_tables.
+GUTTER_DECOMPRESSION_TAILS_ROOT="${GUTTER_DECOMPRESSION_TAILS_ROOT:-/mnt/hotstore/scan_processing/gutter_decompression_v2_tails}"
+# Стенд research/gutter_cut (линия разреза страниц впритык к тексту у корешка): прогон v2 по паку-7, мера, листы — SSD.
+GUTTER_CUT_ROOT="${GUTTER_CUT_ROOT:-/mnt/hotstore/scan_processing/gutter_cut}"
+# Стенд research/border_fill, страницы второго преобразования (повтор у корешка, варианты опоры закраса) — SSD.
+BORDER_FILL_PAGES_ROOT="${BORDER_FILL_PAGES_ROOT:-/mnt/hotstore/scan_processing/border_fill/pages}"
 
 # Боевой прогон v2 пака-6 целиком (6-я версия ключей, 2026-10-15/16, 2480 кадров) — вход стенда research/page_cutting.
 PACK6_V6_WORK="$SCAN_CROPPING_V2_ROOT/pack6_v6"
